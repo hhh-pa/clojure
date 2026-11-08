@@ -1741,6 +1741,9 @@ pub(crate) fn fast_str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
     if p1 == ptr && a1 {
         return s.as_bytes().get(idx).map(|b| *b as char);
     }
+    if s.len() <= STR_SCAN_SMALL_MAX && s.is_ascii() {
+        return s.as_bytes().get(idx).map(|b| *b as char);
+    }
     LAST_SCAN.with(|memo| {
         let memo = memo.borrow();
         slot_scan_char(&memo.0[0], s, idx).or_else(|| slot_scan_char(&memo.0[1], s, idx))
@@ -1757,15 +1760,11 @@ pub(crate) fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
     if let Some(c) = fast_str_char_at(s, idx) {
         return Some(c);
     }
+    if s.len() <= STR_SCAN_SMALL_MAX {
+        return s.chars().nth(idx);
+    }
     if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
         return hit;
-    }
-    if s.len() <= STR_SCAN_SMALL_MAX {
-        if s.is_ascii() {
-            memoize_scan(s, &StrScan::Ascii);
-            return s.as_bytes().get(idx).map(|b| *b as char);
-        }
-        return s.chars().nth(idx);
     }
     match str_scan(s) {
         Some(scan) => scan_char_at(s, &scan, idx),

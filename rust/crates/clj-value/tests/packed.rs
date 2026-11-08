@@ -483,3 +483,33 @@ fn transient_conj_int_arms() {
     assert_eq!(tv_chars.len().unwrap(), 3);
     assert_eq!(tv_chars.nth(2).unwrap(), Some(Value::Int(4)));
 }
+
+#[test]
+fn vector_into_vec_and_array_try_take_objs() {
+    let vi = Vector::from_ints(vec![1, 2, 3]);
+    assert_eq!(
+        vi.into_vec(),
+        vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+    );
+
+    let vc = Vector::from_chars(vec!['x', 'y']);
+    assert_eq!(vc.into_vec(), vec![Value::Char('x'), Value::Char('y')]);
+
+    let vg = Vector::from_vec(vec![Value::Bool(true), Value::Nil]);
+    assert_eq!(vg.into_vec(), vec![Value::Bool(true), Value::Nil]);
+
+    let arr_objs = clj_value::Array::new(
+        clj_value::ArrayDesc::flat(clj_value::BaseType::Object),
+        clj_value::ArrayStore::Objs(vec![Value::Int(42)]),
+    );
+    let arr_clone = arr_objs.clone();
+    assert!(arr_objs.try_take_objs().is_none());
+    drop(arr_clone);
+    assert_eq!(arr_objs.try_take_objs(), Some(vec![Value::Int(42)]));
+
+    let arr_ints = clj_value::Array::new(
+        clj_value::ArrayDesc::flat(clj_value::BaseType::Int),
+        clj_value::ArrayStore::Ints(vec![10, 20]),
+    );
+    assert!(arr_ints.try_take_objs().is_none());
+}

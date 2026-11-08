@@ -3778,12 +3778,16 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, S
     }
 }
 
-/// A string, finite `repeat`, or counted `long` range built without
+/// A string, array, finite `repeat`, or counted `long` range built without
 /// walking its seq (#226: `(vec (repeat n 0))` builds DP tables and
 /// `(vec s)` builds char vectors; the items are exactly the seq's).
 fn collect_direct(v: &Value) -> Option<Vector> {
     if let Value::Str(s) = v {
         return Some(Vector::from_flat_chars(s.chars().collect()));
+    }
+    if let Value::Array(a) = v {
+        let items = a.try_take_objs().unwrap_or_else(|| a.snapshot());
+        return Some(Vector::from_vec(items));
     }
     let Value::Extension(e) = v else {
         return None;

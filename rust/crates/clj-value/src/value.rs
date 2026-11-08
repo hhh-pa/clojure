@@ -768,6 +768,16 @@ impl Vector {
         }
     }
 
+    /// Extract all items into a flat Vec<Value>, unwrapping unshared nodes.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<Value> {
+        match self.inner {
+            VectorInner::Generic(pvec) => pvec.into_vec(),
+            VectorInner::Ints(t) => t.into_vec().into_iter().map(Value::Int).collect(),
+            VectorInner::Chars(t) => t.into_vec().into_iter().map(Value::Char).collect(),
+        }
+    }
+
     /// If this vector is packed chars, append all chars directly to `out`
     /// without boxing into `Value::Char`. Returns true if handled.
     pub fn push_to_string(&self, out: &mut String) -> bool {

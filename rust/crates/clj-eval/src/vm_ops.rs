@@ -1197,6 +1197,10 @@ impl Op2 for Nth {
                     _ => None,
                 }
             }
+            Value::Extension(e) => e
+                .as_any()
+                .downcast_ref::<clj_value::SubVectorValue>()
+                .and_then(|sv| sv.nth(idx)),
             _ => crate::vm_intrinsics::nth_of(a, b, None),
         }
     }
@@ -1522,6 +1526,12 @@ impl Op3 for Nth3 {
                     return Some(v);
                 }
                 None
+            }
+            Value::Extension(e) => {
+                if let Some(sv) = e.as_any().downcast_ref::<clj_value::SubVectorValue>() {
+                    return Some(sv.nth(idx).unwrap_or_else(|| c.clone()));
+                }
+                crate::vm_intrinsics::nth_of(a, b, Some(c))
             }
             _ => crate::vm_intrinsics::nth_of(a, b, Some(c)),
         }

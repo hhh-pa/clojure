@@ -527,3 +527,22 @@ fn vm_ops_match_the_jvm() {
 fn vm_ops_share_port_semantics() {
     check(PORT_ROWS);
 }
+
+#[test]
+fn vm_ops_subvec_nth_and_nth3() {
+    let rows = [
+        (
+            r#"(do (defn sv-nth [v i] (nth (subvec v 1) i)) (sv-nth [10 20 30] 0))"#,
+            "20",
+        ),
+        (
+            r#"(do (defn sv-nth3 [v i d] (nth (subvec v 1) i d)) (sv-nth3 [10 20 30] 0 :def))"#,
+            "20",
+        ),
+        (
+            r#"(do (defn sv-nth3-miss [v i d] (nth (subvec v 1) i d)) (sv-nth3-miss [10 20 30] 5 :def))"#,
+            ":def",
+        ),
+    ];
+    check(&rows);
+}

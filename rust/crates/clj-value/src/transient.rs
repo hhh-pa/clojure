@@ -169,7 +169,7 @@ impl TransientVector {
         let items = match v.into_typed_items() {
             Ok(crate::value::TypedItems::Ints(x)) => TransientItems::Ints(x),
             Ok(crate::value::TypedItems::Chars(x)) => TransientItems::Chars(x),
-            Err(v) => TransientItems::Generic(v.iter().collect()),
+            Err(v) => TransientItems::Generic(v.into_vec()),
         };
         Self { items, valid: true }
     }

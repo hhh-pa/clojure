@@ -232,6 +232,18 @@ impl Array {
         self.cell.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Take the boxed reference slots if uniquely owned, or return None.
+    #[must_use]
+    pub fn try_take_objs(&self) -> Option<Vec<Value>> {
+        if Arc::strong_count(&self.cell) == 1 {
+            let mut guard = self.lock();
+            if let ArrayStore::Objs(v) = &mut *guard {
+                return Some(std::mem::take(v));
+            }
+        }
+        None
+    }
+
     /// The outer slot count.
     #[must_use]
     pub fn len(&self) -> usize {

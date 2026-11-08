@@ -3731,6 +3731,14 @@ fn decimal_value(c: char) -> Option<u32> {
     (d < 10).then_some(d)
 }
 
+fn finish_long_acc(acc: u64, neg: bool) -> Option<i64> {
+    if neg {
+        (acc <= i64::MAX as u64 + 1).then_some((acc as i64).wrapping_neg())
+    } else {
+        (acc <= i64::MAX as u64).then_some(acc as i64)
+    }
+}
+
 /// `Long.parseLong`: one ASCII sign, 1+ decimal digits (any
 /// script), overflow → `None` (the caller answers nil).
 pub(crate) fn parse_long_str(s: &str) -> Option<i64> {
@@ -3741,17 +3749,23 @@ pub(crate) fn parse_long_str(s: &str) -> Option<i64> {
     if digits.is_empty() {
         return None;
     }
+    if digits.is_ascii() {
+        let mut acc: u64 = 0;
+        for &b in digits.as_bytes() {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            acc = acc.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
+        }
+        return finish_long_acc(acc, neg);
+    }
     let mut acc: u64 = 0;
     for c in digits.chars() {
         acc = acc
             .checked_mul(10)?
             .checked_add(u64::from(decimal_value(c)?))?;
     }
-    if neg {
-        (acc <= i64::MAX as u64 + 1).then_some((acc as i64).wrapping_neg())
-    } else {
-        (acc <= i64::MAX as u64).then_some(acc as i64)
-    }
+    finish_long_acc(acc, neg)
 }
 
 /// A signed `NaN`/`Infinity` spelling (exact case, like the JVM).
