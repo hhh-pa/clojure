@@ -1198,7 +1198,29 @@ impl Op2 for Nth {
         }
     }
 }
-op2!(Get, |a, b| crate::vm_intrinsics::get_of(a, b, None));
+
+pub(crate) struct Get;
+
+impl Op2 for Get {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        match a {
+            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
+                Some(m.get(b).cloned().unwrap_or(Value::Nil))
+            }
+            Value::Transient(t) if crate::vm_intrinsics::is_scalar_key(b) => {
+                let guard = t.lock();
+                if let clj_value::TransientKind::Map(tm) = &*guard {
+                    let v = tm.get(b).ok()?.cloned().unwrap_or(Value::Nil);
+                    drop(guard);
+                    return Some(v);
+                }
+                None
+            }
+            _ => crate::vm_intrinsics::get_of(a, b, None),
+        }
+    }
+}
 
 pub(crate) struct Dissoc;
 
@@ -1492,6 +1514,15 @@ impl Op3 for Nth3 {
             Value::Str(s) => {
                 Some(crate::coll::str_char_at(s, idx).map_or_else(|| c.clone(), Value::Char))
             }
+            Value::Transient(t) => {
+                let guard = t.lock();
+                if let clj_value::TransientKind::Vector(tv) = &*guard {
+                    let v = tv.nth(idx).ok()?.unwrap_or_else(|| c.clone());
+                    drop(guard);
+                    return Some(v);
+                }
+                None
+            }
             _ => crate::vm_intrinsics::nth_of(a, b, Some(c)),
         }
     }
@@ -1505,6 +1536,15 @@ impl Op3 for Get3 {
         match a {
             Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
                 Some(m.get(b).cloned().unwrap_or_else(|| c.clone()))
+            }
+            Value::Transient(t) if crate::vm_intrinsics::is_scalar_key(b) => {
+                let guard = t.lock();
+                if let clj_value::TransientKind::Map(tm) = &*guard {
+                    let v = tm.get(b).ok()?.cloned().unwrap_or_else(|| c.clone());
+                    drop(guard);
+                    return Some(v);
+                }
+                None
             }
             _ => crate::vm_intrinsics::get_of(a, b, Some(c)),
         }

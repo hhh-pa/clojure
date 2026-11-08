@@ -507,6 +507,7 @@ fn string_join_and_contains_cases() {
             (r#"(contains? [1 2 3] -1)"#, "false"),
             (r#"(contains? [1 2 3] :foo)"#, "false"),
             (r#"(contains? nil 0)"#, "false"),
+            (r#"(apply contains? [nil 0])"#, "false"),
         ],
     );
 }

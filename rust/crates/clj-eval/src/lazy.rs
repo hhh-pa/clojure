@@ -4716,6 +4716,16 @@ mod tests {
         assert_eq!(range_num(&Value::Nil), RangeNum::Int(0));
     }
 
+    #[test]
+    fn first_fast_empty_set_arm() {
+        assert_eq!(
+            first_fast(&Value::Set(
+                clj_value::Set::from_items_checked(Vec::new()).unwrap()
+            )),
+            Some(Value::Nil)
+        );
+    }
+
     /// The exact range rational rejects `Double` (bound checks
     /// dispatch on `is_double_num` first — the panic is the
     /// contract).

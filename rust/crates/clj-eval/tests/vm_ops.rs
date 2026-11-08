@@ -434,6 +434,14 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"[:nf 1 20 "x"]"#,
     ),
     (r#"((fn [] [{} [] #{}]))"#, r#"[{} [] #{}]"#),
+    (
+        r#"((fn [m k v] [(try (assoc! m (identity k) v) (catch Exception _ :sxs)) (try (assoc! m k (identity v)) (catch Exception _ :ssx)) (try (assoc! (identity m) k v) (catch Exception _ :any))]) {:a 1} :b 2)"#,
+        r#"[:sxs :ssx :any]"#,
+    ),
+    (
+        r#"((fn [tv tm] [(nth tv 0 :nf) (get tm :a :nf) (get tm :a)]) (transient [10 20]) (transient {:a 100}))"#,
+        r#"[10 100 100]"#,
+    ),
 ];
 
 const PORT_ROWS: &[(&str, &str)] = &[

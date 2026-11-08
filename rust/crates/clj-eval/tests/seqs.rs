@@ -577,6 +577,10 @@ fn some_rows() {
         run_last(&mut eval, "(some :a (subvec [1 2 {:a 3} 4] 1 3))"),
         "3"
     );
+    assert_eq!(
+        run_last(&mut eval, "(some :a [{:a false} #{:b} #{:a}])"),
+        ":a"
+    );
 }
 
 #[test]

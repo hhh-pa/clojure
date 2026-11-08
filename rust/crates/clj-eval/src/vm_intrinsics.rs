@@ -210,3 +210,32 @@ pub(crate) fn scalar_eq(a: &Value, b: &Value) -> Option<bool> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clj_value::{
+        Array, ArrayDesc, ArrayStore, BaseType, Transient, TransientKind, TransientVector, Vector,
+    };
+
+    #[test]
+    fn nth_of_coverage_arms() {
+        let v = Value::Vector(Vector::new_sync());
+        assert_eq!(nth_of(&v, &Value::Int(99), None), None);
+
+        let arr = Value::Array(Array::new(
+            ArrayDesc::flat(BaseType::Object),
+            ArrayStore::Objs(vec![Value::Int(10)]),
+        ));
+        assert_eq!(nth_of(&arr, &Value::Int(0), None), Some(Value::Int(10)));
+
+        let tv = Value::Transient(Transient::new(
+            TransientKind::Vector(TransientVector::new()),
+        ));
+        assert_eq!(nth_of(&tv, &Value::Int(0), None), None);
+        assert_eq!(
+            nth_of(&tv, &Value::Int(-1), Some(&Value::Nil)),
+            Some(Value::Nil)
+        );
+    }
+}

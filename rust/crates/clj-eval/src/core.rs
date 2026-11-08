@@ -5228,6 +5228,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn str_of_one_nil_arm() {
+        let mut eval = Evaluator::new("");
+        assert_eq!(str_of_one(&mut eval, &Value::Nil).unwrap(), "");
+    }
+
     /// An instant against a non-instant fails the `String`
     /// checkcast to `java.util.Date` (unit-tested: no
     /// surface form builds a real instant).
