@@ -143,7 +143,7 @@ fn walk_direct(
         return Some(each(&mut v.iter()));
     }
     if let Some(sv) = crate::lazy::as_subvector(coll) {
-        return Some(each(&mut (0..sv.len()).filter_map(|i| sv.nth(i))));
+        return Some(each(&mut sv.vec().iter().skip(sv.start()).take(sv.len())));
     }
     if let Value::Str(s) = coll {
         return Some(each(&mut s.chars().map(Value::Char)));
@@ -1505,15 +1505,43 @@ fn native_some(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     native_some_owned(eval, args.iter().cloned().collect())
 }
 
+fn some_kw_step(found: &mut Value, kw: &Value, head: &Value) -> Walk {
+    match head {
+        Value::Map(m) => {
+            if let Some(v) = m.get(kw) {
+                if v.is_truthy() {
+                    *found = v.clone();
+                    return Walk::Stop;
+                }
+            }
+        }
+        _ => {
+            if let Some(v) = crate::vm_intrinsics::get_of(head, kw, None) {
+                if v.is_truthy() {
+                    *found = v;
+                    return Walk::Stop;
+                }
+            }
+        }
+    }
+    Walk::Continue
+}
+
 pub(crate) fn native_some_owned(
     eval: &mut Evaluator,
     mut args: SmallVec<[Value; 4]>,
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/some", &args, &[2])?;
     let pred = args[0].clone();
-    let prep = crate::vm::Prepared::of(&pred, 1);
     let mut found = Value::Nil;
     let coll = take_walk_coll(&mut args, 1);
+    if let Value::Keyword(_) = &pred {
+        walk_seq(eval, coll, |_eval, head| {
+            Ok(some_kw_step(&mut found, &pred, head))
+        })?;
+        return Ok(found);
+    }
+    let prep = crate::vm::Prepared::of(&pred, 1);
     walk_seq(eval, coll, |eval, head| {
         let r = call_pred1(eval, &pred, prep.as_ref(), head)?;
         if r.is_truthy() {

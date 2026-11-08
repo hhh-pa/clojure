@@ -2788,7 +2788,11 @@ fn str_concat(eval: &mut Evaluator, args: &[Value]) -> Result<String, NativeErro
 
 /// Append `v`'s `str` piece ([`str_of_one`]; chars, strings and nil
 /// append in place, with no piece string).
-fn str_push(out: &mut String, eval: &mut Evaluator, v: &Value) -> Result<(), NativeError> {
+pub(crate) fn str_push(
+    out: &mut String,
+    eval: &mut Evaluator,
+    v: &Value,
+) -> Result<(), NativeError> {
     match v {
         Value::Nil => {}
         Value::Str(s) => out.push_str(s),

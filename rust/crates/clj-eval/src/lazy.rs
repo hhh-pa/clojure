@@ -3193,6 +3193,9 @@ fn seq_vector(x: &Vector) -> Value {
 
 /// `seq` of a map (small maps keep `Map` kind).
 fn seq_map(m: &Map) -> Value {
+    if m.is_empty() {
+        return Value::Nil;
+    }
     let small = !m.is_hashy();
     let kind = if small { SeqKind::Map } else { SeqKind::Key };
     realized_value(
@@ -3208,6 +3211,9 @@ fn seq_map(m: &Map) -> Value {
 
 /// `seq` of a set.
 fn seq_set(s: &Set) -> Value {
+    if s.is_empty() {
+        return Value::Nil;
+    }
     realized_value(
         s.iter().cloned().collect::<Vec<_>>(),
         false,
@@ -3585,6 +3591,10 @@ pub(crate) fn first_fast(v: &Value) -> Option<Value> {
         Value::List(l) => Some(l.first().cloned().unwrap_or(Value::Nil)),
         Value::Vector(x) => Some(x.get(0).unwrap_or(Value::Nil)),
         Value::Str(s) => Some(s.chars().next().map_or(Value::Nil, Value::Char)),
+        Value::Map(m) => Some(m.iter().next().map_or(Value::Nil, |(k, v)| {
+            clj_value::map_entry(k.clone(), v.clone())
+        })),
+        Value::Set(s) => Some(s.iter().next().cloned().unwrap_or(Value::Nil)),
         _ => as_realized(v).map(|r| r.seq().first().cloned().unwrap_or(Value::Nil)),
     }
 }
@@ -3620,6 +3630,8 @@ pub(crate) fn seq_fast(v: &Value) -> Option<Value> {
             SeqKind::Array,
         )),
         Value::Str(s) => Some(seq_str(s)),
+        Value::Map(m) => Some(seq_map(m)),
+        Value::Set(s) => Some(seq_set(s)),
         _ => as_realized(v).map(|r| seq_realized(v, r)),
     }
 }

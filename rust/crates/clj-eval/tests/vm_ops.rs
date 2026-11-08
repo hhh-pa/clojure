@@ -425,6 +425,15 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"(let [t (transient [1 2]) k 0 x 99] (persistent! (assoc! t k x)))"#,
         r#"[99 2]"#,
     ),
+    (
+        r#"((fn [m k] [(dissoc m k) (dissoc nil :k) (dissoc m :not-found)]) {:a 1 :b 2} :a)"#,
+        r#"[{:b 2} nil {:a 1, :b 2}]"#,
+    ),
+    (
+        r#"((fn [m i d] [(get m (str "a") d) (get m (keyword "a") d) (nth [10 20] (int 1) d) (nth [10 20] 5 (str "x"))]) {:a 1} 1 :nf)"#,
+        r#"[:nf 1 20 "x"]"#,
+    ),
+    (r#"((fn [] [{} [] #{}]))"#, r#"[{} [] #{}]"#),
 ];
 
 const PORT_ROWS: &[(&str, &str)] = &[

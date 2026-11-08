@@ -486,3 +486,27 @@ fn natives_boot_no_longer_reaches_still_answer() {
         ],
     );
 }
+
+#[test]
+fn string_join_and_contains_cases() {
+    let mut eval = booted();
+    eval.eval_source("(require '[clojure.string :as str])")
+        .unwrap();
+    check(
+        &mut eval,
+        &[
+            (r#"(str/join "," ["a" "b" "c"])"#, r#""a,b,c""#),
+            (r#"(str/join \- [1 2 3])"#, r#""1-2-3""#),
+            (r#"(str/join nil ["x" "y"])"#, r#""xy""#),
+            (r#"(str/join "," [])"#, r#""""#),
+            (r#"(str/join "," [42])"#, r#""42""#),
+            (r#"(str/join "," (seq [10 20 30]))"#, r#""10,20,30""#),
+            (r#"(contains? [1 2 3] 0)"#, "true"),
+            (r#"(contains? [1 2 3] 2)"#, "true"),
+            (r#"(contains? [1 2 3] 3)"#, "false"),
+            (r#"(contains? [1 2 3] -1)"#, "false"),
+            (r#"(contains? [1 2 3] :foo)"#, "false"),
+            (r#"(contains? nil 0)"#, "false"),
+        ],
+    );
+}

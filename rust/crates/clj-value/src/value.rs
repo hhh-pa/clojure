@@ -1295,12 +1295,11 @@ impl Map {
                 self.small = Some(small);
                 return;
             }
-            let mut vals = Vec::with_capacity(small.vals.len());
-            vals.extend(small.vals.iter().cloned());
+            let mut vals = small.vals.clone();
             vals[idx] = v;
             self.small = Some(Arc::new(SmallMap {
                 shape: Arc::clone(&small.shape),
-                vals: vals.into_boxed_slice(),
+                vals,
             }));
             return;
         }

@@ -1248,6 +1248,15 @@ impl Compiler {
     fn operand(&mut self, expr: &Expr, may_move: bool) -> Operand {
         match expr {
             Expr::Literal(v) => Operand::Const(v.clone()),
+            Expr::MapLit(pairs, meta) if pairs.is_empty() => {
+                Operand::Const(Value::Map(clj_value::new_map().with_meta(meta.clone())))
+            }
+            Expr::VecLit(elems, meta) if elems.is_empty() => {
+                Operand::Const(Value::Vector(Vector::new_sync().with_meta(meta.clone())))
+            }
+            Expr::SetLit(elems, meta) if elems.is_empty() => {
+                Operand::Const(Value::Set(clj_value::new_set().with_meta(meta.clone())))
+            }
             Expr::Local(idx) => match (self.resolve(*idx), may_move && self.is_last(expr)) {
                 (loc @ Loc::Reg(_), true) => Operand::Loc(loc, true),
                 (loc, _) => Operand::Loc(loc, false),
@@ -1275,6 +1284,10 @@ impl Compiler {
     }
 
     fn compile_vec(&mut self, elems: &[Expr], meta: Option<Map>) -> Exec {
+        if elems.is_empty() {
+            let empty = Value::Vector(Vector::new_sync().with_meta(meta));
+            return Box::new(move |_, _| Ok(empty.clone()));
+        }
         let elems = self.compile_all(elems);
         Box::new(move |ev, f| {
             let mut out = Vec::with_capacity(elems.len());
@@ -1298,6 +1311,10 @@ impl Compiler {
     }
 
     fn compile_map(&mut self, pairs: &[(Expr, Expr)], meta: Option<Map>) -> Exec {
+        if pairs.is_empty() {
+            let empty = Value::Map(clj_value::new_map().with_meta(meta));
+            return Box::new(move |_, _| Ok(empty.clone()));
+        }
         let pairs = self.compile_pairs(pairs);
         Box::new(move |ev, f| {
             Ok(Value::Map(
@@ -1307,6 +1324,10 @@ impl Compiler {
     }
 
     fn compile_set(&mut self, elems: &[Expr], meta: Option<Map>) -> Exec {
+        if elems.is_empty() {
+            let empty = Value::Set(clj_value::new_set().with_meta(meta));
+            return Box::new(move |_, _| Ok(empty.clone()));
+        }
         let elems = self.compile_all(elems);
         Box::new(move |ev, f| {
             let mut out = clj_value::new_set();

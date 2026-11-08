@@ -179,11 +179,19 @@ pub(crate) fn count_of(v: &Value) -> Option<Value> {
     i64::try_from(n).ok().map(Value::Int)
 }
 
-/// `contains?` of an unsorted map or set at a scalar key.
+/// `contains?` of an unsorted map, set, vector, or nil.
 pub(crate) fn contains_test(coll: &Value, key: &Value) -> Option<bool> {
     match coll {
         Value::Map(m) if !m.is_sorted() && is_scalar_key(key) => Some(m.contains_key(key)),
         Value::Set(s) if !s.is_sorted() && is_scalar_key(key) => Some(s.contains(key)),
+        Value::Vector(v) => match key {
+            Value::Int(n) => match usize::try_from(*n as i32) {
+                Ok(idx) => Some(idx < v.len()),
+                Err(_) => Some(false),
+            },
+            _ => None,
+        },
+        Value::Nil => Some(false),
         _ => None,
     }
 }

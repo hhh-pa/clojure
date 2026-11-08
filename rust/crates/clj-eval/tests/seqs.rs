@@ -570,6 +570,13 @@ fn some_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(some odd? [2 4 5 6])"), "true");
     assert_eq!(run_last(&mut eval, "(some odd? [2 4])"), "nil");
+    assert_eq!(run_last(&mut eval, "(some :a [{:a 1} {:b 2}])"), "1");
+    assert_eq!(run_last(&mut eval, "(some :c [{:a 1} {:b 2}])"), "nil");
+    assert_eq!(run_last(&mut eval, "(some :a [:foo {:a 2}])"), "2");
+    assert_eq!(
+        run_last(&mut eval, "(some :a (subvec [1 2 {:a 3} 4] 1 3))"),
+        "3"
+    );
 }
 
 #[test]

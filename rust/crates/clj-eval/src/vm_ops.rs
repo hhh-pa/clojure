@@ -360,6 +360,32 @@ fn sss<A: Src, B: Src, C: Src, O: Op3>(c: Site, a: A, b: B, d: C) -> Exec {
     })
 }
 
+fn sxs<A: Src, C: Src, O: Op3>(c: Site, a: A, b: Exec, d: C) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let vb = b(ev, f)?;
+        if valid {
+            if let Some(v) = O::apply(a.read(f), &vb, d.read(f)) {
+                return Ok(v);
+            }
+        }
+        native3(ev, &c, a.read(f), &vb, d.read(f))
+    })
+}
+
+fn ssx<A: Src, B: Src, O: Op3>(c: Site, a: A, b: B, d: Exec) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let vd = d(ev, f)?;
+        if valid {
+            if let Some(v) = O::apply(a.read(f), b.read(f), &vd) {
+                return Ok(v);
+            }
+        }
+        native3(ev, &c, a.read(f), b.read(f), &vd)
+    })
+}
+
 fn any3<O: Op3>(c: Site, a: Operand, b: Operand, d: Operand) -> Exec {
     Box::new(move |ev, f| {
         let valid = ev.site_direct_valid(c.sid, &c.call);
@@ -382,6 +408,24 @@ fn shape3<O: Op3>(c: Site, a: Operand, b: Operand, d: Operand) -> Exec {
     match (shape(a), shape(b), shape(d)) {
         (Shape::Reg(ra), Shape::Reg(rb), Shape::Reg(rc)) => {
             sss::<Reg, Reg, Reg, O>(c, Reg(ra), Reg(rb), Reg(rc))
+        }
+        (Shape::Reg(ra), Shape::Reg(rb), Shape::Kst(rc)) => {
+            sss::<Reg, Reg, Kst, O>(c, Reg(ra), Reg(rb), Kst(rc))
+        }
+        (Shape::Reg(ra), Shape::Kst(rb), Shape::Reg(rc)) => {
+            sss::<Reg, Kst, Reg, O>(c, Reg(ra), Kst(rb), Reg(rc))
+        }
+        (Shape::Reg(ra), Shape::Kst(rb), Shape::Kst(rc)) => {
+            sss::<Reg, Kst, Kst, O>(c, Reg(ra), Kst(rb), Kst(rc))
+        }
+        (Shape::Reg(ra), Shape::Exec(eb), Shape::Kst(rc)) => {
+            sxs::<Reg, Kst, O>(c, Reg(ra), eb, Kst(rc))
+        }
+        (Shape::Reg(ra), Shape::Exec(eb), Shape::Reg(rc)) => {
+            sxs::<Reg, Reg, O>(c, Reg(ra), eb, Reg(rc))
+        }
+        (Shape::Reg(ra), Shape::Reg(rb), Shape::Exec(ed)) => {
+            ssx::<Reg, Reg, O>(c, Reg(ra), Reg(rb), ed)
         }
         (sa, sb, sd) => any3::<O>(c, unshape(sa), unshape(sb), unshape(sd)),
     }
@@ -563,6 +607,7 @@ const BINARY: &[Row2] = &[
     ("max", shape2::<Max, AsValue>, None),
     ("nth", shape2::<Nth, AsValue>, None),
     ("get", shape2::<Get, AsValue>, None),
+    ("dissoc", shape2::<Dissoc, AsValue>, None),
     (
         "contains?",
         shape2::<Contains, AsValue>,
@@ -1135,7 +1180,10 @@ impl Op2 for Nth {
         let Value::Int(n) = b else {
             return None;
         };
-        let idx = usize::try_from(i32::try_from(*n).ok()?).ok()?;
+        if *n < 0 || *n > i32::MAX as i64 {
+            return None;
+        }
+        let idx = *n as usize;
         match a {
             Value::Vector(v) => v.get(idx),
             Value::Str(s) => crate::coll::str_char_at(s, idx).map(Value::Char),
@@ -1151,6 +1199,21 @@ impl Op2 for Nth {
     }
 }
 op2!(Get, |a, b| crate::vm_intrinsics::get_of(a, b, None));
+
+pub(crate) struct Dissoc;
+
+impl Op2 for Dissoc {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        match a {
+            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
+                Some(Value::Map(m.clone().without(b)))
+            }
+            Value::Nil => Some(Value::Nil),
+            _ => None,
+        }
+    }
+}
 
 pub(crate) struct Inc;
 
@@ -1386,7 +1449,10 @@ impl Op3 for AssocBang {
                 let Value::Int(n) = b else {
                     return None;
                 };
-                let i = usize::try_from(i32::try_from(*n).ok()?).ok()?;
+                if *n < 0 || *n > i32::MAX as i64 {
+                    return None;
+                }
+                let i = *n as usize;
                 if let Value::Int(x) = c {
                     tv.assoc_int(i, *x).ok()?;
                 } else {
@@ -1411,7 +1477,23 @@ pub(crate) struct Nth3;
 impl Op3 for Nth3 {
     #[inline(always)]
     fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
-        crate::vm_intrinsics::nth_of(a, b, Some(c))
+        let Value::Int(n) = b else {
+            return None;
+        };
+        let Ok(i32_n) = i32::try_from(*n) else {
+            return None;
+        };
+        if i32_n < 0 {
+            return Some(c.clone());
+        }
+        let idx = i32_n as usize;
+        match a {
+            Value::Vector(v) => Some(v.get(idx).unwrap_or_else(|| c.clone())),
+            Value::Str(s) => {
+                Some(crate::coll::str_char_at(s, idx).map_or_else(|| c.clone(), Value::Char))
+            }
+            _ => crate::vm_intrinsics::nth_of(a, b, Some(c)),
+        }
     }
 }
 
@@ -1420,7 +1502,12 @@ pub(crate) struct Get3;
 impl Op3 for Get3 {
     #[inline(always)]
     fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
-        crate::vm_intrinsics::get_of(a, b, Some(c))
+        match a {
+            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
+                Some(m.get(b).cloned().unwrap_or_else(|| c.clone()))
+            }
+            _ => crate::vm_intrinsics::get_of(a, b, Some(c)),
+        }
     }
 }
 
