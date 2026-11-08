@@ -1615,13 +1615,9 @@ fn promote_scan_hit<T>(
         if let Some((key, scan)) = &memo.0[i] {
             if Arc::ptr_eq(key, s) {
                 let hit = f(scan);
+                let is_ascii = matches!(scan, StrScan::Ascii);
                 memo.0.swap(1, i);
-                if let Some((k1, s1)) = &memo.0[1] {
-                    ASCII_SLOT_1.set((
-                        Arc::as_ptr(k1) as *const () as usize,
-                        matches!(s1, StrScan::Ascii),
-                    ));
-                }
+                ASCII_SLOT_1.set((Arc::as_ptr(s) as *const () as usize, is_ascii));
                 return Some(hit);
             }
         }

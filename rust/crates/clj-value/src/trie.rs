@@ -709,6 +709,7 @@ mod tests {
         assert!(p.pop() && p.len() == FLAT_MAX + 1);
         let big: Packed<char> = Packed::from_vec(vec!['x'; FLAT_MAX + 1]);
         assert!(matches!(big, Packed::Trie(_)));
+        assert_eq!(big.into_vec(), vec!['x'; FLAT_MAX + 1]);
         let mut empty: Packed<char> = Packed::from_vec(Vec::new());
         assert!(!empty.pop());
     }
