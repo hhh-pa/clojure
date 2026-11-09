@@ -353,6 +353,27 @@ fn pair_plan(items: &[Value]) -> Result<MapConjPlan, NativeError> {
     }
 }
 
+/// The pair plan for a vector-like extension conj arg (split
+/// vectors answer from their spans; non-pairs are the pair error).
+fn pair_plan_ext(x: &Value) -> Option<Result<MapConjPlan, NativeError>> {
+    if let Some(sp) = crate::lazy::as_splitvec(x) {
+        if sp.len() != 2 {
+            return Some(Err(pair_err()));
+        }
+        return Some(Ok(MapConjPlan::Pair(
+            sp.nth(0).unwrap_or(Value::Nil),
+            sp.nth(1).unwrap_or(Value::Nil),
+        )));
+    }
+    as_subvector(x).map(|sv| {
+        if sv.len() != 2 {
+            return Err(pair_err());
+        }
+        let items = sv.items();
+        Ok(MapConjPlan::Pair(items[0].clone(), items[1].clone()))
+    })
+}
+
 fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeError> {
     match x {
         Value::Nil => Ok(MapConjPlan::Nil),
@@ -368,21 +389,8 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
         Value::PrimitiveVector(p) => pair_plan(&p.items()),
         Value::MapEntry { key, val, .. } => Ok(MapConjPlan::Pair((**key).clone(), (**val).clone())),
         _ => {
-            if let Some(sp) = crate::lazy::as_splitvec(x) {
-                if sp.len() != 2 {
-                    return Err(pair_err());
-                }
-                return Ok(MapConjPlan::Pair(
-                    sp.nth(0).unwrap_or(Value::Nil),
-                    sp.nth(1).unwrap_or(Value::Nil),
-                ));
-            }
-            if let Some(sv) = as_subvector(x) {
-                if sv.len() != 2 {
-                    return Err(pair_err());
-                }
-                let items = sv.items();
-                return Ok(MapConjPlan::Pair(items[0].clone(), items[1].clone()));
+            if let Some(plan) = pair_plan_ext(x) {
+                return plan;
             }
             // A sequential arg contributes one pair per entry
             // (Oracle FX2 `conj-seq-entries`, `conj-list-entry`,
