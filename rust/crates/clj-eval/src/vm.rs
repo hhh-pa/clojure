@@ -1649,42 +1649,87 @@ fn write_fused_ops(
 ) -> Result<(), Signal> {
     let t = &code.targets;
     match &fused.ops[..] {
-        [a] => {
-            let v = a.eval(ev, f)?;
-            set_reg(&mut f.regs[t[0]], v);
-        }
-        [a, b] => {
-            let (va, vb) = (a.eval(ev, f)?, b.eval(ev, f)?);
-            set_reg(&mut f.regs[t[0]], va);
-            set_reg(&mut f.regs[t[1]], vb);
-        }
-        [a, b, c] => {
-            let (va, vb, vc) = (a.eval(ev, f)?, b.eval(ev, f)?, c.eval(ev, f)?);
-            set_reg(&mut f.regs[t[0]], va);
-            set_reg(&mut f.regs[t[1]], vb);
-            set_reg(&mut f.regs[t[2]], vc);
-        }
-        [a, b, c, d] => {
-            let (va, vb, vc, vd) = (
-                a.eval(ev, f)?,
-                b.eval(ev, f)?,
-                c.eval(ev, f)?,
-                d.eval(ev, f)?,
-            );
-            set_reg(&mut f.regs[t[0]], va);
-            set_reg(&mut f.regs[t[1]], vb);
-            set_reg(&mut f.regs[t[2]], vc);
-            set_reg(&mut f.regs[t[3]], vd);
-        }
-        ops => {
-            let mut values: SmallVec<[Value; 8]> = SmallVec::new();
-            for op in ops {
-                values.push(op.eval(ev, f)?);
-            }
-            for (r, v) in t.iter().zip(values) {
-                set_reg(&mut f.regs[*r], v);
-            }
-        }
+        [a] => write_ops1(ev, f, t, a),
+        [a, b] => write_ops2(ev, f, t, a, b),
+        [a, b, c] => write_ops3(ev, f, t, a, b, c),
+        [a, b, c, d] => write_ops4(ev, f, t, a, b, c, d),
+        ops => write_ops_n(ev, f, t, ops),
+    }
+}
+
+fn write_ops1(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    a: &Operand,
+) -> Result<(), Signal> {
+    let v = a.eval(ev, f)?;
+    set_reg(&mut f.regs[t[0]], v);
+    Ok(())
+}
+
+fn write_ops2(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    a: &Operand,
+    b: &Operand,
+) -> Result<(), Signal> {
+    let (va, vb) = (a.eval(ev, f)?, b.eval(ev, f)?);
+    set_reg(&mut f.regs[t[0]], va);
+    set_reg(&mut f.regs[t[1]], vb);
+    Ok(())
+}
+
+fn write_ops3(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    a: &Operand,
+    b: &Operand,
+    c: &Operand,
+) -> Result<(), Signal> {
+    let (va, vb, vc) = (a.eval(ev, f)?, b.eval(ev, f)?, c.eval(ev, f)?);
+    set_reg(&mut f.regs[t[0]], va);
+    set_reg(&mut f.regs[t[1]], vb);
+    set_reg(&mut f.regs[t[2]], vc);
+    Ok(())
+}
+
+fn write_ops4(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    a: &Operand,
+    b: &Operand,
+    c: &Operand,
+    d: &Operand,
+) -> Result<(), Signal> {
+    let (va, vb, vc, vd) = (
+        a.eval(ev, f)?,
+        b.eval(ev, f)?,
+        c.eval(ev, f)?,
+        d.eval(ev, f)?,
+    );
+    set_reg(&mut f.regs[t[0]], va);
+    set_reg(&mut f.regs[t[1]], vb);
+    set_reg(&mut f.regs[t[2]], vc);
+    set_reg(&mut f.regs[t[3]], vd);
+    Ok(())
+}
+
+fn write_ops_n(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    ops: &[Operand],
+) -> Result<(), Signal> {
+    let mut values: SmallVec<[Value; 8]> = SmallVec::new();
+    for op in ops {
+        values.push(op.eval(ev, f)?);
+    }
+    for (r, v) in t.iter().zip(values) {
+        set_reg(&mut f.regs[*r], v);
     }
     Ok(())
 }
