@@ -191,6 +191,8 @@ fn string_natives_hand_other_arguments_to_upstream() {
             ("(contains? big-toks 40)", "false"),
             ("(get big-toks 99)", "nil"),
             ("(apply get [big-toks 3])", "\"3\""),
+            ("(apply nth [big-toks 3])", "\"3\""),
+            ("(apply nth [big-toks 99 :nf])", ":nf"),
             ("(apply count [big-toks])", "40"),
             ("(empty big-toks)", "[]"),
             ("(first big-toks)", "\"0\""),
