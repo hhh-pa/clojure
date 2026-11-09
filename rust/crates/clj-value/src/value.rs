@@ -717,12 +717,6 @@ impl Vector {
         typed.unwrap_or_else(|| Self::of(VectorInner::Generic(crate::trie::Packed::flat(items))))
     }
 
-    /// Build a generic vector from values in order without converting to a trie.
-    #[must_use]
-    pub fn from_flat_values(items: Vec<Value>) -> Self {
-        Self::of(VectorInner::Generic(crate::trie::Packed::flat(items)))
-    }
-
     /// Build a packed `Int` vector from `i64`s in order (no scan — for
     /// callers that already know, like ranges and packed transients).
     #[must_use]

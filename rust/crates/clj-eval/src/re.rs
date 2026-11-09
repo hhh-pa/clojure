@@ -191,11 +191,8 @@ fn cached_num_str(s: &str) -> Option<Value> {
                 .map(|n| Arc::from(n.to_string().as_str()))
                 .collect()
         });
-        if let Ok(n) = s.parse::<usize>() {
-            if let Some(arc) = cache.get(n) {
-                return Some(Value::Str(Arc::clone(arc)));
-            }
-        }
+        let n: usize = s.parse().ok()?;
+        return cache.get(n).map(|arc| Value::Str(Arc::clone(arc)));
     }
     None
 }
@@ -213,10 +210,7 @@ fn piece_value(s: &str) -> Value {
                 .map(|b| Arc::from(char::from(b).to_string().as_str()))
                 .collect()
         });
-        let b = s.as_bytes()[0];
-        if b < 128 {
-            return Value::Str(cache[b as usize].clone());
-        }
+        return Value::Str(cache[s.as_bytes()[0] as usize].clone());
     }
     if let Some(v) = cached_num_str(s) {
         return v;

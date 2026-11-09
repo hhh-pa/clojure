@@ -1736,10 +1736,6 @@ fn slot_scan_char(
 ) -> Option<char> {
     if let Some((weak, scan)) = entry {
         if std::ptr::eq(weak.as_ptr(), Arc::as_ptr(s)) {
-            if matches!(scan, StrScan::Ascii) {
-                let ptr = Arc::as_ptr(s) as *const () as usize;
-                set_ascii_slot(0, ptr, s.len(), true);
-            }
             return scan_char_at(s, scan, idx);
         }
     }
