@@ -448,7 +448,7 @@ pub(crate) enum Packed<T> {
     Trie(PVec<T>),
 }
 
-impl<T: Copy> Packed<T> {
+impl<T: Clone> Packed<T> {
     /// Flat packed storage (direct reads, unwrap on owned transient).
     pub(crate) fn flat(items: Vec<T>) -> Self {
         Packed::Flat(Arc::new(items))
@@ -478,10 +478,10 @@ impl<T: Copy> Packed<T> {
     }
 
     #[inline]
-    pub(crate) fn get(&self, i: usize) -> Option<T> {
+    pub(crate) fn get(&self, i: usize) -> Option<&T> {
         match self {
-            Packed::Flat(a) => a.get(i).copied(),
-            Packed::Trie(t) => t.get(i).copied(),
+            Packed::Flat(a) => a.get(i),
+            Packed::Trie(t) => t.get(i),
         }
     }
 
@@ -490,7 +490,7 @@ impl<T: Copy> Packed<T> {
         match self {
             Packed::Flat(a) if a.len() < FLAT_MAX => Arc::make_mut(a).push(x),
             Packed::Flat(a) => {
-                let mut t: PVec<T> = a.iter().copied().collect();
+                let mut t: PVec<T> = a.iter().cloned().collect();
                 t.push_back_mut(x);
                 *self = Packed::Trie(t);
             }
@@ -503,7 +503,7 @@ impl<T: Copy> Packed<T> {
         match self {
             Packed::Flat(a) => {
                 if Arc::strong_count(a) > 1 && a.len() > FLAT_MAX {
-                    let mut t: PVec<T> = a.iter().copied().collect();
+                    let mut t: PVec<T> = a.iter().cloned().collect();
                     let ok = t.set_mut(i, x);
                     *self = Packed::Trie(t);
                     ok
@@ -521,12 +521,30 @@ impl<T: Copy> Packed<T> {
         }
     }
 
+    /// Replace the item at `i`, returning the old value (`None` when out of bounds).
+    pub(crate) fn replace(&mut self, i: usize, x: T) -> Option<T> {
+        match self {
+            Packed::Flat(a) => {
+                if Arc::strong_count(a) > 1 && a.len() > FLAT_MAX {
+                    let mut t: PVec<T> = a.iter().cloned().collect();
+                    let old = t.replace_mut(i, x);
+                    *self = Packed::Trie(t);
+                    old
+                } else {
+                    let slot = Arc::make_mut(a).get_mut(i)?;
+                    Some(std::mem::replace(slot, x))
+                }
+            }
+            Packed::Trie(t) => t.replace_mut(i, x),
+        }
+    }
+
     /// Drop the last item (`false` when empty).
     pub(crate) fn pop(&mut self) -> bool {
         match self {
             Packed::Flat(a) => {
                 if Arc::strong_count(a) > 1 && a.len() > FLAT_MAX {
-                    let mut t: PVec<T> = a.iter().copied().collect();
+                    let mut t: PVec<T> = a.iter().cloned().collect();
                     let ok = t.drop_last_mut();
                     *self = Packed::Trie(t);
                     ok
@@ -686,8 +704,8 @@ mod tests {
     fn packed_runs_go_flat_then_trie() {
         let mut p: Packed<i64> = Packed::from_vec((0..FLAT_MAX as i64).collect());
         assert!(matches!(p, Packed::Flat(_)));
-        assert_eq!(p.get(5), Some(5));
-        assert!(p.set(5, -5) && p.get(5) == Some(-5));
+        assert_eq!(p.get(5), Some(&5));
+        assert!(p.set(5, -5) && p.get(5) == Some(&-5));
         assert!(!p.set(FLAT_MAX, 0));
         assert_eq!(p.chunk_from(30), &[30, 31][..]);
         assert!(p.chunk_from(FLAT_MAX).is_empty());
@@ -698,8 +716,8 @@ mod tests {
         p.push(8);
         assert!(matches!(p, Packed::Trie(_)));
         assert_eq!(p.len(), FLAT_MAX + 1);
-        assert_eq!(p.get(FLAT_MAX), Some(8));
-        assert!(p.set(0, 9) && p.get(0) == Some(9));
+        assert_eq!(p.get(FLAT_MAX), Some(&8));
+        assert!(p.set(0, 9) && p.get(0) == Some(&9));
         assert_eq!(p.chunk_from(FLAT_MAX - 1).len(), 1);
         assert_eq!(p.chunk_from(FLAT_MAX).len(), 1);
         assert_eq!(p.iter().size_hint().0, FLAT_MAX + 1);
@@ -729,5 +747,27 @@ mod tests {
 
         let empty: PVec<i64> = PVec::new_sync();
         assert!(empty.into_vec().is_empty());
+    }
+
+    #[test]
+    fn packed_replace_coverage() {
+        // Flat unshared
+        let mut p = Packed::flat(vec![1, 2, 3]);
+        assert_eq!(p.replace(1, 20), Some(2));
+        assert_eq!(p.get(1), Some(&20));
+        assert_eq!(p.replace(10, 99), None);
+
+        // Flat shared > FLAT_MAX
+        let items: Vec<i64> = (0..=FLAT_MAX).map(|x| x as i64).collect();
+        let mut p_shared = Packed::flat(items);
+        let clone = p_shared.clone();
+        assert_eq!(p_shared.replace(5, 500), Some(5));
+        assert!(matches!(p_shared, Packed::Trie(_)));
+        assert_eq!(p_shared.get(5), Some(&500));
+        drop(clone);
+
+        // Trie replace
+        assert_eq!(p_shared.replace(10, 1000), Some(10));
+        assert_eq!(p_shared.replace(FLAT_MAX + 10, 999), None);
     }
 }

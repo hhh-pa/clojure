@@ -1010,6 +1010,44 @@ fn native_mapv(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     native_mapv_owned(eval, args.iter().cloned().collect())
 }
 
+fn parse_long_items<I: Iterator<Item = Value>>(iter: I, cap: usize) -> Option<Value> {
+    let mut ints: Vec<i64> = Vec::with_capacity(cap);
+    let mut mixed: Option<Vec<Value>> = None;
+    for item in iter {
+        let Value::Str(s) = item else {
+            return None;
+        };
+        if let Some(m) = &mut mixed {
+            m.push(
+                crate::core::parse_long_str(&s)
+                    .map(Value::Int)
+                    .unwrap_or(Value::Nil),
+            );
+        } else if let Some(n) = crate::core::parse_long_str(&s) {
+            ints.push(n);
+        } else {
+            let mut m: Vec<Value> = Vec::with_capacity(cap);
+            m.extend(ints.drain(..).map(Value::Int));
+            m.push(Value::Nil);
+            mixed = Some(m);
+        }
+    }
+    Some(Value::Vector(match mixed {
+        Some(m) => Vector::from_vec(m),
+        None => Vector::from_flat_ints(ints),
+    }))
+}
+
+fn try_mapv_parse_long(v: &Value) -> Option<Value> {
+    match v {
+        Value::Vector(vec) => parse_long_items(vec.iter(), vec.len()),
+        _ => {
+            let sv = as_subvector(v)?;
+            parse_long_items(sv.iter(), sv.len())
+        }
+    }
+}
+
 pub(crate) fn native_mapv_owned(
     eval: &mut Evaluator,
     mut args: SmallVec<[Value; 4]>,
@@ -1026,17 +1064,8 @@ pub(crate) fn native_mapv_owned(
     if inputs.len() == 1
         && crate::ext::as_native(&args[0]).is_some_and(|n| &*n.display == "clojure.core/parse-long")
     {
-        if let Value::Vector(vec) = &inputs[0] {
-            if vec.iter().all(|v| matches!(v, Value::Str(_))) {
-                let mut tv = clj_value::TransientVector::new();
-                for v in vec.iter() {
-                    let out =
-                        crate::core::parse_long_1(&v).expect("parse-long on a string never errors");
-                    tv.conj(out).expect("fresh transient accepts conj");
-                }
-                let vec = tv.persistent().expect("fresh transient is valid at freeze");
-                return Ok(Value::Vector(vec));
-            }
+        if let Some(res) = try_mapv_parse_long(&inputs[0]) {
+            return Ok(res);
         }
     }
     // One input under a VM fn walks it in place (#226): no lazy map

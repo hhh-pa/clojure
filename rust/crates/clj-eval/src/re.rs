@@ -182,10 +182,29 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
 /// `PatternSyntaxException` (the crate text, like `re-pattern`).
 /// The running state of the JDK split loop (split out so each
 /// half stays under the complexity ratchet).
+fn cached_num_str(s: &str) -> Option<Value> {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 && bytes.len() <= 4 && bytes.iter().all(|b| b.is_ascii_digit()) {
+        static NUM_CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
+        let cache = NUM_CACHE.get_or_init(|| {
+            (0..=1024)
+                .map(|n| Arc::from(n.to_string().as_str()))
+                .collect()
+        });
+        if let Ok(n) = s.parse::<usize>() {
+            if let Some(arc) = cache.get(n) {
+                return Some(Value::Str(Arc::clone(arc)));
+            }
+        }
+    }
+    None
+}
+
 /// A split piece as a string value. Single-byte pieces (always
 /// ASCII) share one cached allocation, mirroring CPython's
 /// single-char string cache: token-heavy splits over short tokens
-/// then allocate nothing per piece.
+/// then allocate nothing per piece. Small numeric tokens share
+/// static interned string allocations.
 fn piece_value(s: &str) -> Value {
     if s.len() == 1 {
         static CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
@@ -194,7 +213,13 @@ fn piece_value(s: &str) -> Value {
                 .map(|b| Arc::from(char::from(b).to_string().as_str()))
                 .collect()
         });
-        return Value::Str(cache[s.as_bytes()[0] as usize].clone());
+        let b = s.as_bytes()[0];
+        if b < 128 {
+            return Value::Str(cache[b as usize].clone());
+        }
+    }
+    if let Some(v) = cached_num_str(s) {
+        return v;
     }
     Value::Str(Arc::from(s))
 }

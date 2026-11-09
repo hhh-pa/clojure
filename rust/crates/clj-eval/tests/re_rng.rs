@@ -203,6 +203,13 @@ fn split_cut_kinds() {
         ),
         "[\"foo\"]"
     );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(clojure.string/split \"10 20 1024 9999 10000 1a\" #\"\\s+\")"
+        ),
+        "[\"10\" \"20\" \"1024\" \"9999\" \"10000\" \"1a\"]"
+    );
 }
 
 #[test]

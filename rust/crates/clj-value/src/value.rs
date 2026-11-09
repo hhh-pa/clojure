@@ -257,7 +257,7 @@ pub struct Vector {
 /// whatever the type.
 #[derive(Clone, Debug)]
 enum VectorInner {
-    Generic(RpdsVector),
+    Generic(crate::trie::Packed<Value>),
     Ints(crate::trie::Packed<i64>),
     Chars(crate::trie::Packed<char>),
 }
@@ -268,7 +268,7 @@ pub struct VectorIter<'a> {
 }
 
 enum VectorIterInner<'a> {
-    Generic(crate::trie::Iter<'a>),
+    Generic(crate::trie::PackedIter<'a, Value>),
     Ints(crate::trie::PackedIter<'a, i64>),
     Chars(crate::trie::PackedIter<'a, char>),
 }
@@ -714,7 +714,13 @@ impl Vector {
                 .map(Self::from_chars),
             Some(_) => None,
         };
-        typed.unwrap_or_else(|| Self::of(VectorInner::Generic(RpdsVector::from_vec(items))))
+        typed.unwrap_or_else(|| Self::of(VectorInner::Generic(crate::trie::Packed::flat(items))))
+    }
+
+    /// Build a generic vector from values in order without converting to a trie.
+    #[must_use]
+    pub fn from_flat_values(items: Vec<Value>) -> Self {
+        Self::of(VectorInner::Generic(crate::trie::Packed::flat(items)))
     }
 
     /// Build a packed `Int` vector from `i64`s in order (no scan — for
@@ -819,7 +825,7 @@ impl Vector {
         self.retype_empty(&v);
         let generic = match (&mut self.inner, v) {
             (VectorInner::Generic(t), v) => {
-                t.push_back_mut(v);
+                t.push(v);
                 None
             }
             (VectorInner::Ints(t), Value::Int(n)) => {
@@ -830,8 +836,8 @@ impl Vector {
                 t.push(c);
                 None
             }
-            (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| g.push_back_mut(v))),
-            (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| g.push_back_mut(v))),
+            (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| g.push(v))),
+            (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| g.push(v))),
         };
         if let Some(g) = generic {
             self.inner = VectorInner::Generic(g);
@@ -867,7 +873,7 @@ impl Vector {
         }
         let generic = match (&mut self.inner, v) {
             (VectorInner::Generic(t), v) => {
-                t.set_mut(index, v);
+                t.set(index, v);
                 None
             }
             (VectorInner::Ints(t), Value::Int(n)) => {
@@ -879,10 +885,10 @@ impl Vector {
                 None
             }
             (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| {
-                g.set_mut(index, v);
+                g.set(index, v);
             })),
             (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| {
-                g.set_mut(index, v);
+                g.set(index, v);
             })),
         };
         if let Some(g) = generic {
@@ -897,7 +903,7 @@ impl Vector {
     /// collections keep a refcount of 1 across `assoc-in` / `update`.
     pub fn take_nth(&mut self, index: usize) -> Option<Value> {
         if let VectorInner::Generic(t) = &mut self.inner {
-            t.replace_mut(index, Value::Nil)
+            t.replace(index, Value::Nil)
         } else {
             self.get(index)
         }
@@ -924,7 +930,7 @@ impl Vector {
     #[must_use]
     pub fn drop_last_owned(mut self) -> Option<Self> {
         let popped = match &mut self.inner {
-            VectorInner::Generic(t) => t.drop_last_mut(),
+            VectorInner::Generic(t) => t.pop(),
             VectorInner::Ints(t) => t.pop(),
             VectorInner::Chars(t) => t.pop(),
         };
@@ -953,8 +959,8 @@ impl Vector {
     pub fn get(&self, index: usize) -> Option<Value> {
         match &self.inner {
             VectorInner::Generic(t) => t.get(index).cloned(),
-            VectorInner::Ints(t) => t.get(index).map(Value::Int),
-            VectorInner::Chars(t) => t.get(index).map(Value::Char),
+            VectorInner::Ints(t) => t.get(index).copied().map(Value::Int),
+            VectorInner::Chars(t) => t.get(index).copied().map(Value::Char),
         }
     }
 
@@ -1028,9 +1034,9 @@ fn vector_inner_len(inner: &VectorInner) -> usize {
 fn boxed<T: Copy>(
     t: &crate::trie::Packed<T>,
     box_item: fn(T) -> Value,
-    then: impl FnOnce(&mut RpdsVector),
-) -> RpdsVector {
-    let mut g: RpdsVector = t.iter().map(|x| box_item(*x)).collect();
+    then: impl FnOnce(&mut crate::trie::Packed<Value>),
+) -> crate::trie::Packed<Value> {
+    let mut g = crate::trie::Packed::from_vec(t.iter().map(|x| box_item(*x)).collect());
     then(&mut g);
     g
 }

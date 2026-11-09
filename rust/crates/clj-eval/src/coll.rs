@@ -1626,7 +1626,7 @@ fn promote_scan_hit<T>(
     let len = s.len();
     for i in 2..LAST_SCAN_SLOTS {
         if let Some((weak, scan)) = &memo.0[i] {
-            if weak.upgrade().is_some_and(|k| Arc::ptr_eq(&k, s)) {
+            if std::ptr::eq(weak.as_ptr(), Arc::as_ptr(s)) {
                 let hit = f(scan);
                 let is_ascii = matches!(scan, StrScan::Ascii);
                 memo.0.swap(1, i);
@@ -1642,12 +1642,12 @@ fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
     LAST_SCAN.with(|memo| {
         let mut memo = memo.borrow_mut();
         if let Some((weak, scan)) = &memo.0[0] {
-            if weak.upgrade().is_some_and(|k| Arc::ptr_eq(&k, s)) {
+            if std::ptr::eq(weak.as_ptr(), Arc::as_ptr(s)) {
                 return Some(f(scan));
             }
         }
         if let Some((weak, scan)) = &memo.0[1] {
-            if weak.upgrade().is_some_and(|k| Arc::ptr_eq(&k, s)) {
+            if std::ptr::eq(weak.as_ptr(), Arc::as_ptr(s)) {
                 return Some(f(scan));
             }
         }
@@ -1735,7 +1735,11 @@ fn slot_scan_char(
     idx: usize,
 ) -> Option<char> {
     if let Some((weak, scan)) = entry {
-        if weak.upgrade().is_some_and(|k| Arc::ptr_eq(&k, s)) {
+        if std::ptr::eq(weak.as_ptr(), Arc::as_ptr(s)) {
+            if matches!(scan, StrScan::Ascii) {
+                let ptr = Arc::as_ptr(s) as *const () as usize;
+                set_ascii_slot(0, ptr, s.len(), true);
+            }
             return scan_char_at(s, scan, idx);
         }
     }

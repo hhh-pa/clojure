@@ -1040,11 +1040,11 @@ impl Upd for Conj {
 /// pairs, and `Double` with either side (`Int` widened, like the
 /// native's `to_f64`).
 #[inline(always)]
-fn arith(
+fn arith<F: Fn(i64, i64) -> Option<i64>, G: Fn(f64, f64) -> f64>(
     a: &Value,
     b: &Value,
-    int: fn(i64, i64) -> Option<i64>,
-    dbl: fn(f64, f64) -> f64,
+    int: F,
+    dbl: G,
 ) -> Option<Value> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => int(*x, *y).map(Value::Int),
@@ -1057,11 +1057,11 @@ fn arith(
 
 /// A numeric comparison (`Int` pairs exact, any `Double` as `f64`).
 #[inline(always)]
-fn compare(
+fn compare<F: Fn(i64, i64) -> bool, G: Fn(f64, f64) -> bool>(
     a: &Value,
     b: &Value,
-    int: fn(i64, i64) -> bool,
-    dbl: fn(f64, f64) -> bool,
+    int: F,
+    dbl: G,
 ) -> Option<bool> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(int(*x, *y)),
@@ -1074,7 +1074,7 @@ fn compare(
 
 /// An `Int`-pair op (`None` for any other pair).
 #[inline(always)]
-fn ints(a: &Value, b: &Value, op: fn(i64, i64) -> Option<i64>) -> Option<Value> {
+fn ints<F: Fn(i64, i64) -> Option<i64>>(a: &Value, b: &Value, op: F) -> Option<Value> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => op(*x, *y).map(Value::Int),
         _ => None,
@@ -1083,7 +1083,7 @@ fn ints(a: &Value, b: &Value, op: fn(i64, i64) -> Option<i64>) -> Option<Value> 
 
 /// A numeric predicate over `Int` and `Double`.
 #[inline(always)]
-fn sign(a: &Value, int: fn(i64) -> bool, dbl: fn(f64) -> bool) -> Option<bool> {
+fn sign<F: Fn(i64) -> bool, G: Fn(f64) -> bool>(a: &Value, int: F, dbl: G) -> Option<bool> {
     match a {
         Value::Int(x) => Some(int(*x)),
         Value::Double(x) => Some(dbl(*x)),
@@ -1193,7 +1193,7 @@ impl Op2 for Nth {
             Value::Transient(t) => {
                 let guard = t.lock();
                 match &*guard {
-                    clj_value::TransientKind::Vector(tv) => tv.nth(idx).ok()?,
+                    clj_value::TransientKind::Vector(tv) => tv.nth_opt(idx),
                     _ => None,
                 }
             }
@@ -1481,7 +1481,9 @@ impl Op2 for ConjBang {
             return None;
         };
         if let Value::Int(n) = b {
-            tv.conj_int(*n).ok()?;
+            if !tv.conj_int_opt(*n) {
+                return None;
+            }
         } else {
             tv.conj(b.clone()).ok()?;
         }
@@ -1511,7 +1513,9 @@ impl Op3 for AssocBang {
                 }
                 let i = *n as usize;
                 if let Value::Int(x) = c {
-                    tv.assoc_int(i, *x).ok()?;
+                    if !tv.assoc_int_opt(i, *x) {
+                        return None;
+                    }
                 } else {
                     tv.assoc(i, c.clone()).ok()?;
                 }

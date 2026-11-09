@@ -277,6 +277,52 @@ impl TransientVector {
     /// Whether the buffer is still packed (all-`Int` or all-char so
     /// far).
     #[must_use]
+    /// Read index `idx` (`None` past the end or when invalidated).
+    #[inline(always)]
+    pub fn nth_opt(&self, idx: usize) -> Option<Value> {
+        if !self.valid {
+            return None;
+        }
+        match &self.items {
+            TransientItems::Ints(x) => x.get(idx).map(|n| Value::Int(*n)),
+            TransientItems::Chars(x) => x.get(idx).map(|c| Value::Char(*c)),
+            TransientItems::Generic(x) => x.get(idx).cloned(),
+        }
+    }
+
+    /// Set index `idx` to an integer, returning `false` on error.
+    #[inline(always)]
+    pub fn assoc_int_opt(&mut self, idx: usize, n: i64) -> bool {
+        if !self.valid {
+            return false;
+        }
+        match &mut self.items {
+            TransientItems::Ints(x) => {
+                if idx > x.len() {
+                    return false;
+                }
+                put_at(x, idx, n);
+                true
+            }
+            _ => self.assoc(idx, Value::Int(n)).is_ok(),
+        }
+    }
+
+    /// Append an integer, returning `false` on error.
+    #[inline(always)]
+    pub fn conj_int_opt(&mut self, n: i64) -> bool {
+        if !self.valid {
+            return false;
+        }
+        match &mut self.items {
+            TransientItems::Ints(x) => {
+                x.push(n);
+                true
+            }
+            _ => self.conj(Value::Int(n)).is_ok(),
+        }
+    }
+
     pub fn is_packed(&self) -> bool {
         !matches!(self.items, TransientItems::Generic(_))
     }
@@ -290,11 +336,15 @@ impl TransientVector {
         // first — the frozen vector never grows.
         Ok(match items {
             TransientItems::Ints(mut x) => {
-                x.shrink_to_fit();
+                if x.capacity() > x.len() * 2 && x.capacity() - x.len() > 1024 {
+                    x.shrink_to_fit();
+                }
                 Vector::from_flat_ints(x)
             }
             TransientItems::Chars(mut x) => {
-                x.shrink_to_fit();
+                if x.capacity() > x.len() * 2 && x.capacity() - x.len() > 1024 {
+                    x.shrink_to_fit();
+                }
                 Vector::from_flat_chars(x)
             }
             TransientItems::Generic(x) => Vector::from_vec(x),
@@ -1023,5 +1073,59 @@ mod tests {
             });
             let _g = t.lock();
         });
+    }
+
+    #[test]
+    fn transient_vector_opt_helpers_and_persistent_shrink() {
+        let mut tv = TransientVector::new();
+        assert!(tv.conj_int_opt(10));
+        assert!(tv.conj_int_opt(20));
+        assert_eq!(tv.nth_opt(0), Some(Value::Int(10)));
+        assert_eq!(tv.nth_opt(1), Some(Value::Int(20)));
+        assert_eq!(tv.nth_opt(2), None);
+        assert!(tv.assoc_int_opt(1, 25));
+        assert!(!tv.assoc_int_opt(5, 50));
+        assert_eq!(tv.nth_opt(1), Some(Value::Int(25)));
+
+        // Generic transient
+        let mut tg = TransientVector::new();
+        let foo_val = Value::Str(std::sync::Arc::from("foo"));
+        tg.conj(foo_val.clone()).unwrap();
+        assert!(tg.conj_int_opt(42));
+        assert_eq!(tg.nth_opt(0), Some(foo_val));
+        assert_eq!(tg.nth_opt(1), Some(Value::Int(42)));
+        assert_eq!(tg.nth_opt(2), None);
+        assert!(tg.assoc_int_opt(1, 99));
+        assert_eq!(tg.nth_opt(1), Some(Value::Int(99)));
+
+        // Char transient
+        let mut tc = TransientVector::from_vector(&crate::Vector::from_chars(vec!['a', 'b']));
+        assert_eq!(tc.nth_opt(0), Some(Value::Char('a')));
+        assert_eq!(tc.nth_opt(2), None);
+        // conj_int_opt promotes char transient to generic
+        assert!(tc.conj_int_opt(77));
+        assert_eq!(tc.nth_opt(2), Some(Value::Int(77)));
+
+        // Invalid transient
+        let mut t_inv = TransientVector::new();
+        let _ = t_inv.persistent().unwrap();
+        assert_eq!(t_inv.nth_opt(0), None);
+        assert!(!t_inv.conj_int_opt(1));
+        assert!(!t_inv.assoc_int_opt(0, 1));
+
+        // Persistent shrink condition
+        let mut t_shrink_ints = TransientVector::new();
+        if let super::TransientItems::Ints(ref mut v) = t_shrink_ints.items {
+            v.reserve(2000);
+            v.push(1);
+        }
+        let _ = t_shrink_ints.persistent().unwrap();
+
+        let mut t_shrink_chars =
+            TransientVector::from_vector(&crate::Vector::from_chars(vec!['x']));
+        if let super::TransientItems::Chars(ref mut v) = t_shrink_chars.items {
+            v.reserve(2000);
+        }
+        let _ = t_shrink_chars.persistent().unwrap();
     }
 }

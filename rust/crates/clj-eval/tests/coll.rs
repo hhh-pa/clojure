@@ -455,9 +455,9 @@ fn nth_rows() {
     assert_eq!(
         run_last(
             &mut eval,
-            "(nth \"héllo-wörld0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\" 100)"
+            "(let [s \"héllo-wörld0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\"] [(nth s 0) (nth s 100)])"
         ),
-        "\\1"
+        "[\\h \\1]"
     );
     assert_eq!(
         uncaught(&mut eval, "(nth (apply str (repeat 100 \"ab\")) 500)"),

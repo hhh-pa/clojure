@@ -380,6 +380,24 @@ fn mapv_filterv_rows() {
         "java.lang.IllegalArgumentException | Expected string, got java.lang.Long"
     );
     assert_eq!(
+        run_last(
+            &mut eval,
+            "(mapv parse-long (subvec [\"a\" \"1\" \"2\" \"b\"] 1 3))"
+        ),
+        "[1 2]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(mapv parse-long (subvec [\"a\" \"1\" \"x\" \"b\"] 1 3))"
+        ),
+        "[1 nil]"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(mapv parse-long (subvec [\"a\" 1] 1 2))"),
+        "java.lang.IllegalArgumentException | Expected string, got java.lang.Long"
+    );
+    assert_eq!(
         run_last(&mut eval, "(mapv parse-long (list \"1\" \"2\"))"),
         "[1 2]"
     );
