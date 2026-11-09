@@ -150,10 +150,15 @@ fn compare_to_target(a: &Value) -> Option<&'static str> {
         Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_) => {
             Some("clojure.lang.IPersistentVector")
         }
-        Value::Extension(e) => e
-            .as_any()
-            .downcast_ref::<SubVectorValue>()
-            .map(|_| "clojure.lang.IPersistentVector"),
+        Value::Extension(e) => {
+            if e.as_any().downcast_ref::<SubVectorValue>().is_some()
+                || e.as_any().downcast_ref::<crate::SplitVecValue>().is_some()
+            {
+                Some("clojure.lang.IPersistentVector")
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -271,10 +276,15 @@ fn vector_items(v: &Value) -> Option<Vec<Value>> {
         Value::Vector(x) => Some(x.iter().collect()),
         Value::MapEntry { key, val, .. } => Some(vec![(**key).clone(), (**val).clone()]),
         Value::PrimitiveVector(p) => Some(p.items()),
-        Value::Extension(e) => e
-            .as_any()
-            .downcast_ref::<SubVectorValue>()
-            .map(SubVectorValue::items),
+        Value::Extension(e) => {
+            if let Some(sv) = e.as_any().downcast_ref::<SubVectorValue>() {
+                Some(sv.items())
+            } else {
+                e.as_any()
+                    .downcast_ref::<crate::SplitVecValue>()
+                    .map(crate::SplitVecValue::items)
+            }
+        }
         _ => None,
     }
 }

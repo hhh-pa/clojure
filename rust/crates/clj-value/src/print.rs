@@ -671,6 +671,10 @@ fn print_extension_body(
         let items = sv.items();
         let refs: Vec<&Value> = items.iter().collect();
         print_sequential("[", refs, "]", " ", opts, level, out);
+    } else if let Some(sp) = e.as_any().downcast_ref::<crate::SplitVecValue>() {
+        let items = sp.items();
+        let refs: Vec<&Value> = items.iter().collect();
+        print_sequential("[", refs, "]", " ", opts, level, out);
     } else if !opts.readably {
         // Extensions with a `str` display render it here (only
         // `MathContext`, S2 oracle `wp-str`); the rest keep

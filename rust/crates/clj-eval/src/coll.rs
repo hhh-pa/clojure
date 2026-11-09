@@ -1951,7 +1951,10 @@ pub(crate) fn native_vec_owned(
     mut args: SmallVec<[Value; 4]>,
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/vec", &args, &[1])?;
-    if matches!(args[0], Value::Vector(_)) || as_subvector(&args[0]).is_some() {
+    if matches!(args[0], Value::Vector(_))
+        || crate::lazy::as_splitvec(&args[0]).is_some()
+        || as_subvector(&args[0]).is_some()
+    {
         return Ok(args[0].clone().with_meta(None));
     }
     // `RT.toArray`: non-seqables fail the conversion, not the seq
@@ -2594,6 +2597,23 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 
 /// Three-way `subvec` over an already-defaulted end.
 fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeError> {
+    // A split vector windows in place (no piece materializes).
+    if let Some(sp) = crate::lazy::as_splitvec(v) {
+        let s = nth_index(start_v)?;
+        let e = nth_index(end_v)?;
+        let (Ok(su), Ok(eu)) = (usize::try_from(s), usize::try_from(e)) else {
+            return Err(ioobe());
+        };
+        if eu < su || eu > sp.len() {
+            return Err(ioobe());
+        }
+        if su == eu {
+            return Ok(Value::Vector(Vector::from_vec(Vec::new())));
+        }
+        return Ok(Value::Extension(Arc::new(
+            sp.window(su, eu).with_meta(None),
+        )));
+    }
     let (backing, base, len) = match v {
         Value::Vector(x) => (x.clone(), 0, x.len()),
         // `subvec` of a primitive vector is a plain subvector

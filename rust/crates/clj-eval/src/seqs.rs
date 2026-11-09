@@ -1041,11 +1041,40 @@ fn parse_long_items<I: Iterator<Item = Value>>(iter: I, cap: usize) -> Option<Va
 fn try_mapv_parse_long(v: &Value) -> Option<Value> {
     match v {
         Value::Vector(vec) => parse_long_items(vec.iter(), vec.len()),
-        _ => {
+        Value::Extension(_) => {
+            if let Some(sp) = crate::lazy::as_splitvec(v) {
+                return parse_long_pieces(sp);
+            }
             let sv = as_subvector(v)?;
             parse_long_items(sv.iter(), sv.len())
         }
+        _ => None,
     }
+}
+
+/// `(mapv parse-long split-vec)`: parse the spans in place, no
+/// piece string is ever materialized.
+fn parse_long_pieces(sp: &clj_value::SplitVecValue) -> Option<Value> {
+    let cap = sp.len();
+    let mut ints: Vec<i64> = Vec::with_capacity(cap);
+    let mut mixed: Option<Vec<Value>> = None;
+    for i in 0..cap {
+        let s = sp.piece_str(i)?;
+        if let Some(m) = &mut mixed {
+            m.push(crate::core::parse_long_str(s).map_or(Value::Nil, Value::Int));
+        } else if let Some(n) = crate::core::parse_long_str(s) {
+            ints.push(n);
+        } else {
+            let mut m: Vec<Value> = Vec::with_capacity(cap);
+            m.extend(ints.drain(..).map(Value::Int));
+            m.push(Value::Nil);
+            mixed = Some(m);
+        }
+    }
+    Some(Value::Vector(match mixed {
+        Some(m) => Vector::from_vec(m),
+        None => Vector::from_flat_ints(ints),
+    }))
 }
 
 pub(crate) fn native_mapv_owned(

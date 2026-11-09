@@ -19,7 +19,9 @@
 
 use std::sync::Arc;
 
-use clj_value::{Array, ArrayDesc, ArrayStore, BaseType, SeqKind, ThrowClass, Value, Vector};
+use clj_value::{
+    Array, ArrayDesc, ArrayStore, BaseType, SeqKind, SplitVecValue, ThrowClass, Value, Vector,
+};
 use regex::Regex;
 
 use crate::core::cce_err;
@@ -224,7 +226,8 @@ fn piece_value(s: &str) -> Value {
 }
 
 struct SplitAcc {
-    parts: Vec<Value>,
+    /// Piece byte ranges `(start, end)` into the input text.
+    ranges: Vec<(usize, usize)>,
     index: usize,
     count: i64,
 }
@@ -246,20 +249,50 @@ fn split_step(
     if !limited || acc.count < cap {
         let leader = acc.index == 0 && m_start == 0 && m_start == m_end;
         if !leader {
-            acc.parts.push(piece_value(&text[acc.index..m_start]));
+            acc.ranges.push((acc.index, m_start));
             acc.index = m_end;
             acc.count += 1;
         }
     } else if acc.count == cap {
-        acc.parts.push(piece_value(&text[acc.index..]));
+        acc.ranges.push((acc.index, text.len()));
         acc.index = m_end;
         acc.count += 1;
     }
 }
 
-pub(crate) fn pattern_split(text: &str, source: &str, limit: i32) -> Result<Value, NativeError> {
-    let pieces = pattern_pieces(text, source, limit)?;
-    Ok(Value::Vector(Vector::from_vec(pieces)))
+/// Splits at or above this many pieces stay lazy: a
+/// [`SplitVecValue`] of byte spans into the shared input instead
+/// of one string allocation per piece.
+const SPLIT_LAZY_MIN: usize = 32;
+
+pub(crate) fn pattern_split(
+    base: &Arc<str>,
+    source: &str,
+    limit: i32,
+) -> Result<Value, NativeError> {
+    let text: &str = base;
+    let ranges = pattern_ranges(text, source, limit)?;
+    if ranges.len() >= SPLIT_LAZY_MIN && text.len() <= u32::MAX as usize {
+        let spans: Arc<[(u32, u32)]> = ranges
+            .iter()
+            .map(|&(start, end)| (start as u32, (end - start) as u32))
+            .collect();
+        return Ok(Value::Extension(Arc::new(SplitVecValue::new(
+            Arc::clone(base),
+            spans,
+        ))));
+    }
+    Ok(Value::Vector(Vector::from_vec(materialize_ranges(
+        text, &ranges,
+    ))))
+}
+
+/// The piece strings for `ranges` into `text`.
+fn materialize_ranges(text: &str, ranges: &[(usize, usize)]) -> Vec<Value> {
+    ranges
+        .iter()
+        .map(|&(start, end)| piece_value(&text[start..end]))
+        .collect()
 }
 
 /// JVM `String.split`/`Pattern.split`: the pieces as a `String[]`
@@ -361,42 +394,53 @@ impl Iterator for ByteCuts<'_> {
     }
 }
 
-/// The split pieces (engine-agnostic — the `regex` crate and the
-/// boundary scanner share the JDK loop in [`split_pieces`]).
-fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vec<Value>, NativeError> {
+/// The split piece ranges (engine-agnostic — the `regex` crate
+/// and the boundary scanner share the JDK loop in
+/// [`split_ranges`]).
+fn pattern_ranges(
+    text: &str,
+    source: &str,
+    limit: i32,
+) -> Result<Vec<(usize, usize)>, NativeError> {
     if let Some(kind) = cut_kind(text, source) {
         let cuts = ByteCuts {
             bytes: text.as_bytes(),
             pos: 0,
             kind,
         };
-        return Ok(split_pieces(text, cuts, limit));
+        return Ok(split_ranges(text, cuts, limit));
     }
     // Pure-boundary patterns never reach the crate (which cannot
     // compile look-around); anything else splits as before.
     if let Some(alts) = boundary_alternatives(source) {
         let cuts = boundary_cuts(text, &alts)?;
-        return Ok(split_pieces(text, cuts, limit));
+        return Ok(split_ranges(text, cuts, limit));
     }
     let re = compile_source(source)?;
-    Ok(split_pieces(
+    Ok(split_ranges(
         text,
         re.find_iter(text).map(|m| (m.start(), m.end())),
         limit,
     ))
 }
 
+/// The split pieces as strings (for the `String[]` shape).
+fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vec<Value>, NativeError> {
+    let ranges = pattern_ranges(text, source, limit)?;
+    Ok(materialize_ranges(text, &ranges))
+}
+
 /// Run the JDK split loop over byte ranges, collecting the piece
-/// strings (callers wrap them as a vector or a `String[]`).
-fn split_pieces(
+/// ranges (callers materialize them or keep them lazy).
+fn split_ranges(
     text: &str,
     cuts: impl IntoIterator<Item = (usize, usize)>,
     limit: i32,
-) -> Vec<Value> {
+) -> Vec<(usize, usize)> {
     let limited = limit > 0;
     let cap = i64::from(limit) - 1;
     let mut acc = SplitAcc {
-        parts: Vec::new(),
+        ranges: Vec::new(),
         index: 0,
         count: 0,
     };
@@ -404,21 +448,17 @@ fn split_pieces(
         split_step(&mut acc, text, start, end, limited, cap);
     }
     if acc.index == 0 {
-        return vec![Value::Str(Arc::from(text))];
+        return vec![(0, text.len())];
     }
     if !limited || acc.count < i64::from(limit) {
-        acc.parts.push(piece_value(&text[acc.index..]));
+        acc.ranges.push((acc.index, text.len()));
     }
     if limit == 0 {
-        while acc
-            .parts
-            .last()
-            .is_some_and(|p| matches!(p, Value::Str(s) if s.is_empty()))
-        {
-            acc.parts.pop();
+        while acc.ranges.last().is_some_and(|&(start, end)| start == end) {
+            acc.ranges.pop();
         }
     }
-    acc.parts
+    acc.ranges
 }
 
 /// A single-char boundary atom, kept as source so atom tests run

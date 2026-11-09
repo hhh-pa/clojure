@@ -68,7 +68,13 @@ fn nth_item(coll: &Value, i: Option<usize>) -> Option<Option<Value>> {
         }
         Value::Str(s) => Some(i.and_then(|i| crate::coll::str_char_at(s, i).map(Value::Char))),
         Value::Transient(t) => transient_nth(t, i),
-        Value::Extension(_) => crate::lazy::as_subvector(coll).map(|sv| i.and_then(|i| sv.nth(i))),
+        Value::Extension(_) => {
+            if let Some(sp) = crate::lazy::as_splitvec(coll) {
+                Some(i.and_then(|i| sp.nth(i)))
+            } else {
+                crate::lazy::as_subvector(coll).map(|sv| i.and_then(|i| sv.nth(i)))
+            }
+        }
         _ => None,
     }
 }
@@ -110,6 +116,9 @@ fn get_set(s: &clj_value::Set, key: &Value) -> Option<Option<Value>> {
 }
 
 fn get_subvec(coll: &Value, key: &Value) -> Option<Option<Value>> {
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Some(index(key).and_then(|i| sp.nth(i)));
+    }
     let sv = crate::lazy::as_subvector(coll)?;
     Some(index(key).and_then(|i| sv.nth(i)))
 }
@@ -173,7 +182,10 @@ pub(crate) fn count_of(v: &Value) -> Option<Value> {
         Value::Set(s) => s.size(),
         Value::Str(s) => crate::coll::str_utf16_len(s),
         Value::Transient(t) => transient_len(t)?,
-        Value::Extension(_) => crate::lazy::as_subvector(v)?.len(),
+        Value::Extension(_) => match crate::lazy::as_splitvec(v) {
+            Some(sp) => sp.len(),
+            None => crate::lazy::as_subvector(v)?.len(),
+        },
         _ => return None,
     };
     i64::try_from(n).ok().map(Value::Int)
@@ -258,5 +270,24 @@ mod tests {
         t_map.assoc(kw.clone(), Value::Int(99)).unwrap();
         let tm_with_val = Value::Transient(Transient::new(TransientKind::Map(t_map)));
         assert_eq!(get_of(&tm_with_val, &kw, None), Some(Value::Int(99)));
+
+        // Split vectors answer nth/get/count from their spans.
+        let sp = Value::Extension(std::sync::Arc::new(clj_value::SplitVecValue::new(
+            std::sync::Arc::from("10 010 7"),
+            std::sync::Arc::from([(0, 2), (3, 3), (7, 1)]),
+        )));
+        assert_eq!(
+            nth_of(&sp, &Value::Int(1), None),
+            Some(Value::Str(std::sync::Arc::from("010")))
+        );
+        assert_eq!(
+            nth_of(&sp, &Value::Int(9), Some(&Value::Nil)),
+            Some(Value::Nil)
+        );
+        assert_eq!(
+            get_of(&sp, &Value::Int(2), None),
+            Some(Value::Str(std::sync::Arc::from("7")))
+        );
+        assert_eq!(count_of(&sp), Some(Value::Int(3)));
     }
 }

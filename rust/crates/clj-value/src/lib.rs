@@ -82,7 +82,7 @@ pub use ref_kind::{Ref, RefState};
 pub use scalar::{Instant, Uri, UriError, Uuid};
 pub use seq::{
     CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue,
-    RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,
+    RealizedSeq, RepeatValue, Seq, SeqKind, SplitVecValue, SubVectorValue, ValSeqValue, seq_vec,
 };
 pub use symbol::{SymKey, Symbol};
 pub use tower::{

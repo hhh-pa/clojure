@@ -1364,7 +1364,30 @@ fn compare_numbers(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, N
 }
 
 /// Same-type scalars and vectors (`None` when the types differ).
+/// Items of a vector-like value for `compare` (plain and
+/// primitive vectors, subvectors, split vectors — the JVM orders
+/// them all as `IPersistentVector`s).
+fn vector_like_items(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Vector(vec) => Some(vec.iter().collect()),
+        Value::PrimitiveVector(p) => Some(p.items()),
+        Value::Extension(_) => crate::lazy::as_subvector(v).map(|sv| sv.items()),
+        _ => None,
+    }
+}
+
 fn compare_same_type(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, NativeError> {
+    // Vector-likes beyond plain vectors/entries (handled in place
+    // below) order itemwise too.
+    if matches!(x, Value::Extension(_) | Value::PrimitiveVector(_))
+        || matches!(y, Value::Extension(_) | Value::PrimitiveVector(_))
+    {
+        if let (Some(a), Some(b)) = (vector_like_items(x), vector_like_items(y)) {
+            let av = clj_value::Vector::from_vec(a);
+            let bv = clj_value::Vector::from_vec(b);
+            return Ok(Some(compare_vectors(&av, &bv)?));
+        }
+    }
     match (x, y) {
         (Value::Str(a), Value::Str(b)) => Ok(Some(compare_utf16(a, b))),
         (Value::Char(a), Value::Char(b)) => Ok(Some(a.cmp(b))),
@@ -1461,6 +1484,7 @@ fn compare_cast_err(x: &Value, y: &Value) -> NativeError {
         Value::Instant(_) => "java.util.Date",
         Value::Uri(_) => "java.net.URI",
         Value::Vector(_) | Value::MapEntry { .. } => "clojure.lang.IPersistentVector",
+        Value::Extension(_) if vector_like_items(x).is_some() => "clojure.lang.IPersistentVector",
         _ => return cce_err(x, "java.lang.Comparable"),
     };
     cce_err(y, target)
@@ -5201,6 +5225,36 @@ pub(crate) const TOWER_NATIVES: &[(&str, NativeFnPtr)] = &[("math-context", nati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Split vectors order as vectors; mixed vector-likes name
+    /// the interface in cast errors.
+    #[test]
+    fn compare_orders_split_vectors() {
+        use std::cmp::Ordering;
+        let sp = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from("1 2"),
+            Arc::from([(0, 1), (2, 1)]),
+        )));
+        let plain = Value::Vector(clj_value::Vector::from_vec(vec![
+            Value::Str(Arc::from("1")),
+            Value::Str(Arc::from("2")),
+        ]));
+        assert_eq!(jvm_compare(&sp, &plain).unwrap(), Ordering::Equal);
+        assert_eq!(jvm_compare(&plain, &sp).unwrap(), Ordering::Equal);
+        let err = jvm_compare(&sp, &Value::Int(1)).expect_err("cast");
+        assert!(format!("{err:?}").contains("IPersistentVector"));
+        // Primitive vectors take the same itemwise path.
+        let pv = Value::PrimitiveVector(clj_value::PrimitiveVector::new(
+            clj_value::Elem8::Int,
+            vec![Value::Int(1), Value::Int(2)],
+            None,
+        ));
+        let iv = Value::Vector(clj_value::Vector::from_vec(vec![
+            Value::Int(1),
+            Value::Int(2),
+        ]));
+        assert_eq!(jvm_compare(&pv, &iv).unwrap(), Ordering::Equal);
+    }
 
     /// `num_rank` still orders `Double` top (only called past the
     /// `either_double` guards, so user code never reaches this

@@ -23,8 +23,8 @@ use smallvec::SmallVec;
 
 use clj_value::{
     CHUNK_SIZE, ConsValue, CycleValue, ExtensionValue, IterateValue, KeySeqValue, List, Map,
-    RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set, SubVectorValue, ThrowClass,
-    TransientVector, ValSeqValue, Value, Vector,
+    RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set, SplitVecValue,
+    SubVectorValue, ThrowClass, TransientVector, ValSeqValue, Value, Vector,
 };
 
 use crate::core::Num;
@@ -631,10 +631,28 @@ seq_downcast!(
     "Downcast a seq value to its value view, if any."
 );
 seq_downcast!(
-    as_subvector,
-    SubVectorValue,
-    "Downcast a value to its subvector view, if any."
+    as_splitvec,
+    SplitVecValue,
+    "Downcast a value to its split-vector view, if any."
 );
+
+/// Downcast a value to its subvector view, if any. A split vector
+/// answers through its once-materialized full-window view, so
+/// every generic vector operation keeps working unchanged.
+pub(crate) fn as_subvector(v: &Value) -> Option<&SubVectorValue> {
+    match v {
+        Value::Extension(e) => {
+            if let Some(sv) = e.as_any().downcast_ref::<SubVectorValue>() {
+                Some(sv)
+            } else {
+                e.as_any()
+                    .downcast_ref::<SplitVecValue>()
+                    .map(SplitVecValue::view)
+            }
+        }
+        _ => None,
+    }
+}
 
 /// Whether the value is a seq (a list or any seq object).
 pub(crate) fn is_seq_value(v: &Value) -> bool {

@@ -158,6 +158,49 @@ fn string_natives_hand_other_arguments_to_upstream() {
             ),
         ],
     );
+    // Large splits answer through the lazy span vector with the
+    // same observable surface as a plain vector of pieces.
+    check(
+        &mut eval,
+        &[
+            (
+                "(def big-toks (str/split (str/join \" \" (range 40)) #\" \"))",
+                "#'user/big-toks",
+            ),
+            ("(class big-toks)", "clojure.lang.PersistentVector"),
+            ("(vector? big-toks)", "true"),
+            ("(count big-toks)", "40"),
+            ("(nth big-toks 39)", "\"39\""),
+            ("(get big-toks 3)", "\"3\""),
+            ("(big-toks 7)", "\"7\""),
+            ("(= big-toks (mapv str (range 40)))", "true"),
+            ("(= (hash big-toks) (hash (mapv str (range 40))))", "true"),
+            ("(subvec big-toks 2 5)", "[\"2\" \"3\" \"4\"]"),
+            (
+                "(class (subvec big-toks 2 5))",
+                "clojure.lang.APersistentVector$SubVector",
+            ),
+            ("(= (mapv parse-long big-toks) (vec (range 40)))", "true"),
+            ("(meta (with-meta big-toks {:a 1}))", "{:a 1}"),
+            ("(compare big-toks (mapv str (range 40)))", "0"),
+            ("(peek (conj big-toks \"x\"))", "\"x\""),
+            ("(nth (assoc big-toks 0 \"z\") 0)", "\"z\""),
+            ("(count (pop big-toks))", "39"),
+            (
+                "(try (subvec big-toks 3 2) (catch Exception e (class e)))",
+                "java.lang.IndexOutOfBoundsException",
+            ),
+            (
+                "(try (subvec big-toks -1 2) (catch Exception e (class e)))",
+                "java.lang.IndexOutOfBoundsException",
+            ),
+            ("(subvec big-toks 40 40)", "[]"),
+            (
+                "(mapv parse-long (str/split (str/join \" \" (concat (range 20) [\"x\"] (range 20))) #\" \"))",
+                "[0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 nil 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19]",
+            ),
+        ],
+    );
     // Arity errors come from the upstream fn, named like the JVM's.
     for (form, want) in [
         (r#"(str/split "a")"#, "(1) passed to: clojure.string/split"),
