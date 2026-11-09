@@ -51,6 +51,10 @@ fn string_natives_answer_strings_and_regexes() {
         &mut eval,
         &[
             (r#"(str/split "a,b,,c,," #",")"#, r#"["a" "b" "" "c"]"#),
+            (
+                r#"(str/split "10 010 00 007 999" #" ")"#,
+                r#"["10" "010" "00" "007" "999"]"#,
+            ),
             (r#"(str/split "a,b,,c,," #"," 2)"#, r#"["a" "b,,c,,"]"#),
             (
                 r#"(str/split "a,b,,c,," #"," -1)"#,

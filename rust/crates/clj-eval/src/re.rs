@@ -192,7 +192,12 @@ fn cached_num_str(s: &str) -> Option<Value> {
                 .collect()
         });
         let n: usize = s.parse().ok()?;
-        return cache.get(n).map(|arc| Value::Str(Arc::clone(arc)));
+        // Only the canonical rendering may come from the cache: a
+        // piece like "010" must stay verbatim, never become "10".
+        return cache
+            .get(n)
+            .filter(|arc| arc.as_ref() == s)
+            .map(|arc| Value::Str(Arc::clone(arc)));
     }
     None
 }
