@@ -330,7 +330,6 @@ fn transient_capacity(n: usize) -> usize {
 enum TransientMapStorage {
     Small {
         entries: Vec<(Value, Value)>,
-        index: HashMap<Value, usize, FxBuildHasher>,
     },
     Promoted {
         map: HashMap<Value, Value, FxBuildHasher>,
@@ -354,7 +353,6 @@ impl TransientMap {
         Self {
             storage: TransientMapStorage::Small {
                 entries: Vec::new(),
-                index: HashMap::default(),
             },
             valid: true,
             len: 0,
@@ -382,13 +380,11 @@ impl TransientMap {
             }
         } else {
             let mut entries = Vec::with_capacity(m.size());
-            let mut index = HashMap::with_capacity_and_hasher(m.size(), FxBuildHasher::default());
             for (k, v) in m.iter() {
-                index.insert(k.clone(), entries.len());
                 entries.push((k.clone(), v.clone()));
             }
             Self {
-                storage: TransientMapStorage::Small { entries, index },
+                storage: TransientMapStorage::Small { entries },
                 valid: true,
                 len: m.size() * 2,
                 cap: (m.size() * 2).max(16),
@@ -407,6 +403,19 @@ impl TransientMap {
         self.promoted
     }
 
+    fn promote_with(&mut self, k: Value, v: Value) {
+        if let TransientMapStorage::Small { entries } = &mut self.storage {
+            self.promoted = true;
+            let mut map =
+                HashMap::with_capacity_and_hasher(entries.len() + 1, FxBuildHasher::default());
+            for (ek, ev) in std::mem::take(entries) {
+                map.insert(ek, ev);
+            }
+            map.insert(k, v);
+            self.storage = TransientMapStorage::Promoted { map };
+        }
+    }
+
     /// Assoc a key/value pair.
     pub fn assoc(&mut self, k: Value, v: Value) -> Result<(), TransientError> {
         self.check()?;
@@ -414,24 +423,15 @@ impl TransientMap {
             TransientMapStorage::Promoted { map } => {
                 map.insert(k, v);
             }
-            TransientMapStorage::Small { entries, index } => {
-                if let Some(&i) = index.get(&k) {
-                    entries[i].1 = v;
+            TransientMapStorage::Small { entries } => {
+                if let Some(pair) = entries.iter_mut().find(|(ek, _)| ek == &k) {
+                    pair.1 = v;
                     return Ok(());
                 }
                 let promote = !self.promoted
                     && (self.len >= 128 || (self.len >= 16 && !matches!(k, Value::Keyword(_))));
                 if promote {
-                    self.promoted = true;
-                    let mut map = HashMap::with_capacity_and_hasher(
-                        entries.len() + 1,
-                        FxBuildHasher::default(),
-                    );
-                    for (ek, ev) in std::mem::take(entries) {
-                        map.insert(ek, ev);
-                    }
-                    map.insert(k, v);
-                    self.storage = TransientMapStorage::Promoted { map };
+                    self.promote_with(k, v);
                 } else {
                     if self.len < self.cap {
                         self.len += 2;
@@ -439,7 +439,6 @@ impl TransientMap {
                         self.cap = transient_capacity(self.cap);
                         self.len += 2;
                     }
-                    index.insert(k.clone(), entries.len());
                     entries.push((k, v));
                 }
             }
@@ -455,14 +454,10 @@ impl TransientMap {
             TransientMapStorage::Promoted { map } => {
                 map.remove(k);
             }
-            TransientMapStorage::Small { entries, index } => {
-                if let Some(i) = index.remove(k) {
+            TransientMapStorage::Small { entries } => {
+                if let Some(i) = entries.iter().position(|(ek, _)| ek == k) {
                     entries.swap_remove(i);
                     self.len = self.len.saturating_sub(2);
-                    if let Some((moved, _)) = entries.get(i) {
-                        let moved = moved.clone();
-                        index.insert(moved, i);
-                    }
                 }
             }
         }
@@ -474,8 +469,8 @@ impl TransientMap {
         self.check()?;
         match &self.storage {
             TransientMapStorage::Promoted { map } => Ok(map.get(k)),
-            TransientMapStorage::Small { entries, index } => {
-                Ok(index.get(k).map(|&i| &entries[i].1))
+            TransientMapStorage::Small { entries } => {
+                Ok(entries.iter().find(|(ek, _)| ek == k).map(|(_, ev)| ev))
             }
         }
     }
@@ -504,7 +499,6 @@ impl TransientMap {
             &mut self.storage,
             TransientMapStorage::Small {
                 entries: Vec::new(),
-                index: HashMap::default(),
             },
         ) {
             TransientMapStorage::Promoted { map } => {
@@ -533,22 +527,32 @@ impl Default for TransientMap {
     }
 }
 
+/// Storage strategy for transient sets: linear scan for small sets ($\le 16$
+/// members) avoiding hash set allocation, promoted to a hash set beyond that.
+#[derive(Clone, Debug)]
+enum TransientSetStorage {
+    Small(Vec<Value>),
+    Promoted {
+        members: Vec<Value>,
+        index: HashSet<Value, FxBuildHasher>,
+    },
+}
+
 /// A transient set: `conj!`/`disj!` buffer with insertion-ordered
 /// freeze (re-conj keeps the original member).
 #[derive(Clone, Debug)]
 pub struct TransientSet {
-    members: Vec<Value>,
-    index: HashSet<Value, FxBuildHasher>,
+    storage: TransientSetStorage,
     valid: bool,
 }
 
+#[allow(clippy::mutable_key_type)]
 impl TransientSet {
     /// An empty transient set.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            members: Vec::new(),
-            index: HashSet::default(),
+            storage: TransientSetStorage::Small(Vec::new()),
             valid: true,
         }
     }
@@ -556,23 +560,66 @@ impl TransientSet {
     /// A transient over `s`'s members (insertion order kept).
     #[must_use]
     pub fn from_set(s: &Set) -> Self {
-        let mut t = Self::new();
-        for m in s.iter() {
-            t.index.insert(m.clone());
-            t.members.push(m.clone());
+        if s.size() >= 16 {
+            let mut index = HashSet::with_capacity_and_hasher(s.size(), FxBuildHasher::default());
+            let mut members = Vec::with_capacity(s.size());
+            for m in s.iter() {
+                index.insert(m.clone());
+                members.push(m.clone());
+            }
+            Self {
+                storage: TransientSetStorage::Promoted { members, index },
+                valid: true,
+            }
+        } else {
+            let mut members = Vec::with_capacity(s.size());
+            for m in s.iter() {
+                members.push(m.clone());
+            }
+            Self {
+                storage: TransientSetStorage::Small(members),
+                valid: true,
+            }
         }
-        t
     }
 
     fn check(&self) -> Result<(), TransientError> {
         ensure(self.valid)
     }
 
+    fn promote_conj(&mut self, v: Value) {
+        if let TransientSetStorage::Small(members) = &mut self.storage {
+            let mut index =
+                HashSet::with_capacity_and_hasher(members.len() + 1, FxBuildHasher::default());
+            for m in members.iter() {
+                index.insert(m.clone());
+            }
+            index.insert(v.clone());
+            let mut m = std::mem::take(members);
+            m.push(v);
+            self.storage = TransientSetStorage::Promoted { members: m, index };
+        }
+    }
+
     /// Add a member (present is a no-op, keeping the original).
     pub fn conj(&mut self, v: Value) -> Result<(), TransientError> {
         self.check()?;
-        if self.index.insert(v.clone()) {
-            self.members.push(v);
+        match &mut self.storage {
+            TransientSetStorage::Small(members) => {
+                if members.contains(&v) {
+                    return Ok(());
+                }
+                if members.len() >= 16 {
+                    self.promote_conj(v);
+                } else {
+                    members.push(v);
+                }
+            }
+            TransientSetStorage::Promoted { members, index } => {
+                if index.insert(v.clone()) {
+                    members.push(v);
+                }
+            }
         }
         Ok(())
     }
@@ -580,8 +627,17 @@ impl TransientSet {
     /// Drop a member (missing is a no-op).
     pub fn disj(&mut self, v: &Value) -> Result<(), TransientError> {
         self.check()?;
-        if self.index.remove(v) {
-            self.members.retain(|m| m != v);
+        match &mut self.storage {
+            TransientSetStorage::Small(members) => {
+                if let Some(i) = members.iter().position(|m| m == v) {
+                    members.swap_remove(i);
+                }
+            }
+            TransientSetStorage::Promoted { members, index } => {
+                if index.remove(v) {
+                    members.retain(|m| m != v);
+                }
+            }
         }
         Ok(())
     }
@@ -589,13 +645,19 @@ impl TransientSet {
     /// Whether a member is present.
     pub fn contains(&self, v: &Value) -> Result<bool, TransientError> {
         self.check()?;
-        Ok(self.index.contains(v))
+        match &self.storage {
+            TransientSetStorage::Small(members) => Ok(members.contains(v)),
+            TransientSetStorage::Promoted { index, .. } => Ok(index.contains(v)),
+        }
     }
 
     /// The member count.
     pub fn len(&self) -> Result<usize, TransientError> {
         self.check()?;
-        Ok(self.members.len())
+        match &self.storage {
+            TransientSetStorage::Small(members) => Ok(members.len()),
+            TransientSetStorage::Promoted { members, .. } => Ok(members.len()),
+        }
     }
 
     /// Whether the set is empty.
@@ -611,9 +673,15 @@ impl TransientSet {
     pub fn persistent(&mut self) -> Result<Set, TransientError> {
         self.check()?;
         self.valid = false;
-        let members = std::mem::take(&mut self.members);
-        self.index.clear();
-        self.index.shrink_to_fit();
+        let members =
+            match std::mem::replace(&mut self.storage, TransientSetStorage::Small(Vec::new())) {
+                TransientSetStorage::Small(members) => members,
+                TransientSetStorage::Promoted { members, mut index } => {
+                    index.clear();
+                    index.shrink_to_fit();
+                    members
+                }
+            };
         let mut set = new_set();
         for v in members {
             set = set.insert(v);
@@ -897,6 +965,38 @@ mod tests {
         assert!(t.is_empty().unwrap());
         t.conj(Value::Int(1)).unwrap();
         assert!(!t.is_empty().unwrap());
+    }
+
+    #[test]
+    fn set_from_set_and_promoted_branches() {
+        let s = crate::Set::from_items_checked(vec![Value::Int(1)]).unwrap();
+        let mut ts = TransientSet::from_set(&s);
+        assert_eq!(ts.len().unwrap(), 1);
+        assert!(ts.contains(&Value::Int(1)).unwrap());
+        assert!(!ts.contains(&Value::Int(2)).unwrap());
+        ts.disj(&Value::Int(99)).unwrap();
+        ts.disj(&Value::Int(1)).unwrap();
+        assert_eq!(ts.len().unwrap(), 0);
+
+        // Promoted path (>= 16 items)
+        for i in 0..20 {
+            ts.conj(Value::Int(i)).unwrap();
+        }
+        assert_eq!(ts.len().unwrap(), 20);
+        ts.conj(Value::Int(5)).unwrap(); // dup
+        assert_eq!(ts.len().unwrap(), 20);
+        assert!(ts.contains(&Value::Int(5)).unwrap());
+        assert!(!ts.contains(&Value::Int(99)).unwrap());
+        ts.disj(&Value::Int(99)).unwrap();
+        ts.disj(&Value::Int(5)).unwrap();
+        assert_eq!(ts.len().unwrap(), 19);
+        let frozen = ts.persistent().unwrap();
+        assert_eq!(frozen.size(), 19);
+
+        // from_set with >= 16 items
+        let ts_promoted = TransientSet::from_set(&frozen);
+        assert_eq!(ts_promoted.len().unwrap(), 19);
+        assert!(ts_promoted.contains(&Value::Int(0)).unwrap());
     }
 
     #[test]

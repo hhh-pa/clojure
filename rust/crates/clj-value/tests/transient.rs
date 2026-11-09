@@ -246,3 +246,46 @@ fn map_transient_promoted_operations() {
     let frozen2 = tm2.persistent().unwrap();
     assert_eq!(frozen2.size(), 20);
 }
+
+#[test]
+fn set_transient_promoted_operations() {
+    let mut ts = TransientSet::new();
+    assert!(ts.is_empty().unwrap());
+    // Add 20 items to trigger promotion (>= 16 items).
+    for i in 0..20 {
+        ts.conj(int(i)).unwrap();
+    }
+    assert!(!ts.is_empty().unwrap());
+    assert_eq!(ts.len().unwrap(), 20);
+
+    // Duplicate conj on promoted set (hit)
+    ts.conj(int(5)).unwrap();
+    assert_eq!(ts.len().unwrap(), 20);
+
+    // Contains hit and miss
+    assert!(ts.contains(&int(5)).unwrap());
+    assert!(!ts.contains(&int(99)).unwrap());
+
+    // Disj existing and missing
+    ts.disj(&int(5)).unwrap();
+    assert!(!ts.contains(&int(5)).unwrap());
+    assert_eq!(ts.len().unwrap(), 19);
+    ts.disj(&int(999)).unwrap();
+    assert_eq!(ts.len().unwrap(), 19);
+
+    // Persistent freeze from promoted storage
+    let frozen = ts.persistent().unwrap();
+    assert_eq!(frozen.size(), 19);
+    assert!(frozen.contains(&int(0)));
+    assert!(!frozen.contains(&int(5)));
+
+    // Test from_set with >= 16 items
+    let mut ts2 = TransientSet::from_set(&frozen);
+    assert_eq!(ts2.len().unwrap(), 19);
+    assert!(ts2.contains(&int(0)).unwrap());
+    assert!(!ts2.contains(&int(5)).unwrap());
+    ts2.conj(int(100)).unwrap();
+    assert_eq!(ts2.len().unwrap(), 20);
+    let frozen2 = ts2.persistent().unwrap();
+    assert_eq!(frozen2.size(), 20);
+}
