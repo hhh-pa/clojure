@@ -403,19 +403,6 @@ impl TransientMap {
         self.promoted
     }
 
-    fn promote_with(&mut self, k: Value, v: Value) {
-        if let TransientMapStorage::Small { entries } = &mut self.storage {
-            self.promoted = true;
-            let mut map =
-                HashMap::with_capacity_and_hasher(entries.len() + 1, FxBuildHasher::default());
-            for (ek, ev) in std::mem::take(entries) {
-                map.insert(ek, ev);
-            }
-            map.insert(k, v);
-            self.storage = TransientMapStorage::Promoted { map };
-        }
-    }
-
     /// Assoc a key/value pair.
     pub fn assoc(&mut self, k: Value, v: Value) -> Result<(), TransientError> {
         self.check()?;
@@ -431,7 +418,16 @@ impl TransientMap {
                 let promote = !self.promoted
                     && (self.len >= 128 || (self.len >= 16 && !matches!(k, Value::Keyword(_))));
                 if promote {
-                    self.promote_with(k, v);
+                    self.promoted = true;
+                    let mut map = HashMap::with_capacity_and_hasher(
+                        entries.len() + 1,
+                        FxBuildHasher::default(),
+                    );
+                    for (ek, ev) in std::mem::take(entries) {
+                        map.insert(ek, ev);
+                    }
+                    map.insert(k, v);
+                    self.storage = TransientMapStorage::Promoted { map };
                 } else {
                     if self.len < self.cap {
                         self.len += 2;
@@ -587,20 +583,6 @@ impl TransientSet {
         ensure(self.valid)
     }
 
-    fn promote_conj(&mut self, v: Value) {
-        if let TransientSetStorage::Small(members) = &mut self.storage {
-            let mut index =
-                HashSet::with_capacity_and_hasher(members.len() + 1, FxBuildHasher::default());
-            for m in members.iter() {
-                index.insert(m.clone());
-            }
-            index.insert(v.clone());
-            let mut m = std::mem::take(members);
-            m.push(v);
-            self.storage = TransientSetStorage::Promoted { members: m, index };
-        }
-    }
-
     /// Add a member (present is a no-op, keeping the original).
     pub fn conj(&mut self, v: Value) -> Result<(), TransientError> {
         self.check()?;
@@ -610,7 +592,17 @@ impl TransientSet {
                     return Ok(());
                 }
                 if members.len() >= 16 {
-                    self.promote_conj(v);
+                    let mut index = HashSet::with_capacity_and_hasher(
+                        members.len() + 1,
+                        FxBuildHasher::default(),
+                    );
+                    for m in members.iter() {
+                        index.insert(m.clone());
+                    }
+                    index.insert(v.clone());
+                    let mut m = std::mem::take(members);
+                    m.push(v);
+                    self.storage = TransientSetStorage::Promoted { members: m, index };
                 } else {
                     members.push(v);
                 }
