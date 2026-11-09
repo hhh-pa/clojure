@@ -1083,6 +1083,17 @@ fn native_not_empty(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     }
 }
 
+/// `empty` of a vector-like extension (split vectors and
+/// subvectors fall back to a plain vector, metadata kept).
+fn empty_vector_like(v: &Value) -> Option<Value> {
+    if let Some(sp) = crate::lazy::as_splitvec(v) {
+        return Some(Value::Vector(
+            Vector::new_sync().with_meta(sp.meta().cloned()),
+        ));
+    }
+    as_subvector(v).map(|sv| Value::Vector(Vector::new_sync().with_meta(sv.meta().cloned())))
+}
+
 fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/empty", args, &[1])?;
     // `RT.empty`: maps are class-sticky (array stays array, hash
@@ -1101,6 +1112,9 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     }
     if let Some(i) = crate::types::struct_inst(&args[0]) {
         return Ok(crate::types::empty_struct(i));
+    }
+    if let Some(v) = empty_vector_like(&args[0]) {
+        return Ok(v);
     }
     Ok(match &args[0] {
         Value::Map(m) => Value::Map(
@@ -1121,14 +1135,7 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
                 .with_meta(s.meta().cloned())
                 .with_sort(s.sort_spec().cloned()),
         ),
-        v if crate::lazy::as_splitvec(v).is_some() => {
-            let meta = crate::lazy::as_splitvec(v).and_then(|sp| sp.meta().cloned());
-            Value::Vector(Vector::new_sync().with_meta(meta))
-        }
-        v if as_subvector(v).is_some() => {
-            let meta = as_subvector(v).and_then(|sv| sv.meta().cloned());
-            Value::Vector(Vector::new_sync().with_meta(meta))
-        }
+
         v if is_seq_value(v) => Value::List(List::new_sync()),
         _ => Value::Nil,
     })
@@ -1547,7 +1554,13 @@ fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value,
         let found = usize::try_from(n).ok().and_then(|idx| sp.nth(idx));
         return nth_indexed_found(found, not_found);
     }
-    let found = match coll {
+    nth_indexed_found(nth_indexed_in(coll, n)?, not_found)
+}
+
+/// The indexed probe behind [`nth_indexed`] (every shape except
+/// split vectors, which answer from their spans).
+fn nth_indexed_in(coll: &Value, n: i32) -> Result<Option<Value>, NativeError> {
+    Ok(match coll {
         Value::Vector(x) => usize::try_from(n).ok().and_then(|idx| x.get(idx)),
         Value::PrimitiveVector(p) => usize::try_from(n).ok().and_then(|idx| p.get(idx).cloned()),
         Value::MapEntry { key, val, .. } => usize::try_from(n).ok().and_then(|idx| match idx {
@@ -1557,8 +1570,7 @@ fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value,
         }),
         Value::Transient(t) => nth_indexed_transient(t, n)?,
         _ => as_subvector(coll).and_then(|sv| usize::try_from(n).ok().and_then(|idx| sv.nth(idx))),
-    };
-    nth_indexed_found(found, not_found)
+    })
 }
 
 /// `nth` over a sequential value by walking (nil-`not_found`
