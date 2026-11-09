@@ -17,12 +17,12 @@
 //! rule statically. `persistent` drops metadata (a fresh transient
 //! carries none).
 
-use std::cell::{Cell, UnsafeCell};
+use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{FxBuildHasher, Map, Set, Value, Vector, new_map, new_set};
 
@@ -658,33 +658,12 @@ impl TransientKind {
 /// Fresh transient identities (print-only; equality is shared-cell).
 static TRANSIENT_ID: AtomicU64 = AtomicU64::new(1);
 
-thread_local! {
-    static CURRENT_THREAD_ID: Cell<u64> = const { Cell::new(0) };
-}
-
-static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(1);
-
-#[inline]
-fn current_thread_id() -> u64 {
-    CURRENT_THREAD_ID.with(|cell| {
-        let mut id = cell.get();
-        if id == 0 {
-            id = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
-            cell.set(id);
-        }
-        id
-    })
-}
-
 /// A fast spinlock cell for single-threaded transient operations.
 /// Transients are thread-confined by Clojure specification; this lock
-/// satisfies `Send + Sync` with zero atomic synchronization overhead on the
-/// biased thread, while providing mutual exclusion and memory safety if
-/// accessed across threads.
+/// satisfies `Send + Sync` with minimal atomic overhead instead of
+/// OS-level mutex primitives.
 pub struct TransientLock {
     locked: AtomicBool,
-    owner: AtomicU64,
-    depth: AtomicU32,
     data: UnsafeCell<TransientKind>,
 }
 
@@ -702,37 +681,12 @@ impl TransientLock {
     pub fn new(kind: TransientKind) -> Self {
         Self {
             locked: AtomicBool::new(false),
-            owner: AtomicU64::new(current_thread_id()),
-            depth: AtomicU32::new(0),
             data: UnsafeCell::new(kind),
         }
     }
 
     #[inline]
     pub fn lock(&self) -> TransientGuard<'_> {
-        let tid = current_thread_id();
-        if self.owner.load(Ordering::Relaxed) == tid {
-            let d = self.depth.load(Ordering::Relaxed);
-            if d > 0 {
-                self.depth.store(d + 1, Ordering::Relaxed);
-                return TransientGuard {
-                    lock: self,
-                    is_biased: !self.locked.load(Ordering::Relaxed),
-                };
-            }
-            if !self.locked.load(Ordering::Relaxed) {
-                self.depth.store(1, Ordering::Relaxed);
-                return TransientGuard {
-                    lock: self,
-                    is_biased: true,
-                };
-            }
-        }
-        self.lock_slow(tid)
-    }
-
-    #[cold]
-    fn lock_slow(&self, tid: u64) -> TransientGuard<'_> {
         if self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -742,22 +696,13 @@ impl TransientLock {
                 std::hint::spin_loop();
             }
         }
-        while self.depth.load(Ordering::Acquire) > 0 {
-            std::hint::spin_loop();
-        }
-        self.owner.store(tid, Ordering::Relaxed);
-        self.depth.store(1, Ordering::Relaxed);
-        TransientGuard {
-            lock: self,
-            is_biased: false,
-        }
+        TransientGuard { lock: self }
     }
 }
 
 /// RAII lock guard for [`TransientLock`].
 pub struct TransientGuard<'a> {
     lock: &'a TransientLock,
-    is_biased: bool,
 }
 
 impl Deref for TransientGuard<'_> {
@@ -779,24 +724,7 @@ impl DerefMut for TransientGuard<'_> {
 impl Drop for TransientGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        if self.is_biased {
-            let d = self.lock.depth.load(Ordering::Relaxed);
-            if d > 1 {
-                self.lock.depth.store(d - 1, Ordering::Relaxed);
-            } else if self.lock.locked.load(Ordering::Relaxed) {
-                self.lock.depth.store(0, Ordering::Release);
-            } else {
-                self.lock.depth.store(0, Ordering::Relaxed);
-            }
-            return;
-        }
-        let d = self.lock.depth.load(Ordering::Relaxed);
-        if d > 1 {
-            self.lock.depth.store(d - 1, Ordering::Relaxed);
-        } else {
-            self.lock.depth.store(0, Ordering::Relaxed);
-            self.lock.locked.store(false, Ordering::Release);
-        }
+        self.lock.locked.store(false, Ordering::Release);
     }
 }
 
@@ -1003,50 +931,5 @@ mod tests {
             });
             let _g = t.lock();
         });
-    }
-
-    #[test]
-    fn transient_lock_biased_reentrant_and_transfer() {
-        let t = Transient::new(TransientKind::Vector(TransientVector::new()));
-        // Biased re-entrant lock on the owner thread
-        let g1 = t.lock();
-        assert!(g1.is_biased);
-        let g2 = t.lock();
-        assert!(g2.is_biased);
-        drop(g2);
-        drop(g1);
-
-        // Biased lock held while another thread contends: exercises drop with locked == true
-        let g_held = t.lock();
-        assert!(g_held.is_biased);
-        let t_clone = t.clone();
-        std::thread::scope(|s| {
-            s.spawn(move || {
-                // Thread transfer: acquires lock_slow, re-biases to child thread
-                let mut g_child1 = t_clone.lock();
-                assert!(!g_child1.is_biased);
-                // Re-entrant lock on the foreign thread
-                let g_child2 = t_clone.lock();
-                drop(g_child2);
-                assert_eq!(
-                    g_child1.jvm_class(),
-                    "clojure.lang.PersistentVector$TransientVector"
-                );
-                let _ = &mut *g_child1;
-                drop(g_child1);
-            });
-            // Give child thread time to set locked and begin spinning on depth
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            drop(g_held);
-        });
-
-        // Lock transferred back to main thread via lock_slow
-        let g_main = t.lock();
-        assert_eq!(
-            g_main.jvm_class(),
-            "clojure.lang.PersistentVector$TransientVector"
-        );
-        let _ = &*g_main;
-        drop(g_main);
     }
 }
