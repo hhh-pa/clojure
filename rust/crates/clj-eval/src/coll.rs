@@ -1197,6 +1197,15 @@ pub(crate) fn native_last_owned(
     mut args: SmallVec<[Value; 4]>,
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/last", &args, &[1])?;
+    // Split vectors answer from the last span (stepping would
+    // materialize every piece just to walk to the end).
+    if let Some(sp) = crate::lazy::as_splitvec(&args[0]) {
+        return Ok(sp
+            .len()
+            .checked_sub(1)
+            .and_then(|i| sp.nth(i))
+            .unwrap_or(Value::Nil));
+    }
     let mut cur = take_walk_coll(&mut args, 0);
     let mut last = Value::Nil;
     loop {
