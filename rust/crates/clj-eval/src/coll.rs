@@ -2596,9 +2596,15 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 }
 
 /// Three-way `subvec` over an already-defaulted end.
-fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeError> {
-    // A split vector windows in place (no piece materializes).
-    if let Some(sp) = crate::lazy::as_splitvec(v) {
+/// `subvec` on a split vector: window in place (no piece
+/// materializes). `None` passes through to the generic path.
+fn splitvec_subvec(
+    v: &Value,
+    start_v: &Value,
+    end_v: &Value,
+) -> Option<Result<Value, NativeError>> {
+    let sp = crate::lazy::as_splitvec(v)?;
+    Some((|| {
         let s = nth_index(start_v)?;
         let e = nth_index(end_v)?;
         let (Ok(su), Ok(eu)) = (usize::try_from(s), usize::try_from(e)) else {
@@ -2610,9 +2616,15 @@ fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeErr
         if su == eu {
             return Ok(Value::Vector(Vector::from_vec(Vec::new())));
         }
-        return Ok(Value::Extension(Arc::new(
+        Ok(Value::Extension(Arc::new(
             sp.window(su, eu).with_meta(None),
-        )));
+        )))
+    })())
+}
+
+fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeError> {
+    if let Some(r) = splitvec_subvec(v, start_v, end_v) {
+        return r;
     }
     let (backing, base, len) = match v {
         Value::Vector(x) => (x.clone(), 0, x.len()),
