@@ -184,11 +184,45 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
 /// `PatternSyntaxException` (the crate text, like `re-pattern`).
 /// The running state of the JDK split loop (split out so each
 /// half stays under the complexity ratchet).
-struct SplitAcc {
-    /// Piece byte ranges `(start, end)` into the input text.
-    ranges: Vec<(usize, usize)>,
+struct SplitAcc<V: PieceVec> {
+    /// The collected pieces (byte ranges or split spans).
+    pieces: V,
     index: usize,
     count: i64,
+}
+
+/// A split-piece sink: `(start, end)` byte ranges, or the
+/// `(start, len)` `u32` spans a [`SplitVecValue`] stores (built
+/// directly, so a lazy split never materializes the wider range
+/// vector first).
+trait PieceVec: Default {
+    fn push_piece(&mut self, start: usize, end: usize);
+    fn pop_piece(&mut self);
+    fn last_is_empty(&self) -> bool;
+}
+
+impl PieceVec for Vec<(usize, usize)> {
+    fn push_piece(&mut self, start: usize, end: usize) {
+        self.push((start, end));
+    }
+    fn pop_piece(&mut self) {
+        self.pop();
+    }
+    fn last_is_empty(&self) -> bool {
+        self.last().is_some_and(|&(start, end)| start == end)
+    }
+}
+
+impl PieceVec for Vec<(u32, u32)> {
+    fn push_piece(&mut self, start: usize, end: usize) {
+        self.push((start as u32, (end - start) as u32));
+    }
+    fn pop_piece(&mut self) {
+        self.pop();
+    }
+    fn last_is_empty(&self) -> bool {
+        self.last().is_some_and(|&(_, len)| len == 0)
+    }
 }
 
 /// One split-loop step over a match `(start, end)`: matches
@@ -197,8 +231,8 @@ struct SplitAcc {
 /// is reached, the next match pushes the remainder instead and
 /// later matches are dead (the `count == cap` arm fires exactly
 /// once).
-fn split_step(
-    acc: &mut SplitAcc,
+fn split_step<V: PieceVec>(
+    acc: &mut SplitAcc<V>,
     text: &str,
     m_start: usize,
     m_end: usize,
@@ -208,12 +242,12 @@ fn split_step(
     if !limited || acc.count < cap {
         let leader = acc.index == 0 && m_start == 0 && m_start == m_end;
         if !leader {
-            acc.ranges.push((acc.index, m_start));
+            acc.pieces.push_piece(acc.index, m_start);
             acc.index = m_end;
             acc.count += 1;
         }
     } else if acc.count == cap {
-        acc.ranges.push((acc.index, text.len()));
+        acc.pieces.push_piece(acc.index, text.len());
         acc.index = m_end;
         acc.count += 1;
     }
@@ -229,21 +263,46 @@ pub(crate) fn pattern_split(
     source: &str,
     limit: i32,
 ) -> Result<Value, NativeError> {
+    // Spans build directly (`u32` pairs) whenever the text fits;
+    // only a >4GB input takes the wider range vector.
+    split_pieces(base, source, limit, base.len() <= u32::MAX as usize)
+}
+
+/// [`pattern_split`] with the representation chosen by the caller
+/// (split out so tests can drive the range fallback directly).
+fn split_pieces(
+    base: &Arc<str>,
+    source: &str,
+    limit: i32,
+    use_spans: bool,
+) -> Result<Value, NativeError> {
     let text: &str = base;
-    let ranges = pattern_ranges(text, source, limit)?;
-    if ranges.len() >= SPLIT_LAZY_MIN && text.len() <= u32::MAX as usize {
-        let spans: Arc<[(u32, u32)]> = ranges
-            .iter()
-            .map(|&(start, end)| (start as u32, (end - start) as u32))
-            .collect();
-        return Ok(Value::Extension(Arc::new(SplitVecValue::new(
-            Arc::clone(base),
-            spans,
-        ))));
+    let spans = use_spans
+        .then(|| pattern_pieces_vec::<Vec<(u32, u32)>>(text, source, limit))
+        .transpose()?;
+    match spans {
+        Some(spans) if spans.len() >= SPLIT_LAZY_MIN => Ok(Value::Extension(Arc::new(
+            SplitVecValue::new(Arc::clone(base), Arc::from(spans)),
+        ))),
+        Some(spans) => Ok(Value::Vector(Vector::from_vec(materialize_spans(
+            text, &spans,
+        )))),
+        None => Ok(Value::Vector(Vector::from_vec(materialize_ranges(
+            text,
+            &pattern_ranges(text, source, limit)?,
+        )))),
     }
-    Ok(Value::Vector(Vector::from_vec(materialize_ranges(
-        text, &ranges,
-    ))))
+}
+
+/// The piece strings for `spans` into `text`.
+fn materialize_spans(text: &str, spans: &[(u32, u32)]) -> Vec<Value> {
+    spans
+        .iter()
+        .map(|&(start, len)| {
+            let start = start as usize;
+            clj_value::piece_value(&text[start..start + len as usize])
+        })
+        .collect()
 }
 
 /// The piece strings for `ranges` into `text`.
@@ -361,6 +420,12 @@ fn pattern_ranges(
     source: &str,
     limit: i32,
 ) -> Result<Vec<(usize, usize)>, NativeError> {
+    pattern_pieces_vec(text, source, limit)
+}
+
+/// The split pieces in the caller's representation (the dispatch
+/// [`pattern_ranges`] documents).
+fn pattern_pieces_vec<V: PieceVec>(text: &str, source: &str, limit: i32) -> Result<V, NativeError> {
     if let Some(kind) = cut_kind(text, source) {
         let cuts = ByteCuts {
             bytes: text.as_bytes(),
@@ -391,15 +456,15 @@ fn pattern_pieces(text: &str, source: &str, limit: i32) -> Result<Vec<Value>, Na
 
 /// Run the JDK split loop over byte ranges, collecting the piece
 /// ranges (callers materialize them or keep them lazy).
-fn split_ranges(
+fn split_ranges<V: PieceVec>(
     text: &str,
     cuts: impl IntoIterator<Item = (usize, usize)>,
     limit: i32,
-) -> Vec<(usize, usize)> {
+) -> V {
     let limited = limit > 0;
     let cap = i64::from(limit) - 1;
     let mut acc = SplitAcc {
-        ranges: Vec::new(),
+        pieces: V::default(),
         index: 0,
         count: 0,
     };
@@ -407,17 +472,19 @@ fn split_ranges(
         split_step(&mut acc, text, start, end, limited, cap);
     }
     if acc.index == 0 {
-        return vec![(0, text.len())];
+        let mut whole = V::default();
+        whole.push_piece(0, text.len());
+        return whole;
     }
     if !limited || acc.count < i64::from(limit) {
-        acc.ranges.push((acc.index, text.len()));
+        acc.pieces.push_piece(acc.index, text.len());
     }
     if limit == 0 {
-        while acc.ranges.last().is_some_and(|&(start, end)| start == end) {
-            acc.ranges.pop();
+        while acc.pieces.last_is_empty() {
+            acc.pieces.pop_piece();
         }
     }
-    acc.ranges
+    acc.pieces
 }
 
 /// A single-char boundary atom, kept as source so atom tests run
@@ -761,5 +828,24 @@ fn native_re_seq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
         Ok(Value::Nil)
     } else {
         Ok(realized_value(items, false, false, false, SeqKind::Cons))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The range-vector fallback (only reachable past 4GB in
+    /// production) yields the same pieces as the span path.
+    #[test]
+    fn split_range_fallback_matches_spans() {
+        let base: Arc<str> = Arc::from("a,b,,c,");
+        let shown = |limit: i32, use_spans: bool| {
+            clj_value::print_to_string(&split_pieces(&base, ",", limit, use_spans).expect("split"))
+        };
+        assert_eq!(shown(0, false), "[a b  c]");
+        assert_eq!(shown(0, true), shown(0, false));
+        assert_eq!(shown(-1, true), shown(-1, false));
+        assert_eq!(shown(2, true), shown(2, false));
     }
 }
