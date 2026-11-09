@@ -375,6 +375,17 @@ fn mapv_filterv_rows() {
         "[1 nil -3]"
     );
     assert_eq!(run_last(&mut eval, "(mapv parse-long [])"), "[]");
+    // Long digit strings take the checked path: a trailing
+    // non-digit answers nil, and non-ASCII decimal digits restart
+    // on the char-wise path.
+    assert_eq!(
+        run_last(&mut eval, "(parse-long \"1234567890123456789x\")"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(parse-long \"٠٠٠٠٠٠٠٠٠٠٠٠٠٠٠٠٠٠١٢٣\")"),
+        "123"
+    );
     assert_eq!(
         uncaught(&mut eval, "(mapv parse-long [\"1\" 2])"),
         "java.lang.IllegalArgumentException | Expected string, got java.lang.Long"

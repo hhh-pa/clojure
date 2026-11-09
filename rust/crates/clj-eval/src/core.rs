@@ -3770,19 +3770,41 @@ pub(crate) fn parse_long_str(s: &str) -> Option<i64> {
         Some(rest) => (true, rest),
         None => (false, s.strip_prefix('+').unwrap_or(s)),
     };
-    if digits.is_empty() {
+    let bytes = digits.as_bytes();
+    if bytes.is_empty() {
         return None;
     }
-    if digits.is_ascii() {
-        let mut acc: u64 = 0;
-        for &b in digits.as_bytes() {
+    // One byte pass covers the all-ASCII-digits case; any byte at
+    // or above 0x80 restarts on the char path (decimal digits in
+    // any script). Up to 18 digits cannot overflow a `u64`, so
+    // the short loop skips the checked arithmetic.
+    let mut acc: u64 = 0;
+    if bytes.len() <= 18 {
+        for &b in bytes {
+            if b >= 0x80 {
+                return parse_long_chars(digits, neg);
+            }
             if !b.is_ascii_digit() {
                 return None;
             }
-            acc = acc.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
+            acc = acc * 10 + u64::from(b - b'0');
         }
         return finish_long_acc(acc, neg);
     }
+    for &b in bytes {
+        if b >= 0x80 {
+            return parse_long_chars(digits, neg);
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        acc = acc.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
+    }
+    finish_long_acc(acc, neg)
+}
+
+/// The char-wise half of `Long.parseLong` (non-ASCII digits).
+fn parse_long_chars(digits: &str, neg: bool) -> Option<i64> {
     let mut acc: u64 = 0;
     for c in digits.chars() {
         acc = acc
