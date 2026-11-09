@@ -1197,10 +1197,16 @@ impl Op2 for Nth {
                     _ => None,
                 }
             }
-            Value::Extension(e) => e
-                .as_any()
-                .downcast_ref::<clj_value::SubVectorValue>()
-                .and_then(|sv| sv.nth(idx)),
+            Value::Extension(e) => {
+                let any = e.as_any();
+                if let Some(sv) = any.downcast_ref::<clj_value::SubVectorValue>() {
+                    return sv.nth(idx);
+                }
+                if let Some(sp) = any.downcast_ref::<clj_value::SplitVecValue>() {
+                    return sp.nth(idx);
+                }
+                crate::vm_intrinsics::nth_of(a, b, None)
+            }
             _ => crate::vm_intrinsics::nth_of(a, b, None),
         }
     }

@@ -195,6 +195,9 @@ fn string_natives_hand_other_arguments_to_upstream() {
             ("(empty big-toks)", "[]"),
             ("(first big-toks)", "\"0\""),
             ("(last big-toks)", "\"39\""),
+            ("(+ 1 (count (nth big-toks 5)))", "2"),
+            ("(count (filterv seq big-toks))", "40"),
+            ("(filterv (fn [s] (= s \"7\")) big-toks)", "[\"7\"]"),
             ("(pop (subvec big-toks 0 1))", "[]"),
             ("(conj {} (subvec big-toks 0 2))", "{\"0\" \"1\"}"),
             (

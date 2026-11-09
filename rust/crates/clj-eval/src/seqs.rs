@@ -1165,6 +1165,12 @@ pub(crate) fn native_filterv_owned(
     if let Value::Vector(v) = input {
         return filterv_vector(eval, &args[0], v);
     }
+    // Split vectors materialize once into the vector lane (the
+    // lazy filter thunk steps per item through pending machinery).
+    if let Some(sp) = crate::lazy::as_splitvec(&input) {
+        let v = clj_value::Vector::from_vec(sp.items());
+        return filterv_vector(eval, &args[0], v);
+    }
     let filtered = filter_thunk(args[0].clone(), input, false);
     // Packed streaming (#227): no intermediate `Vec<Value>`, and
     // all-`Int` results freeze to packed storage zero-copy.

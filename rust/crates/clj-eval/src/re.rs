@@ -184,47 +184,6 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
 /// `PatternSyntaxException` (the crate text, like `re-pattern`).
 /// The running state of the JDK split loop (split out so each
 /// half stays under the complexity ratchet).
-fn cached_num_str(s: &str) -> Option<Value> {
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2 && bytes.len() <= 4 && bytes.iter().all(|b| b.is_ascii_digit()) {
-        static NUM_CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
-        let cache = NUM_CACHE.get_or_init(|| {
-            (0..=1024)
-                .map(|n| Arc::from(n.to_string().as_str()))
-                .collect()
-        });
-        let n: usize = s.parse().ok()?;
-        // Only the canonical rendering may come from the cache: a
-        // piece like "010" must stay verbatim, never become "10".
-        return cache
-            .get(n)
-            .filter(|arc| arc.as_ref() == s)
-            .map(|arc| Value::Str(Arc::clone(arc)));
-    }
-    None
-}
-
-/// A split piece as a string value. Single-byte pieces (always
-/// ASCII) share one cached allocation, mirroring CPython's
-/// single-char string cache: token-heavy splits over short tokens
-/// then allocate nothing per piece. Small numeric tokens share
-/// static interned string allocations.
-fn piece_value(s: &str) -> Value {
-    if s.len() == 1 {
-        static CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
-        let cache = CACHE.get_or_init(|| {
-            (0u8..128)
-                .map(|b| Arc::from(char::from(b).to_string().as_str()))
-                .collect()
-        });
-        return Value::Str(cache[s.as_bytes()[0] as usize].clone());
-    }
-    if let Some(v) = cached_num_str(s) {
-        return v;
-    }
-    Value::Str(Arc::from(s))
-}
-
 struct SplitAcc {
     /// Piece byte ranges `(start, end)` into the input text.
     ranges: Vec<(usize, usize)>,
@@ -291,7 +250,7 @@ pub(crate) fn pattern_split(
 fn materialize_ranges(text: &str, ranges: &[(usize, usize)]) -> Vec<Value> {
     ranges
         .iter()
-        .map(|&(start, end)| piece_value(&text[start..end]))
+        .map(|&(start, end)| clj_value::piece_value(&text[start..end]))
         .collect()
 }
 

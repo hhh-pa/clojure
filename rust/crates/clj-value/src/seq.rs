@@ -877,6 +877,48 @@ pub struct SplitVecValue {
     meta: Option<Map>,
 }
 
+fn cached_num_str(s: &str) -> Option<Value> {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 && bytes.len() <= 4 && bytes.iter().all(|b| b.is_ascii_digit()) {
+        static NUM_CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
+        let cache = NUM_CACHE.get_or_init(|| {
+            (0..=1024)
+                .map(|n| Arc::from(n.to_string().as_str()))
+                .collect()
+        });
+        let n: usize = s.parse().ok()?;
+        // Only the canonical rendering may come from the cache: a
+        // piece like "010" must stay verbatim, never become "10".
+        return cache
+            .get(n)
+            .filter(|arc| arc.as_ref() == s)
+            .map(|arc| Value::Str(Arc::clone(arc)));
+    }
+    None
+}
+
+/// A split piece as a string value. Single-byte pieces (always
+/// ASCII) share one cached allocation, mirroring CPython's
+/// single-char string cache: token-heavy splits over short tokens
+/// then allocate nothing per piece. Small numeric tokens share
+/// static interned string allocations.
+#[must_use]
+pub fn piece_value(s: &str) -> Value {
+    if s.len() == 1 {
+        static CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(|| {
+            (0u8..128)
+                .map(|b| Arc::from(char::from(b).to_string().as_str()))
+                .collect()
+        });
+        return Value::Str(cache[s.as_bytes()[0] as usize].clone());
+    }
+    if let Some(v) = cached_num_str(s) {
+        return v;
+    }
+    Value::Str(Arc::from(s))
+}
+
 impl SplitVecValue {
     /// Pieces of `base` at `(start, len)` byte spans (the caller
     /// upholds UTF-8 boundaries, as split match offsets do).
@@ -962,7 +1004,7 @@ impl SplitVecValue {
     /// The piece at `index` as a value (`None` past the end).
     #[must_use]
     pub fn nth(&self, index: usize) -> Option<Value> {
-        self.piece_str(index).map(|s| Value::Str(Arc::from(s)))
+        self.piece_str(index).map(piece_value)
     }
 
     /// The piece strings, in order.
@@ -975,7 +1017,7 @@ impl SplitVecValue {
     pub fn iter(&self) -> impl Iterator<Item = Value> + '_ {
         self.window_spans().iter().map(|&(start, len)| {
             let start = start as usize;
-            Value::Str(Arc::from(&self.base[start..start + len as usize]))
+            piece_value(&self.base[start..start + len as usize])
         })
     }
 
