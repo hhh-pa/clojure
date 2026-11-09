@@ -910,6 +910,22 @@ impl SplitVecValue {
         }
     }
 
+    /// This split vector without its last piece (the JVM class
+    /// and metadata are preserved, like `pop`); the caller
+    /// upholds `len >= 1`.
+    #[must_use]
+    pub fn drop_last(&self) -> Self {
+        Self {
+            base: Arc::clone(&self.base),
+            spans: Arc::clone(&self.spans),
+            off: self.off,
+            len: self.len - 1,
+            sub: self.sub,
+            view: std::sync::OnceLock::new(),
+            meta: self.meta.clone(),
+        }
+    }
+
     /// Whether this value is a `subvec` window (JVM class
     /// `APersistentVector$SubVector` rather than
     /// `PersistentVector`).

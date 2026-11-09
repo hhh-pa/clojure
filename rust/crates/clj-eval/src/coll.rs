@@ -166,6 +166,11 @@ fn lookup_array_slot(a: &clj_value::Array, key: &Value) -> Option<Value> {
 }
 
 fn lookup_present_fallback(coll: &Value, key: &Value) -> Result<Option<Value>, NativeError> {
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Ok(
+            int_key(key).and_then(|i| usize::try_from(i as i32).ok().and_then(|idx| sp.nth(idx)))
+        );
+    }
     if let Some(sv) = as_subvector(coll) {
         return Ok(
             int_key(key).and_then(|i| usize::try_from(i as i32).ok().and_then(|idx| sv.nth(idx)))
@@ -256,6 +261,13 @@ fn find_entry_transient(
 
 /// `RT.find` over anything else (subvectors read; the rest fail).
 fn find_entry_fallback(coll: &Value, key: &Value) -> Result<Option<(Value, Value)>, NativeError> {
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Ok(int_key(key).and_then(|i| {
+            usize::try_from(i as i32)
+                .ok()
+                .and_then(|idx| sp.nth(idx).map(|v| (key.clone(), v)))
+        }));
+    }
     if let Some(sv) = as_subvector(coll) {
         return Ok(int_key(key).and_then(|i| {
             usize::try_from(i as i32)
@@ -356,6 +368,15 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
         Value::PrimitiveVector(p) => pair_plan(&p.items()),
         Value::MapEntry { key, val, .. } => Ok(MapConjPlan::Pair((**key).clone(), (**val).clone())),
         _ => {
+            if let Some(sp) = crate::lazy::as_splitvec(x) {
+                if sp.len() != 2 {
+                    return Err(pair_err());
+                }
+                return Ok(MapConjPlan::Pair(
+                    sp.nth(0).unwrap_or(Value::Nil),
+                    sp.nth(1).unwrap_or(Value::Nil),
+                ));
+            }
             if let Some(sv) = as_subvector(x) {
                 if sv.len() != 2 {
                     return Err(pair_err());
@@ -710,6 +731,9 @@ fn count_transient(t: &Transient) -> Result<i64, NativeError> {
 /// `RT.count` over the extension/seq tail (subvectors, ranges,
 /// realized seqs, repeats, then a seq walk).
 fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
+    if let Some(sp) = crate::lazy::as_splitvec(v) {
+        return Ok(sp.len() as i64);
+    }
     if let Some(sv) = as_subvector(v) {
         return Ok(sv.len() as i64);
     }
@@ -1097,6 +1121,10 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
                 .with_meta(s.meta().cloned())
                 .with_sort(s.sort_spec().cloned()),
         ),
+        v if crate::lazy::as_splitvec(v).is_some() => {
+            let meta = crate::lazy::as_splitvec(v).and_then(|sp| sp.meta().cloned());
+            Value::Vector(Vector::new_sync().with_meta(meta))
+        }
         v if as_subvector(v).is_some() => {
             let meta = as_subvector(v).and_then(|sv| sv.meta().cloned());
             Value::Vector(Vector::new_sync().with_meta(meta))
@@ -1383,6 +1411,11 @@ fn contains_str(s: &str, coll: &Value, key: &Value) -> Result<Value, NativeError
 
 /// `contains?` over anything else (subvectors read; the rest fail).
 fn contains_fallback(coll: &Value, key: &Value) -> Result<Value, NativeError> {
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Ok(Value::Bool(int_key(key).is_some_and(|i| {
+            usize::try_from(i as i32).is_ok_and(|idx| idx < sp.len())
+        })));
+    }
     if let Some(sv) = as_subvector(coll) {
         return Ok(Value::Bool(int_key(key).is_some_and(|i| {
             usize::try_from(i as i32).is_ok_and(|idx| idx < sv.len())
@@ -1499,6 +1532,12 @@ fn nth_indexed_found(
 }
 
 fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
+    // Split vectors answer from their spans (the subvector view
+    // would materialize every piece).
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        let found = usize::try_from(n).ok().and_then(|idx| sp.nth(idx));
+        return nth_indexed_found(found, not_found);
+    }
     let found = match coll {
         Value::Vector(x) => usize::try_from(n).ok().and_then(|idx| x.get(idx)),
         Value::PrimitiveVector(p) => usize::try_from(n).ok().and_then(|idx| p.get(idx).cloned()),
@@ -1898,7 +1937,8 @@ fn nth_fast(coll: &Value, n: i32, not_found: &Option<Value>) -> Option<Result<Va
     if matches!(
         coll,
         Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
-    ) || as_subvector(coll).is_some()
+    ) || crate::lazy::as_splitvec(coll).is_some()
+        || as_subvector(coll).is_some()
         || matches!(coll, Value::Transient(_))
     {
         return Some(nth_indexed(coll, n, not_found.as_ref()));
@@ -2515,6 +2555,13 @@ fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         Value::PrimitiveVector(p) => Ok(p.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::MapEntry { val, .. } => Ok((**val).clone()),
         _ => {
+            if let Some(sp) = crate::lazy::as_splitvec(&args[0]) {
+                return Ok(sp
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|i| sp.nth(i))
+                    .unwrap_or(Value::Nil));
+            }
             if let Some(sv) = as_subvector(&args[0]) {
                 return Ok(sv.iter().last().unwrap_or(Value::Nil));
             }
@@ -2566,6 +2613,12 @@ fn pop_pv(p: PrimitiveVector) -> Result<Value, NativeError> {
 
 /// `pop` over anything else (subvectors shrink; the rest fail).
 fn pop_fallback(arg: &Value) -> Result<Value, NativeError> {
+    if let Some(sp) = crate::lazy::as_splitvec(arg) {
+        if sp.len() == 1 {
+            return Ok(Value::Vector(Vector::from_vec(Vec::new())));
+        }
+        return Ok(Value::Extension(Arc::new(sp.drop_last())));
+    }
     if let Some(sv) = as_subvector(arg) {
         if sv.len() == 1 {
             return Ok(Value::Vector(Vector::from_vec(Vec::new())));

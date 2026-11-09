@@ -3168,6 +3168,7 @@ fn is_extension_seqable(v: &Value) -> bool {
         || is_always_seq(v)
         || as_keys(v).is_some()
         || as_vals(v).is_some()
+        || as_splitvec(v).is_some()
         || as_subvector(v).is_some()
         || crate::xform::Eduction::parts(v).is_some()
         || crate::collmisc::as_iteration(v).is_some()
@@ -3305,6 +3306,9 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
 /// The first item of an extension collection (the subvector
 /// head, else the `ArrayList` snapshot head).
 fn first_direct_extension(v: &Value) -> Option<Value> {
+    if let Some(sp) = as_splitvec(v) {
+        return Some(sp.nth(0).unwrap_or(Value::Nil));
+    }
     as_subvector(v)
         .map(|sv| sv.iter().next().unwrap_or(Value::Nil))
         .or_else(|| {
@@ -3876,6 +3880,7 @@ fn uoe() -> NativeError {
 /// seq object — like `Sequential`).
 fn is_sequential(v: &Value) -> bool {
     matches!(v, Value::Vector(_) | Value::MapEntry { .. })
+        || as_splitvec(v).is_some()
         || as_subvector(v).is_some()
         || is_seq_value(v)
 }
