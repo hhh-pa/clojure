@@ -3488,15 +3488,11 @@ fn agent_shutdown_rejects() {
     run(&mut eval, "(send s6x-a inc)");
     assert_eq!(run_last(&mut eval, "@s6x-done"), ":ok");
     // The publish lands after the deliver; poll (bounded) for it.
-    // Once 5 is visible, the outbox release (both handlers) has run
-    // too — the release precedes the publish.
-    let start = std::time::Instant::now();
-    while run_last(&mut eval, "@s6x-a") != "5" {
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(10),
-            "action never published"
-        );
-    }
+    wait_published(&mut eval, "@s6x-a", "5");
+    // The nested sends release after the action completes; poll
+    // until both rejection handlers have run.
+    wait_published(&mut eval, "(nil? @s6x-seen2)", "false");
+    wait_published(&mut eval, "(nil? @s6x-seen3)", "false");
     // The action published; everything queued or nested after the
     // shutdown was rejected, never run.
     assert_eq!(run_last(&mut eval, "@s6x-a2"), "0");
