@@ -944,7 +944,12 @@ impl Compiler {
         }
         let targets: Arc<[usize]> = steps.iter().map(|(r, ..)| *r).collect();
         let saved = std::mem::replace(&mut self.scope().recur, Arc::clone(&targets));
-        let body = self.compile_body(body);
+        let fused = self.try_fused_loop(body, targets.len());
+        let body = if fused.is_some() {
+            konst(Value::Nil)
+        } else {
+            self.compile_body(body)
+        };
         self.scope().recur = saved;
         self.reset(mark);
         let unpacks = steps.iter().any(|(_, _, u)| u.is_some());
@@ -953,8 +958,42 @@ impl Compiler {
             targets,
             body,
             unpacks,
+            fused,
         };
         Box::new(move |ev, f| run_loop(ev, f, &code))
+    }
+
+    /// Detect the fused loop shape: a single-form body that is an
+    /// `if` with a bare terminal `recur` in exactly one branch.
+    /// Parts compile in `compile_if` order (test, then, els) so
+    /// register allocation and last-use moves match the generic
+    /// path exactly.
+    fn try_fused_loop(&mut self, body: &[Expr], arity: usize) -> Option<FusedLoop> {
+        let [Expr::If { test, then, els }] = body else {
+            return None;
+        };
+        let (recur_args, recur_when_true) =
+            match (terminal_recur(then, arity), terminal_recur(els, arity)) {
+                (Some(args), None) => (args, true),
+                (None, Some(args)) => (args, false),
+                _ => return None,
+            };
+        let test = self.compile_test(test);
+        // Compile in source order: then-branch before els-branch.
+        let (then_ops, exit) = if recur_when_true {
+            let ops: Vec<Operand> = recur_args.iter().map(|a| self.operand(a, true)).collect();
+            (ops, self.compile(els))
+        } else {
+            let exit = self.compile(then);
+            let ops: Vec<Operand> = recur_args.iter().map(|a| self.operand(a, true)).collect();
+            (ops, exit)
+        };
+        Some(FusedLoop {
+            test,
+            exit,
+            ops: then_ops,
+            recur_when_true,
+        })
     }
 
     /// `recur`: every arg evaluates (in order), then the target
@@ -1544,6 +1583,20 @@ struct LoopCode {
     body: Exec,
     /// Whether any binding destructures (unpacks after each `recur`).
     unpacks: bool,
+    /// The fused shape (single `if` body with a terminal `recur`
+    /// in one branch), when detected.
+    fused: Option<FusedLoop>,
+}
+
+/// A fused loop body: test, recur operands (evaluated in order,
+/// registers written after every operand), and the exit branch —
+/// one Rust loop instead of a closure tree plus a signal per
+/// iteration.
+struct FusedLoop {
+    test: Test,
+    exit: Exec,
+    ops: Vec<Operand>,
+    recur_when_true: bool,
 }
 
 /// Run a `loop`: bind in order (each init sees the earlier names),
@@ -1558,7 +1611,7 @@ fn run_loop(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Va
         }
     }
     loop {
-        match (code.body)(ev, f) {
+        match loop_once(ev, f, code) {
             // The VM's own `recur` wrote the registers already.
             Err(Signal::Recur(values)) if values.is_empty() => {}
             // A tree-evaluated one carries the values.
@@ -1575,6 +1628,80 @@ fn run_loop(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Va
             }
         }
     }
+}
+
+/// The args of a bare terminal `recur` with the loop's arity.
+fn terminal_recur(e: &Expr, arity: usize) -> Option<&Vec<Expr>> {
+    match e {
+        Expr::Recur(args) if args.len() == arity => Some(args),
+        _ => None,
+    }
+}
+
+/// Evaluate the fused loop's recur operands (in order) and
+/// write the target registers only after every operand has
+/// evaluated — the same order `recur1..4`/`recur_n` keep.
+fn write_fused_ops(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    fused: &FusedLoop,
+) -> Result<(), Signal> {
+    let t = &code.targets;
+    match &fused.ops[..] {
+        [a] => {
+            let v = a.eval(ev, f)?;
+            set_reg(&mut f.regs[t[0]], v);
+        }
+        [a, b] => {
+            let (va, vb) = (a.eval(ev, f)?, b.eval(ev, f)?);
+            set_reg(&mut f.regs[t[0]], va);
+            set_reg(&mut f.regs[t[1]], vb);
+        }
+        [a, b, c] => {
+            let (va, vb, vc) = (a.eval(ev, f)?, b.eval(ev, f)?, c.eval(ev, f)?);
+            set_reg(&mut f.regs[t[0]], va);
+            set_reg(&mut f.regs[t[1]], vb);
+            set_reg(&mut f.regs[t[2]], vc);
+        }
+        [a, b, c, d] => {
+            let (va, vb, vc, vd) = (
+                a.eval(ev, f)?,
+                b.eval(ev, f)?,
+                c.eval(ev, f)?,
+                d.eval(ev, f)?,
+            );
+            set_reg(&mut f.regs[t[0]], va);
+            set_reg(&mut f.regs[t[1]], vb);
+            set_reg(&mut f.regs[t[2]], vc);
+            set_reg(&mut f.regs[t[3]], vd);
+        }
+        ops => {
+            let mut values: SmallVec<[Value; 8]> = SmallVec::new();
+            for op in ops {
+                values.push(op.eval(ev, f)?);
+            }
+            for (r, v) in t.iter().zip(values) {
+                set_reg(&mut f.regs[*r], v);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One loop iteration: `Ok` ends the loop with that value; a
+/// `Recur` signal (empty = registers written) continues it. The
+/// fused shape runs test/operands inline; the generic shape calls
+/// the compiled body.
+fn loop_once(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Value, Signal> {
+    let Some(fused) = &code.fused else {
+        return (code.body)(ev, f);
+    };
+    if (fused.test)(ev, f)? != fused.recur_when_true {
+        return (fused.exit)(ev, f);
+    }
+    write_fused_ops(ev, f, code, fused)?;
+    Err(Signal::Recur(Vec::new()))
 }
 
 /// A tree-evaluator frame holding `locs`' values at their lexical
