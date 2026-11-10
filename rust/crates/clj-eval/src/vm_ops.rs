@@ -1557,6 +1557,23 @@ pub(crate) fn int_value_op(call: &DirectCall) -> Option<IntCtor> {
     int_value_named(core_name(call)?, call.args.len())
 }
 
+/// The binary op an n-ary (three or more arguments) call folds
+/// left with, for the ops `clojure.core` defines as that fold
+/// (`(+ a b c)` is `(+ (+ a b) c)`, each step checked).
+pub(crate) fn int_fold_op(call: &DirectCall) -> Option<IntOp2> {
+    const FOLDS: &[&str] = &[
+        "+", "+'", "-", "-'", "*", "*'", "bit-and", "bit-or", "bit-xor", "min", "max",
+    ];
+    let name = core_name(call)?;
+    if call.args.len() < 3 || !FOLDS.contains(&name) {
+        return None;
+    }
+    INT_BINARY
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, op)| *op)
+}
+
 /// The unboxed test op for `call` (see [`int_value_op`]).
 pub(crate) fn int_test_op(call: &DirectCall) -> Option<IntTestCtor> {
     int_test_named(core_name(call)?, call.args.len())

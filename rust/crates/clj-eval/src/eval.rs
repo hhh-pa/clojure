@@ -1100,6 +1100,30 @@ impl Evaluator {
         self.vm_direct.get(site) == Some(&now) || self.site_direct_check(site, call)
     }
 
+    /// Whether a group of sites (one id for many) still validates:
+    /// the cached verdict answers inline, else `check` re-validates
+    /// every member and a valid verdict is recorded under the
+    /// current epochs (read after the check, which may have forced
+    /// a lazy var).
+    pub(crate) fn group_valid(
+        &mut self,
+        gid: usize,
+        check: impl FnOnce(&mut Self) -> bool,
+    ) -> bool {
+        let now = (self.registry.epoch(), self.bindings.version());
+        if self.vm_direct.get(gid) == Some(&now) {
+            return true;
+        }
+        let ok = check(self);
+        if ok {
+            if self.vm_direct.len() <= gid {
+                self.vm_direct.resize(gid + 1, (u64::MAX, u64::MAX));
+            }
+            self.vm_direct[gid] = (self.registry.epoch(), self.bindings.version());
+        }
+        ok
+    }
+
     /// The epochs a cached direct verdict is keyed by: while a
     /// snapshot is unchanged, every site validated under it
     /// still validates (no root in the lineage was written and

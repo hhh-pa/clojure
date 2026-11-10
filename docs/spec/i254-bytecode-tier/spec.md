@@ -1,7 +1,9 @@
 # I254: Bytecode tier for hot loops — Specification
 
-- Status: slice 1 measured — **no-go** (see §1.5). Spike
-  reverted; this spec remains the design record.
+- Status: slice 1 (bytecode dispatch) and the flat-scalar
+  slice measured **no-go** and reverted (§1.5, §1.6); the
+  32-byte `Value` (§1.7) and the unboxed loop tier (§1.8)
+  landed.
 - Issue: [#254](https://github.com/hhh-pa/clojure/issues/254).
   Branch: `perf/254-bytecode-tier`.
 - Parents/context: #214 (performant JIT subset), #226
@@ -205,9 +207,72 @@ count_strings −5.4% INS and −13.8% peak RSS, trie −6.5% INS
 and −35.1% peak RSS (228.7 → 148.4 MB), knapsack −4.2%;
 tiny-program peak RSS 3.49 → 3.26 MB. Semantics battery
 (identity/aliasing/meta/transients/exceptions/sorts)
-byte-identical old-vs-new. Gate verdict pending dispatch
-(the Linux Pin counts are authoritative; local numbers are
-directional).
+byte-identical old-vs-new. Gate verdict: MEM losses 22 → 0
+(run 42839070153; INS 28 → 25).
+
+### 1.8 Unboxed loop tier (`vm_scalar`, landed)
+
+The gate's string loops (KMP and Boyer-Moore tables and scans)
+and Dijkstra's heap and edge loops are flat-tier loops of
+`nth`/compare/int ops, where each step pays a boxed `Value`
+and a closure call (~80 instructions for a literal `let`,
+~190 for a string `nth`). §1.5 and §1.6 showed that a dispatch
+loop over the same boxed skeleton cannot win. This slice
+removes the boxing instead, across the whole body.
+
+- **Builder.** `vm_scalar::compile` builds a tree from the
+  loop's `if`/`let`/`and`/`or`/nested-`loop` forms. Its
+  scalars are `Int`/`Char`/`Bool` values carried as tagged
+  `Sv` slots; it handles one- and two-argument int ops (and
+  the n-ary folds of `+ - * min max bit-and/or/xor`),
+  `int`/`long`, `nth`/`count` over invariant strings and
+  (transient) vectors, `=`/`not=`/comparisons/`zero?`/`pos?`/
+  `neg?`/`not`, and `assoc!`/`conj!` on transient vectors at
+  a `recur` or exit. Anything else becomes a miss node.
+- **Program.** The tree lowers to a flat register program:
+  slot-to-slot steps, branches, nested loops as inline code,
+  and constants and invariants loaded from a template at
+  entry. One dispatch loop runs it (`exec`, out of line).
+- **Exact behavior.** Every op answers exactly what its boxed
+  op answers, or misses (overflow, a non-scalar, an
+  out-of-range index, a redefined site, a moved direct
+  snapshot). An iteration's effects run only after all of its
+  values have computed and every effect target has checked
+  out. A miss therefore writes the iteration's starting state
+  back and resumes the boxed tiers, which re-run that
+  iteration whole. One effect with collection-reading
+  operands is allowed (they evaluate before it on either
+  road); `recur`/exit values may not read collections when the
+  leaf has effects.
+- **Sites.** A loop's sites validate as one group, cached per
+  evaluator in `vm_direct`, at entry; each iteration then only
+  compares the direct snapshot.
+- **Short loops.** After 32 entries, a loop averaging under
+  two iterations per entry stops entering the tier: for 0–1
+  trips, setup costs more than the boxed iterations it would
+  replace. Measured on `find-edge`-shaped calls: with the
+  give-up rule, 0- and 1-trip loops cost the same as before
+  the tier, and 2-trip loops are 3% cheaper.
+
+Local macOS retired instructions (pre-tier `c70215bf` build →
+tier):
+
+| Shape | Before | After |
+| --- | --- | --- |
+| KMP scan step | 675 | ~313 |
+| BM inner compare | 723 | ~336 |
+| BM table build step | 812 | ~352 |
+| flat `let` + `recur` | 342 | ~172 |
+| kmp tc11–15 (whole run) | — | −47..−48% |
+| boyer_moore tc10–15 | — | −45..−47% |
+| dijkstrashortreach tc3–7 | — | −15..−17% |
+| suffix_tree tc9 | — | −10% |
+
+Full local sweep: 1562 gate cases, 0 wrong outputs, total
+instructions −15.5%, median peak RSS +0.4%. The semantics
+battery is `tests/scalar_loop.rs`: 90 rows, each checked
+against JVM Clojure 1.12 and run on both the VM and the tree
+evaluator.
 
 ## Part 2 — Technical specification
 

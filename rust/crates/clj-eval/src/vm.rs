@@ -600,6 +600,21 @@ struct Compiler {
     scopes: Vec<Scope>,
 }
 
+impl crate::vm_scalar::Host for Compiler {
+    fn resolve_local(&mut self, idx: usize) -> Loc {
+        self.resolve(idx)
+    }
+
+    fn reads(&self, expr: &Expr, g: usize) -> bool {
+        let base = self.scopes.last().expect("a scope is always open").base;
+        crate::vm_live::may_read(expr, base, g + 1, g)
+    }
+
+    fn site(&self, call: &DirectCall) -> crate::vm_ops::Site {
+        crate::vm_ops::Site::new(site_of(call))
+    }
+}
+
 impl Compiler {
     fn scope(&mut self) -> &mut Scope {
         self.scopes.last_mut().expect("a scope is always open")
@@ -1027,6 +1042,13 @@ impl Compiler {
         } else {
             None
         };
+        let int_fused = fused.as_ref().is_some_and(|f| f.int.is_some());
+        let scalar = if unpacks || int_fused {
+            None
+        } else {
+            let base = self.visible();
+            crate::vm_scalar::compile(self, body, &targets, base)
+        };
         let body = if fused.is_some() || flat.is_some() {
             konst(Value::Nil)
         } else {
@@ -1041,6 +1063,7 @@ impl Compiler {
             unpacks,
             fused,
             flat,
+            scalar,
         };
         Box::new(move |ev, f| run_loop(ev, f, &code))
     }
@@ -1889,7 +1912,7 @@ fn recur_n(targets: Arc<[usize]>, ops: Vec<Operand>) -> Exec {
 /// An `and`/`or` step over the let-bound local `g`: `(let* [g a]
 /// (if g b g))` answers `(a, b, true)`, `(let* [g a] (if g g b))`
 /// `(a, b, false)`.
-fn and_or_shape(expr: &Expr, g: usize) -> Option<(&Expr, &Expr, bool)> {
+pub(crate) fn and_or_shape(expr: &Expr, g: usize) -> Option<(&Expr, &Expr, bool)> {
     let Expr::Let { bindings, body } = expr else {
         return None;
     };
@@ -1930,6 +1953,9 @@ struct LoopCode {
     /// The flat shape (see [`FlatLoop`]) when the loop takes it:
     /// no destructuring loop bindings, no fused shape.
     flat: Option<FlatLoop>,
+    /// The unboxed program (see [`crate::vm_scalar`]) tried first,
+    /// when no unboxed-int fused program covers the loop.
+    scalar: Option<crate::vm_scalar::ScalarLoop>,
 }
 
 /// One flat-loop step: the `let`/`if`/`do` skeleton of a loop
@@ -2043,6 +2069,9 @@ fn run_loop(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Va
         if let Some(unpack) = unpack {
             unpack(ev, f)?;
         }
+    }
+    if let Some(v) = crate::vm_scalar::try_run(ev, f, code.scalar.as_ref(), &code.targets) {
+        return Ok(v);
     }
     if let Some(flat) = &code.flat {
         return run_flat(ev, f, code, flat);
