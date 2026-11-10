@@ -207,7 +207,13 @@ fn native(ev: &mut Evaluator, c: &Site, mut values: SmallVec<[Value; 4]>) -> Res
 
 #[cold]
 #[inline(never)]
-fn native3(ev: &mut Evaluator, c: &Site, a: &Value, b: &Value, d: &Value) -> Result<Value, Signal> {
+pub(crate) fn native3(
+    ev: &mut Evaluator,
+    c: &Site,
+    a: &Value,
+    b: &Value,
+    d: &Value,
+) -> Result<Value, Signal> {
     native(ev, c, smallvec![a.clone(), b.clone(), d.clone()])
 }
 
@@ -802,6 +808,54 @@ pub(crate) fn test_ctor(call: &DirectCall) -> Option<Ctor<bool>> {
 /// Whether `call` compiles to specialized code (see [`value_ctor`]).
 pub(crate) fn in_place(call: &DirectCall) -> bool {
     value_ctor(call).is_some()
+}
+
+/// `pop!` for effect only: the mutation, no transient clone.
+struct PopBangFx;
+
+impl Op1 for PopBangFx {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        PopBang::apply_mut(a)?;
+        Some(Value::Nil)
+    }
+}
+
+/// `conj!` for effect only (see [`PopBangFx`]).
+struct ConjBangFx;
+
+impl Op2 for ConjBangFx {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        ConjBang::apply_mut(a, b)?;
+        Some(Value::Nil)
+    }
+}
+
+/// `assoc!` for effect only (see [`PopBangFx`]).
+struct AssocBangFx;
+
+impl Op3 for AssocBangFx {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        AssocBang::apply_mut(a, b, c)?;
+        Some(Value::Nil)
+    }
+}
+
+/// The effect-position code for `call`, when its op is a
+/// transient mutator whose returned transient the caller
+/// discards: the mutation runs (a miss still runs the native,
+/// whose return value the caller drops either way), but the
+/// inline hit skips cloning the transient just to drop it.
+pub(crate) fn effect_ctor(call: &DirectCall) -> Option<Ctor<Value>> {
+    let name = core_name(call)?;
+    match (name, call.args.len()) {
+        ("pop!", 1) => Some(Ctor::One(shape1::<PopBangFx, AsValue>)),
+        ("conj!", 2) => Some(Ctor::Two(shape2::<ConjBangFx, AsValue>)),
+        ("assoc!", 3) => Some(Ctor::Three(shape3::<AssocBangFx>)),
+        _ => None,
+    }
 }
 
 /// An update op's inline answer over its owned operands (the
@@ -1456,9 +1510,10 @@ impl Op1 for DoubleCast {
 /// place; anything else runs the native).
 pub(crate) struct PopBang;
 
-impl Op1 for PopBang {
+impl PopBang {
+    /// The mutation alone (see [`effect_ctor`]).
     #[inline(always)]
-    fn apply(a: &Value) -> Option<Value> {
+    fn apply_mut(a: &Value) -> Option<()> {
         let Value::Transient(t) = a else {
             return None;
         };
@@ -1468,6 +1523,14 @@ impl Op1 for PopBang {
         };
         tv.pop().ok()?;
         drop(guard);
+        Some(())
+    }
+}
+
+impl Op1 for PopBang {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        Self::apply_mut(a)?;
         Some(a.clone())
     }
 }
@@ -1476,9 +1539,10 @@ impl Op1 for PopBang {
 /// place; anything else — or a frozen transient — runs the native).
 pub(crate) struct ConjBang;
 
-impl Op2 for ConjBang {
+impl ConjBang {
+    /// The mutation alone (see [`effect_ctor`]).
     #[inline(always)]
-    fn apply(a: &Value, b: &Value) -> Option<Value> {
+    fn apply_mut(a: &Value, b: &Value) -> Option<()> {
         let Value::Transient(t) = a else {
             return None;
         };
@@ -1494,6 +1558,14 @@ impl Op2 for ConjBang {
             tv.conj(b.clone()).ok()?;
         }
         drop(guard);
+        Some(())
+    }
+}
+
+impl Op2 for ConjBang {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        Self::apply_mut(a, b)?;
         Some(a.clone())
     }
 }
@@ -1502,9 +1574,10 @@ impl Op2 for ConjBang {
 /// (the cell updates in place; anything else runs the native).
 pub(crate) struct AssocBang;
 
-impl Op3 for AssocBang {
+impl AssocBang {
+    /// The mutation alone (see [`effect_ctor`]).
     #[inline(always)]
-    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+    fn apply_mut(a: &Value, b: &Value, c: &Value) -> Option<()> {
         let Value::Transient(t) = a else {
             return None;
         };
@@ -1535,6 +1608,14 @@ impl Op3 for AssocBang {
             _ => return None,
         }
         drop(guard);
+        Some(())
+    }
+}
+
+impl Op3 for AssocBang {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        Self::apply_mut(a, b, c)?;
         Some(a.clone())
     }
 }
