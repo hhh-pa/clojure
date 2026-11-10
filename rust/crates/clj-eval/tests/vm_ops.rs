@@ -455,6 +455,53 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"((fn [tv tm] [(nth tv 0 :nf) (get tm :a :nf) (get tm :a)]) (transient [10 20]) (transient {:a 100}))"#,
         r#"[10 100 100]"#,
     ),
+    // #254 fused `(assoc! t k (conj (nth t k) x))`: effect and value
+    // positions, register/captured/literal operands, vector-literal
+    // `x`, every miss (persistent, non-int or negative key, map or
+    // packed transient, out of range, frozen), items `conj` does not
+    // inline (map, set + vector), a redefined `conj`, metadata.
+    (
+        r#"(let [t (transient [[] [1]])] (assoc! t 1 (conj (nth t 1) 2)) (assoc! t 0 (conj (nth t 0) :k)) (persistent! t))"#,
+        r#"[[:k] [1 2]]"#,
+    ),
+    (
+        r#"(let [t (transient [[] '(1)])] (persistent! ((fn [] (assoc! t 1 (conj (nth t 1) 0)) (assoc! t 0 (conj (nth t 0) 5))))))"#,
+        r#"[[5] (0 1)]"#,
+    ),
+    (
+        r#"(let [t (transient [[] nil]) v 1 w "s"] (dotimes [i 2] (assoc! t i (conj (nth t i) [v w]))) (persistent! t))"#,
+        r#"[[[1 "s"]] ([1 "s"])]"#,
+    ),
+    (
+        r#"[(let [t [[]]] (try (assoc! t 0 (conj (nth t 0) 1)) (catch Exception e (.getName (class e))))) (let [t (transient [[]]) k "a"] (try (assoc! t k (conj (nth t k) 1)) (catch Exception e (.getName (class e))))) (let [t (transient [[]]) k -1] (try (assoc! t k (conj (nth t k) 1)) (catch Exception e (.getName (class e)))))]"#,
+        r#"["java.lang.ClassCastException" "java.lang.ClassCastException" "java.lang.IndexOutOfBoundsException"]"#,
+    ),
+    (
+        r#"[(let [t (transient {0 []})] (try (assoc! t 0 (conj (nth t 0) 1)) (catch Exception e (.getName (class e))))) (let [t (transient [0 1])] (try (assoc! t 0 (conj (nth t 0) 1)) (catch Exception e (.getName (class e))))) (let [t (transient [[]])] (try (assoc! t 3 (conj (nth t 3) 1)) (catch Exception e (.getName (class e)))))]"#,
+        r#"["java.lang.UnsupportedOperationException" "java.lang.ClassCastException" "java.lang.IndexOutOfBoundsException"]"#,
+    ),
+    (
+        r#"(let [t (transient [{:a 1} #{1}])] (assoc! t 0 (conj (nth t 0) [:b 2])) (assoc! t 1 (conj (nth t 1) [2])) (persistent! t))"#,
+        r#"[{:a 1, :b 2} #{1 [2]}]"#,
+    ),
+    (
+        r#"(let [t (transient [[]])] (persistent! t) (try (assoc! t 0 (conj (nth t 0) 1)) (catch Throwable e (.getName (class e)))))"#,
+        r#""java.lang.IllegalAccessError""#,
+    ),
+    (
+        r#"(let [t (transient [[1]])] (with-redefs [conj (fn [c x] [:r x])] (assoc! t 0 (conj (nth t 0) 2))) (persistent! t))"#,
+        r#"[[:r 2]]"#,
+    ),
+    (
+        r#"[(let [t (transient [[1] [2]]) u 1] (= t (assoc! t u (conj (nth t u) 3)))) (let [t (transient [(with-meta [1] {:m 1})])] (assoc! t 0 (conj (nth t 0) 2)) (let [v (nth (persistent! t) 0)] [v (meta v)]))]"#,
+        r#"[true [[1 2] {:m 1}]]"#,
+    ),
+    // Shapes the fused update leaves generic: a computed `x`, a
+    // `letfn` member `x`, a computed key.
+    (
+        r#"[(let [t (transient [[]]) v 1] (assoc! t 0 (conj (nth t 0) (inc v))) (persistent! t)) (letfn [(g [] 1)] (let [t (transient [[]])] (assoc! t 0 (conj (nth t 0) g)) (count (nth (persistent! t) 0)))) (let [t (transient [[]])] (assoc! t (+ 0 0) (conj (nth t (+ 0 0)) 1)) (persistent! t)) (letfn [(g [] 1) (h [] (let [t (transient [[]])] (assoc! t 0 (conj (nth t 0) g)) (count (nth (persistent! t) 0))))] (h))]"#,
+        r#"[[[2]] 1 [[1]] 1]"#,
+    ),
 ];
 
 const PORT_ROWS: &[(&str, &str)] = &[

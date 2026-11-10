@@ -290,6 +290,25 @@ impl TransientVector {
         }
     }
 
+    /// Move the item at `idx` out of a generic buffer, leaving `nil`
+    /// until the caller writes it back with [`assoc`](Self::assoc)
+    /// (`None` when invalidated, packed, or out of bounds). The VM's
+    /// fused `(assoc! t k (conj (nth t k) x))` updates the moved item
+    /// in place, where a cloned read would leave it shared and make
+    /// `conj` copy it whole.
+    #[inline]
+    pub fn take_at(&mut self, idx: usize) -> Option<Value> {
+        if !self.valid {
+            return None;
+        }
+        match &mut self.items {
+            TransientItems::Generic(x) => x
+                .get_mut(idx)
+                .map(|slot| std::mem::replace(slot, Value::Nil)),
+            _ => None,
+        }
+    }
+
     /// Set index `idx` to an integer, returning `false` on error.
     #[inline(always)]
     pub fn assoc_int_opt(&mut self, idx: usize, n: i64) -> bool {
@@ -909,6 +928,23 @@ mod tests {
 
     fn kw(name: &str) -> Value {
         Value::Keyword(Keyword::new(None, name))
+    }
+
+    #[test]
+    fn take_at_moves_generic_items_only() {
+        let mut tv = TransientVector::new();
+        tv.conj(kw("a")).unwrap();
+        tv.conj(kw("b")).unwrap();
+        assert_eq!(tv.take_at(1), Some(kw("b")));
+        assert_eq!(tv.nth(1).unwrap(), Some(Value::Nil));
+        assert_eq!(tv.take_at(2), None);
+        tv.assoc(1, kw("c")).unwrap();
+        assert_eq!(tv.nth(1).unwrap(), Some(kw("c")));
+        let mut packed = TransientVector::new();
+        packed.conj_int(7).unwrap();
+        assert_eq!(packed.take_at(0), None);
+        tv.persistent().unwrap();
+        assert_eq!(tv.take_at(0), None);
     }
 
     #[test]

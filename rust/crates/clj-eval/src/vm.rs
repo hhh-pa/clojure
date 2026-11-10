@@ -784,12 +784,67 @@ impl Compiler {
     /// built just to drop).
     fn compile_effect(&mut self, expr: &Expr) -> Exec {
         if let Expr::DirectNative(call) = expr {
+            if let Some(code) = self.try_assoc_conj(call, true) {
+                return code;
+            }
             if let Some(ctor) = crate::vm_ops::effect_ctor(call) {
                 let ops = self.in_place_operands(call);
                 return ctor.code(site_of(call), ops);
             }
         }
         self.compile(expr)
+    }
+
+    /// The fused transient update `(assoc! t k (conj (nth t k) x))`
+    /// (see [`crate::vm_ops::assoc_conj_code`]): `t` one local in
+    /// both places, `k` the same local or `Int` literal in both, and
+    /// `x` a local, literal, or metadata-free vector literal of
+    /// those. The call's ordinary code compiles first (the same
+    /// registers and last-use moves) and runs on every miss.
+    fn try_assoc_conj(&mut self, call: &DirectCall, effect: bool) -> Option<Exec> {
+        let (t, k, x, conj, nth) = assoc_conj_shape(call)?;
+        let generic = match crate::vm_ops::effect_ctor(call) {
+            Some(ctor) if effect => {
+                let ops = self.in_place_operands(call);
+                ctor.code(site_of(call), ops)
+            }
+            _ => self.compile_direct_plain(call),
+        };
+        let srcs = (self.in_place(t), self.in_place(k), self.pure_src(x));
+        let (Some(t), Some(k), Some(x)) = srcs else {
+            return Some(generic);
+        };
+        let sites = [call, conj, nth].map(|c| crate::vm_ops::Site::new(site_of(c)));
+        Some(crate::vm_ops::assoc_conj_code(
+            sites, t, k, x, effect, generic,
+        ))
+    }
+
+    /// A local (not a `letfn` member) or literal, read in place.
+    fn in_place(&mut self, e: &Expr) -> Option<crate::vm_ops::InPlace> {
+        use crate::vm_ops::InPlace;
+        match e {
+            Expr::Literal(v) => Some(InPlace::Kst(v.clone())),
+            Expr::Local(idx) => match self.resolve(*idx) {
+                Loc::Reg(r) => Some(InPlace::Reg(r)),
+                Loc::Up(u) => Some(InPlace::Up(u)),
+                Loc::Rec(_) => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The fused update's appended operand (see [`Self::try_assoc_conj`]).
+    fn pure_src(&mut self, e: &Expr) -> Option<crate::vm_ops::PureSrc> {
+        use crate::vm_ops::PureSrc;
+        match e {
+            Expr::VecLit(items, None) if !items.is_empty() => items
+                .iter()
+                .map(|i| self.in_place(i))
+                .collect::<Option<Vec<_>>>()
+                .map(|v| PureSrc::Vec(v.into())),
+            other => self.in_place(other).map(PureSrc::One),
+        }
     }
 
     fn compile_body(&mut self, body: &[Expr]) -> Exec {
@@ -1588,6 +1643,13 @@ impl Compiler {
     /// operand shape ([`crate::vm_ops`]), the other intrinsics read
     /// registers and literals in place.
     fn compile_direct(&mut self, call: &DirectCall) -> Exec {
+        if let Some(code) = self.try_assoc_conj(call, false) {
+            return code;
+        }
+        self.compile_direct_plain(call)
+    }
+
+    fn compile_direct_plain(&mut self, call: &DirectCall) -> Exec {
         if let Some(ctor) = crate::vm_ops::value_ctor(call) {
             let ops = self.in_place_operands(call);
             return ctor.code(site_of(call), ops);
@@ -2379,7 +2441,10 @@ pub(crate) fn clone_value(v: &Value) -> Value {
 #[inline(always)]
 fn set_reg(slot: &mut Value, v: Value) {
     let old = std::mem::replace(slot, v);
-    if matches!(old, Value::Int(_) | Value::Nil | Value::Bool(_)) {
+    if matches!(
+        old,
+        Value::Int(_) | Value::Nil | Value::Bool(_) | Value::Char(_) | Value::Double(_)
+    ) {
         std::mem::forget(old);
     }
 }
@@ -2492,6 +2557,41 @@ fn direct_general(site: Arc<DirectCall>, ops: Vec<Operand>) -> Exec {
         eval_operands(ev, f, &ops, &mut values)?;
         ev.call_direct_values(&site, &mut values)
     })
+}
+
+/// The direct call `e` makes to `clojure.core/<name>` with `argc`
+/// arguments.
+fn core_call<'e>(e: &'e Expr, name: &str, argc: usize) -> Option<&'e DirectCall> {
+    match e {
+        Expr::DirectNative(call)
+            if call.args.len() == argc && crate::vm_ops::core_name(call) == Some(name) =>
+        {
+            Some(call)
+        }
+        _ => None,
+    }
+}
+
+/// `(assoc! t k (conj (nth t k) x))`'s parts: the transient local,
+/// the key, the appended form, and the `conj` and `nth` calls.
+type AssocConj<'e> = (&'e Expr, &'e Expr, &'e Expr, &'e DirectCall, &'e DirectCall);
+
+/// The fused transient update's shape (see
+/// `Compiler::try_assoc_conj`): one local `t` and the same key (a
+/// local or `Int` literal) in both places.
+fn assoc_conj_shape(call: &DirectCall) -> Option<AssocConj<'_>> {
+    let ([t, k, upd], Some("assoc!")) = (&call.args[..], crate::vm_ops::core_name(call)) else {
+        return None;
+    };
+    let conj = core_call(upd, "conj", 2)?;
+    let nth = core_call(&conj.args[0], "nth", 2)?;
+    let same_t = matches!((t, &nth.args[0]), (Expr::Local(a), Expr::Local(b)) if a == b);
+    let same_k = match (k, &nth.args[1]) {
+        (Expr::Local(a), Expr::Local(b)) => a == b,
+        (Expr::Literal(Value::Int(a)), Expr::Literal(Value::Int(b))) => a == b,
+        _ => false,
+    };
+    (same_t && same_k).then_some((t, k, &conj.args[1], conj, nth))
 }
 
 /// A direct call's site record (the analyzed call minus its

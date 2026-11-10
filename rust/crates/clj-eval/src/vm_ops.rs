@@ -1073,6 +1073,95 @@ impl Upd for Assoc {
     }
 }
 
+/// A local or literal operand of the fused transient update (see
+/// [`assoc_conj_code`]), read in place.
+pub(crate) enum InPlace {
+    Reg(usize),
+    Up(usize),
+    Kst(Value),
+}
+
+impl InPlace {
+    #[inline(always)]
+    fn get<'v>(&'v self, f: &'v Frame<'_>) -> &'v Value {
+        match self {
+            InPlace::Reg(r) => &f.regs[*r],
+            InPlace::Up(u) => &f.up[*u],
+            InPlace::Kst(v) => v,
+        }
+    }
+}
+
+/// The fused update's appended operand: side-effect free, so it
+/// may evaluate before the slot's item is read.
+pub(crate) enum PureSrc {
+    One(InPlace),
+    /// A vector literal (no metadata) of locals and literals.
+    Vec(Box<[InPlace]>),
+}
+
+impl PureSrc {
+    fn value(&self, f: &Frame<'_>) -> Value {
+        match self {
+            PureSrc::One(s) => s.get(f).clone(),
+            PureSrc::Vec(items) => Value::Vector(clj_value::Vector::from_vec(
+                items.iter().map(|s| s.get(f).clone()).collect(),
+            )),
+        }
+    }
+}
+
+/// `(assoc! t k (conj (nth t k) x))` over a transient local `t`, the
+/// same key `k` in both places, and a pure `x` (see
+/// `Compiler::try_assoc_conj`). The generic road's `nth` clones the
+/// slot's item, so `conj` sees it shared and copies it whole (an
+/// O(n) append per edge in adjacency builds). Here the item moves
+/// out of the transient, takes `x` in place through [`Conj`], and
+/// moves back. The three sites validate first, and any miss runs
+/// `generic`, whose results and errors are the natives'.
+pub(crate) fn assoc_conj_code(
+    sites: [Site; 3],
+    t: InPlace,
+    k: InPlace,
+    x: PureSrc,
+    effect: bool,
+    generic: Exec,
+) -> Exec {
+    Box::new(move |ev, f| {
+        if sites.iter().all(|s| s.valid(ev)) && assoc_conj_hit(t.get(f), k.get(f), &x, f) {
+            return Ok(if effect { Value::Nil } else { t.get(f).clone() });
+        }
+        generic(ev, f)
+    })
+}
+
+/// The fused update's inline step (`false` leaves the transient as
+/// it was).
+#[inline]
+fn assoc_conj_hit(t: &Value, k: &Value, x: &PureSrc, f: &Frame<'_>) -> bool {
+    let (Value::Transient(cell), Value::Int(n)) = (t, k) else {
+        return false;
+    };
+    let Ok(i) = usize::try_from(*n) else {
+        return false;
+    };
+    let xv = x.value(f);
+    let mut guard = cell.lock();
+    let clj_value::TransientKind::Vector(tv) = &mut *guard else {
+        return false;
+    };
+    let Some(item) = tv.take_at(i) else {
+        return false;
+    };
+    let mut args = [item, xv];
+    let (updated, hit) = match Conj::apply(&mut args) {
+        Some(v) => (v, true),
+        None => (std::mem::replace(&mut args[0], Value::Nil), false),
+    };
+    // The slot was in bounds a moment ago, so the write-back holds.
+    tv.assoc(i, updated).is_ok() && hit
+}
+
 /// `(conj coll x)`: vectors, lists, `nil`, and unsorted sets of
 /// scalars.
 pub(crate) struct Conj;
