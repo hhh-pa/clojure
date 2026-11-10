@@ -759,7 +759,7 @@ fn sort_by_checked(
 /// each item moves once when the permutation is applied. Small
 /// inputs sort in place. The comparator must be total (the
 /// specialized lanes below).
-fn sort_by_index(items: &mut [Value], mut cmp: impl FnMut(&Value, &Value) -> std::cmp::Ordering) {
+fn sort_by_index(items: &mut [Value], cmp: fn(&Value, &Value) -> std::cmp::Ordering) {
     if items.len() < 64 {
         items.sort_by(cmp);
         return;
