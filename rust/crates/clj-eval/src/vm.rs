@@ -1831,6 +1831,34 @@ fn run_loop(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Va
     }
 }
 
+/// A discarded evaluation's next step (see [`run_flat`]).
+fn discard_value(v: Result<Value, Signal>, pc: usize) -> Result<usize, Signal> {
+    v.map(|_| pc + 1)
+}
+
+/// A branch test's next step: fall through or jump.
+fn branch_target(t: Result<bool, Signal>, pc: usize, target: usize) -> Result<usize, Signal> {
+    t.map(|b| if b { pc + 1 } else { target })
+}
+
+/// A `recur` write's next step: back to the first.
+fn restart(r: Result<(), Signal>) -> Result<usize, Signal> {
+    r.map(|()| 0)
+}
+
+/// A flat `Set` step: evaluate into its register, next step on.
+fn flat_set(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    r: usize,
+    e: &Exec,
+    pc: usize,
+) -> Result<usize, Signal> {
+    let v = e(ev, f)?;
+    set_reg(&mut f.regs[r], v);
+    Ok(pc + 1)
+}
+
 /// Run a flat loop body: step dispatch in one Rust loop (a
 /// separate step function cost more than the closure call it
 /// replaced). A `Recur` signal from an opaque leaf (a VM `recur`
@@ -1844,24 +1872,12 @@ fn run_flat(
 ) -> Result<Value, Signal> {
     let mut pc = 0usize;
     loop {
-        let step = &flat.steps[pc];
-        let flow = match step {
-            Step::Eval(e) => e(ev, f).map(|_| pc + 1),
-            Step::Set(r, e) => match e(ev, f) {
-                Ok(v) => {
-                    set_reg(&mut f.regs[*r], v);
-                    Ok(pc + 1)
-                }
-                Err(s) => Err(s),
-            },
-            Step::Unpack(e) => e(ev, f).map(|_| pc + 1),
-            Step::JumpUnless(test, target) => match test(ev, f) {
-                Ok(true) => Ok(pc + 1),
-                Ok(false) => Ok(*target),
-                Err(s) => Err(s),
-            },
+        let flow = match &flat.steps[pc] {
+            Step::Eval(e) | Step::Unpack(e) => discard_value(e(ev, f), pc),
+            Step::Set(r, e) => flat_set(ev, f, *r, e, pc),
+            Step::JumpUnless(test, target) => branch_target(test(ev, f), pc, *target),
             Step::Jump(target) => Ok(*target),
-            Step::Recur(ops) => write_recur_ops(ev, f, &code.targets, ops).map(|()| 0),
+            Step::Recur(ops) => restart(write_recur_ops(ev, f, &code.targets, ops)),
             Step::Exit(e) => match e(ev, f) {
                 Ok(v) => return Ok(v),
                 Err(s) => Err(s),
