@@ -1100,6 +1100,15 @@ impl Evaluator {
         self.vm_direct.get(site) == Some(&now) || self.site_direct_check(site, call)
     }
 
+    /// The epochs a cached direct verdict is keyed by: while a
+    /// snapshot is unchanged, every site validated under it
+    /// still validates (no root in the lineage was written and
+    /// this evaluator's bindings did not change).
+    #[inline(always)]
+    pub(crate) fn direct_snapshot(&self) -> (u64, u64) {
+        (self.registry.epoch(), self.bindings.version())
+    }
+
     /// [`site_direct_valid`](Self::site_direct_valid)'s miss: check
     /// the var and record a valid verdict under the current epochs.
     #[cold]
