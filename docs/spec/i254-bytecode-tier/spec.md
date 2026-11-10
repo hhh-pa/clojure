@@ -146,6 +146,44 @@ A future bytecode attempt should start from superinstruction
 patterns (test+step+recur as one unboxed instruction), not
 from a general dispatch loop.
 
+### 1.6 Post-#250 levers and flat-scalar slice: measured
+
+Lever 1 (unboxed-int stretch for fused loops, `f600cc38`) and
+lever 2 (borrowed sort reads + index sort, `27bb6da3`,
+`e2db802b`) landed and hold their local wins (floors −60%,
+trie sort −13–15% locally). On the unwaived gate
+([42795315827](https://github.com/hhh-pa/clojure/actions/runs/42795315827))
+they are INS-neutral (28 losses, same-run rsrs median 1.0001,
+rsrs 0+0) and cost ~+1.2% median RSS, flipping seven
+knife-edge MEM cases (16 → 23): the gate stems' hot loops are
+flat-tier (`let`/effects/`nth`), not fused-shaped.
+
+The flat-tier follow-up — a scalar step program shadowing the
+flat `Step` list (per-register `Int`/`Char`/`Bool` cache
+mirrored to the frame, `nth`/`count`/casts, transient
+`assoc!`/`conj!`/`pop!` effects, per-step deopt to
+`run_flat_from`) — was then built and measured. Semantics
+matched the base binary on every probe (overflow and
+out-of-bounds after an in-iteration effect, frozen transient,
+site redefinition, nested-loop boxed steps). Performance is
+a **no-go**, worse than the bytecode spike: on an isolated
+matrix inner loop (200M iterations) the scalar driver retires
+438B instructions against the boxed flat driver's 213B
+(2.06×); `count_strings` +57–70%, `dijkstrashortreach` +16%,
+KMP neutral. Two evaluator shapes (recursive tree walk,
+lowered postfix stack program) both lose: per-node generic
+dispatch plus stack/cache traffic costs more than the
+monomorphized shape closures it replaces, exactly as §1.5
+found for the fused tier. The slice was reverted in full
+(patch kept outside the tree); the branch stays at the
+lever-1/2 state.
+
+Remaining direction, unchanged: beat the shape closures at
+their own granularity (wider fused shapes with unboxed state
+across the whole body, superinstructions), or cut per-op
+intrinsic cost and RSS footprint. A general interpreter loop
+over the flat skeleton is now measured twice and excluded.
+
 ## Part 2 — Technical specification
 
 ### 2.1 Current execution tiers (source of truth)
