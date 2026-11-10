@@ -314,3 +314,92 @@ fn perf_ascii_string_indexing() {
         elapsed.as_secs_f64()
     );
 }
+
+/// The flat loop tier (#226 follow-up): loop bodies compile to
+/// step lists; these pin the shapes its emitter and executor
+/// must keep identical to the closure tree — empty bodies,
+/// destructuring, wide recurs absorbed from opaque subforms,
+/// and statement-position transient mutators.
+#[test]
+fn flat_loop_shapes() {
+    let mut eval = boot();
+    // Empty body: the value is nil, evaluated once.
+    assert_eq!(run_last(&mut eval, "(loop [x 1])"), "nil");
+    assert_eq!(run_last(&mut eval, "(loop [x 1] (do))"), "nil");
+    // Destructured loop bindings re-unpack after every recur
+    // (the generic runner keeps them).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [[a b] [1 2] n 0] (if (< n 3) (recur [b a] (inc n)) [a b n]))"
+        ),
+        "[2 1 3]"
+    );
+    // Destructuring `let` inside a flat body (an Unpack step).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 0 acc 0] (if (< i 4) (let [[x y] [i (inc i)]] (recur y (+ acc x))) acc))"
+        ),
+        "6"
+    );
+    // Wide recurs through an opaque `case` tail: the flat
+    // executor absorbs the VM recur signal (5 targets).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [a 0 b 0 c 0 d 0 e 0] (case a 0 (recur 1 b c d e) 1 (recur 2 b c d (inc e)) (+ a e)))"
+        ),
+        "3"
+    );
+    // A four-arity fn recur (the arity-4 write path).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn [a b c d] (if (pos? a) (recur (dec a) b c (inc d)) d)) 3 0 0 0)"
+        ),
+        "3"
+    );
+    // Statement-position transient mutators in flat and generic
+    // bodies alike keep their effect, discard semantics intact.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [t (transient [])] (loop [i 0] (when (< i 3) (conj! t i) (recur (inc i)))) (persistent! t))"
+        ),
+        "[0 1 2]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [t (transient [0 0])] (loop [i 0] (if (< i 2) (do (assoc! t i (* i 10)) (recur (inc i))) (persistent! t))))"
+        ),
+        "[0 10]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [t (transient [1 2 3])] (pop! t) (persistent! t))"
+        ),
+        "[1 2]"
+    );
+    // A `when-not` statement (the nil-then jump shape).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [t (transient [])] (loop [i 0] (when-not (= i 3) (conj! t i) (recur (inc i)))) (persistent! t))"
+        ),
+        "[0 1 2]"
+    );
+    // A `recur` out of a tree-evaluated subtree (`binding` is not
+    // VM-compiled) carries its values into the generic runner of
+    // a destructuring loop, which also re-unpacks per iteration.
+    // (The `let` keeps the body off the fused shape.)
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn [] (loop [[a b] [0 0] n 0] (let [m n] (binding [*print-level* 2] (if (< m 2) (recur [a (inc b)] (inc n)) [a b n]))))))"
+        ),
+        "[0 2 2]"
+    );
+}

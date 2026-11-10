@@ -410,3 +410,106 @@ fn meta_survives_packing() {
     let back: Vec<Value> = vm.iter().collect();
     assert_eq!(back, ints(10));
 }
+
+/// `from_vector_owned` unwraps packed ints, chars, and generic vectors.
+#[test]
+fn transient_from_vector_owned_arms() {
+    let gv = Vector::from_vec(vec![Value::Nil, Value::Int(1)]);
+    let tv = TransientVector::from_vector_owned(gv);
+    assert!(!tv.is_packed());
+
+    let cv = Vector::from_chars(vec!['a', 'b', 'c']);
+    let tv = TransientVector::from_vector_owned(cv);
+    assert!(tv.is_packed());
+
+    let iv_flat = Vector::from_ints(vec![1, 2, 3]);
+    let tv = TransientVector::from_vector_owned(iv_flat);
+    assert!(tv.is_packed());
+
+    let big_ints = (0..2000).collect::<Vec<i64>>();
+    let iv_big = Vector::from_ints(big_ints);
+    let tv = TransientVector::from_vector_owned(iv_big);
+    assert!(tv.is_packed());
+    assert_eq!(tv.len().unwrap(), 2000);
+}
+
+#[test]
+fn vector_push_to_string() {
+    let flat_cv = Vector::from_chars(vec!['h', 'e', 'l', 'l', 'o']);
+    let mut s = String::new();
+    assert!(flat_cv.push_to_string(&mut s));
+    assert_eq!(s, "hello");
+
+    let big_chars: Vec<char> = (0..2000)
+        .map(|i| if i % 2 == 0 { 'a' } else { 'b' })
+        .collect();
+    let trie_cv = Vector::from_chars(big_chars.clone());
+    let mut s2 = String::new();
+    assert!(trie_cv.push_to_string(&mut s2));
+    assert_eq!(s2.len(), 2000);
+    assert_eq!(s2, big_chars.into_iter().collect::<String>());
+
+    let iv = Vector::from_ints(vec![1, 2, 3]);
+    let mut s3 = String::new();
+    assert!(!iv.push_to_string(&mut s3));
+    assert!(s3.is_empty());
+}
+
+#[test]
+fn packed_flat_shared_set_and_pop_promotion_to_trie() {
+    let big: Vec<i64> = (0..2000).collect();
+    let v = Vector::from_flat_ints(big);
+    // Clone to make strong_count > 1
+    let v_clone1 = v.clone();
+    assert_eq!(v_clone1.get(10), Some(Value::Int(10)));
+    let updated = v_clone1.set_nth(10, Value::Int(999)).unwrap();
+    assert_eq!(updated.get(10), Some(Value::Int(999)));
+
+    let v_clone2 = v.clone();
+    assert_eq!(v_clone2.len(), 2000);
+    let popped = v_clone2.drop_last().unwrap();
+    assert_eq!(popped.len(), 1999);
+}
+
+#[test]
+fn transient_conj_int_arms() {
+    let mut tv_ints = TransientVector::from_vector_owned(Vector::from_ints(vec![1, 2]));
+    assert!(tv_ints.conj_int(3).is_ok());
+    assert_eq!(tv_ints.len().unwrap(), 3);
+    assert_eq!(tv_ints.nth(2).unwrap(), Some(Value::Int(3)));
+
+    let mut tv_chars = TransientVector::from_vector_owned(Vector::from_chars(vec!['a', 'b']));
+    assert!(tv_chars.conj_int(4).is_ok());
+    assert_eq!(tv_chars.len().unwrap(), 3);
+    assert_eq!(tv_chars.nth(2).unwrap(), Some(Value::Int(4)));
+}
+
+#[test]
+fn vector_into_vec_and_array_try_take_objs() {
+    let vi = Vector::from_ints(vec![1, 2, 3]);
+    assert_eq!(
+        vi.into_vec(),
+        vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+    );
+
+    let vc = Vector::from_chars(vec!['x', 'y']);
+    assert_eq!(vc.into_vec(), vec![Value::Char('x'), Value::Char('y')]);
+
+    let vg = Vector::from_vec(vec![Value::Bool(true), Value::Nil]);
+    assert_eq!(vg.into_vec(), vec![Value::Bool(true), Value::Nil]);
+
+    let arr_objs = clj_value::Array::new(
+        clj_value::ArrayDesc::flat(clj_value::BaseType::Object),
+        clj_value::ArrayStore::Objs(vec![Value::Int(42)]),
+    );
+    let arr_clone = arr_objs.clone();
+    assert!(arr_objs.try_take_objs().is_none());
+    drop(arr_clone);
+    assert_eq!(arr_objs.try_take_objs(), Some(vec![Value::Int(42)]));
+
+    let arr_ints = clj_value::Array::new(
+        clj_value::ArrayDesc::flat(clj_value::BaseType::Int),
+        clj_value::ArrayStore::Ints(vec![10, 20]),
+    );
+    assert!(arr_ints.try_take_objs().is_none());
+}

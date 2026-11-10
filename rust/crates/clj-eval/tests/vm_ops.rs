@@ -259,6 +259,19 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"[\a \é \z]"#,
     ),
     (
+        r#"(let [t (transient [1 2])] (persistent! (conj! t 3)))"#,
+        r#"[1 2 3]"#,
+    ),
+    (
+        r#"(let [t (transient [1 2])] (persistent! (conj! t :kw)))"#,
+        r#"[1 2 :kw]"#,
+    ),
+    (r#"(let [s "hello"] [(nth s 0) (nth s 4)])"#, r#"[\h \o]"#),
+    (
+        r#"(let [s "world"] [(nth s 0 :def) (nth s 10 :def)])"#,
+        r#"[\w :def]"#,
+    ),
+    (
         r#"(loop [s (seq [1 2 3]) acc []] (if (seq s) (let [x (first s)] (recur (rest s) (conj acc x))) acc))"#,
         r#"[1 2 3]"#,
     ),
@@ -315,6 +328,10 @@ const JVM_ROWS: &[(&str, &str)] = &[
     (
         r#"[(conj (vec "abc") \d) (conj (vec "ab") 1) (assoc (vec "ab") 0 \z) (assoc (vec "ab") 1 :x) (pop (vec "ab")) (conj (pop [\a]) 1) (= (vec "ab") [\a \b]) (hash (vec "ab"))]"#,
         r#"[[\a \b \c \d] [\a \b 1] [\z \b] [\a :x] [\a] [1] true -338459411]"#,
+    ),
+    (
+        r#"[(assoc {:a 1} :b 2 :c 3) (conj [1] 2 3 4) (conj {:a 1} [:b 2]) (assoc (identity [1 2]) 0 9) (assoc {:a 1} [1] 2)]"#,
+        r#"[{:a 1, :b 2, :c 3} [1 2 3 4] {:a 1, :b 2} [9 2] {:a 1, [1] 2}]"#,
     ),
     // Maps and keywords called as fns answer inline as the `get` they
     // are; the promoting ops share `+`/`-`/`*` until a long overflows;
@@ -384,6 +401,60 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"(reduce (fn [{:keys [n s]} x] {:n (inc n) :s (+ s x)}) {:n 0 :s 0} [1 2 3])"#,
         r#"{:n 3, :s 6}"#,
     ),
+    // 3-arg direct calls (#250): assoc!, nth with default, get with default
+    (
+        r#"((fn [v i x] (let [t (transient v)] [(persistent! (assoc! t i x)) (persistent! (assoc! (transient [1 2]) 0 :sym)) (persistent! (assoc! (transient {:a 1}) :b 2))])) [1 2 3] 1 99)"#,
+        r#"[[1 99 3] [:sym 2] {:a 1, :b 2}]"#,
+    ),
+    (
+        r#"((fn [t] [(persistent! (assoc! t (+ 0 1) 88)) (persistent! (assoc! (transient [1 2]) 0 (+ 5 5))) (persistent! (assoc! (transient [1 2]) (inc 0) (+ 5 5)))]) (transient [10 20]))"#,
+        r#"[[10 88] [10 2] [1 10]]"#,
+    ),
+    (
+        r#"[(nth [10 20] 0 :d) (nth [10 20] 5 :d) (nth nil 0 :d) (nth "abc" 1 :d) (nth "abc" 5 :d) (get {:a 1} :a :d) (get {:a 1} :b :d) (get nil :a :d) (get [10 20] 1 :d) (get [10 20] 5 :d)]"#,
+        r#"[10 :d :d \b :d 1 :d :d 20 :d]"#,
+    ),
+    (
+        r#"((fn [m] [(:k m) (:missing m :default) (:k nil :default) (:k "not-map") (:k m (+ 1 2))]) {:k 42})"#,
+        r#"[42 :default :default nil 42]"#,
+    ),
+    (
+        r#"((fn [v] [(try (assoc! v 0 1) (catch Exception e :err)) (try (assoc! (transient [1]) :not-int 1) (catch Exception e :ierr)) (try (assoc! (transient [1]) 99 1) (catch Exception e :oob)) (persistent! (assoc! (transient {}) [1 2] 3)) (try (assoc! (transient #{1}) 0 1) (catch Exception e :serr)) (try (let [t (persistent! (transient {}))] (assoc! t :a 1)) (catch Exception e :perr))]) [10])"#,
+        r#"[:err :ierr :oob {[1 2] 3} :serr :perr]"#,
+    ),
+    (
+        r#"(let [k :c] ((fn [m] (persistent! (assoc! (transient m) k 3))) {:a 1}))"#,
+        r#"{:a 1, :c 3}"#,
+    ),
+    (
+        r#"(let [a 1 b 2 c 3 d 4] [(if (< a b c d) :yes :no) (if (> a b c d) :y :no)])"#,
+        r#"[:yes :no]"#,
+    ),
+    (
+        r#"(let [v [1 2] k 0 x 99] (try (assoc! v k x) (catch Exception e :caught)))"#,
+        r#":caught"#,
+    ),
+    (
+        r#"(let [t (transient [1 2]) k 0 x 99] (persistent! (assoc! t k x)))"#,
+        r#"[99 2]"#,
+    ),
+    (
+        r#"((fn [m k] [(dissoc m k) (dissoc nil :k) (dissoc m :not-found)]) {:a 1 :b 2} :a)"#,
+        r#"[{:b 2} nil {:a 1, :b 2}]"#,
+    ),
+    (
+        r#"((fn [m i d] [(get m (str "a") d) (get m (keyword "a") d) (nth [10 20] (int 1) d) (nth [10 20] 5 (str "x"))]) {:a 1} 1 :nf)"#,
+        r#"[:nf 1 20 "x"]"#,
+    ),
+    (r#"((fn [] [{} [] #{}]))"#, r#"[{} [] #{}]"#),
+    (
+        r#"((fn [m k v] [(try (assoc! m (identity k) v) (catch Exception _ :sxs)) (try (assoc! m k (identity v)) (catch Exception _ :ssx)) (try (assoc! (identity m) k v) (catch Exception _ :any))]) {:a 1} :b 2)"#,
+        r#"[:sxs :ssx :any]"#,
+    ),
+    (
+        r#"((fn [tv tm] [(nth tv 0 :nf) (get tm :a :nf) (get tm :a)]) (transient [10 20]) (transient {:a 100}))"#,
+        r#"[10 100 100]"#,
+    ),
 ];
 
 const PORT_ROWS: &[(&str, &str)] = &[
@@ -404,7 +475,15 @@ const PORT_ROWS: &[(&str, &str)] = &[
         r#"3"#,
     ),
     (
+        r#"(do (defn r-nth3-inv [coll idx nf] [(nth coll (identity idx) nf) (nth coll idx (identity nf)) (nth (identity coll) (identity idx) nf)]) (with-redefs [nth (fn [c i n] :redef3)] (r-nth3-inv [10 20] 0 :default)))"#,
+        r#"[:redef3 :redef3 :redef3]"#,
+    ),
+    (
         r#"(do (defn r-asc [m] (assoc m :a 1)) (with-redefs [assoc (fn [m k v] :redef)] (r-asc {})))"#,
+        r#":redef"#,
+    ),
+    (
+        r#"(do (defn r-conj [c x] (conj c x)) (with-redefs [conj (fn [c x] :redef)] (r-conj [] 1)))"#,
         r#":redef"#,
     ),
     (
@@ -418,6 +497,14 @@ const PORT_ROWS: &[(&str, &str)] = &[
     (
         r#"(do (defn r-rest [s] [(rest s) (first s)]) (with-redefs [rest (fn [s] :redef)] (r-rest [1 2])))"#,
         r#"[:redef 1]"#,
+    ),
+    (
+        r#"(do (defn r-trans [v] (transient v)) (with-redefs [transient (fn [v] :trans-redef)] (r-trans [1 2])))"#,
+        r#":trans-redef"#,
+    ),
+    (
+        r#"(do (defn r-pers [t] (persistent! t)) (with-redefs [persistent! (fn [t] :pers-redef)] (r-pers (transient [1 2]))))"#,
+        r#":pers-redef"#,
     ),
 ];
 
@@ -439,4 +526,23 @@ fn vm_ops_match_the_jvm() {
 #[test]
 fn vm_ops_share_port_semantics() {
     check(PORT_ROWS);
+}
+
+#[test]
+fn vm_ops_subvec_nth_and_nth3() {
+    let rows = [
+        (
+            r#"(do (defn sv-nth [v i] (nth (subvec v 1) i)) (sv-nth [10 20 30] 0))"#,
+            "20",
+        ),
+        (
+            r#"(do (defn sv-nth3 [v i d] (nth (subvec v 1) i d)) (sv-nth3 [10 20 30] 0 :def))"#,
+            "20",
+        ),
+        (
+            r#"(do (defn sv-nth3-miss [v i d] (nth (subvec v 1) i d)) (sv-nth3-miss [10 20 30] 5 :def))"#,
+            ":def",
+        ),
+    ];
+    check(&rows);
 }

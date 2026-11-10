@@ -142,11 +142,11 @@ fn lookup_pv_slot(p: &PrimitiveVector, key: &Value) -> Option<Value> {
     })
 }
 
-fn lookup_str_slot(s: &str, key: &Value) -> Option<Value> {
+fn lookup_str_slot(s: &Arc<str>, key: &Value) -> Option<Value> {
     num_index(key).and_then(|i| {
         usize::try_from(i)
             .ok()
-            .and_then(|idx| s.chars().nth(idx).map(Value::Char))
+            .and_then(|idx| str_char_at(s, idx).map(Value::Char))
     })
 }
 
@@ -166,6 +166,11 @@ fn lookup_array_slot(a: &clj_value::Array, key: &Value) -> Option<Value> {
 }
 
 fn lookup_present_fallback(coll: &Value, key: &Value) -> Result<Option<Value>, NativeError> {
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Ok(
+            int_key(key).and_then(|i| usize::try_from(i as i32).ok().and_then(|idx| sp.nth(idx)))
+        );
+    }
     if let Some(sv) = as_subvector(coll) {
         return Ok(
             int_key(key).and_then(|i| usize::try_from(i as i32).ok().and_then(|idx| sv.nth(idx)))
@@ -256,6 +261,13 @@ fn find_entry_transient(
 
 /// `RT.find` over anything else (subvectors read; the rest fail).
 fn find_entry_fallback(coll: &Value, key: &Value) -> Result<Option<(Value, Value)>, NativeError> {
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Ok(int_key(key).and_then(|i| {
+            usize::try_from(i as i32)
+                .ok()
+                .and_then(|idx| sp.nth(idx).map(|v| (key.clone(), v)))
+        }));
+    }
     if let Some(sv) = as_subvector(coll) {
         return Ok(int_key(key).and_then(|i| {
             usize::try_from(i as i32)
@@ -341,6 +353,27 @@ fn pair_plan(items: &[Value]) -> Result<MapConjPlan, NativeError> {
     }
 }
 
+/// The pair plan for a vector-like extension conj arg (split
+/// vectors answer from their spans; non-pairs are the pair error).
+fn pair_plan_ext(x: &Value) -> Option<Result<MapConjPlan, NativeError>> {
+    if let Some(sp) = crate::lazy::as_splitvec(x) {
+        if sp.len() != 2 {
+            return Some(Err(pair_err()));
+        }
+        return Some(Ok(MapConjPlan::Pair(
+            sp.nth(0).unwrap_or(Value::Nil),
+            sp.nth(1).unwrap_or(Value::Nil),
+        )));
+    }
+    as_subvector(x).map(|sv| {
+        if sv.len() != 2 {
+            return Err(pair_err());
+        }
+        let items = sv.items();
+        Ok(MapConjPlan::Pair(items[0].clone(), items[1].clone()))
+    })
+}
+
 fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeError> {
     match x {
         Value::Nil => Ok(MapConjPlan::Nil),
@@ -356,12 +389,8 @@ fn map_conj_plan(eval: &mut Evaluator, x: &Value) -> Result<MapConjPlan, NativeE
         Value::PrimitiveVector(p) => pair_plan(&p.items()),
         Value::MapEntry { key, val, .. } => Ok(MapConjPlan::Pair((**key).clone(), (**val).clone())),
         _ => {
-            if let Some(sv) = as_subvector(x) {
-                if sv.len() != 2 {
-                    return Err(pair_err());
-                }
-                let items = sv.items();
-                return Ok(MapConjPlan::Pair(items[0].clone(), items[1].clone()));
+            if let Some(plan) = pair_plan_ext(x) {
+                return plan;
             }
             // A sequential arg contributes one pair per entry
             // (Oracle FX2 `conj-seq-entries`, `conj-list-entry`,
@@ -710,6 +739,9 @@ fn count_transient(t: &Transient) -> Result<i64, NativeError> {
 /// `RT.count` over the extension/seq tail (subvectors, ranges,
 /// realized seqs, repeats, then a seq walk).
 fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
+    if let Some(sp) = crate::lazy::as_splitvec(v) {
+        return Ok(sp.len() as i64);
+    }
     if let Some(sv) = as_subvector(v) {
         return Ok(sv.len() as i64);
     }
@@ -779,18 +811,12 @@ pub(crate) fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeErr
 /// place instead of path-copying per step.
 fn into_inner(eval: &mut Evaluator, to: Value, from: Value) -> Result<Value, NativeError> {
     let mut acc = to;
-    let mut cur = seq_value(eval, &from).map_err(signal_to_native)?;
-    // Owned callers nilled the arg slot: dropping the head here
-    // frees memoized chunks as the walk advances (#221).
-    drop(from);
-    loop {
-        if matches!(cur, Value::Nil) {
-            return Ok(acc);
-        }
-        let head = first_value(eval, &cur).map_err(signal_to_native)?;
-        acc = conj_one(eval, acc, head)?;
-        cur = next_value(eval, &cur).map_err(signal_to_native)?;
-    }
+    crate::seqs::walk_seq(eval, from, |eval, head| {
+        let cur = std::mem::replace(&mut acc, Value::Nil);
+        acc = conj_one(eval, cur, head.clone())?;
+        Ok(crate::seqs::Walk::Continue)
+    })?;
+    Ok(acc)
 }
 
 /// Two-way `merge` (`([x y] (if (and x y) (into x y) (or x y)))`).
@@ -1065,6 +1091,17 @@ fn native_not_empty(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     }
 }
 
+/// `empty` of a vector-like extension (split vectors and
+/// subvectors fall back to a plain vector, metadata kept).
+fn empty_vector_like(v: &Value) -> Option<Value> {
+    if let Some(sp) = crate::lazy::as_splitvec(v) {
+        return Some(Value::Vector(
+            Vector::new_sync().with_meta(sp.meta().cloned()),
+        ));
+    }
+    as_subvector(v).map(|sv| Value::Vector(Vector::new_sync().with_meta(sv.meta().cloned())))
+}
+
 fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/empty", args, &[1])?;
     // `RT.empty`: maps are class-sticky (array stays array, hash
@@ -1083,6 +1120,9 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     }
     if let Some(i) = crate::types::struct_inst(&args[0]) {
         return Ok(crate::types::empty_struct(i));
+    }
+    if let Some(v) = empty_vector_like(&args[0]) {
+        return Ok(v);
     }
     Ok(match &args[0] {
         Value::Map(m) => Value::Map(
@@ -1103,10 +1143,7 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
                 .with_meta(s.meta().cloned())
                 .with_sort(s.sort_spec().cloned()),
         ),
-        v if as_subvector(v).is_some() => {
-            let meta = as_subvector(v).and_then(|sv| sv.meta().cloned());
-            Value::Vector(Vector::new_sync().with_meta(meta))
-        }
+
         v if is_seq_value(v) => Value::List(List::new_sync()),
         _ => Value::Nil,
     })
@@ -1175,6 +1212,15 @@ pub(crate) fn native_last_owned(
     mut args: SmallVec<[Value; 4]>,
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/last", &args, &[1])?;
+    // Split vectors answer from the last span (stepping would
+    // materialize every piece just to walk to the end).
+    if let Some(sp) = crate::lazy::as_splitvec(&args[0]) {
+        return Ok(sp
+            .len()
+            .checked_sub(1)
+            .and_then(|i| sp.nth(i))
+            .unwrap_or(Value::Nil));
+    }
     let mut cur = take_walk_coll(&mut args, 0);
     let mut last = Value::Nil;
     loop {
@@ -1389,6 +1435,11 @@ fn contains_str(s: &str, coll: &Value, key: &Value) -> Result<Value, NativeError
 
 /// `contains?` over anything else (subvectors read; the rest fail).
 fn contains_fallback(coll: &Value, key: &Value) -> Result<Value, NativeError> {
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Ok(Value::Bool(int_key(key).is_some_and(|i| {
+            usize::try_from(i as i32).is_ok_and(|idx| idx < sp.len())
+        })));
+    }
     if let Some(sv) = as_subvector(coll) {
         return Ok(Value::Bool(int_key(key).is_some_and(|i| {
             usize::try_from(i as i32).is_ok_and(|idx| idx < sv.len())
@@ -1505,7 +1556,19 @@ fn nth_indexed_found(
 }
 
 fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value, NativeError> {
-    let found = match coll {
+    // Split vectors answer from their spans (the subvector view
+    // would materialize every piece).
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        let found = usize::try_from(n).ok().and_then(|idx| sp.nth(idx));
+        return nth_indexed_found(found, not_found);
+    }
+    nth_indexed_found(nth_indexed_in(coll, n)?, not_found)
+}
+
+/// The indexed probe behind [`nth_indexed`] (every shape except
+/// split vectors, which answer from their spans).
+fn nth_indexed_in(coll: &Value, n: i32) -> Result<Option<Value>, NativeError> {
+    Ok(match coll {
         Value::Vector(x) => usize::try_from(n).ok().and_then(|idx| x.get(idx)),
         Value::PrimitiveVector(p) => usize::try_from(n).ok().and_then(|idx| p.get(idx).cloned()),
         Value::MapEntry { key, val, .. } => usize::try_from(n).ok().and_then(|idx| match idx {
@@ -1515,8 +1578,7 @@ fn nth_indexed(coll: &Value, n: i32, not_found: Option<&Value>) -> Result<Value,
         }),
         Value::Transient(t) => nth_indexed_transient(t, n)?,
         _ => as_subvector(coll).and_then(|sv| usize::try_from(n).ok().and_then(|idx| sv.nth(idx))),
-    };
-    nth_indexed_found(found, not_found)
+    })
 }
 
 /// `nth` over a sequential value by walking (nil-`not_found`
@@ -1592,43 +1654,87 @@ const STR_SCAN_SMALL_MAX: usize = 64;
 // `Arc<str>` millions of times, and search loops alternate two (a
 // text and a pattern — #226: one slot ping-ponged through the global
 // mutex per read). The memo answers repeats without the global
-// cache mutex — and without touching refcounts, since a strong key
-// compares by `ptr_eq` alone (sound: `Arc<str>` is immutable, so the
-// same allocation is the same string, and liveness pins the address
-// against ABA). At most `LAST_SCAN_SLOTS` strings pinned per thread
-// (each freed when its slot is reused); the global cache stays
-// `Weak` (8 slots must not pin).
+// cache mutex — and without touching refcounts on hits. The memo
+// stores `Weak<str>` so multi-megabyte string buffers are deallocated
+// immediately when dropped by the evaluator, avoiding peak RSS bloat.
 const LAST_SCAN_SLOTS: usize = 4;
 
 /// The memo slots plus the next slot to reuse.
-type ScanMemo = ([Option<(Arc<str>, StrScan)>; LAST_SCAN_SLOTS], usize);
+type ScanMemo = (
+    [Option<(std::sync::Weak<str>, StrScan)>; LAST_SCAN_SLOTS],
+    usize,
+);
+const ASCII_CACHE_SLOTS: usize = 4;
+type AsciiCache = [(usize, usize, bool); ASCII_CACHE_SLOTS];
 
 thread_local! {
     static LAST_SCAN: std::cell::RefCell<ScanMemo> =
         const { std::cell::RefCell::new(([None, None, None, None], 0)) };
+    static ASCII_SLOTS: std::cell::Cell<AsciiCache> =
+        const { std::cell::Cell::new([(0, 0, false); ASCII_CACHE_SLOTS]) };
+}
+
+#[inline(always)]
+fn set_ascii_slot(slot: usize, ptr: usize, len: usize, is_ascii: bool) {
+    if slot < ASCII_CACHE_SLOTS {
+        let mut slots = ASCII_SLOTS.get();
+        slots[slot] = (ptr, len, is_ascii);
+        ASCII_SLOTS.set(slots);
+    }
 }
 
 /// Answer `f` over the memoized scan for a string, if it is one of
-/// the last few scanned (no `StrScan` clone on a hit).
+/// the last few scanned (no `StrScan` clone on a hit, slot 0 MRU).
+fn promote_scan_hit<T>(
+    memo: &mut ScanMemo,
+    s: &Arc<str>,
+    f: impl FnOnce(&StrScan) -> T,
+) -> Option<T> {
+    let ptr = Arc::as_ptr(s) as *const () as usize;
+    let len = s.len();
+    for i in 2..LAST_SCAN_SLOTS {
+        if let Some((weak, scan)) = &memo.0[i] {
+            if std::ptr::eq(weak.as_ptr(), Arc::as_ptr(s)) {
+                let hit = f(scan);
+                let is_ascii = matches!(scan, StrScan::Ascii);
+                memo.0.swap(1, i);
+                set_ascii_slot(1, ptr, len, is_ascii);
+                return Some(hit);
+            }
+        }
+    }
+    None
+}
+
 fn with_scan_hit<T>(s: &Arc<str>, f: impl FnOnce(&StrScan) -> T) -> Option<T> {
     LAST_SCAN.with(|memo| {
-        let memo = memo.borrow();
-        memo.0
-            .iter()
-            .flatten()
-            .find(|(key, _)| Arc::ptr_eq(key, s))
-            .map(|(_, scan)| f(scan))
+        let mut memo = memo.borrow_mut();
+        if let Some((weak, scan)) = &memo.0[0] {
+            if std::ptr::eq(weak.as_ptr(), Arc::as_ptr(s)) {
+                return Some(f(scan));
+            }
+        }
+        if let Some((weak, scan)) = &memo.0[1] {
+            if std::ptr::eq(weak.as_ptr(), Arc::as_ptr(s)) {
+                return Some(f(scan));
+            }
+        }
+        promote_scan_hit(&mut memo, s, f)
     })
 }
 
 /// Memoize a string's scan (called on every global-cache hit and
 /// fresh build, so repeats skip the mutex), reusing slots in turn.
 fn memoize_scan(s: &Arc<str>, scan: &StrScan) {
+    let ptr = Arc::as_ptr(s) as *const () as usize;
+    let len = s.len();
+    let is_ascii = matches!(scan, StrScan::Ascii);
     LAST_SCAN.with(|memo| {
         let mut memo = memo.borrow_mut();
         let slot = memo.1;
-        memo.0[slot] = Some((Arc::clone(s), scan.clone()));
+        memo.0[slot] = Some((Arc::downgrade(s), scan.clone()));
         memo.1 = (slot + 1) % LAST_SCAN_SLOTS;
+        set_ascii_slot(slot, ptr, len, is_ascii);
     });
 }
 
@@ -1691,6 +1797,44 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
     })
 }
 
+fn slot_scan_char(
+    entry: &Option<(std::sync::Weak<str>, StrScan)>,
+    s: &Arc<str>,
+    idx: usize,
+) -> Option<char> {
+    if let Some((weak, scan)) = entry {
+        if std::ptr::eq(weak.as_ptr(), Arc::as_ptr(s)) {
+            return scan_char_at(s, scan, idx);
+        }
+    }
+    None
+}
+
+/// Direct fast-path read from the thread-local scan slots
+/// without closure indirection or mutable borrow overhead.
+#[inline(always)]
+pub(crate) fn fast_str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
+    let ptr = Arc::as_ptr(s) as *const () as usize;
+    let len = s.len();
+    let slots = ASCII_SLOTS.get();
+    for &(p, l, is_ascii) in &slots {
+        if p == ptr && l == len {
+            if is_ascii {
+                return s.as_bytes().get(idx).map(|b| *b as char);
+            }
+            break;
+        }
+    }
+    if len <= STR_SCAN_SMALL_MAX && s.is_ascii() {
+        set_ascii_slot(0, ptr, len, true);
+        return s.as_bytes().get(idx).map(|b| *b as char);
+    }
+    LAST_SCAN.with(|memo| {
+        let memo = memo.borrow();
+        slot_scan_char(&memo.0[0], s, idx).or_else(|| slot_scan_char(&memo.0[1], s, idx))
+    })
+}
+
 /// The char at `idx` (`None` reads out of bounds). Small strings
 /// decode directly — ASCII short-circuits through one SIMD check
 /// to a byte load, skipping per-char decode entirely; big
@@ -1698,10 +1842,14 @@ fn build_str_scan(s: &str) -> Option<StrScan> {
 /// `Ascii` flag answers in one byte load even for small
 /// indexes, where a direct scan would re-decode, #235).
 pub(crate) fn str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
+    if let Some(c) = fast_str_char_at(s, idx) {
+        return Some(c);
+    }
+    str_char_at_slow(s, idx)
+}
+
+fn str_char_at_slow(s: &Arc<str>, idx: usize) -> Option<char> {
     if s.len() <= STR_SCAN_SMALL_MAX {
-        if s.is_ascii() {
-            return s.as_bytes().get(idx).map(|b| *b as char);
-        }
         return s.chars().nth(idx);
     }
     if let Some(hit) = with_scan_hit(s, |scan| scan_char_at(s, scan, idx)) {
@@ -1727,6 +1875,9 @@ fn scan_char_at(s: &str, scan: &StrScan, idx: usize) -> Option<char> {
 /// mutex/evaluator roundtrip, never this).
 pub fn str_utf16_len(s: &Arc<str>) -> usize {
     if s.len() <= 256 {
+        if s.is_ascii() {
+            return s.len();
+        }
         return s.encode_utf16().count();
     }
     let memo = with_scan_hit(s, |scan| match scan {
@@ -1815,7 +1966,8 @@ fn nth_fast(coll: &Value, n: i32, not_found: &Option<Value>) -> Option<Result<Va
     if matches!(
         coll,
         Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
-    ) || as_subvector(coll).is_some()
+    ) || crate::lazy::as_splitvec(coll).is_some()
+        || as_subvector(coll).is_some()
         || matches!(coll, Value::Transient(_))
     {
         return Some(nth_indexed(coll, n, not_found.as_ref()));
@@ -1868,7 +2020,10 @@ pub(crate) fn native_vec_owned(
     mut args: SmallVec<[Value; 4]>,
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/vec", &args, &[1])?;
-    if matches!(args[0], Value::Vector(_)) || as_subvector(&args[0]).is_some() {
+    if matches!(args[0], Value::Vector(_))
+        || crate::lazy::as_splitvec(&args[0]).is_some()
+        || as_subvector(&args[0]).is_some()
+    {
         return Ok(args[0].clone().with_meta(None));
     }
     // `RT.toArray`: non-seqables fail the conversion, not the seq
@@ -2039,41 +2194,62 @@ fn ioobe() -> NativeError {
     NativeError::new(ThrowClass::IndexOutOfBoundsException, String::new())
 }
 
-fn native_transient(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/transient", args, &[1])?;
-    match &args[0] {
-        Value::Vector(x) => Ok(Value::Transient(Transient::with_meta(
-            TransientKind::Vector(TransientVector::from_vector(x)),
-            x.meta().cloned(),
-        ))),
+pub(crate) fn native_transient_owned(
+    _eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/transient", &args, &[1])?;
+    let val = args.pop().unwrap();
+    match val {
+        Value::Vector(x) => {
+            let meta = x.meta().cloned();
+            Ok(Value::Transient(Transient::with_meta(
+                TransientKind::Vector(TransientVector::from_vector_owned(x)),
+                meta,
+            )))
+        }
         // Sorted maps/sets are not editable on the JVM either
         // (probe `trans-sorted`).
         Value::Map(m) if m.is_sorted() => {
-            Err(cce_err(&args[0], "clojure.lang.IEditableCollection"))
+            Err(cce_err(&Value::Map(m), "clojure.lang.IEditableCollection"))
         }
-        Value::Map(m) => Ok(Value::Transient(Transient::with_meta(
-            TransientKind::Map(TransientMap::from_map(m)),
-            m.meta().cloned(),
-        ))),
+        Value::Map(m) => {
+            let meta = m.meta().cloned();
+            Ok(Value::Transient(Transient::with_meta(
+                TransientKind::Map(TransientMap::from_map(&m)),
+                meta,
+            )))
+        }
         Value::Set(s) if s.is_sorted() => {
-            Err(cce_err(&args[0], "clojure.lang.IEditableCollection"))
+            Err(cce_err(&Value::Set(s), "clojure.lang.IEditableCollection"))
         }
-        Value::Set(s) => Ok(Value::Transient(Transient::with_meta(
-            TransientKind::Set(TransientSet::from_set(s)),
-            s.meta().cloned(),
-        ))),
+        Value::Set(s) => {
+            let meta = s.meta().cloned();
+            Ok(Value::Transient(Transient::with_meta(
+                TransientKind::Set(TransientSet::from_set(&s)),
+                meta,
+            )))
+        }
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
             "Cannot invoke \"clojure.lang.IEditableCollection.asTransient()\" because \"coll\" is null"
                 .to_owned(),
         )),
-        other => Err(cce_err(other, "clojure.lang.IEditableCollection")),
+        other => Err(cce_err(&other, "clojure.lang.IEditableCollection")),
     }
 }
 
-fn native_persistent(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/persistent!", args, &[1])?;
-    match &args[0] {
+fn native_transient(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    native_transient_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_persistent_owned(
+    _eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/persistent!", &args, &[1])?;
+    let val = args.pop().unwrap();
+    match val {
         Value::Transient(t) => {
             let meta = t.source_meta().cloned();
             let mut guard = t.lock();
@@ -2094,8 +2270,12 @@ fn native_persistent(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
             "Cannot invoke \"clojure.lang.ITransientCollection.persistent()\" because \"coll\" is null"
                 .to_owned(),
         )),
-        other => Err(cce_err(other, "clojure.lang.ITransientCollection")),
+        other => Err(cce_err(&other, "clojure.lang.ITransientCollection")),
     }
+}
+
+fn native_persistent(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    native_persistent_owned(eval, args.iter().cloned().collect())
 }
 
 /// The `conj!` map plan (computed unlocked: seqing the
@@ -2404,6 +2584,13 @@ fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         Value::PrimitiveVector(p) => Ok(p.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::MapEntry { val, .. } => Ok((**val).clone()),
         _ => {
+            if let Some(sp) = crate::lazy::as_splitvec(&args[0]) {
+                return Ok(sp
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|i| sp.nth(i))
+                    .unwrap_or(Value::Nil));
+            }
             if let Some(sv) = as_subvector(&args[0]) {
                 return Ok(sv.iter().last().unwrap_or(Value::Nil));
             }
@@ -2455,6 +2642,12 @@ fn pop_pv(p: PrimitiveVector) -> Result<Value, NativeError> {
 
 /// `pop` over anything else (subvectors shrink; the rest fail).
 fn pop_fallback(arg: &Value) -> Result<Value, NativeError> {
+    if let Some(sp) = crate::lazy::as_splitvec(arg) {
+        if sp.len() == 1 {
+            return Ok(Value::Vector(Vector::from_vec(Vec::new())));
+        }
+        return Ok(Value::Extension(Arc::new(sp.drop_last())));
+    }
     if let Some(sv) = as_subvector(arg) {
         if sv.len() == 1 {
             return Ok(Value::Vector(Vector::from_vec(Vec::new())));
@@ -2485,7 +2678,36 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 }
 
 /// Three-way `subvec` over an already-defaulted end.
+/// `subvec` on a split vector: window in place (no piece
+/// materializes). `None` passes through to the generic path.
+fn splitvec_subvec(
+    v: &Value,
+    start_v: &Value,
+    end_v: &Value,
+) -> Option<Result<Value, NativeError>> {
+    let sp = crate::lazy::as_splitvec(v)?;
+    Some((|| {
+        let s = nth_index(start_v)?;
+        let e = nth_index(end_v)?;
+        let (Ok(su), Ok(eu)) = (usize::try_from(s), usize::try_from(e)) else {
+            return Err(ioobe());
+        };
+        if eu < su || eu > sp.len() {
+            return Err(ioobe());
+        }
+        if su == eu {
+            return Ok(Value::Vector(Vector::from_vec(Vec::new())));
+        }
+        Ok(Value::Extension(Arc::new(
+            sp.window(su, eu).with_meta(None),
+        )))
+    })())
+}
+
 fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeError> {
+    if let Some(r) = splitvec_subvec(v, start_v, end_v) {
+        return r;
+    }
     let (backing, base, len) = match v {
         Value::Vector(x) => (x.clone(), 0, x.len()),
         // `subvec` of a primitive vector is a plain subvector
@@ -3167,5 +3389,50 @@ mod tests {
         let t2: Arc<str> = Arc::from("z".repeat(200));
         drop(t);
         assert_eq!(str_char_at(&t2, 100), Some('z'));
+    }
+
+    #[test]
+    fn str_scan_small_ascii_memoizes_and_repeats() {
+        let s: Arc<str> = Arc::from("hello_world");
+        assert_eq!(str_char_at(&s, 0), Some('h'));
+        assert_eq!(str_char_at(&s, 1), Some('e'));
+        assert_eq!(str_char_at(&s, 10), Some('d'));
+        assert_eq!(str_char_at(&s, 11), None);
+    }
+
+    #[test]
+    fn str_scan_memo_slot_swap() {
+        let s0: Arc<str> = Arc::from("0".repeat(200));
+        let s1: Arc<str> = Arc::from("1".repeat(200));
+        let s2: Arc<str> = Arc::from("2".repeat(200));
+        assert_eq!(str_char_at(&s0, 0), Some('0'));
+        assert_eq!(str_char_at(&s1, 0), Some('1'));
+        assert_eq!(str_char_at(&s2, 0), Some('2'));
+        assert_eq!(str_char_at(&s2, 10), Some('2'));
+        assert_eq!(fast_str_char_at(&s0, 5), Some('0'));
+        assert_eq!(fast_str_char_at(&s2, 5), Some('2'));
+        assert_eq!(str_char_at(&s1, 5), Some('1'));
+    }
+
+    #[test]
+    fn native_persistent_borrowed_fallback() {
+        let mut eval = crate::boot();
+        let tv = Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Vector(
+            clj_value::TransientVector::new(),
+        )));
+        let res = native_persistent(&mut eval, &[tv]).expect("persistent!");
+        assert!(matches!(res, Value::Vector(_)));
+    }
+
+    #[test]
+    fn str_scan_fast_indexed_slot0() {
+        let s: Arc<str> = Arc::from("é".repeat(200));
+        let scan = build_str_scan(&s).unwrap();
+        LAST_SCAN.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            memo.0[0] = Some((Arc::downgrade(&s), scan));
+        });
+        assert_eq!(fast_str_char_at(&s, 5), Some('é'));
+        assert_eq!(fast_str_char_at(&s, 250), None);
     }
 }

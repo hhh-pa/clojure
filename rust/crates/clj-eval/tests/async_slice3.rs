@@ -616,7 +616,7 @@ fn go_errors_settle_nil_and_close() {
     assert_eq!(
         run_last(
             &mut eval,
-            "(let [c (a/chan 1)] (a/>!! c :v) (let [g (a/go (doall (for [ch [c]] (a/<! ch))))] [(goo g) (a/closed? g)]))"
+            "(let [c (a/chan 1)] (a/>!! c :v) (let [g (a/go (doall (for [ch [c]] (a/<! ch))))] (let [v (goo g)] (a/<!! g) [v (a/closed? g)])))"
         ),
         "[(:v) true]"
     );

@@ -249,8 +249,7 @@ impl Walk {
         if crate::vm_ops::update_order(call) {
             return self.update(call, live);
         }
-        let in_place =
-            crate::vm_ops::in_place(call) || crate::vm_intrinsics::intrinsic_of(call).is_some();
+        let in_place = crate::vm_ops::in_place(call);
         if !in_place {
             self.seq(&call.args, live);
             return;

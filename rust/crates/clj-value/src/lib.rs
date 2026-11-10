@@ -82,7 +82,8 @@ pub use ref_kind::{Ref, RefState};
 pub use scalar::{Instant, Uri, UriError, Uuid};
 pub use seq::{
     CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue,
-    RealizedSeq, RepeatValue, Seq, SeqKind, SubVectorValue, ValSeqValue, seq_vec,
+    RealizedSeq, RepeatValue, Seq, SeqKind, SplitVecValue, SubVectorValue, ValSeqValue,
+    piece_value, seq_vec,
 };
 pub use symbol::{SymKey, Symbol};
 pub use tower::{
@@ -90,7 +91,8 @@ pub use tower::{
     RoundingMode, bigint_parse, bigint_parse_radix, ratio_to_f64,
 };
 pub use transient::{
-    Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector,
+    Transient, TransientError, TransientGuard, TransientKind, TransientLock, TransientMap,
+    TransientSet, TransientVector,
 };
 pub use value::{
     FxBuildHasher, List, Map, MemberSet, Set, SortSpec, Value, Vector, bigdec_result,

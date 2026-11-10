@@ -5003,6 +5003,13 @@ fn lpv_create_owning_201() {
     assert_eq!(
         run(
             &mut eval,
+            "(let [a (into-array Object [\"a\" \"b\"]) b a] (clojure.lang.LazilyPersistentVector/createOwning a))"
+        ),
+        "[\"a\" \"b\"]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
             "(class (clojure.lang.LazilyPersistentVector/createOwning (into-array Object [])))"
         ),
         "clojure.lang.PersistentVector"
@@ -5595,4 +5602,77 @@ fn character_case_201() {
     assert_eq!(run(&mut eval, "(Character/isUpperCase \\A)"), "true");
     assert_eq!(run(&mut eval, "(Character/isUpperCase \\a)"), "false");
     assert_eq!(run(&mut eval, "(Character/isUpperCase 65)"), "true");
+}
+
+#[test]
+fn string_optimizations_coverage() {
+    let mut eval = boot();
+    // Non-ASCII charAt in and out of bounds
+    assert_eq!(run(&mut eval, "(.. \"é\" (charAt 0))"), "\\é");
+    assert_eq!(
+        uncaught(&mut eval, "(.. \"😀\" (charAt -1))"),
+        "java.lang.StringIndexOutOfBoundsException | Index -1 out of bounds for length 2"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.. \"😀\" (charAt 5))"),
+        "java.lang.StringIndexOutOfBoundsException | Index 5 out of bounds for length 2"
+    );
+
+    // Non-ASCII substring in and out of bounds
+    assert_eq!(run(&mut eval, "(.. \"héllo\" (substring 1))"), "\"éllo\"");
+    assert_eq!(run(&mut eval, "(.. \"héllo\" (substring 1 3))"), "\"él\"");
+    assert_eq!(
+        uncaught(&mut eval, "(.. \"héllo\" (substring -1 2))"),
+        "java.lang.StringIndexOutOfBoundsException | Range [-1, 2) out of bounds for length 5"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.. \"héllo\" (substring 3 1))"),
+        "java.lang.StringIndexOutOfBoundsException | Range [3, 1) out of bounds for length 5"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(.. \"héllo\" (substring 2 10))"),
+        "java.lang.StringIndexOutOfBoundsException | Range [2, 10) out of bounds for length 5"
+    );
+
+    // indexOf edges
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" \"b\" 10)"), "-1");
+    assert_eq!(run(&mut eval, "(.indexOf \"abc\" \"\" 1)"), "1");
+    assert_eq!(run(&mut eval, "(.indexOf \"héllo\" \"é\")"), "1");
+    assert_eq!(run(&mut eval, "(.indexOf \"hello\" \"é\")"), "-1");
+    assert_eq!(run(&mut eval, "(.indexOf \"héllo\" \"\" 1)"), "1");
+    assert_eq!(run(&mut eval, "(.indexOf \"héllo\" \"é\" 10)"), "-1");
+
+    // lastIndexOf edges
+    assert_eq!(run(&mut eval, "(.lastIndexOf \"a\" \"abc\")"), "-1");
+    assert_eq!(run(&mut eval, "(.lastIndexOf \"héllo\" \"é\")"), "1");
+    assert_eq!(run(&mut eval, "(.lastIndexOf \"hello\" \"é\")"), "-1");
+    assert_eq!(run(&mut eval, "(.lastIndexOf \"héllo\" \"é\" -1)"), "-1");
+    assert_eq!(run(&mut eval, "(.lastIndexOf \"héllo\" \"\")"), "5");
+
+    // parse_long_str with Unicode digits
+    assert_eq!(run(&mut eval, "(Long/parseLong \"١٢\")"), "12");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"-١٢\")"), "-12");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"+١٢\")"), "12");
+    assert_eq!(run(&mut eval, "(Long/parseLong \"١2\")"), "12");
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"-\")"),
+        "java.lang.NumberFormatException | For input string: \"-\""
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(Long/parseLong \"+\")"),
+        "java.lang.NumberFormatException | For input string: \"+\""
+    );
+
+    // collect_direct for Array
+    assert_eq!(
+        run(&mut eval, "(vec (into-array Object [10 20 30]))"),
+        "[10 20 30]"
+    );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [a (into-array Object [10 20]) b a] (vec a))"
+        ),
+        "[10 20]"
+    );
 }

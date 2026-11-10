@@ -171,8 +171,16 @@ jobs:
           workspaces: rust
           save-if: 'true'
       # Pinned to the nextest the gate image provisions
-      # (rust-quality-gates nextestVersion).
+      # (rust-quality-gates nextestVersion). Caches the binary across shards
+      # to avoid network latency and rate limits on release downloads.
+      - name: cache cargo-nextest
+        id: cache-nextest
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-nextest${{ runner.os == 'Windows' && '.exe' || '' }}
+          key: cargo-nextest-0.9.148-${{ runner.os }}-${{ runner.arch }}
       - uses: taiki-e/install-action@v2
+        if: steps.cache-nextest.outputs.cache-hit != 'true'
         with:
           tool: cargo-nextest@0.9.148
       - run: cargo nextest run --workspace --locked --partition hash:${{ matrix.shard }}/8 --no-fail-fast
@@ -203,7 +211,17 @@ jobs:
         with:
           workspaces: rust
           save-if: 'true'
+      # Pinned to the nextest the gate image provisions
+      # (rust-quality-gates nextestVersion). Caches the binary across shards
+      # to avoid network latency and rate limits on release downloads.
+      - name: cache cargo-nextest
+        id: cache-nextest
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-nextest${{ runner.os == 'Windows' && '.exe' || '' }}
+          key: cargo-nextest-0.9.148-${{ runner.os }}-${{ runner.arch }}
       - uses: taiki-e/install-action@v2
+        if: steps.cache-nextest.outputs.cache-hit != 'true'
         with:
           tool: cargo-nextest@0.9.148
       # S9A D2: LLVM-dependent compilation excluded (inkwell 0.10.0

@@ -63,33 +63,59 @@ impl CharStream {
         if chunk.is_empty() {
             return;
         }
-        let mut iter = chunk.chars().peekable();
+        let mut rest = chunk;
         if self.pending_cr {
             self.pending_cr = false;
             self.chars.push('\n');
-            if iter.peek() == Some(&'\n') {
-                iter.next();
-            }
+            rest = rest.strip_prefix('\n').unwrap_or(rest);
         }
-        while let Some(c) = iter.next() {
-            if c == '\r' {
-                if iter.peek() == Some(&'\n') {
-                    iter.next();
-                    self.chars.push('\n');
-                } else if iter.peek().is_none() {
-                    self.pending_cr = true;
-                } else {
-                    self.chars.push('\n');
-                }
-            } else {
-                self.chars.push(c);
+        // Bulk-take plain runs between '\r's: the common case
+        // decodes without per-char branching.
+        while let Some(i) = rest.find('\r') {
+            self.chars.extend(rest[..i].chars());
+            let after = &rest[i + 1..];
+            if after.is_empty() {
+                self.pending_cr = true;
+                return;
             }
+            self.chars.push('\n');
+            rest = after.strip_prefix('\n').unwrap_or(after);
         }
+        self.chars.extend(rest.chars());
     }
 
     /// Read one `\n`-split line (`\n` consumed and stripped); `None`
     /// at EOF, the tail when EOF lands mid-line.
     pub fn read_line(&mut self) -> Option<String> {
+        if self.pushback.is_none() {
+            if self.pending_cr {
+                self.pending_cr = false;
+                self.chars.push('\n');
+            }
+            let rest = &self.chars[self.pos..];
+            match rest.iter().position(|&c| c == '\n') {
+                Some(k) => {
+                    let line: String = rest[..k].iter().collect();
+                    self.pos += k + 1;
+                    self.line += 1;
+                    self.col = 1;
+                    self.bumpable = false;
+                    return Some(line);
+                }
+                None if !rest.is_empty() => {
+                    // The tail at buffer end: the per-char path
+                    // ends through the EOF read, whose line bump
+                    // is part of this return's end state.
+                    let line: String = rest.iter().collect();
+                    self.line += 1;
+                    self.col = 1;
+                    self.bumpable = false;
+                    self.pos = self.chars.len();
+                    return Some(line);
+                }
+                _ => {}
+            }
+        }
         let mut line = String::new();
         loop {
             match self.read() {
@@ -103,6 +129,54 @@ impl CharStream {
                 }
             }
         }
+    }
+
+    /// Whether a `\n`-terminated line is fully buffered (a staged
+    /// chunk-trailing `\r` terminates once materialized, as does an
+    /// unread `\n`): streaming callers pull more input instead of
+    /// mistaking a buffered partial line for the EOF tail.
+    #[must_use]
+    pub fn has_complete_line(&self) -> bool {
+        self.pending_cr || self.pushback == Some('\n') || self.chars[self.pos..].contains(&'\n')
+    }
+
+    /// Drain every remaining char (the `slurp` bulk path): the same
+    /// text and line/column end state as reading char by char to
+    /// EOF, without the final EOF read's line bump.
+    pub fn drain_to_string(&mut self) -> String {
+        if self.pushback.is_some() || self.pending_cr {
+            let mut out = String::new();
+            loop {
+                if self.pushback.is_none() && !self.pending_cr && self.pos >= self.chars.len() {
+                    break;
+                }
+                let Some(c) = self.read() else { break };
+                out.push(c);
+            }
+            return out;
+        }
+        let span = &self.chars[self.pos..];
+        let out: String = span.iter().collect();
+        let mut newlines = 0u32;
+        let mut since_newline = 0usize;
+        for &c in span {
+            if c == '\n' {
+                newlines += 1;
+                since_newline = 0;
+            } else {
+                since_newline += 1;
+            }
+        }
+        if newlines > 0 {
+            self.line += newlines;
+            self.col = 1 + since_newline as u32;
+            self.bumpable = since_newline > 0;
+        } else {
+            self.col += span.len() as u32;
+            self.bumpable = self.bumpable || !span.is_empty();
+        }
+        self.pos = self.chars.len();
+        out
     }
 
     /// Read one char, or `None` at EOF (with the EOF line-bump rule).
@@ -148,6 +222,15 @@ impl CharStream {
         debug_assert!(self.pushback.is_none(), "single-char pushback");
         self.pushback = Some(c);
         self.col -= 1;
+    }
+
+    /// Drop consumed chars so a long-lived stream fed line by line
+    /// retains only the unconsumed tail (the pushback char, when
+    /// present, stays: it is part of that tail).
+    pub fn compact(&mut self) {
+        let keep_from = self.capture_mark();
+        self.chars.drain(..keep_from);
+        self.pos -= keep_from;
     }
 
     /// The logical read position: unread chars count as unconsumed
@@ -248,6 +331,24 @@ mod tests {
                 (None, 3, 1),
             ]
         );
+    }
+
+    #[test]
+    fn compact_drops_consumed_keeps_pushback() {
+        let mut s = CharStream::new("ab\ncd");
+        assert_eq!(s.read(), Some('a'));
+        assert_eq!(s.read(), Some('b'));
+        s.compact();
+        assert_eq!(s.read(), Some('\n'));
+        s.unread('\n');
+        s.compact();
+        assert_eq!(s.read(), Some('\n'));
+        assert_eq!(s.read(), Some('c'));
+        s.compact();
+        s.extend("e");
+        assert_eq!(s.read(), Some('d'));
+        assert_eq!(s.read(), Some('e'));
+        assert_eq!(s.read(), None);
     }
 
     #[test]
@@ -459,5 +560,94 @@ mod tests {
         assert_eq!(s.read_line(), Some(String::new()));
         assert_eq!(s.read_line(), Some("b".to_owned()));
         assert_eq!(s.read_line(), None);
+    }
+
+    /// Drain and `read_line` fast paths must match char-by-char
+    /// reads in text and in the line/column end state, over CR
+    /// normalization, chunk-split CRLF pairs, staged trailing CRs,
+    /// and pushback.
+    #[test]
+    fn drain_and_read_line_match_char_reads() {
+        fn reference(chunks: &[&str]) -> (String, u32, u32) {
+            let mut s = CharStream::new("");
+            for c in chunks {
+                s.extend(c);
+            }
+            let mut out = String::new();
+            // Stop at the last char so the EOF read's bump is not
+            // part of the comparison.
+            loop {
+                let mark = (s.line(), s.col());
+                match s.read() {
+                    Some(c) => out.push(c),
+                    None => return (out, mark.0, mark.1),
+                }
+            }
+        }
+        let cases: &[&[&str]] = &[
+            &["abc"],
+            &["a\nb\nc"],
+            &["a\nb\n"],
+            &["\n\n"],
+            &[""],
+            &["ab", "\r\ncd", "\r", "ef\r\n"],
+            &["x\r"],
+            &["x\r", "y"],
+            &["x\r", "\ny"],
+            &["αβ\nγ"],
+            &["no newline at all here"],
+        ];
+        for chunks in cases {
+            let (text, line, col) = reference(chunks);
+            let mut s = CharStream::new("");
+            for c in *chunks {
+                s.extend(c);
+            }
+            assert_eq!(s.drain_to_string(), text, "drain text {chunks:?}");
+            assert_eq!((s.line(), s.col()), (line, col), "drain pos {chunks:?}");
+            assert_eq!(s.read(), None);
+            // read_line walk reproduces the same text lines.
+            let mut s = CharStream::new("");
+            for c in *chunks {
+                s.extend(c);
+            }
+            let mut lines = Vec::new();
+            while let Some(l) = s.read_line() {
+                lines.push(l);
+            }
+            assert_eq!(
+                lines.join("\n"),
+                text.strip_suffix('\n').unwrap_or(&text),
+                "lines {chunks:?}"
+            );
+        }
+        // Pushback + staged CR take the drain fallback.
+        let mut s = CharStream::new("ab");
+        assert_eq!(s.read(), Some('a'));
+        s.unread('a');
+        assert_eq!(s.drain_to_string(), "ab");
+        let mut s = CharStream::new("");
+        s.extend("q\r");
+        assert_eq!(s.drain_to_string(), "q\n");
+        // A partially read stream drains only the remainder.
+        let mut s = CharStream::new("ab\ncd");
+        assert_eq!(s.read_line(), Some("ab".to_owned()));
+        assert_eq!(s.drain_to_string(), "cd");
+        assert_eq!((s.line(), s.col()), (2, 3));
+        // Completeness tracks buffered terminators only.
+        let mut s = CharStream::new("ab");
+        assert!(!s.has_complete_line());
+        s.extend("c\n");
+        assert!(s.has_complete_line());
+        assert_eq!(s.read_line(), Some("abc".to_owned()));
+        let mut s = CharStream::new("");
+        s.extend("q\r");
+        assert!(s.has_complete_line());
+        assert_eq!(s.read_line(), Some("q".to_owned()));
+        let mut s = CharStream::new("a\nb");
+        assert_eq!(s.read(), Some('a'));
+        assert_eq!(s.read(), Some('\n'));
+        s.unread('\n');
+        assert!(s.has_complete_line());
     }
 }

@@ -34,6 +34,9 @@ pub(crate) const STRING_NATIVES: &[(&str, Native)] = &[
     ("join", native_join),
     ("trim", native_trim),
     ("blank?", native_blank),
+    ("starts-with?", native_starts_with),
+    ("ends-with?", native_ends_with),
+    ("includes?", native_includes),
 ];
 
 /// Call the interpreted upstream definition of `clojure.string/name`
@@ -131,6 +134,80 @@ fn native_blank(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     }
 }
 
+/// `(starts-with? s substr)`: for two strings, the UTF-8 byte
+/// prefix test equals the upstream UTF-16 unit test (a valid
+/// string's unit prefix is its char prefix). Anything else (nil,
+/// other `CharSequence`s, odd arities) takes the upstream path.
+fn native_starts_with(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    match args {
+        [Value::Str(s), Value::Str(p)] => Ok(Value::Bool(s.starts_with(p.as_ref()))),
+        _ => upstream(eval, "starts-with?", args),
+    }
+}
+
+/// `(ends-with? s suffix)`: byte suffix test, as `starts-with?`.
+fn native_ends_with(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    match args {
+        [Value::Str(s), Value::Str(p)] => Ok(Value::Bool(s.ends_with(p.as_ref()))),
+        _ => upstream(eval, "ends-with?", args),
+    }
+}
+
+/// `(includes? s substr)`: substring test, as `starts-with?`.
+fn native_includes(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    match args {
+        [Value::Str(s), Value::Str(p)] => Ok(Value::Bool(s.contains(p.as_ref()))),
+        _ => upstream(eval, "includes?", args),
+    }
+}
+
+fn join_vector(
+    eval: &mut Evaluator,
+    sep: &str,
+    v: &clj_value::Vector,
+) -> Result<Value, NativeError> {
+    let mut out = String::with_capacity(v.len().saturating_mul(sep.len() + 4));
+    let mut first = true;
+    for item in v.iter() {
+        if !first {
+            out.push_str(sep);
+        }
+        first = false;
+        crate::core::str_push(&mut out, eval, &item)?;
+    }
+    Ok(Value::Str(Arc::from(out)))
+}
+
+fn join_seq(eval: &mut Evaluator, sep: &str, coll: &Value) -> Result<Value, NativeError> {
+    let mut out = String::new();
+    let mut first = true;
+    let mut cur = seq_value(eval, coll).map_err(signal_to_native)?;
+    loop {
+        match step_unit(eval, &cur).map_err(signal_to_native)? {
+            StepUnit::Empty => break,
+            StepUnit::One { head, tail } => {
+                cur = tail;
+                if !first {
+                    out.push_str(sep);
+                }
+                first = false;
+                crate::core::str_push(&mut out, eval, &head)?;
+            }
+            StepUnit::Chunk { items, tail } => {
+                cur = tail;
+                for item in items.iter() {
+                    if !first {
+                        out.push_str(sep);
+                    }
+                    first = false;
+                    crate::core::str_push(&mut out, eval, item)?;
+                }
+            }
+        }
+    }
+    Ok(Value::Str(Arc::from(out)))
+}
+
 /// `(join sep coll)`: each item's `str` between `(str sep)`, walking
 /// `coll` step by step like the upstream `first`/`next` loop (each
 /// step realizes before the items it yields are stringified). A
@@ -149,28 +226,8 @@ fn native_join(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     if !is_seqable(coll) {
         return upstream(eval, "join", args);
     }
-    let mut out = String::new();
-    let mut first = true;
-    let mut cur = seq_value(eval, coll).map_err(signal_to_native)?;
-    loop {
-        let items: Vec<Value> = match step_unit(eval, &cur).map_err(signal_to_native)? {
-            StepUnit::Empty => break,
-            StepUnit::One { head, tail } => {
-                cur = tail;
-                vec![head]
-            }
-            StepUnit::Chunk { items, tail } => {
-                cur = tail;
-                items.to_vec()
-            }
-        };
-        for item in &items {
-            if !first {
-                out.push_str(&sep);
-            }
-            first = false;
-            out.push_str(&crate::core::str_of_one(eval, item)?);
-        }
+    if let Value::Vector(v) = coll {
+        return join_vector(eval, &sep, v);
     }
-    Ok(Value::Str(Arc::from(out)))
+    join_seq(eval, &sep, coll)
 }

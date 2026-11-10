@@ -503,17 +503,18 @@ fn call_value(
     ev.invoke_args(callee, std::mem::take(args), span)
 }
 
-/// `(m k)`, `(m k nf)`, `(:k m)` and `(:k m nf)` as the `get` they
-/// are, inline (`None` leaves whatever the inline lookup does not
-/// cover — other shapes, arities and their errors — to the general
-/// invoke).
-fn invoke_lookup(callee: &Value, args: &[Value]) -> Option<Value> {
+/// `(m k)`, `(m k nf)`, `(:k m)`, `(:k m nf)`, `(v i)`, `(s k)`, and
+/// `(s k nf)` inline (`None` leaves whatever the inline lookup does
+/// not cover — other shapes, arities and their errors — to the
+/// general invoke).
+pub(crate) fn invoke_lookup(callee: &Value, args: &[Value]) -> Option<Value> {
     use crate::vm_intrinsics::get_of;
     match (callee, args) {
-        (Value::Map(_), [k]) => get_of(callee, k, None),
-        (Value::Map(_), [k, nf]) => get_of(callee, k, Some(nf)),
+        (Value::Map(_) | Value::Set(_), [k]) => get_of(callee, k, None),
+        (Value::Map(_) | Value::Set(_), [k, nf]) => get_of(callee, k, Some(nf)),
         (Value::Keyword(_), [m]) => get_of(m, callee, None),
         (Value::Keyword(_), [m, nf]) => get_of(m, callee, Some(nf)),
+        (Value::Vector(v), [Value::Int(n)]) => usize::try_from(*n).ok().and_then(|i| v.get(i)),
         _ => None,
     }
 }
@@ -777,8 +778,29 @@ impl Compiler {
         exprs.iter().map(|e| self.compile(e)).collect()
     }
 
+    /// A form whose value is discarded: identical to
+    /// [`compile`](Self::compile) except that a transient
+    /// mutator compiles to its effect code (no transient clone
+    /// built just to drop).
+    fn compile_effect(&mut self, expr: &Expr) -> Exec {
+        if let Expr::DirectNative(call) = expr {
+            if let Some(ctor) = crate::vm_ops::effect_ctor(call) {
+                let ops = self.in_place_operands(call);
+                return ctor.code(site_of(call), ops);
+            }
+        }
+        self.compile(expr)
+    }
+
     fn compile_body(&mut self, body: &[Expr]) -> Exec {
-        let mut execs = self.compile_all(body);
+        let mut execs: Vec<Exec> = match body.split_last() {
+            None => Vec::new(),
+            Some((last, rest)) => {
+                let mut execs: Vec<Exec> = rest.iter().map(|e| self.compile_effect(e)).collect();
+                execs.push(self.compile(last));
+                execs
+            }
+        };
         match execs.len() {
             0 => konst(Value::Nil),
             1 => execs.pop().expect("one form"),
@@ -818,12 +840,6 @@ impl Compiler {
                 let ops = self.in_place_operands(call);
                 return ctor.code(site_of(call), ops);
             }
-            if let (None, Some(op)) = (
-                crate::vm_ops::value_ctor(call),
-                crate::vm_intrinsics::intrinsic_of(call),
-            ) {
-                return self.intrinsic_test(call, op);
-            }
         }
         let e = self.compile(expr);
         Box::new(move |ev, f| Ok(e(ev, f)?.is_truthy()))
@@ -857,11 +873,6 @@ impl Compiler {
     /// place (never moved out).
     fn in_place_operands(&mut self, call: &DirectCall) -> Vec<Operand> {
         call.args.iter().map(|a| self.operand(a, false)).collect()
-    }
-
-    fn intrinsic_test(&mut self, call: &DirectCall, fast: crate::vm_intrinsics::Fast) -> Test {
-        let ops = self.in_place_operands(call);
-        intrinsic_test_exec(site_of(call), ops, fast)
     }
 
     /// `let`: a symbol's init writes its register directly (no
@@ -953,18 +964,189 @@ impl Compiler {
             });
         }
         let targets: Arc<[usize]> = steps.iter().map(|(r, ..)| *r).collect();
+        let unpacks = steps.iter().any(|(_, _, u)| u.is_some());
         let saved = std::mem::replace(&mut self.scope().recur, Arc::clone(&targets));
-        let body = self.compile_body(body);
+        let fused = self.try_fused_loop(body, targets.len());
+        let flat = if fused.is_none() && !unpacks {
+            Some(self.compile_flat_loop(body, targets.len()))
+        } else {
+            None
+        };
+        let body = if fused.is_some() || flat.is_some() {
+            konst(Value::Nil)
+        } else {
+            self.compile_body(body)
+        };
         self.scope().recur = saved;
         self.reset(mark);
-        let unpacks = steps.iter().any(|(_, _, u)| u.is_some());
         let code = LoopCode {
             steps,
             targets,
             body,
             unpacks,
+            fused,
+            flat,
         };
         Box::new(move |ev, f| run_loop(ev, f, &code))
+    }
+
+    /// Detect the fused loop shape: a single-form body that is an
+    /// `if` with a bare terminal `recur` in exactly one branch.
+    /// Parts compile in `compile_if` order (test, then, els) so
+    /// register allocation and last-use moves match the generic
+    /// path exactly.
+    fn try_fused_loop(&mut self, body: &[Expr], arity: usize) -> Option<FusedLoop> {
+        let [Expr::If { test, then, els }] = body else {
+            return None;
+        };
+        let (recur_args, recur_when_true) =
+            match (terminal_recur(then, arity), terminal_recur(els, arity)) {
+                (Some(args), None) => (args, true),
+                (None, Some(args)) => (args, false),
+                _ => return None,
+            };
+        let test = self.compile_test(test);
+        // Compile in source order: then-branch before els-branch.
+        let (then_ops, exit) = if recur_when_true {
+            let ops: Vec<Operand> = recur_args.iter().map(|a| self.operand(a, true)).collect();
+            (ops, self.compile(els))
+        } else {
+            let exit = self.compile(then);
+            let ops: Vec<Operand> = recur_args.iter().map(|a| self.operand(a, true)).collect();
+            (ops, exit)
+        };
+        Some(FusedLoop {
+            test,
+            exit,
+            ops: then_ops,
+            recur_when_true,
+        })
+    }
+
+    /// Compile a loop body to flat steps (see [`FlatLoop`]).
+    /// Leaf forms compile through the ordinary paths, in exactly
+    /// the order `compile_body`/`compile_let`/`compile_if` compile
+    /// them, so register allocation and last-use moves match the
+    /// generic loop exactly.
+    fn compile_flat_loop(&mut self, body: &[Expr], arity: usize) -> FlatLoop {
+        let mut steps = Vec::new();
+        self.flat_body_tail(&mut steps, body, arity);
+        FlatLoop {
+            steps: steps.into_boxed_slice(),
+        }
+    }
+
+    /// A body in tail position: statements, then the tail form.
+    fn flat_body_tail(&mut self, steps: &mut Vec<Step>, body: &[Expr], arity: usize) {
+        match body.split_last() {
+            None => steps.push(Step::Exit(konst(Value::Nil))),
+            Some((last, rest)) => {
+                for e in rest {
+                    self.flat_stmt(steps, e, arity);
+                }
+                self.flat_tail(steps, last, arity);
+            }
+        }
+    }
+
+    /// One form in tail position: every path ends in `Recur` or
+    /// `Exit`, so an `if` needs no joining jump.
+    fn flat_tail(&mut self, steps: &mut Vec<Step>, e: &Expr, arity: usize) {
+        match e {
+            Expr::Recur(args) if args.len() == arity => {
+                let ops: Vec<Operand> = args.iter().map(|a| self.operand(a, true)).collect();
+                steps.push(Step::Recur(ops.into_boxed_slice()));
+            }
+            Expr::If { test, then, els } => {
+                let test = self.compile_test(test);
+                let jump = steps.len();
+                steps.push(Step::JumpUnless(test, usize::MAX));
+                self.flat_tail(steps, then, arity);
+                patch_jump(steps, jump);
+                self.flat_tail(steps, els, arity);
+            }
+            Expr::Let { bindings, body } => self.flat_let(steps, bindings, body, arity, true),
+            Expr::Do(body) => self.flat_body_tail(steps, body, arity),
+            _ => steps.push(Step::Exit(self.compile(e))),
+        }
+    }
+
+    /// One form in statement position (its value is discarded).
+    fn flat_stmt(&mut self, steps: &mut Vec<Step>, e: &Expr, arity: usize) {
+        match e {
+            Expr::If { test, then, els } => self.flat_if_stmt(steps, test, then, els, arity),
+            Expr::Let { bindings, body } => self.flat_let(steps, bindings, body, arity, false),
+            Expr::Do(body) => {
+                for e in body {
+                    self.flat_stmt(steps, e, arity);
+                }
+            }
+            _ => steps.push(Step::Eval(self.compile_effect(e))),
+        }
+    }
+
+    /// A statement `if`: a literal-nil branch needs no step (the
+    /// `when`/`when-not` shapes), anything else joins after.
+    /// Branches compile in source order, like `compile_if`.
+    fn flat_if_stmt(
+        &mut self,
+        steps: &mut Vec<Step>,
+        test: &Expr,
+        then: &Expr,
+        els: &Expr,
+        arity: usize,
+    ) {
+        let test = self.compile_test(test);
+        let jump = steps.len();
+        steps.push(Step::JumpUnless(test, usize::MAX));
+        if is_nil_literal(then) {
+            let end = steps.len();
+            steps.push(Step::Jump(usize::MAX));
+            patch_jump(steps, jump);
+            self.flat_stmt(steps, els, arity);
+            patch_jump(steps, end);
+            return;
+        }
+        self.flat_stmt(steps, then, arity);
+        if is_nil_literal(els) {
+            patch_jump(steps, jump);
+            return;
+        }
+        let end = steps.len();
+        steps.push(Step::Jump(usize::MAX));
+        patch_jump(steps, jump);
+        self.flat_stmt(steps, els, arity);
+        patch_jump(steps, end);
+    }
+
+    /// A `let` as flat steps: bindings in order (each init
+    /// compiles before its register is pushed, like
+    /// `compile_let`), then the body in tail or statement flow.
+    fn flat_let(
+        &mut self,
+        steps: &mut Vec<Step>,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+        arity: usize,
+        tail: bool,
+    ) {
+        let mark = self.mark();
+        for (pat, init) in bindings {
+            let init = self.compile(init);
+            steps.push(if matches!(pat, Pattern::Symbol(_)) {
+                Step::Set(self.push_local(), init)
+            } else {
+                Step::Unpack(self.bind_step(pat, init))
+            });
+        }
+        if tail {
+            self.flat_body_tail(steps, body, arity);
+        } else {
+            for e in body {
+                self.flat_stmt(steps, e, arity);
+            }
+        }
+        self.reset(mark);
     }
 
     /// `recur`: every arg evaluates (in order), then the target
@@ -1193,6 +1375,11 @@ impl Compiler {
     /// with a fixed arity for the arg count takes them straight into
     /// its registers.
     fn compile_invoke(&mut self, head: &Expr, args: &[Expr], span: Span) -> Exec {
+        if let Expr::Literal(Value::Keyword(kw)) = head {
+            if let Some(exec) = self.compile_literal_keyword_invoke(kw, args, span) {
+                return exec;
+            }
+        }
         let head = self.compile(head);
         let args: Vec<Operand> = args.iter().map(|a| self.operand(a, true)).collect();
         Box::new(move |ev, f| {
@@ -1206,11 +1393,62 @@ impl Compiler {
         })
     }
 
+    /// Fast-path literal keyword invocations (`(:kw target)` or `(:kw target fallback)`).
+    fn compile_literal_keyword_invoke(
+        &mut self,
+        kw: &clj_value::Keyword,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Exec> {
+        if args.len() == 1 {
+            let target = self.operand(&args[0], false);
+            let kw_val = Value::Keyword(kw.clone());
+            Some(Box::new(move |ev, f| {
+                let comp = target.computed(ev, f)?;
+                let m = target.read(f, comp.as_ref());
+                if let Some(v) = crate::vm_intrinsics::get_of(m, &kw_val, None) {
+                    return Ok(v);
+                }
+                let mut values: SmallVec<[Value; 4]> = SmallVec::new();
+                values.push(m.clone());
+                call_value(ev, &kw_val, &mut values, span)
+            }))
+        } else if args.len() == 2 {
+            let target = self.operand(&args[0], false);
+            let fallback = self.operand(&args[1], false);
+            let kw_val = Value::Keyword(kw.clone());
+            Some(Box::new(move |ev, f| {
+                let comp_target = target.computed(ev, f)?;
+                let comp_fb = fallback.computed(ev, f)?;
+                let m = target.read(f, comp_target.as_ref());
+                let fb = fallback.read(f, comp_fb.as_ref());
+                if let Some(v) = crate::vm_intrinsics::get_of(m, &kw_val, Some(fb)) {
+                    return Ok(v);
+                }
+                let mut values: SmallVec<[Value; 4]> = SmallVec::new();
+                values.push(m.clone());
+                values.push(fb.clone());
+                call_value(ev, &kw_val, &mut values, span)
+            }))
+        } else {
+            None
+        }
+    }
+
     /// A direct-call operand; `may_move` lets a last-use local move
     /// out (not for intrinsics, which read locals in place).
     fn operand(&mut self, expr: &Expr, may_move: bool) -> Operand {
         match expr {
             Expr::Literal(v) => Operand::Const(v.clone()),
+            Expr::MapLit(pairs, meta) if pairs.is_empty() => {
+                Operand::Const(Value::Map(clj_value::new_map().with_meta(meta.clone())))
+            }
+            Expr::VecLit(elems, meta) if elems.is_empty() => {
+                Operand::Const(Value::Vector(Vector::new_sync().with_meta(meta.clone())))
+            }
+            Expr::SetLit(elems, meta) if elems.is_empty() => {
+                Operand::Const(Value::Set(clj_value::new_set().with_meta(meta.clone())))
+            }
             Expr::Local(idx) => match (self.resolve(*idx), may_move && self.is_last(expr)) {
                 (loc @ Loc::Reg(_), true) => Operand::Loc(loc, true),
                 (loc, _) => Operand::Loc(loc, false),
@@ -1233,15 +1471,15 @@ impl Compiler {
             let ops: Vec<Operand> = call.args.iter().map(|a| self.operand(a, true)).collect();
             return crate::vm_ops::update_code(ctor, site, ops);
         }
-        if let Some(op) = crate::vm_intrinsics::intrinsic_of(call) {
-            let ops = self.in_place_operands(call);
-            return direct_intrinsic(site, ops, op);
-        }
         let ops: Vec<Operand> = call.args.iter().map(|a| self.operand(a, true)).collect();
         direct_general(site, ops)
     }
 
     fn compile_vec(&mut self, elems: &[Expr], meta: Option<Map>) -> Exec {
+        if elems.is_empty() {
+            let empty = Value::Vector(Vector::new_sync().with_meta(meta));
+            return Box::new(move |_, _| Ok(empty.clone()));
+        }
         let elems = self.compile_all(elems);
         Box::new(move |ev, f| {
             let mut out = Vec::with_capacity(elems.len());
@@ -1265,6 +1503,10 @@ impl Compiler {
     }
 
     fn compile_map(&mut self, pairs: &[(Expr, Expr)], meta: Option<Map>) -> Exec {
+        if pairs.is_empty() {
+            let empty = Value::Map(clj_value::new_map().with_meta(meta));
+            return Box::new(move |_, _| Ok(empty.clone()));
+        }
         let pairs = self.compile_pairs(pairs);
         Box::new(move |ev, f| {
             Ok(Value::Map(
@@ -1274,6 +1516,10 @@ impl Compiler {
     }
 
     fn compile_set(&mut self, elems: &[Expr], meta: Option<Map>) -> Exec {
+        if elems.is_empty() {
+            let empty = Value::Set(clj_value::new_set().with_meta(meta));
+            return Box::new(move |_, _| Ok(empty.clone()));
+        }
         let elems = self.compile_all(elems);
         Box::new(move |ev, f| {
             let mut out = clj_value::new_set();
@@ -1490,11 +1736,75 @@ struct LoopCode {
     body: Exec,
     /// Whether any binding destructures (unpacks after each `recur`).
     unpacks: bool,
+    /// The fused shape (single `if` body with a terminal `recur`
+    /// in one branch), when detected.
+    fused: Option<FusedLoop>,
+    /// The flat shape (see [`FlatLoop`]) when the loop takes it:
+    /// no destructuring loop bindings, no fused shape.
+    flat: Option<FlatLoop>,
+}
+
+/// One flat-loop step: the `let`/`if`/`do` skeleton of a loop
+/// body as a jump-threaded list, so an iteration pays one Rust
+/// `match` dispatch per step instead of a dyn-closure call per
+/// nesting level. Leaf forms stay compiled [`Exec`]s, evaluated
+/// in exactly the order the closure tree evaluated them.
+enum Step {
+    /// Evaluate for effect, discard the value.
+    Eval(Exec),
+    /// A `let` name binding: evaluate into its register.
+    Set(usize, Exec),
+    /// A `let` destructuring step.
+    Unpack(Exec),
+    /// Jump to the target step when the test is falsy.
+    JumpUnless(Test, usize),
+    /// Jump to the target step.
+    Jump(usize),
+    /// A terminal `recur`: write the loop targets, restart.
+    Recur(Box<[Operand]>),
+    /// Evaluate and return from the loop.
+    Exit(Exec),
+}
+
+/// A loop body as flat steps (see [`Step`]).
+struct FlatLoop {
+    steps: Box<[Step]>,
+}
+
+/// A fused loop body: test, recur operands (evaluated in order,
+/// registers written after every operand), and the exit branch —
+/// one Rust loop instead of a closure tree plus a signal per
+/// iteration.
+struct FusedLoop {
+    test: Test,
+    exit: Exec,
+    ops: Vec<Operand>,
+    recur_when_true: bool,
 }
 
 /// Run a `loop`: bind in order (each init sees the earlier names),
 /// then run the body, rewriting the raw registers (and unpacking
 /// again) on every `recur`.
+/// Write a tree-evaluated `recur`'s carried values into the loop
+/// targets (the VM's own `recur` writes registers first and
+/// carries none).
+fn absorb_recur_values(code: &LoopCode, f: &mut Frame<'_>, values: Vec<Value>) {
+    for (r, v) in code.targets.iter().zip(values) {
+        f.regs[*r] = v;
+    }
+}
+
+/// Re-unpack destructured loop bindings after a `recur` rewrote
+/// their raw registers (no steps run for plain bindings).
+fn run_unpacks(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<(), Signal> {
+    if code.unpacks {
+        for unpack in code.steps.iter().filter_map(|(_, _, u)| u.as_ref()) {
+            unpack(ev, f)?;
+        }
+    }
+    Ok(())
+}
+
 fn run_loop(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Value, Signal> {
     for (r, init, unpack) in &code.steps {
         let v = init(ev, f)?;
@@ -1503,24 +1813,239 @@ fn run_loop(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Va
             unpack(ev, f)?;
         }
     }
+    if let Some(flat) = &code.flat {
+        return run_flat(ev, f, code, flat);
+    }
+    if let Some(fused) = &code.fused {
+        return run_fused(ev, f, code, fused);
+    }
     loop {
         match (code.body)(ev, f) {
             // The VM's own `recur` wrote the registers already.
             Err(Signal::Recur(values)) if values.is_empty() => {}
             // A tree-evaluated one carries the values.
-            Err(Signal::Recur(values)) => {
-                for (r, v) in code.targets.iter().zip(values) {
-                    f.regs[*r] = v;
-                }
-            }
+            Err(Signal::Recur(values)) => absorb_recur_values(code, f, values),
             other => return other,
         }
-        if code.unpacks {
-            for unpack in code.steps.iter().filter_map(|(_, _, u)| u.as_ref()) {
-                unpack(ev, f)?;
+        run_unpacks(ev, f, code)?;
+    }
+}
+
+/// A discarded evaluation's next step (see [`run_flat`]).
+fn discard_value(v: Result<Value, Signal>, pc: usize) -> Result<usize, Signal> {
+    v.map(|_| pc + 1)
+}
+
+/// A branch test's next step: fall through or jump.
+fn branch_target(t: Result<bool, Signal>, pc: usize, target: usize) -> Result<usize, Signal> {
+    t.map(|b| if b { pc + 1 } else { target })
+}
+
+/// A `recur` write's next step: back to the first.
+fn restart(r: Result<(), Signal>) -> Result<usize, Signal> {
+    r.map(|()| 0)
+}
+
+/// A flat `Set` step: evaluate into its register, next step on.
+fn flat_set(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    r: usize,
+    e: &Exec,
+    pc: usize,
+) -> Result<usize, Signal> {
+    let v = e(ev, f)?;
+    set_reg(&mut f.regs[r], v);
+    Ok(pc + 1)
+}
+
+/// Run a flat loop body: step dispatch in one Rust loop (a
+/// separate step function cost more than the closure call it
+/// replaced). A `Recur` signal from an opaque leaf (a VM `recur`
+/// inside a compiled subform, or a tree-evaluated one carrying
+/// values) restarts at the first step, like [`run_loop`].
+fn run_flat(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    flat: &FlatLoop,
+) -> Result<Value, Signal> {
+    let mut pc = 0usize;
+    loop {
+        let flow = match &flat.steps[pc] {
+            Step::Eval(e) | Step::Unpack(e) => discard_value(e(ev, f), pc),
+            Step::Set(r, e) => flat_set(ev, f, *r, e, pc),
+            Step::JumpUnless(test, target) => branch_target(test(ev, f), pc, *target),
+            Step::Jump(target) => Ok(*target),
+            Step::Recur(ops) => restart(write_recur_ops(ev, f, &code.targets, ops)),
+            Step::Exit(e) => match e(ev, f) {
+                Ok(v) => return Ok(v),
+                Err(s) => Err(s),
+            },
+        };
+        match flow {
+            Ok(next) => pc = next,
+            Err(Signal::Recur(values)) => {
+                absorb_recur_values(code, f, values);
+                pc = 0;
             }
+            Err(s) => return Err(s),
         }
     }
+}
+
+/// Point the not-yet-targeted jump step at `at` to the
+/// current end of the step list.
+fn patch_jump(steps: &mut [Step], at: usize) {
+    let target = steps.len();
+    if let Step::JumpUnless(_, t) | Step::Jump(t) = &mut steps[at] {
+        *t = target;
+    }
+}
+
+/// A literal `nil` form (its compile allocates nothing, so a
+/// flat emitter may skip it without disturbing allocation).
+fn is_nil_literal(e: &Expr) -> bool {
+    matches!(e, Expr::Literal(Value::Nil))
+}
+
+/// The args of a bare terminal `recur` with the loop's arity.
+fn terminal_recur(e: &Expr, arity: usize) -> Option<&Vec<Expr>> {
+    match e {
+        Expr::Recur(args) if args.len() == arity => Some(args),
+        _ => None,
+    }
+}
+
+/// Evaluate a `recur`'s operands (in order) and write the target
+/// registers only after every operand has evaluated — the same
+/// order `recur1..4`/`recur_n` keep.
+fn write_recur_ops(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    ops: &[Operand],
+) -> Result<(), Signal> {
+    match ops {
+        [a] => write_ops1(ev, f, t, a),
+        [a, b] => write_ops2(ev, f, t, a, b),
+        [a, b, c] => write_ops3(ev, f, t, a, b, c),
+        [a, b, c, d] => write_ops4(ev, f, t, a, b, c, d),
+        ops => write_ops_n(ev, f, t, ops),
+    }
+}
+
+fn write_ops1(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    a: &Operand,
+) -> Result<(), Signal> {
+    let v = a.eval(ev, f)?;
+    set_reg(&mut f.regs[t[0]], v);
+    Ok(())
+}
+
+fn write_ops2(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    a: &Operand,
+    b: &Operand,
+) -> Result<(), Signal> {
+    let (va, vb) = (a.eval(ev, f)?, b.eval(ev, f)?);
+    set_reg(&mut f.regs[t[0]], va);
+    set_reg(&mut f.regs[t[1]], vb);
+    Ok(())
+}
+
+fn write_ops3(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    a: &Operand,
+    b: &Operand,
+    c: &Operand,
+) -> Result<(), Signal> {
+    let (va, vb, vc) = (a.eval(ev, f)?, b.eval(ev, f)?, c.eval(ev, f)?);
+    set_reg(&mut f.regs[t[0]], va);
+    set_reg(&mut f.regs[t[1]], vb);
+    set_reg(&mut f.regs[t[2]], vc);
+    Ok(())
+}
+
+fn write_ops4(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    a: &Operand,
+    b: &Operand,
+    c: &Operand,
+    d: &Operand,
+) -> Result<(), Signal> {
+    let (va, vb, vc, vd) = (
+        a.eval(ev, f)?,
+        b.eval(ev, f)?,
+        c.eval(ev, f)?,
+        d.eval(ev, f)?,
+    );
+    set_reg(&mut f.regs[t[0]], va);
+    set_reg(&mut f.regs[t[1]], vb);
+    set_reg(&mut f.regs[t[2]], vc);
+    set_reg(&mut f.regs[t[3]], vd);
+    Ok(())
+}
+
+fn write_ops_n(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    t: &[usize],
+    ops: &[Operand],
+) -> Result<(), Signal> {
+    let mut values: SmallVec<[Value; 8]> = SmallVec::new();
+    for op in ops {
+        values.push(op.eval(ev, f)?);
+    }
+    for (r, v) in t.iter().zip(values) {
+        set_reg(&mut f.regs[*r], v);
+    }
+    Ok(())
+}
+
+/// Run a fused loop body in one Rust loop (no `Recur` signal
+/// per iteration): `fused_once`'s `None` continues, its value
+/// ends the loop, and a `Recur` signal from an opaque leaf is
+/// absorbed like [`run_loop`]'s.
+fn run_fused(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    fused: &FusedLoop,
+) -> Result<Value, Signal> {
+    loop {
+        match fused_once(ev, f, code, fused) {
+            Ok(Some(v)) => return Ok(v),
+            Ok(None) => {}
+            Err(Signal::Recur(values)) => absorb_recur_values(code, f, values),
+            Err(s) => return Err(s),
+        }
+        run_unpacks(ev, f, code)?;
+    }
+}
+
+/// One fused iteration: the exit branch's value, or `None` after
+/// a `recur` wrote the target registers.
+fn fused_once(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    fused: &FusedLoop,
+) -> Result<Option<Value>, Signal> {
+    if (fused.test)(ev, f)? != fused.recur_when_true {
+        return (fused.exit)(ev, f).map(Some);
+    }
+    write_recur_ops(ev, f, &code.targets, &fused.ops)?;
+    Ok(None)
 }
 
 /// A tree-evaluator frame holding `locs`' values at their lexical
@@ -1613,7 +2138,11 @@ pub(crate) enum Operand {
 
 impl Operand {
     /// A computed operand's value (`None` for in-place operands).
-    fn computed(&self, ev: &mut Evaluator, f: &mut Frame<'_>) -> Result<Option<Value>, Signal> {
+    pub(crate) fn computed(
+        &self,
+        ev: &mut Evaluator,
+        f: &mut Frame<'_>,
+    ) -> Result<Option<Value>, Signal> {
         match self {
             Operand::Exec(e) => e(ev, f).map(Some),
             _ => Ok(None),
@@ -1621,7 +2150,7 @@ impl Operand {
     }
 
     /// The operand in place (`computed` holds an `Exec`'s value).
-    fn read<'v>(&'v self, f: &'v Frame<'_>, computed: Option<&'v Value>) -> &'v Value {
+    pub(crate) fn read<'v>(&'v self, f: &'v Frame<'_>, computed: Option<&'v Value>) -> &'v Value {
         match self {
             Operand::Const(v) => v,
             Operand::Loc(l, _) => f.get(*l),
@@ -1690,61 +2219,6 @@ fn site_of(call: &DirectCall) -> Arc<DirectCall> {
         args: Vec::new(),
         span: call.span,
     })
-}
-
-/// A three-argument intrinsic direct call: computed operands
-/// evaluate first (in order — locals and literals have no effects,
-/// and no argument rewrites a live local's register), then the fast
-/// path reads every operand in place; a miss runs the native over
-/// clones.
-fn direct_intrinsic(
-    site: Arc<DirectCall>,
-    ops: Vec<Operand>,
-    fast: crate::vm_intrinsics::Fast,
-) -> Exec {
-    let sid = next_site();
-    let [a, b, c] = <[Operand; 3]>::try_from(ops).ok().expect("three operands");
-    Box::new(move |ev, f| intrinsic3(ev, f, sid, &site, [&a, &b, &c], fast))
-}
-
-/// [`direct_intrinsic`] as a branch test (the same call, truth
-/// taken directly).
-fn intrinsic_test_exec(
-    site: Arc<DirectCall>,
-    ops: Vec<Operand>,
-    fast: crate::vm_intrinsics::Fast,
-) -> Test {
-    let sid = next_site();
-    let [a, b, c] = <[Operand; 3]>::try_from(ops).ok().expect("three operands");
-    Box::new(move |ev, f| Ok(intrinsic3(ev, f, sid, &site, [&a, &b, &c], fast)?.is_truthy()))
-}
-
-#[inline(always)]
-fn intrinsic3(
-    ev: &mut Evaluator,
-    f: &mut Frame<'_>,
-    sid: usize,
-    site: &DirectCall,
-    [a, b, c]: [&Operand; 3],
-    fast: crate::vm_intrinsics::Fast,
-) -> Result<Value, Signal> {
-    if !ev.site_direct_valid(sid, site) {
-        let values = smallvec::smallvec![a.eval(ev, f)?, b.eval(ev, f)?, c.eval(ev, f)?];
-        return direct_slow_values(ev, site, values);
-    }
-    let (ta, tb, tc) = (a.computed(ev, f)?, b.computed(ev, f)?, c.computed(ev, f)?);
-    let (va, vb, vc) = (
-        a.read(f, ta.as_ref()),
-        b.read(f, tb.as_ref()),
-        c.read(f, tc.as_ref()),
-    );
-    match fast(&[va, vb, vc]) {
-        Some(v) => Ok(v),
-        None => {
-            let mut values = smallvec::smallvec![va.clone(), vb.clone(), vc.clone()];
-            ev.call_direct_values(site, &mut values)
-        }
-    }
 }
 
 /// [`direct_slow`] over already-evaluated args.

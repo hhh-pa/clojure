@@ -376,3 +376,102 @@ fn take_value_shaped_and_trie() {
     assert_eq!(big.take_value(&Value::Int(5)), Some(Value::Int(50)));
     assert_eq!(big.take_value(&Value::Int(999)), None);
 }
+
+#[test]
+fn shape_registry_mru_exact_keys() {
+    let char_pairs = vec![
+        (Value::Char('a'), Value::Int(1)),
+        (Value::Char('b'), Value::Int(2)),
+    ];
+    let m1 = clj_value::Map::from_kvs_last_wins(char_pairs.clone());
+    let m2 = clj_value::Map::from_kvs_last_wins(char_pairs);
+    assert!(m1.is_shaped());
+    assert!(m2.is_shaped());
+
+    let str_pairs = vec![(Value::Str(std::sync::Arc::from("k")), Value::Int(1))];
+    let m3 = clj_value::Map::from_kvs_last_wins(str_pairs.clone());
+    let m4 = clj_value::Map::from_kvs_last_wins(str_pairs);
+    assert!(m3.is_shaped());
+    assert!(m4.is_shaped());
+
+    let sym_pairs = vec![(
+        Value::Symbol(clj_value::Symbol::new(None, "sym")),
+        Value::Int(1),
+    )];
+    let m5 = clj_value::Map::from_kvs_last_wins(sym_pairs.clone());
+    let m6 = clj_value::Map::from_kvs_last_wins(sym_pairs);
+    assert!(m5.is_shaped());
+    assert!(m6.is_shaped());
+
+    let bool_nil_pairs = vec![
+        (Value::Bool(true), Value::Int(1)),
+        (Value::Nil, Value::Int(2)),
+    ];
+    let m7 = clj_value::Map::from_kvs_last_wins(bool_nil_pairs.clone());
+    let m8 = clj_value::Map::from_kvs_last_wins(bool_nil_pairs);
+    assert!(m7.is_shaped());
+    assert!(m8.is_shaped());
+
+    for _ in 0..10 {
+        let a = clj_value::Map::from_kvs_last_wins(vec![(Value::Char('x'), Value::Int(1))]);
+        let b = clj_value::Map::from_kvs_last_wins(vec![(Value::Char('y'), Value::Int(2))]);
+        assert_eq!(a.get(&Value::Char('x')), Some(&Value::Int(1)));
+        assert_eq!(b.get(&Value::Char('y')), Some(&Value::Int(2)));
+    }
+}
+
+#[test]
+fn map_shape_ascii_map_lookups() {
+    let mut m = clj_value::Map::from_kvs_last_wins(vec![
+        (Value::Char('a'), Value::Int(10)),
+        (Value::Char('\u{100}'), Value::Int(20)),
+        (
+            Value::Keyword(clj_value::Keyword::new(None, "k")),
+            Value::Int(30),
+        ),
+    ]);
+    assert!(m.is_shaped());
+
+    // ASCII char lookup
+    assert_eq!(m.get(&Value::Char('a')), Some(&Value::Int(10)));
+    assert!(m.contains_key(&Value::Char('a')));
+    assert_eq!(m.get(&Value::Char('b')), None);
+    assert!(!m.contains_key(&Value::Char('b')));
+
+    // Non-ASCII char lookup
+    assert_eq!(m.get(&Value::Char('\u{100}')), Some(&Value::Int(20)));
+    assert!(m.contains_key(&Value::Char('\u{100}')));
+    assert_eq!(m.get(&Value::Char('\u{101}')), None);
+    assert!(!m.contains_key(&Value::Char('\u{101}')));
+
+    // Non-char lookup
+    let kw = Value::Keyword(clj_value::Keyword::new(None, "k"));
+    let kw_missing = Value::Keyword(clj_value::Keyword::new(None, "missing"));
+    assert_eq!(m.get(&kw), Some(&Value::Int(30)));
+    assert!(m.contains_key(&kw));
+    assert_eq!(m.get(&kw_missing), None);
+    assert!(!m.contains_key(&kw_missing));
+
+    // without on existing and missing ASCII / non-ASCII keys
+    let m2 = m.clone().without(&Value::Char('b'));
+    assert_eq!(m2.size(), 3);
+    let m3 = m.clone().without(&Value::Char('a'));
+    assert_eq!(m3.size(), 2);
+    assert_eq!(m3.get(&Value::Char('a')), None);
+
+    // take_value on ASCII char
+    assert_eq!(m.take_value(&Value::Char('a')), Some(Value::Int(10)));
+}
+
+#[test]
+fn shape_registry_capacity_cap() {
+    let mut maps = Vec::with_capacity(600);
+    for i in 0..600 {
+        let m = clj_value::Map::from_kvs_last_wins(vec![(
+            Value::Keyword(clj_value::Keyword::new(None, &format!("k{i}"))),
+            Value::Int(i),
+        )]);
+        assert!(m.is_shaped());
+        maps.push(m);
+    }
+}

@@ -23,8 +23,8 @@ use smallvec::SmallVec;
 
 use clj_value::{
     CHUNK_SIZE, ConsValue, CycleValue, ExtensionValue, IterateValue, KeySeqValue, List, Map,
-    RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set, SubVectorValue, ThrowClass,
-    TransientVector, ValSeqValue, Value, Vector,
+    RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set, SplitVecValue,
+    SubVectorValue, ThrowClass, TransientVector, ValSeqValue, Value, Vector,
 };
 
 use crate::core::Num;
@@ -631,10 +631,28 @@ seq_downcast!(
     "Downcast a seq value to its value view, if any."
 );
 seq_downcast!(
-    as_subvector,
-    SubVectorValue,
-    "Downcast a value to its subvector view, if any."
+    as_splitvec,
+    SplitVecValue,
+    "Downcast a value to its split-vector view, if any."
 );
+
+/// Downcast a value to its subvector view, if any. A split vector
+/// answers through its once-materialized full-window view, so
+/// every generic vector operation keeps working unchanged.
+pub(crate) fn as_subvector(v: &Value) -> Option<&SubVectorValue> {
+    match v {
+        Value::Extension(e) => {
+            if let Some(sv) = e.as_any().downcast_ref::<SubVectorValue>() {
+                Some(sv)
+            } else {
+                e.as_any()
+                    .downcast_ref::<SplitVecValue>()
+                    .map(SplitVecValue::view)
+            }
+        }
+        _ => None,
+    }
+}
 
 /// Whether the value is a seq (a list or any seq object).
 pub(crate) fn is_seq_value(v: &Value) -> bool {
@@ -1708,7 +1726,12 @@ fn step_map_one(eval: &mut Evaluator, f: &Value, input: Value) -> Result<Forced,
         }
         None => {
             for item in items.iter() {
-                out.push(eval.call(f, std::slice::from_ref(item))?);
+                let slice = std::slice::from_ref(item);
+                let val = match crate::vm::invoke_lookup(f, slice) {
+                    Some(v) => v,
+                    None => eval.call(f, slice)?,
+                };
+                out.push(val);
             }
         }
     }
@@ -1739,7 +1762,23 @@ pub(crate) fn filter_pred(eval: &mut Evaluator, f: &Value, item: &Value) -> Resu
             return Ok(!empty);
         }
     }
-    Ok(eval.call(f, std::slice::from_ref(item))?.is_truthy())
+    let slice = std::slice::from_ref(item);
+    if let Some(v) = crate::vm::invoke_lookup(f, slice) {
+        return Ok(v.is_truthy());
+    }
+    Ok(eval.call(f, slice)?.is_truthy())
+}
+
+fn test_filter_item(
+    eval: &mut Evaluator,
+    f: &Value,
+    prep: Option<&crate::vm::Prepared>,
+    item: &Value,
+) -> Result<bool, Signal> {
+    match prep {
+        Some(p) => Ok(p.call1(eval, crate::vm::clone_value(item))?.is_truthy()),
+        None => filter_pred(eval, f, item),
+    }
 }
 
 /// `filter`/`remove`: consume whole units, testing each item in
@@ -1750,17 +1789,22 @@ fn step_filter(
     mut input: Value,
     invert: bool,
 ) -> Result<Forced, Signal> {
+    let is_seq = crate::ext::as_native(f).is_some_and(|n| &*n.display == "clojure.core/seq");
+    let prep = if is_seq {
+        None
+    } else {
+        crate::vm::Prepared::of(f, 1)
+    };
     loop {
-        let (items, tail) = match step_unit(eval, &input)? {
+        let (items, tail): (Arc<[Value]>, Value) = match step_unit(eval, &input)? {
             StepUnit::Empty => return Ok(Forced::Empty),
-            StepUnit::One { head, tail } => (vec![head], tail),
-            StepUnit::Chunk { items, tail } => (items.to_vec(), tail),
+            StepUnit::One { head, tail } => (Arc::from([head]), tail),
+            StepUnit::Chunk { items, tail } => (items, tail),
         };
         crate::core::check_ifn(eval, f)?;
         let mut kept = Vec::new();
-        for item in &items {
-            let pass = filter_pred(eval, f, item)? != invert;
-            if pass {
+        for item in items.iter() {
+            if test_filter_item(eval, f, prep.as_ref(), item)? != invert {
                 kept.push(item.clone());
             }
         }
@@ -3124,6 +3168,7 @@ fn is_extension_seqable(v: &Value) -> bool {
         || is_always_seq(v)
         || as_keys(v).is_some()
         || as_vals(v).is_some()
+        || as_splitvec(v).is_some()
         || as_subvector(v).is_some()
         || crate::xform::Eduction::parts(v).is_some()
         || crate::collmisc::as_iteration(v).is_some()
@@ -3167,6 +3212,9 @@ fn seq_vector(x: &Vector) -> Value {
 
 /// `seq` of a map (small maps keep `Map` kind).
 fn seq_map(m: &Map) -> Value {
+    if m.is_empty() {
+        return Value::Nil;
+    }
     let small = !m.is_hashy();
     let kind = if small { SeqKind::Map } else { SeqKind::Key };
     realized_value(
@@ -3182,6 +3230,9 @@ fn seq_map(m: &Map) -> Value {
 
 /// `seq` of a set.
 fn seq_set(s: &Set) -> Value {
+    if s.is_empty() {
+        return Value::Nil;
+    }
     realized_value(
         s.iter().cloned().collect::<Vec<_>>(),
         false,
@@ -3255,6 +3306,9 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
 /// The first item of an extension collection (the subvector
 /// head, else the `ArrayList` snapshot head).
 fn first_direct_extension(v: &Value) -> Option<Value> {
+    if let Some(sp) = as_splitvec(v) {
+        return Some(sp.nth(0).unwrap_or(Value::Nil));
+    }
     as_subvector(v)
         .map(|sv| sv.iter().next().unwrap_or(Value::Nil))
         .or_else(|| {
@@ -3559,6 +3613,10 @@ pub(crate) fn first_fast(v: &Value) -> Option<Value> {
         Value::List(l) => Some(l.first().cloned().unwrap_or(Value::Nil)),
         Value::Vector(x) => Some(x.get(0).unwrap_or(Value::Nil)),
         Value::Str(s) => Some(s.chars().next().map_or(Value::Nil, Value::Char)),
+        Value::Map(m) => Some(m.iter().next().map_or(Value::Nil, |(k, v)| {
+            clj_value::map_entry(k.clone(), v.clone())
+        })),
+        Value::Set(s) => Some(s.iter().next().cloned().unwrap_or(Value::Nil)),
         _ => as_realized(v).map(|r| r.seq().first().cloned().unwrap_or(Value::Nil)),
     }
 }
@@ -3594,6 +3652,8 @@ pub(crate) fn seq_fast(v: &Value) -> Option<Value> {
             SeqKind::Array,
         )),
         Value::Str(s) => Some(seq_str(s)),
+        Value::Map(m) => Some(seq_map(m)),
+        Value::Set(s) => Some(seq_set(s)),
         _ => as_realized(v).map(|r| seq_realized(v, r)),
     }
 }
@@ -3673,6 +3733,26 @@ pub(crate) fn rest_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signa
 
 /// `next`: like `rest` but nil at the end (forcing one step).
 pub(crate) fn next_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    if let Some(r) = as_realized(v) {
+        let more = r.seq().more();
+        if more.is_empty() {
+            return Ok(Value::Nil);
+        }
+        return Ok(Value::Extension(Arc::new(seq_tail(
+            more,
+            r.is_counted(),
+            r.is_idrop(),
+            r.kind(),
+            r.meta(),
+        ))));
+    }
+    if let Value::List(l) = v {
+        return Ok(l
+            .drop_first()
+            .filter(|t| !t.is_empty())
+            .map(|t| Value::List(t.with_meta(None)))
+            .unwrap_or(Value::Nil));
+    }
     let rest = rest_value(eval, v)?;
     // `next` nil-puns empty tails (spent repeats, done ranges —
     // like the JVM's `next.seq()`).
@@ -3720,10 +3800,17 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, S
     }
 }
 
-/// A finite `repeat` or a counted `long` range built without walking
-/// its seq (#226: `(vec (repeat n 0))` builds DP tables; the items
-/// are exactly the seq's).
+/// A string, array, finite `repeat`, or counted `long` range built without
+/// walking its seq (#226: `(vec (repeat n 0))` builds DP tables and
+/// `(vec s)` builds char vectors; the items are exactly the seq's).
 fn collect_direct(v: &Value) -> Option<Vector> {
+    if let Value::Str(s) = v {
+        return Some(Vector::from_flat_chars(s.chars().collect()));
+    }
+    if let Value::Array(a) = v {
+        let items = a.try_take_objs().unwrap_or_else(|| a.snapshot());
+        return Some(Vector::from_vec(items));
+    }
     let Value::Extension(e) = v else {
         return None;
     };
@@ -3731,8 +3818,8 @@ fn collect_direct(v: &Value) -> Option<Vector> {
     if let Some(r) = any.downcast_ref::<clj_value::RepeatValue>() {
         let n = usize::try_from(r.n()?.max(0)).ok()?;
         return Some(match r.x() {
-            Value::Int(x) => Vector::from_ints(vec![*x; n]),
-            Value::Char(c) => Vector::from_chars(vec![*c; n]),
+            Value::Int(x) => Vector::from_flat_ints(vec![*x; n]),
+            Value::Char(c) => Vector::from_flat_chars(vec![*c; n]),
             x => Vector::from_vec(vec![x.clone(); n]),
         });
     }
@@ -3745,7 +3832,7 @@ fn collect_direct(v: &Value) -> Option<Vector> {
     let ints = (0..n.max(0))
         .map(|k| k.checked_mul(step).and_then(|d| cur.checked_add(d)))
         .collect::<Option<Vec<i64>>>()?;
-    Some(Vector::from_ints(ints))
+    Some(Vector::from_flat_ints(ints))
 }
 
 pub(crate) fn collect_all(eval: &mut Evaluator, v: Value) -> Result<Vec<Value>, Signal> {
@@ -3793,6 +3880,7 @@ fn uoe() -> NativeError {
 /// seq object — like `Sequential`).
 fn is_sequential(v: &Value) -> bool {
     matches!(v, Value::Vector(_) | Value::MapEntry { .. })
+        || as_splitvec(v).is_some()
         || as_subvector(v).is_some()
         || is_seq_value(v)
 }
@@ -4653,6 +4741,32 @@ mod tests {
     #[test]
     fn range_num_falls_back_for_non_numbers() {
         assert_eq!(range_num(&Value::Nil), RangeNum::Int(0));
+    }
+
+    #[test]
+    fn first_fast_empty_set_arm() {
+        assert_eq!(
+            first_fast(&Value::Set(
+                clj_value::Set::from_items_checked(Vec::new()).unwrap()
+            )),
+            Some(Value::Nil)
+        );
+    }
+
+    #[test]
+    fn first_direct_set_arms() {
+        assert_eq!(
+            first_direct(&Value::Set(
+                clj_value::Set::from_items_checked(vec![Value::Int(42)]).unwrap()
+            )),
+            Some(Value::Int(42))
+        );
+        assert_eq!(
+            first_direct(&Value::Set(
+                clj_value::Set::from_items_checked(Vec::new()).unwrap()
+            )),
+            Some(Value::Nil)
+        );
     }
 
     /// The exact range rational rejects `Double` (bound checks

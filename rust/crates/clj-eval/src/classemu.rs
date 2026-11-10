@@ -4036,7 +4036,10 @@ fn static_lpv_create_owning(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
         1 => match &args[0] {
             Value::Vector(_) => Ok(args[0].clone()),
-            Value::Array(a) => Ok(Value::Vector(Vector::from_vec(a.snapshot()))),
+            Value::Array(a) => {
+                let items = a.try_take_objs().unwrap_or_else(|| a.snapshot());
+                Ok(Value::Vector(Vector::from_vec(items)))
+            }
             _ => Err(crate::types::no_method(
                 "createOwning",
                 1,
@@ -6297,7 +6300,11 @@ fn str_body_npe(param: &str) -> NativeError {
 /// `length` (UTF-16 units — the `count` twin).
 fn gated_str_length(target: &Value) -> Option<Result<Value, NativeError>> {
     match target {
-        Value::Str(s) => Some(Ok(Value::Int(s.encode_utf16().count() as i64))),
+        Value::Str(s) => Some(Ok(Value::Int(if s.is_ascii() {
+            s.len() as i64
+        } else {
+            crate::coll::str_utf16_len(s) as i64
+        }))),
         _ => None,
     }
 }
@@ -6346,14 +6353,21 @@ fn gated_str_charat(target: &Value, rest: &[Value]) -> Option<Result<Value, Nati
 /// The `charAt` body (split for the complexity budget).
 fn str_char_at(s: &str, v: &Value) -> Result<Value, NativeError> {
     let index = str_int_arg(v)?;
-    let units: Vec<u16> = s.encode_utf16().collect();
-    let unit = usize::try_from(index)
-        .ok()
-        .and_then(|i| units.get(i).copied());
-    match unit {
-        Some(u) => Ok(utf16_unit_value(u)),
-        None => Err(sioobe_index(index, units.len())),
+    if s.is_ascii() {
+        let len = s.len();
+        if let Ok(i) = usize::try_from(index) {
+            if let Some(&b) = s.as_bytes().get(i) {
+                return Ok(Value::Char(b as char));
+            }
+        }
+        return Err(sioobe_index(index, len));
     }
+    if let Ok(i) = usize::try_from(index) {
+        if let Some(u) = s.encode_utf16().nth(i) {
+            return Ok(utf16_unit_value(u));
+        }
+    }
+    Err(sioobe_index(index, s.encode_utf16().count()))
 }
 
 /// A UTF-16 unit as a value: scalars read `Char`, surrogate
@@ -6372,16 +6386,28 @@ fn gated_str_substring(target: &Value, rest: &[Value]) -> Option<Result<Value, N
     }
 }
 
+fn substring_end(len: i64, rest: &[Value]) -> Result<i64, NativeError> {
+    if rest.len() == 2 {
+        Ok(i64::from(str_int_arg(&rest[1])?))
+    } else {
+        Ok(len)
+    }
+}
+
 /// The `substring` body (split for the complexity budget).
 fn str_substring(s: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    let begin = i64::from(str_int_arg(&rest[0])?);
+    if s.is_ascii() {
+        let len = s.len() as i64;
+        let end = substring_end(len, rest)?;
+        if begin < 0 || begin > end || end > len {
+            return Err(sioobe_range(begin, end, len));
+        }
+        return Ok(Value::Str(Arc::from(&s[begin as usize..end as usize])));
+    }
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len() as i64;
-    let begin = i64::from(str_int_arg(&rest[0])?);
-    let end = if rest.len() == 2 {
-        i64::from(str_int_arg(&rest[1])?)
-    } else {
-        len
-    };
+    let end = substring_end(len, rest)?;
     if begin < 0 || begin > end || end > len {
         return Err(sioobe_range(begin, end, len));
     }
@@ -6422,6 +6448,12 @@ fn str_starts_with(s: &str, rest: &[Value]) -> Result<Value, NativeError> {
 /// The unit-slice prefix test (the `startsWith` body past the
 /// bounds check — `to >= 0` by construction).
 fn units_start_with(s: &str, prefix: &str, to: i32) -> bool {
+    if s.is_ascii() && prefix.is_ascii() {
+        return s
+            .as_bytes()
+            .get(to as usize..)
+            .is_some_and(|rest| rest.starts_with(prefix.as_bytes()));
+    }
     let text: Vec<u16> = s.encode_utf16().collect();
     let pre: Vec<u16> = prefix.encode_utf16().collect();
     if i64::from(to) > text.len() as i64 - pre.len() as i64 {
@@ -6613,12 +6645,27 @@ fn str_needle(v: &Value) -> Option<StrNeedle> {
 /// The `indexOf` scan over UTF-16 units from `from` (the JDK
 /// `fromIndex` rules — see `gated_str_indexof_from`).
 fn str_index_search(s: &str, needle: StrNeedle, from: i32) -> i64 {
-    let hay: Vec<u16> = s.encode_utf16().collect();
-    let from = from.max(0) as usize;
     let units = match needle {
         StrNeedle::Absent => return -1,
         StrNeedle::Units(units) => units,
     };
+    let from = from.max(0) as usize;
+    if s.is_ascii() && units.iter().all(|&u| u < 128) {
+        let hay_bytes = s.as_bytes();
+        if units.is_empty() {
+            return from.min(hay_bytes.len()) as i64;
+        }
+        if from > hay_bytes.len() {
+            return -1;
+        }
+        let needle_bytes: Vec<u8> = units.iter().map(|&u| u as u8).collect();
+        return hay_bytes[from..]
+            .windows(needle_bytes.len())
+            .position(|w| w == needle_bytes.as_slice())
+            .map(|i| (from + i) as i64)
+            .unwrap_or(-1);
+    }
+    let hay: Vec<u16> = s.encode_utf16().collect();
     if units.is_empty() {
         return from.min(hay.len()) as i64;
     }
@@ -6636,11 +6683,29 @@ fn str_index_search(s: &str, needle: StrNeedle, from: i32) -> i64 {
 /// `fromIndex` past the last start clamps, negative reads -1,
 /// empty needles read the clamped start).
 fn str_last_index_search(s: &str, needle: StrNeedle, from: i32) -> i64 {
-    let hay: Vec<u16> = s.encode_utf16().collect();
     let units = match needle {
         StrNeedle::Absent => return -1,
         StrNeedle::Units(units) => units,
     };
+    if s.is_ascii() && units.iter().all(|&u| u < 128) {
+        let hay_bytes = s.as_bytes();
+        let last_start = hay_bytes.len() as i64 - units.len() as i64;
+        let from = (from as i64).min(last_start);
+        if from < 0 {
+            return -1;
+        }
+        if units.is_empty() {
+            return from;
+        }
+        let from = from as usize;
+        let needle_bytes: Vec<u8> = units.iter().map(|&u| u as u8).collect();
+        return hay_bytes[..=from + needle_bytes.len() - 1]
+            .windows(needle_bytes.len())
+            .rposition(|w| w == needle_bytes.as_slice())
+            .map(|i| i as i64)
+            .unwrap_or(-1);
+    }
+    let hay: Vec<u16> = s.encode_utf16().collect();
     let last_start = hay.len() as i64 - units.len() as i64;
     let from = (from as i64).min(last_start);
     if from < 0 {

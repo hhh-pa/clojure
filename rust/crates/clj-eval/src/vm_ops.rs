@@ -35,6 +35,11 @@ use crate::eval::Evaluator;
 use crate::expr::DirectCall;
 use crate::vm::{Code, Exec, Frame, Loc, Operand, direct_slow_values, local, next_site};
 
+/// A three-argument op's inline answer (`None` runs the native).
+pub(crate) trait Op3: Send + Sync + 'static {
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value>;
+}
+
 /// A two-argument op's inline answer (`None` runs the native).
 pub(crate) trait Op2: Send + Sync + 'static {
     fn apply(a: &Value, b: &Value) -> Option<Value>;
@@ -202,6 +207,18 @@ fn native(ev: &mut Evaluator, c: &Site, mut values: SmallVec<[Value; 4]>) -> Res
 
 #[cold]
 #[inline(never)]
+pub(crate) fn native3(
+    ev: &mut Evaluator,
+    c: &Site,
+    a: &Value,
+    b: &Value,
+    d: &Value,
+) -> Result<Value, Signal> {
+    native(ev, c, smallvec![a.clone(), b.clone(), d.clone()])
+}
+
+#[cold]
+#[inline(never)]
 fn native2(ev: &mut Evaluator, c: &Site, a: &Value, b: &Value) -> Result<Value, Signal> {
     native(ev, c, smallvec![a.clone(), b.clone()])
 }
@@ -329,6 +346,97 @@ fn shape1<O: Op1, T: Out>(c: Site, a: Operand) -> Code<T::T> {
     }
 }
 
+fn unshape(s: Shape) -> Operand {
+    match s {
+        Shape::Reg(r) => Operand::Loc(Loc::Reg(r), false),
+        Shape::Up(u) => Operand::Loc(Loc::Up(u), false),
+        Shape::Kst(v) => Operand::Const(v),
+        Shape::Exec(e) => Operand::Exec(e),
+    }
+}
+
+fn sss<A: Src, B: Src, C: Src, O: Op3>(c: Site, a: A, b: B, d: C) -> Exec {
+    Box::new(move |ev, f| {
+        if ev.site_direct_valid(c.sid, &c.call) {
+            if let Some(v) = O::apply(a.read(f), b.read(f), d.read(f)) {
+                return Ok(v);
+            }
+        }
+        native3(ev, &c, a.read(f), b.read(f), d.read(f))
+    })
+}
+
+fn sxs<A: Src, C: Src, O: Op3>(c: Site, a: A, b: Exec, d: C) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let vb = b(ev, f)?;
+        if valid {
+            if let Some(v) = O::apply(a.read(f), &vb, d.read(f)) {
+                return Ok(v);
+            }
+        }
+        native3(ev, &c, a.read(f), &vb, d.read(f))
+    })
+}
+
+fn ssx<A: Src, B: Src, O: Op3>(c: Site, a: A, b: B, d: Exec) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let vd = d(ev, f)?;
+        if valid {
+            if let Some(v) = O::apply(a.read(f), b.read(f), &vd) {
+                return Ok(v);
+            }
+        }
+        native3(ev, &c, a.read(f), b.read(f), &vd)
+    })
+}
+
+fn any3<O: Op3>(c: Site, a: Operand, b: Operand, d: Operand) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let ca = a.computed(ev, f)?;
+        let cb = b.computed(ev, f)?;
+        let cd = d.computed(ev, f)?;
+        let va = a.read(f, ca.as_ref());
+        let vb = b.read(f, cb.as_ref());
+        let vd = d.read(f, cd.as_ref());
+        if valid {
+            if let Some(v) = O::apply(va, vb, vd) {
+                return Ok(v);
+            }
+        }
+        native3(ev, &c, va, vb, vd)
+    })
+}
+
+fn shape3<O: Op3>(c: Site, a: Operand, b: Operand, d: Operand) -> Exec {
+    match (shape(a), shape(b), shape(d)) {
+        (Shape::Reg(ra), Shape::Reg(rb), Shape::Reg(rc)) => {
+            sss::<Reg, Reg, Reg, O>(c, Reg(ra), Reg(rb), Reg(rc))
+        }
+        (Shape::Reg(ra), Shape::Reg(rb), Shape::Kst(rc)) => {
+            sss::<Reg, Reg, Kst, O>(c, Reg(ra), Reg(rb), Kst(rc))
+        }
+        (Shape::Reg(ra), Shape::Kst(rb), Shape::Reg(rc)) => {
+            sss::<Reg, Kst, Reg, O>(c, Reg(ra), Kst(rb), Reg(rc))
+        }
+        (Shape::Reg(ra), Shape::Kst(rb), Shape::Kst(rc)) => {
+            sss::<Reg, Kst, Kst, O>(c, Reg(ra), Kst(rb), Kst(rc))
+        }
+        (Shape::Reg(ra), Shape::Exec(eb), Shape::Kst(rc)) => {
+            sxs::<Reg, Kst, O>(c, Reg(ra), eb, Kst(rc))
+        }
+        (Shape::Reg(ra), Shape::Exec(eb), Shape::Reg(rc)) => {
+            sxs::<Reg, Reg, O>(c, Reg(ra), eb, Reg(rc))
+        }
+        (Shape::Reg(ra), Shape::Reg(rb), Shape::Exec(ed)) => {
+            ssx::<Reg, Reg, O>(c, Reg(ra), Reg(rb), ed)
+        }
+        (sa, sb, sd) => any3::<O>(c, unshape(sa), unshape(sb), unshape(sd)),
+    }
+}
+
 /// An n-ary call's computed operands, evaluated in source order
 /// into `out` (filled in place: a returned buffer would copy its
 /// inline storage per call).
@@ -445,14 +553,25 @@ const NARY: &[RowN] = &[
     ),
 ];
 
+type Ctor3<T> = fn(Site, Operand, Operand, Operand) -> Code<T>;
 type Ctor2<T> = fn(Site, Operand, Operand) -> Code<T>;
 type Ctor1<T> = fn(Site, Operand) -> Code<T>;
+
+/// See [`RowN`].
+type Row3 = (&'static str, Ctor3<Value>);
 
 /// See [`RowN`].
 type Row2 = (&'static str, Ctor2<Value>, Option<Ctor2<bool>>);
 
 /// See [`RowN`].
 type Row1 = (&'static str, Ctor1<Value>, Option<Ctor1<bool>>);
+
+/// The three-argument ops by core name (value code).
+const TERNARY: &[Row3] = &[
+    ("assoc!", shape3::<AssocBang>),
+    ("nth", shape3::<Nth3>),
+    ("get", shape3::<Get3>),
+];
 
 /// The two-argument ops by core name: the value code, and the
 /// test code for the predicates.
@@ -494,6 +613,7 @@ const BINARY: &[Row2] = &[
     ("max", shape2::<Max, AsValue>, None),
     ("nth", shape2::<Nth, AsValue>, None),
     ("get", shape2::<Get, AsValue>, None),
+    ("dissoc", shape2::<Dissoc, AsValue>, None),
     (
         "contains?",
         shape2::<Contains, AsValue>,
@@ -546,6 +666,9 @@ const UNARY: &[Row1] = &[
     ),
     ("parse-long", shape1::<ParseLong, AsValue>, None),
     ("count", shape1::<Count, AsValue>, None),
+    ("peek", shape1::<Peek, AsValue>, None),
+    ("pop!", shape1::<PopBang, AsValue>, None),
+    ("bit-not", shape1::<BitNot, AsValue>, None),
     (
         "first",
         shape1::<First, AsValue>,
@@ -580,6 +703,7 @@ pub(crate) fn core_name(call: &DirectCall) -> Option<&str> {
 pub(crate) enum Ctor<T: 'static> {
     One(Ctor1<T>),
     Two(Ctor2<T>),
+    Three(Ctor3<T>),
     N(CtorN<T>),
 }
 
@@ -595,9 +719,46 @@ impl<T: 'static> Ctor<T> {
                 let a = next();
                 c(site, a, next())
             }
+            Ctor::Three(c) => {
+                let a = next();
+                let b = next();
+                c(site, a, b, next())
+            }
             Ctor::N(c) => c(site, ops.collect()),
         }
     }
+}
+
+fn unary_value_ctor(name: &str) -> Option<Ctor<Value>> {
+    UNARY
+        .iter()
+        .find(|(n, ..)| *n == name)
+        .map(|(_, v, _)| Ctor::One(*v))
+}
+
+fn binary_value_ctor(name: &str) -> Option<Ctor<Value>> {
+    BINARY
+        .iter()
+        .find(|(n, ..)| *n == name)
+        .map(|(_, v, _)| Ctor::Two(*v))
+}
+
+fn ternary_value_ctor(name: &str) -> Option<Ctor<Value>> {
+    TERNARY
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, v)| Ctor::Three(*v))
+        .or_else(|| {
+            NARY.iter()
+                .find(|(n, ..)| *n == name)
+                .map(|(_, v, _)| Ctor::N(*v))
+        })
+}
+
+fn nary_value_ctor(name: &str) -> Option<Ctor<Value>> {
+    NARY.iter()
+        .find(|(n, ..)| *n == name)
+        .map(|(_, v, _)| Ctor::N(*v))
 }
 
 /// The specialized value code for `call`, if its op has one. Its
@@ -606,29 +767,40 @@ impl<T: 'static> Ctor<T> {
 pub(crate) fn value_ctor(call: &DirectCall) -> Option<Ctor<Value>> {
     let name = core_name(call)?;
     match call.args.len() {
-        1 => UNARY
-            .iter()
-            .find(|(n, ..)| *n == name)
-            .map(|(_, v, _)| Ctor::One(*v)),
-        2 => BINARY
-            .iter()
-            .find(|(n, ..)| *n == name)
-            .map(|(_, v, _)| Ctor::Two(*v)),
-        3.. => NARY
-            .iter()
-            .find(|(n, ..)| *n == name)
-            .map(|(_, v, _)| Ctor::N(*v)),
+        1 => unary_value_ctor(name),
+        2 => binary_value_ctor(name),
+        3 => ternary_value_ctor(name),
+        4.. => nary_value_ctor(name),
         _ => None,
     }
+}
+
+fn unary_test_ctor(name: &str) -> Option<Ctor<bool>> {
+    UNARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::One)
+}
+
+fn binary_test_ctor(name: &str) -> Option<Ctor<bool>> {
+    BINARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::Two)
+}
+
+fn ternary_test_ctor(name: &str) -> Option<Ctor<bool>> {
+    NARY.iter()
+        .find(|(n, ..)| *n == name)
+        .and_then(|(_, _, t)| t.map(Ctor::N))
+}
+
+fn nary_test_ctor(name: &str) -> Option<Ctor<bool>> {
+    NARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::N)
 }
 
 /// The specialized test code for `call`, if its op is a predicate.
 pub(crate) fn test_ctor(call: &DirectCall) -> Option<Ctor<bool>> {
     let name = core_name(call)?;
     match call.args.len() {
-        1 => UNARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::One),
-        2 => BINARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::Two),
-        3.. => NARY.iter().find(|(n, ..)| *n == name)?.2.map(Ctor::N),
+        1 => unary_test_ctor(name),
+        2 => binary_test_ctor(name),
+        3 => ternary_test_ctor(name),
+        4.. => nary_test_ctor(name),
         _ => None,
     }
 }
@@ -636,6 +808,54 @@ pub(crate) fn test_ctor(call: &DirectCall) -> Option<Ctor<bool>> {
 /// Whether `call` compiles to specialized code (see [`value_ctor`]).
 pub(crate) fn in_place(call: &DirectCall) -> bool {
     value_ctor(call).is_some()
+}
+
+/// `pop!` for effect only: the mutation, no transient clone.
+struct PopBangFx;
+
+impl Op1 for PopBangFx {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        PopBang::apply_mut(a)?;
+        Some(Value::Nil)
+    }
+}
+
+/// `conj!` for effect only (see [`PopBangFx`]).
+struct ConjBangFx;
+
+impl Op2 for ConjBangFx {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        ConjBang::apply_mut(a, b)?;
+        Some(Value::Nil)
+    }
+}
+
+/// `assoc!` for effect only (see [`PopBangFx`]).
+struct AssocBangFx;
+
+impl Op3 for AssocBangFx {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        AssocBang::apply_mut(a, b, c)?;
+        Some(Value::Nil)
+    }
+}
+
+/// The effect-position code for `call`, when its op is a
+/// transient mutator whose returned transient the caller
+/// discards: the mutation runs (a miss still runs the native,
+/// whose return value the caller drops either way), but the
+/// inline hit skips cloning the transient just to drop it.
+pub(crate) fn effect_ctor(call: &DirectCall) -> Option<Ctor<Value>> {
+    let name = core_name(call)?;
+    match (name, call.args.len()) {
+        ("pop!", 1) => Some(Ctor::One(shape1::<PopBangFx, AsValue>)),
+        ("conj!", 2) => Some(Ctor::Two(shape2::<ConjBangFx, AsValue>)),
+        ("assoc!", 3) => Some(Ctor::Three(shape3::<AssocBangFx>)),
+        _ => None,
+    }
 }
 
 /// An update op's inline answer over its owned operands (the
@@ -659,32 +879,16 @@ pub(crate) enum Coll {
 /// first, then the other operands in order, then a local
 /// collection is read — last, so the last-use analysis can move it
 /// even when the other operands read it ([`update_order`]).
-fn upd<O: Upd>(c: Site, coll: Coll, rest: Vec<Operand>) -> Exec {
-    if rest.is_empty() {
-        return upd1::<O>(c, coll);
+fn upd<O: Upd>(c: Site, coll: Coll, mut rest: Vec<Operand>) -> Exec {
+    match rest.len() {
+        0 => upd1::<O>(c, coll),
+        1 => upd2::<O>(c, coll, rest.pop().unwrap()),
+        _ => {
+            let o2 = rest.pop().unwrap();
+            let o1 = rest.pop().unwrap();
+            upd3::<O>(c, coll, o1, o2)
+        }
     }
-    Box::new(move |ev, f| {
-        let valid = ev.site_direct_valid(c.sid, &c.call);
-        let mut args: SmallVec<[Value; 4]> = SmallVec::new();
-        args.push(match &coll {
-            Coll::Exec(e) => e(ev, f)?,
-            _ => Value::Nil,
-        });
-        for o in &rest {
-            args.push(o.eval(ev, f)?);
-        }
-        match &coll {
-            Coll::Take(r) => args[0] = std::mem::replace(&mut f.regs[*r], Value::Nil),
-            Coll::Read(o) => args[0] = o.eval(ev, f)?,
-            Coll::Exec(_) => {}
-        }
-        if valid {
-            if let Some(v) = O::apply(&mut args) {
-                return Ok(v);
-            }
-        }
-        native(ev, &c, args)
-    })
 }
 
 /// A one-operand update op (`next`, `rest`): the collection alone,
@@ -703,6 +907,57 @@ fn upd1<O: Upd>(c: Site, coll: Coll) -> Exec {
             }
         }
         native(ev, &c, smallvec![a])
+    })
+}
+
+/// A two-operand update op (`conj`): stack-allocated args without SmallVec.
+fn upd2<O: Upd>(c: Site, coll: Coll, o1: Operand) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let mut a = match &coll {
+            Coll::Exec(e) => e(ev, f)?,
+            _ => Value::Nil,
+        };
+        let b = o1.eval(ev, f)?;
+        match &coll {
+            Coll::Take(r) => a = std::mem::replace(&mut f.regs[*r], Value::Nil),
+            Coll::Read(o) => a = o.eval(ev, f)?,
+            Coll::Exec(_) => {}
+        }
+        let mut args = [a, b];
+        if valid {
+            if let Some(v) = O::apply(&mut args) {
+                return Ok(v);
+            }
+        }
+        let [a, b] = args;
+        native(ev, &c, smallvec![a, b])
+    })
+}
+
+/// A three-operand update op (`assoc`): stack-allocated args without SmallVec.
+fn upd3<O: Upd>(c: Site, coll: Coll, o1: Operand, o2: Operand) -> Exec {
+    Box::new(move |ev, f| {
+        let valid = ev.site_direct_valid(c.sid, &c.call);
+        let mut a = match &coll {
+            Coll::Exec(e) => e(ev, f)?,
+            _ => Value::Nil,
+        };
+        let b = o1.eval(ev, f)?;
+        let c_val = o2.eval(ev, f)?;
+        match &coll {
+            Coll::Take(r) => a = std::mem::replace(&mut f.regs[*r], Value::Nil),
+            Coll::Read(o) => a = o.eval(ev, f)?,
+            Coll::Exec(_) => {}
+        }
+        let mut args = [a, b, c_val];
+        if valid {
+            if let Some(v) = O::apply(&mut args) {
+                return Ok(v);
+            }
+        }
+        let [a, b, c_val] = args;
+        native(ev, &c, smallvec![a, b, c_val])
     })
 }
 
@@ -734,6 +989,7 @@ type UpdRow = (&'static str, usize, UpdCtor);
 const UPDATES: &[UpdRow] = &[
     ("assoc", 3, upd::<Assoc>),
     ("conj", 2, upd::<Conj>),
+    ("pop", 1, upd::<Pop>),
     ("next", 1, upd::<Next>),
     ("rest", 1, upd::<Rest>),
 ];
@@ -753,6 +1009,7 @@ pub(crate) fn update_ctor(call: &DirectCall) -> Option<UpdCtor> {
         "assoc" if argc >= 5 && argc % 2 == 1 => Some(upd_native),
         "assoc-in" if argc == 3 => Some(upd_native),
         "update" | "update-in" if argc >= 3 => Some(upd_native),
+        "transient" | "persistent!" if argc == 1 => Some(upd_native),
         _ => None,
     }
 }
@@ -797,8 +1054,10 @@ impl Upd for Assoc {
                     None
                 }
             },
-            (Value::Map(m), k) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k) => {
-                Some(Value::Map(m.insert(k.clone(), take(v))))
+            (Value::Map(m), k_ref)
+                if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) =>
+            {
+                Some(Value::Map(m.insert(take(k), take(v))))
             }
             (other, _) => {
                 *coll = other;
@@ -835,11 +1094,11 @@ impl Upd for Conj {
 /// pairs, and `Double` with either side (`Int` widened, like the
 /// native's `to_f64`).
 #[inline(always)]
-fn arith(
+fn arith<F: Fn(i64, i64) -> Option<i64>, G: Fn(f64, f64) -> f64>(
     a: &Value,
     b: &Value,
-    int: fn(i64, i64) -> Option<i64>,
-    dbl: fn(f64, f64) -> f64,
+    int: F,
+    dbl: G,
 ) -> Option<Value> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => int(*x, *y).map(Value::Int),
@@ -852,11 +1111,11 @@ fn arith(
 
 /// A numeric comparison (`Int` pairs exact, any `Double` as `f64`).
 #[inline(always)]
-fn compare(
+fn compare<F: Fn(i64, i64) -> bool, G: Fn(f64, f64) -> bool>(
     a: &Value,
     b: &Value,
-    int: fn(i64, i64) -> bool,
-    dbl: fn(f64, f64) -> bool,
+    int: F,
+    dbl: G,
 ) -> Option<bool> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(int(*x, *y)),
@@ -869,7 +1128,7 @@ fn compare(
 
 /// An `Int`-pair op (`None` for any other pair).
 #[inline(always)]
-fn ints(a: &Value, b: &Value, op: fn(i64, i64) -> Option<i64>) -> Option<Value> {
+fn ints<F: Fn(i64, i64) -> Option<i64>>(a: &Value, b: &Value, op: F) -> Option<Value> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => op(*x, *y).map(Value::Int),
         _ => None,
@@ -878,7 +1137,7 @@ fn ints(a: &Value, b: &Value, op: fn(i64, i64) -> Option<i64>) -> Option<Value> 
 
 /// A numeric predicate over `Int` and `Double`.
 #[inline(always)]
-fn sign(a: &Value, int: fn(i64) -> bool, dbl: fn(f64) -> bool) -> Option<bool> {
+fn sign<F: Fn(i64) -> bool, G: Fn(f64) -> bool>(a: &Value, int: F, dbl: G) -> Option<bool> {
     match a {
         Value::Int(x) => Some(int(*x)),
         Value::Double(x) => Some(dbl(*x)),
@@ -970,8 +1229,71 @@ op2!(Ushr, |a, b| ints(a, b, |x, n| Some(
 )));
 op2!(Min, |a, b| ints(a, b, |x, y| Some(x.min(y))));
 op2!(Max, |a, b| ints(a, b, |x, y| Some(x.max(y))));
-op2!(Nth, |a, b| crate::vm_intrinsics::nth_of(a, b, None));
-op2!(Get, |a, b| crate::vm_intrinsics::get_of(a, b, None));
+pub(crate) struct Nth;
+
+impl Op2 for Nth {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        let Value::Int(n) = b else {
+            return None;
+        };
+        if *n < 0 || *n > i32::MAX as i64 {
+            return None;
+        }
+        let idx = *n as usize;
+        match a {
+            Value::Vector(v) => v.get(idx),
+            Value::Str(s) => crate::coll::str_char_at(s, idx).map(Value::Char),
+            Value::Transient(t) => {
+                let guard = t.lock();
+                match &*guard {
+                    clj_value::TransientKind::Vector(tv) => tv.nth_opt(idx),
+                    _ => None,
+                }
+            }
+            Value::Extension(e) => {
+                let any = e.as_any();
+                if let Some(sv) = any.downcast_ref::<clj_value::SubVectorValue>() {
+                    return sv.nth(idx);
+                }
+                if let Some(sp) = any.downcast_ref::<clj_value::SplitVecValue>() {
+                    return sp.nth(idx);
+                }
+                crate::vm_intrinsics::nth_of(a, b, None)
+            }
+            _ => crate::vm_intrinsics::nth_of(a, b, None),
+        }
+    }
+}
+
+pub(crate) struct Get;
+
+impl Op2 for Get {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        match a {
+            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
+                Some(m.get(b).cloned().unwrap_or(Value::Nil))
+            }
+            _ => crate::vm_intrinsics::get_of(a, b, None),
+        }
+    }
+}
+
+pub(crate) struct Dissoc;
+
+impl Op2 for Dissoc {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        match a {
+            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
+                Some(Value::Map(m.clone().without(b)))
+            }
+            Value::Nil => Some(Value::Nil),
+            _ => None,
+        }
+    }
+}
 
 pub(crate) struct Inc;
 
@@ -1014,12 +1336,64 @@ impl Op1 for Dec {
     }
 }
 
+/// `(bit-not x)` on an integer.
+pub(crate) struct BitNot;
+
+impl Op1 for BitNot {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        let Value::Int(x) = a else {
+            return None;
+        };
+        Some(Value::Int(!x))
+    }
+}
+
 pub(crate) struct Count;
 
 impl Op1 for Count {
     #[inline(always)]
     fn apply(a: &Value) -> Option<Value> {
         crate::vm_intrinsics::count_of(a)
+    }
+}
+
+/// `(peek coll)` over `nil`, lists, and plain (unmarked) vectors.
+pub(crate) struct Peek;
+
+impl Op1 for Peek {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        match a {
+            Value::Nil => Some(Value::Nil),
+            Value::List(l) => Some(l.first().cloned().unwrap_or(Value::Nil)),
+            Value::Vector(x) if x.meta().is_none() => Some(if x.is_empty() {
+                Value::Nil
+            } else {
+                x.get(x.len() - 1).unwrap_or(Value::Nil)
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// `(pop coll)` over a non-empty plain (unmarked) vector: a last-use
+/// operand moves out and drops its last item in place.
+pub(crate) struct Pop;
+
+impl Upd for Pop {
+    #[inline(always)]
+    fn apply(args: &mut [Value]) -> Option<Value> {
+        let [coll] = args else { return None };
+        match std::mem::replace(coll, Value::Nil) {
+            Value::Vector(x) if !x.is_empty() && x.meta().is_none() => {
+                x.drop_last_owned().map(Value::Vector)
+            }
+            other => {
+                *coll = other;
+                None
+            }
+        }
     }
 }
 
@@ -1132,13 +1506,14 @@ impl Op1 for DoubleCast {
     }
 }
 
-/// `(conj! tv x)` onto a live transient vector (the cell updates in
-/// place; anything else — or a frozen transient — runs the native).
-pub(crate) struct ConjBang;
+/// `(pop! t)` over a live transient vector (drops its last item in
+/// place; anything else runs the native).
+pub(crate) struct PopBang;
 
-impl Op2 for ConjBang {
+impl PopBang {
+    /// The mutation alone (see [`effect_ctor`]).
     #[inline(always)]
-    fn apply(a: &Value, b: &Value) -> Option<Value> {
+    fn apply_mut(a: &Value) -> Option<()> {
         let Value::Transient(t) = a else {
             return None;
         };
@@ -1146,9 +1521,156 @@ impl Op2 for ConjBang {
         let clj_value::TransientKind::Vector(tv) = &mut *guard else {
             return None;
         };
-        tv.conj(b.clone()).ok()?;
+        tv.pop().ok()?;
         drop(guard);
+        Some(())
+    }
+}
+
+impl Op1 for PopBang {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        Self::apply_mut(a)?;
         Some(a.clone())
+    }
+}
+
+/// `(conj! tv x)` onto a live transient vector (the cell updates in
+/// place; anything else — or a frozen transient — runs the native).
+pub(crate) struct ConjBang;
+
+impl ConjBang {
+    /// The mutation alone (see [`effect_ctor`]).
+    #[inline(always)]
+    fn apply_mut(a: &Value, b: &Value) -> Option<()> {
+        let Value::Transient(t) = a else {
+            return None;
+        };
+        let mut guard = t.lock();
+        let clj_value::TransientKind::Vector(tv) = &mut *guard else {
+            return None;
+        };
+        if let Value::Int(n) = b {
+            if !tv.conj_int_opt(*n) {
+                return None;
+            }
+        } else {
+            tv.conj(b.clone()).ok()?;
+        }
+        drop(guard);
+        Some(())
+    }
+}
+
+impl Op2 for ConjBang {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        Self::apply_mut(a, b)?;
+        Some(a.clone())
+    }
+}
+
+/// `(assoc! t k v)` on a live transient vector or transient map
+/// (the cell updates in place; anything else runs the native).
+pub(crate) struct AssocBang;
+
+impl AssocBang {
+    /// The mutation alone (see [`effect_ctor`]).
+    #[inline(always)]
+    fn apply_mut(a: &Value, b: &Value, c: &Value) -> Option<()> {
+        let Value::Transient(t) = a else {
+            return None;
+        };
+        let mut guard = t.lock();
+        match &mut *guard {
+            clj_value::TransientKind::Vector(tv) => {
+                let Value::Int(n) = b else {
+                    return None;
+                };
+                if *n < 0 || *n > i32::MAX as i64 {
+                    return None;
+                }
+                let i = *n as usize;
+                if let Value::Int(x) = c {
+                    if !tv.assoc_int_opt(i, *x) {
+                        return None;
+                    }
+                } else {
+                    tv.assoc(i, c.clone()).ok()?;
+                }
+            }
+            clj_value::TransientKind::Map(tm) => {
+                if !crate::vm_intrinsics::is_scalar_key(b) {
+                    return None;
+                }
+                tm.assoc(b.clone(), c.clone()).ok()?;
+            }
+            _ => return None,
+        }
+        drop(guard);
+        Some(())
+    }
+}
+
+impl Op3 for AssocBang {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        Self::apply_mut(a, b, c)?;
+        Some(a.clone())
+    }
+}
+
+pub(crate) struct Nth3;
+
+impl Op3 for Nth3 {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        let Value::Int(n) = b else {
+            return None;
+        };
+        let Ok(i32_n) = i32::try_from(*n) else {
+            return None;
+        };
+        if i32_n < 0 {
+            return Some(c.clone());
+        }
+        let idx = i32_n as usize;
+        match a {
+            Value::Vector(v) => Some(v.get(idx).unwrap_or_else(|| c.clone())),
+            Value::Str(s) => {
+                Some(crate::coll::str_char_at(s, idx).map_or_else(|| c.clone(), Value::Char))
+            }
+            Value::Transient(t) => {
+                let guard = t.lock();
+                if let clj_value::TransientKind::Vector(tv) = &*guard {
+                    let v = tv.nth(idx).ok()?.unwrap_or_else(|| c.clone());
+                    drop(guard);
+                    return Some(v);
+                }
+                None
+            }
+            Value::Extension(e) => {
+                if let Some(sv) = e.as_any().downcast_ref::<clj_value::SubVectorValue>() {
+                    return Some(sv.nth(idx).unwrap_or_else(|| c.clone()));
+                }
+                crate::vm_intrinsics::nth_of(a, b, Some(c))
+            }
+            _ => crate::vm_intrinsics::nth_of(a, b, Some(c)),
+        }
+    }
+}
+
+pub(crate) struct Get3;
+
+impl Op3 for Get3 {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        match a {
+            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
+                Some(m.get(b).cloned().unwrap_or_else(|| c.clone()))
+            }
+            _ => crate::vm_intrinsics::get_of(a, b, Some(c)),
+        }
     }
 }
 
@@ -1251,5 +1773,75 @@ mod tests {
         );
         assert_eq!(<IsString as Op1>::test(&s_hi), Some(true));
         assert_eq!(<IsString as Op1>::test(&Value::Int(1)), Some(false));
+    }
+
+    #[test]
+    fn peek_pop_and_lookup_fast_paths() {
+        let v_empty = Value::Vector(clj_value::Vector::new_sync());
+        let v_one = Value::Vector(clj_value::Vector::from_vec(vec![Value::Int(7)]));
+        let l_empty = Value::List(clj_value::List::new_sync());
+        let l_one = Value::List(clj_value::List::from_vec(vec![Value::Int(9)]));
+        assert_eq!(<Peek as Op1>::apply(&Value::Nil), Some(Value::Nil));
+        assert_eq!(<Peek as Op1>::apply(&l_empty), Some(Value::Nil));
+        assert_eq!(<Peek as Op1>::apply(&l_one), Some(Value::Int(9)));
+        assert_eq!(<Peek as Op1>::apply(&v_empty), Some(Value::Nil));
+        assert_eq!(<Peek as Op1>::apply(&v_one), Some(Value::Int(7)));
+        assert_eq!(<Peek as Op1>::apply(&Value::Int(1)), None);
+
+        assert_eq!(<Pop as Upd>::apply(&mut []), None);
+        assert_eq!(<Pop as Upd>::apply(&mut [v_empty.clone()]), None);
+        assert_eq!(
+            <Pop as Upd>::apply(&mut [v_one.clone()]),
+            Some(v_empty.clone())
+        );
+
+        let mut ev = crate::boot();
+        let res = ev
+            .eval_source(
+                r#"
+                (let [s #{:a :b}
+                      v [10 20 30]
+                      st "hello"]
+                  [(s :a) (s :c :nf) (get s :b) (get s :c :nf)
+                   (v 1) (get st 1) (get st 99 :nf) (get st :bad)
+                   (get (transient [1]) 0) (get (transient {:a 1}) [1 2])
+                   (nth (subvec v 1) 0) (count (subvec v 1))
+                   (get (subvec v 1) 0) (get (subvec v 1) 99 :nf)
+                   (reduce + 0 (subvec v 1))
+                   (apply nth [(subvec v 1) 0])
+                   (apply peek [nil]) (apply peek [(vec (range 5))])
+                   (#{[1 2]} [1 2] :nf) (#{[1 2]} [3 4] :nf)
+                   (vec "abc") (into [] "xy")
+                   (vec (map s [:a :c])) (vec (map #(inc %) [1 2]))
+                   (vec (map (var inc) [1 2]))
+                   (vec (filter s [:a :c])) (vec (filter seq ["a" ""]))
+                   (vec (filter (var pos?) [1 -1]))
+                   (every? s [:a :b]) (every? (var pos?) [1 2])
+                   (some s [:c :a]) (some (var pos?) [-1 2])])
+                "#,
+            )
+            .unwrap();
+        assert!(matches!(res.last(), Some(Value::Vector(_))));
+    }
+
+    #[test]
+    fn pop_bang_and_bit_not() {
+        assert_eq!(<BitNot as Op1>::apply(&Value::Int(0)), Some(Value::Int(-1)));
+        assert_eq!(<BitNot as Op1>::apply(&Value::Int(-1)), Some(Value::Int(0)));
+        assert_eq!(<BitNot as Op1>::apply(&Value::Nil), None);
+
+        let tv = Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Vector(
+            clj_value::TransientVector::new(),
+        )));
+        assert_eq!(<PopBang as Op1>::apply(&tv), None);
+        assert_eq!(<PopBang as Op1>::apply(&Value::Nil), None);
+
+        assert!(<ConjBang as Op2>::apply(&tv, &Value::Int(123)).is_some());
+        assert_eq!(<PopBang as Op1>::apply(&tv), Some(tv.clone()));
+
+        let tm = Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Map(
+            clj_value::TransientMap::new(),
+        )));
+        assert_eq!(<PopBang as Op1>::apply(&tm), None);
     }
 }

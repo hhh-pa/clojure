@@ -93,6 +93,16 @@ fn count_rows() {
     assert_eq!(run_last(&mut eval, "(count #{1 2})"), "2");
     assert_eq!(run_last(&mut eval, "(count '(1 2 3))"), "3");
     assert_eq!(run_last(&mut eval, "(count (transient [1 2]))"), "2");
+    assert_eq!(run_last(&mut eval, "(count (transient {:a 1 :b 2}))"), "2");
+    assert_eq!(run_last(&mut eval, "(count (transient #{1 2 3}))"), "3");
+    assert_eq!(
+        run_last(&mut eval, "(apply count [(transient {:a 1 :b 2})])"),
+        "2"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(apply count [(transient #{1 2 3})])"),
+        "3"
+    );
     assert_eq!(run_last(&mut eval, "(count (subvec [1 2 3] 1))"), "2");
     assert_eq!(run_last(&mut eval, "(count (range 5))"), "5");
     assert_eq!(run_last(&mut eval, "(count (range 0 5.0))"), "5");
@@ -353,6 +363,8 @@ fn contains_rows() {
     assert_eq!(run_last(&mut eval, "(contains? \"ab\" 5)"), "false");
     assert_eq!(run_last(&mut eval, "(contains? nil :a)"), "false");
     assert_eq!(run_last(&mut eval, "(contains? #{1} 1)"), "true");
+    assert_eq!(run_last(&mut eval, "(contains? #{1 2 3 4 5} 5)"), "true");
+    assert_eq!(run_last(&mut eval, "(contains? #{1 2 3 4 5} 9)"), "false");
     assert_eq!(run_last(&mut eval, "(contains? (transient [1]) 0)"), "true");
     assert_eq!(
         run_last(&mut eval, "(contains? (subvec [1 2] 0) :a)"),
@@ -404,6 +416,14 @@ fn nth_rows() {
     assert_eq!(run_last(&mut eval, "(nth \"abc\" 5 :nf)"), ":nf");
     assert_eq!(run_last(&mut eval, "(nth (transient [1 2]) 1)"), "2");
     assert_eq!(run_last(&mut eval, "(nth (transient [1 2]) 5 :nf)"), ":nf");
+    assert!(
+        uncaught(&mut eval, "(nth (transient {:a 1}) 0 :nf)")
+            .starts_with("java.lang.UnsupportedOperationException")
+    );
+    assert!(
+        uncaught(&mut eval, "(nth (transient #{1}) 0 :nf)")
+            .starts_with("java.lang.UnsupportedOperationException")
+    );
     assert_eq!(run_last(&mut eval, "(nth [1 2] 1.9)"), "2");
     assert_eq!(run_last(&mut eval, "(nth (map inc [1 2]) 1)"), "3");
     assert_eq!(
@@ -435,9 +455,9 @@ fn nth_rows() {
     assert_eq!(
         run_last(
             &mut eval,
-            "(nth \"héllo-wörld0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\" 100)"
+            "(let [s \"héllo-wörld0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\"] [(nth s 0) (nth s 100)])"
         ),
-        "\\1"
+        "[\\h \\1]"
     );
     assert_eq!(
         uncaught(&mut eval, "(nth (apply str (repeat 100 \"ab\")) 500)"),
@@ -688,6 +708,13 @@ fn transient_rows() {
         run_last(
             &mut eval,
             "(let [t (transient [1 2])] (pop! t) (persistent! t))"
+        ),
+        "[1]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [t (transient [1 2])] (apply pop! [t]) (persistent! t))"
         ),
         "[1]"
     );
@@ -1665,6 +1692,20 @@ fn corpus_in_gaps() {
             "(let [tm (transient {})] (persistent! (assoc! tm :a 10)))"
         ),
         "{:a 10}"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [tv (transient [1 2])] (persistent! (assoc! tv 0 42)))"
+        ),
+        "[42 2]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [tv (transient [1 2])] (persistent! (assoc! tv 0 :keyword)))"
+        ),
+        "[:keyword 2]"
     );
 
     // Multi-pair assoc update op
@@ -2839,5 +2880,42 @@ fn owned_churn_scale_smoke() {
             "(let [g (group-by #(mod % 10) (range 100))] [(count g) (count (get g 0))])"
         ),
         "[10 10]"
+    );
+}
+
+#[test]
+fn fast_str_char_at_memo_and_index() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s \"éàüö\"] [(nth s 0) (nth s 1) (nth s 2) (nth s 3)])"
+        ),
+        "[\\é \\à \\ü \\ö]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s (apply str (repeat 100 \"é\"))] [(nth s 0) (nth s 1) (nth s 50)])"
+        ),
+        "[\\é \\é \\é]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s1 \"hello\" s2 \"world\"] [(nth s1 0) (nth s2 0) (nth s1 1) (nth s2 1)])"
+        ),
+        "[\\h \\w \\e \\o]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [s \"abcdefghijklmnopqrstuvwxyz\"] [(nth s 0) (nth s 25) (nth s 12)])"
+        ),
+        "[\\a \\z \\m]"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(nth \"abc\" 10)"),
+        "java.lang.StringIndexOutOfBoundsException | Index 10 out of bounds for length 3"
     );
 }

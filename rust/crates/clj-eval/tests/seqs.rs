@@ -334,6 +334,29 @@ fn sort_by_rows() {
 }
 
 #[test]
+fn sort_default_fast_path_rows() {
+    let mut eval = boot();
+    assert_eq!(run_last(&mut eval, "(sort [3 1 2 1])"), "(1 1 2 3)");
+    assert_eq!(
+        run_last(&mut eval, "(sort [\"pear\" \"apple\" \"fig\"])"),
+        "(\"apple\" \"fig\" \"pear\")"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sort [[1 2] [1 1] [0 9] [1]])"),
+        "([0 9] [1] [1 1] [1 2])"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sort [[\"b\" 1] [\"a\" 2] [\"b\" 0]])"),
+        "([\"a\" 2] [\"b\" 0] [\"b\" 1])"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(sort [\"b\" \"é\" \"a\"])"),
+        "(\"a\" \"b\" \"é\")"
+    );
+    assert_eq!(run_last(&mut eval, "(sort [])"), "()");
+}
+
+#[test]
 fn dorun_doall_n_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(dorun 2 [1 2 3])"), "nil");
@@ -347,6 +370,48 @@ fn dorun_doall_n_rows() {
 fn mapv_filterv_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(mapv inc [1 2 3])"), "[2 3 4]");
+    assert_eq!(
+        run_last(&mut eval, "(mapv parse-long [\"1\" \"x\" \"-3\"])"),
+        "[1 nil -3]"
+    );
+    assert_eq!(run_last(&mut eval, "(mapv parse-long [])"), "[]");
+    // Long digit strings take the checked path: a trailing
+    // non-digit answers nil, and non-ASCII decimal digits restart
+    // on the char-wise path.
+    assert_eq!(
+        run_last(&mut eval, "(parse-long \"1234567890123456789x\")"),
+        "nil"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(parse-long \"٠٠٠٠٠٠٠٠٠٠٠٠٠٠٠٠٠٠١٢٣\")"),
+        "123"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(mapv parse-long [\"1\" 2])"),
+        "java.lang.IllegalArgumentException | Expected string, got java.lang.Long"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(mapv parse-long (subvec [\"a\" \"1\" \"2\" \"b\"] 1 3))"
+        ),
+        "[1 2]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(mapv parse-long (subvec [\"a\" \"1\" \"x\" \"b\"] 1 3))"
+        ),
+        "[1 nil]"
+    );
+    assert_eq!(
+        uncaught(&mut eval, "(mapv parse-long (subvec [\"a\" 1] 1 2))"),
+        "java.lang.IllegalArgumentException | Expected string, got java.lang.Long"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(mapv parse-long (list \"1\" \"2\"))"),
+        "[1 2]"
+    );
     assert_eq!(run_last(&mut eval, "(mapv + [1 2] [10 20 30])"), "[11 22]");
     assert_eq!(run_last(&mut eval, "(filterv odd? [1 2 3 4])"), "[1 3]");
     assert_eq!(run_last(&mut eval, "(filterv pos? [])"), "[]");
@@ -534,6 +599,17 @@ fn some_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(some odd? [2 4 5 6])"), "true");
     assert_eq!(run_last(&mut eval, "(some odd? [2 4])"), "nil");
+    assert_eq!(run_last(&mut eval, "(some :a [{:a 1} {:b 2}])"), "1");
+    assert_eq!(run_last(&mut eval, "(some :c [{:a 1} {:b 2}])"), "nil");
+    assert_eq!(run_last(&mut eval, "(some :a [:foo {:a 2}])"), "2");
+    assert_eq!(
+        run_last(&mut eval, "(some :a (subvec [1 2 {:a 3} 4] 1 3))"),
+        "3"
+    );
+    assert_eq!(
+        run_last(&mut eval, "(some :a [{:a false} #{:b} #{:a}])"),
+        ":a"
+    );
 }
 
 #[test]

@@ -257,7 +257,7 @@ pub struct Vector {
 /// whatever the type.
 #[derive(Clone, Debug)]
 enum VectorInner {
-    Generic(RpdsVector),
+    Generic(crate::trie::Packed<Value>),
     Ints(crate::trie::Packed<i64>),
     Chars(crate::trie::Packed<char>),
 }
@@ -268,7 +268,7 @@ pub struct VectorIter<'a> {
 }
 
 enum VectorIterInner<'a> {
-    Generic(crate::trie::Iter<'a>),
+    Generic(crate::trie::PackedIter<'a, Value>),
     Ints(crate::trie::PackedIter<'a, i64>),
     Chars(crate::trie::PackedIter<'a, char>),
 }
@@ -343,7 +343,7 @@ impl DoubleEndedIterator for VectorIter<'_> {
 /// Representation is orthogonal to the reported class
 /// (`hashy`): a 9-pair all-keyword map stays array-classed
 /// whether shaped or hashed.
-const INLINE_MAP_MAX: usize = 16;
+pub(crate) const INLINE_MAP_MAX: usize = 16;
 
 /// A small map's shared key-set (#221 suffix states: 200k maps
 /// share ONE `[:len :link :next]` shape, so per-map memory is
@@ -357,6 +357,37 @@ const INLINE_MAP_MAX: usize = 16;
 #[derive(Debug)]
 struct MapShape {
     keys: Box<[Value]>,
+    ascii_map: [u8; 128],
+}
+
+fn build_ascii_map(keys: &[Value]) -> [u8; 128] {
+    let mut ascii_map = [0xFFu8; 128];
+    for (idx, k) in keys.iter().enumerate() {
+        if let Value::Char(c) = k {
+            let cu = *c as u32;
+            if cu < 128 {
+                ascii_map[cu as usize] = idx as u8;
+            }
+        }
+    }
+    ascii_map
+}
+
+impl MapShape {
+    #[inline]
+    fn find_key(&self, k: &Value) -> Option<usize> {
+        if let Value::Char(c) = k {
+            let cu = *c as u32;
+            if cu < 128 {
+                let idx = self.ascii_map[cu as usize];
+                if idx != 0xFF {
+                    return Some(idx as usize);
+                }
+                return None;
+            }
+        }
+        self.keys.iter().position(|ek| ek == k)
+    }
 }
 
 /// A small map's entries: the shared shape plus this version's
@@ -378,10 +409,23 @@ struct SmallMap {
 struct ShapeRegistry {
     map: HashMap<Vec<Value>, Weak<MapShape>, FxBuildHasher>,
     since_cleanup: usize,
-    /// The last all-keyword shape interned: runs of same-shape maps
-    /// (every fresh var's `{:ns … :name …}`) skip the hash probe.
-    /// Kept alive here, so its table entry never goes stale.
-    last: Option<Arc<MapShape>>,
+    /// The last exact shapes interned (MRU slots 0 and 1): runs of
+    /// same-shape maps or alternating shapes skip the hash probe.
+    /// Kept alive here, so their table entries never go stale.
+    last: [Option<Arc<MapShape>>; 2],
+}
+
+#[inline]
+fn is_exact_key(k: &Value) -> bool {
+    matches!(
+        k,
+        Value::Keyword(_)
+            | Value::Char(_)
+            | Value::Str(_)
+            | Value::Symbol(_)
+            | Value::Bool(_)
+            | Value::Nil
+    )
 }
 
 /// Dead-entry cleanup cadence: a cleanup scans the whole table,
@@ -395,12 +439,33 @@ const SHAPE_CLEANUP_EVERY: usize = 16;
 /// Amortized retain-scan visits per miss past the
 /// [`SHAPE_CLEANUP_EVERY`] floor (see above).
 const SHAPE_CLEANUP_AMORT: usize = 8;
+/// Maximum entries in the thread-local shape registry map to prevent
+/// unbounded memory growth on high-cardinality ad-hoc keys.
+const SHAPE_REGISTRY_CAP: usize = 512;
+
+impl ShapeRegistry {
+    fn insert_shape(&mut self, keys: &[Value], shape: &Arc<MapShape>) {
+        if self.map.len() >= SHAPE_REGISTRY_CAP {
+            self.map.retain(|_, weak| weak.strong_count() > 0);
+        }
+        if self.map.len() < SHAPE_REGISTRY_CAP {
+            self.map.insert(keys.to_vec(), Arc::downgrade(shape));
+        }
+        self.since_cleanup += 1;
+        if self.since_cleanup >= SHAPE_CLEANUP_EVERY
+            && self.since_cleanup.saturating_mul(SHAPE_CLEANUP_AMORT) >= self.map.len()
+        {
+            self.map.retain(|_, weak| weak.strong_count() > 0);
+            self.since_cleanup = 0;
+        }
+    }
+}
 
 thread_local! {
     static SHAPE_REGISTRY: RefCell<ShapeRegistry> = RefCell::new(ShapeRegistry {
         map: HashMap::default(),
         since_cleanup: 0,
-        last: None,
+        last: [None, None],
     });
 }
 
@@ -412,33 +477,32 @@ thread_local! {
 fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
     SHAPE_REGISTRY.with(|reg| {
         let mut reg = reg.borrow_mut();
-        // Keyword keys compare unambiguously (no cross-type `=`), so
+        // Exact keys compare unambiguously (no cross-type `=`), so
         // the shortcut agrees with the table's own `Eq`.
-        let keywords = keys.iter().all(|k| matches!(k, Value::Keyword(_)));
-        if keywords {
-            if let Some(last) = reg.last.as_ref().filter(|l| *l.keys == *keys) {
-                return Arc::clone(last);
+        let exact = keys.iter().all(is_exact_key);
+        if exact {
+            if let Some(l0) = reg.last[0].as_ref().filter(|l| *l.keys == *keys) {
+                return Arc::clone(l0);
+            }
+            if let Some(l1) = reg.last[1].as_ref().filter(|l| *l.keys == *keys) {
+                return Arc::clone(l1);
             }
         }
         if let Some(shape) = reg.map.get(keys).and_then(Weak::upgrade) {
-            if keywords {
-                reg.last = Some(Arc::clone(&shape));
+            if exact {
+                reg.last[1] = reg.last[0].take();
+                reg.last[0] = Some(Arc::clone(&shape));
             }
             return shape;
         }
         let shape = Arc::new(MapShape {
             keys: keys.to_vec().into_boxed_slice(),
+            ascii_map: build_ascii_map(keys),
         });
-        reg.map.insert(keys.to_vec(), Arc::downgrade(&shape));
-        if keywords {
-            reg.last = Some(Arc::clone(&shape));
-        }
-        reg.since_cleanup += 1;
-        if reg.since_cleanup >= SHAPE_CLEANUP_EVERY
-            && reg.since_cleanup.saturating_mul(SHAPE_CLEANUP_AMORT) >= reg.map.len()
-        {
-            reg.map.retain(|_, weak| weak.strong_count() > 0);
-            reg.since_cleanup = 0;
+        reg.insert_shape(keys, &shape);
+        if exact {
+            reg.last[1] = reg.last[0].take();
+            reg.last[0] = Some(Arc::clone(&shape));
         }
         shape
     })
@@ -650,20 +714,32 @@ impl Vector {
                 .map(Self::from_chars),
             Some(_) => None,
         };
-        typed.unwrap_or_else(|| Self::of(VectorInner::Generic(RpdsVector::from_vec(items))))
+        typed.unwrap_or_else(|| Self::of(VectorInner::Generic(crate::trie::Packed::flat(items))))
     }
 
     /// Build a packed `Int` vector from `i64`s in order (no scan — for
     /// callers that already know, like ranges and packed transients).
     #[must_use]
     pub fn from_ints(ints: Vec<i64>) -> Self {
-        Self::of(VectorInner::Ints(crate::trie::Packed::from_vec(ints)))
+        Self::of(VectorInner::Ints(crate::trie::Packed::flat(ints)))
+    }
+
+    /// Build a packed `Int` vector from `i64`s in order (no scan).
+    #[must_use]
+    pub fn from_flat_ints(ints: Vec<i64>) -> Self {
+        Self::of(VectorInner::Ints(crate::trie::Packed::flat(ints)))
     }
 
     /// Build a packed char vector from `char`s in order (no scan).
     #[must_use]
     pub fn from_chars(chars: Vec<char>) -> Self {
-        Self::of(VectorInner::Chars(crate::trie::Packed::from_vec(chars)))
+        Self::of(VectorInner::Chars(crate::trie::Packed::flat(chars)))
+    }
+
+    /// Build a packed char vector from `char`s in order (no scan).
+    #[must_use]
+    pub fn from_flat_chars(chars: Vec<char>) -> Self {
+        Self::of(VectorInner::Chars(crate::trie::Packed::flat(chars)))
     }
 
     /// Whether this vector rides on packed `i64` or `char` storage.
@@ -679,6 +755,41 @@ impl Vector {
             VectorInner::Generic(_) => None,
             VectorInner::Ints(t) => Some(TypedItems::Ints(t.iter().copied().collect())),
             VectorInner::Chars(t) => Some(TypedItems::Chars(t.iter().copied().collect())),
+        }
+    }
+
+    /// The packed items when typed, moving out of an owned vector
+    /// without re-allocating where possible.
+    pub(crate) fn into_typed_items(self) -> Result<TypedItems, Self> {
+        match self.inner {
+            VectorInner::Generic(_) => Err(self),
+            VectorInner::Ints(t) => Ok(TypedItems::Ints(t.into_vec())),
+            VectorInner::Chars(t) => Ok(TypedItems::Chars(t.into_vec())),
+        }
+    }
+
+    /// Extract all items into a flat Vec<Value>, unwrapping unshared nodes.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<Value> {
+        match self.inner {
+            VectorInner::Generic(pvec) => pvec.into_vec(),
+            VectorInner::Ints(t) => t.into_vec().into_iter().map(Value::Int).collect(),
+            VectorInner::Chars(t) => t.into_vec().into_iter().map(Value::Char).collect(),
+        }
+    }
+
+    /// If this vector is packed chars, append all chars directly to `out`
+    /// without boxing into `Value::Char`. Returns true if handled.
+    pub fn push_to_string(&self, out: &mut String) -> bool {
+        match &self.inner {
+            VectorInner::Chars(packed) => {
+                out.reserve(packed.len());
+                for &c in packed.iter() {
+                    out.push(c);
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -708,7 +819,7 @@ impl Vector {
         self.retype_empty(&v);
         let generic = match (&mut self.inner, v) {
             (VectorInner::Generic(t), v) => {
-                t.push_back_mut(v);
+                t.push(v);
                 None
             }
             (VectorInner::Ints(t), Value::Int(n)) => {
@@ -719,8 +830,8 @@ impl Vector {
                 t.push(c);
                 None
             }
-            (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| g.push_back_mut(v))),
-            (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| g.push_back_mut(v))),
+            (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| g.push(v))),
+            (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| g.push(v))),
         };
         if let Some(g) = generic {
             self.inner = VectorInner::Generic(g);
@@ -756,7 +867,7 @@ impl Vector {
         }
         let generic = match (&mut self.inner, v) {
             (VectorInner::Generic(t), v) => {
-                t.set_mut(index, v);
+                t.set(index, v);
                 None
             }
             (VectorInner::Ints(t), Value::Int(n)) => {
@@ -768,10 +879,10 @@ impl Vector {
                 None
             }
             (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| {
-                g.set_mut(index, v);
+                g.set(index, v);
             })),
             (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| {
-                g.set_mut(index, v);
+                g.set(index, v);
             })),
         };
         if let Some(g) = generic {
@@ -786,7 +897,7 @@ impl Vector {
     /// collections keep a refcount of 1 across `assoc-in` / `update`.
     pub fn take_nth(&mut self, index: usize) -> Option<Value> {
         if let VectorInner::Generic(t) = &mut self.inner {
-            t.replace_mut(index, Value::Nil)
+            t.replace(index, Value::Nil)
         } else {
             self.get(index)
         }
@@ -813,7 +924,7 @@ impl Vector {
     #[must_use]
     pub fn drop_last_owned(mut self) -> Option<Self> {
         let popped = match &mut self.inner {
-            VectorInner::Generic(t) => t.drop_last_mut(),
+            VectorInner::Generic(t) => t.pop(),
             VectorInner::Ints(t) => t.pop(),
             VectorInner::Chars(t) => t.pop(),
         };
@@ -837,12 +948,13 @@ impl Vector {
 
     /// The item at `index` (`None` past the end; logarithmic — indexed
     /// callers must use this, not `iter().nth()`).
+    #[inline]
     #[must_use]
     pub fn get(&self, index: usize) -> Option<Value> {
         match &self.inner {
             VectorInner::Generic(t) => t.get(index).cloned(),
-            VectorInner::Ints(t) => t.get(index).map(Value::Int),
-            VectorInner::Chars(t) => t.get(index).map(Value::Char),
+            VectorInner::Ints(t) => t.get(index).copied().map(Value::Int),
+            VectorInner::Chars(t) => t.get(index).copied().map(Value::Char),
         }
     }
 
@@ -916,9 +1028,9 @@ fn vector_inner_len(inner: &VectorInner) -> usize {
 fn boxed<T: Copy>(
     t: &crate::trie::Packed<T>,
     box_item: fn(T) -> Value,
-    then: impl FnOnce(&mut RpdsVector),
-) -> RpdsVector {
-    let mut g: RpdsVector = t.iter().map(|x| box_item(*x)).collect();
+    then: impl FnOnce(&mut crate::trie::Packed<Value>),
+) -> crate::trie::Packed<Value> {
+    let mut g = crate::trie::Packed::from_vec(t.iter().map(|x| box_item(*x)).collect());
     then(&mut g);
     g
 }
@@ -1091,7 +1203,7 @@ impl Map {
 
     /// Build from deduped parallel keys/vals (big maps take the
     /// hash trie directly; small ones intern one shape).
-    fn from_parts(keys: Vec<Value>, vals: Vec<Value>, hashy: bool) -> Self {
+    pub(crate) fn from_parts(keys: Vec<Value>, vals: Vec<Value>, hashy: bool) -> Self {
         if keys.len() > INLINE_MAP_MAX {
             let mut inner = RpdsMap::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
             for (k, v) in keys.into_iter().zip(vals) {
@@ -1183,7 +1295,7 @@ impl Map {
     /// shared); new keys intern the extended key-set (hits
     /// allocate nothing past values).
     fn insert_shaped_mut(&mut self, mut small: Arc<SmallMap>, k: Value, v: Value) {
-        if let Some(idx) = small.shape.keys.iter().position(|ek| ek == &k) {
+        if let Some(idx) = small.shape.find_key(&k) {
             // `get_mut` succeeds only with no live alias (not even
             // the consumed input survives), so the write is
             // invisible and the entries `Arc` (see [`Map::id`])
@@ -1193,12 +1305,11 @@ impl Map {
                 self.small = Some(small);
                 return;
             }
-            let mut vals = Vec::with_capacity(small.vals.len());
-            vals.extend(small.vals.iter().cloned());
+            let mut vals = small.vals.clone();
             vals[idx] = v;
             self.small = Some(Arc::new(SmallMap {
                 shape: Arc::clone(&small.shape),
-                vals: vals.into_boxed_slice(),
+                vals,
             }));
             return;
         }
@@ -1260,7 +1371,7 @@ impl Map {
     #[must_use]
     pub fn without(mut self, k: &Value) -> Self {
         if let Some(small) = self.small.take() {
-            let Some(idx) = small.shape.keys.iter().position(|ek| ek == k) else {
+            let Some(idx) = small.shape.find_key(k) else {
                 self.small = Some(small);
                 return self;
             };
@@ -1440,12 +1551,7 @@ impl Map {
     #[must_use]
     pub fn get(&self, k: &Value) -> Option<&Value> {
         match &self.small {
-            Some(small) => small
-                .shape
-                .keys
-                .iter()
-                .position(|ek| ek == k)
-                .map(|idx| &small.vals[idx]),
+            Some(small) => small.shape.find_key(k).map(|idx| &small.vals[idx]),
             None => self.trie().get(k),
         }
     }
@@ -1455,7 +1561,7 @@ impl Map {
     /// keep a refcount of 1 across `assoc-in` / `update`.
     pub fn take_value(&mut self, k: &Value) -> Option<Value> {
         if let Some(small) = &mut self.small {
-            let idx = small.shape.keys.iter().position(|ek| ek == k)?;
+            let idx = small.shape.find_key(k)?;
             return Some(match Arc::get_mut(small) {
                 Some(entries) => std::mem::replace(&mut entries.vals[idx], Value::Nil),
                 None => small.vals[idx].clone(),
@@ -1468,7 +1574,7 @@ impl Map {
     #[must_use]
     pub fn contains_key(&self, k: &Value) -> bool {
         match &self.small {
-            Some(small) => small.shape.keys.iter().any(|ek| ek == k),
+            Some(small) => small.shape.find_key(k).is_some(),
             None => self.trie().get(k).is_some(),
         }
     }
@@ -1605,6 +1711,9 @@ impl Set {
     /// Whether a value is present.
     #[must_use]
     pub fn contains(&self, v: &Value) -> bool {
+        if self.members.len() <= 4 {
+            return self.members.iter().any(|m| m == v);
+        }
         self.inner.contains(v)
     }
 
@@ -1612,6 +1721,9 @@ impl Set {
     /// returns the member, not the key).
     #[must_use]
     pub fn get(&self, v: &Value) -> Option<&Value> {
+        if !self.inner.contains(v) {
+            return None;
+        }
         self.members.iter().find(|m| *m == v)
     }
 
@@ -2027,6 +2139,10 @@ fn seq_ext_meta(e: &Arc<dyn ExtensionValue>) -> Option<&Map> {
             any.downcast_ref::<crate::SubVectorValue>()
                 .and_then(crate::SubVectorValue::meta)
         })
+        .or_else(|| {
+            any.downcast_ref::<crate::SplitVecValue>()
+                .and_then(crate::SplitVecValue::meta)
+        })
 }
 
 /// Rebuild a sequence extension value with new metadata (`None`
@@ -2053,6 +2169,7 @@ fn seq_ext_with_meta(
     retag!(crate::KeySeqValue);
     retag!(crate::ValSeqValue);
     retag!(crate::SubVectorValue);
+    retag!(crate::SplitVecValue);
     None
 }
 
@@ -2665,6 +2782,12 @@ fn hash_extension<H: Hasher>(e: &Arc<dyn ExtensionValue>, state: &mut H) {
         for item in sv.iter() {
             item.hash(state);
         }
+    } else if let Some(sp) = e.as_any().downcast_ref::<crate::SplitVecValue>() {
+        state.write_u8(8);
+        sp.len().hash(state);
+        for item in sp.iter() {
+            item.hash(state);
+        }
     } else {
         state.write_u8(17);
         e.dyn_hash(state);
@@ -2930,6 +3053,9 @@ fn seq_items(v: &Value) -> Option<Vec<Value>> {
             }
             if let Some(sv) = e.as_any().downcast_ref::<crate::SubVectorValue>() {
                 return Some(sv.items());
+            }
+            if let Some(sp) = e.as_any().downcast_ref::<crate::SplitVecValue>() {
+                return Some(sp.items());
             }
             None
         }

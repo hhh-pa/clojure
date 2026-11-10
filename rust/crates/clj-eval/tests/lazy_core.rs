@@ -51,6 +51,10 @@ fn string_natives_answer_strings_and_regexes() {
         &mut eval,
         &[
             (r#"(str/split "a,b,,c,," #",")"#, r#"["a" "b" "" "c"]"#),
+            (
+                r#"(str/split "10 010 00 007 999" #" ")"#,
+                r#"["10" "010" "00" "007" "999"]"#,
+            ),
             (r#"(str/split "a,b,,c,," #"," 2)"#, r#"["a" "b,,c,,"]"#),
             (
                 r#"(str/split "a,b,,c,," #"," -1)"#,
@@ -74,6 +78,12 @@ fn string_natives_answer_strings_and_regexes() {
             (r#"(str/blank? "")"#, "true"),
             (r#"(str/blank? " \t\n\u000b\u001c")"#, "true"),
             (r#"(str/blank? " ")"#, "false"),
+            (r#"(str/starts-with? "abc" "ab")"#, "true"),
+            (r#"(str/starts-with? "abc" "ac")"#, "false"),
+            (r#"(str/ends-with? "abc" "bc")"#, "true"),
+            (r#"(str/ends-with? "abc" "ab")"#, "false"),
+            (r#"(str/includes? "abc" "b")"#, "true"),
+            (r#"(str/includes? "abc" "x")"#, "false"),
         ],
     );
 }
@@ -124,8 +134,92 @@ fn string_natives_hand_other_arguments_to_upstream() {
                 "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
             ),
             (
+                r#"(str/starts-with? nil "a")"#,
+                "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
+            ),
+            (
+                r#"(str/ends-with? nil "a")"#,
+                "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
+            ),
+            (
+                r#"(str/includes? nil "a")"#,
+                "java.lang.NullPointerException: Cannot invoke \"Object.getClass()\" because \"target\" is null",
+            ),
+            (r#"(.startsWith "abc" "ab")"#, "true"),
+            (r#"(.startsWith "abc" "b" 1)"#, "true"),
+            (r#"(.startsWith "abc" "b" 5)"#, "false"),
+            (r#"(.startsWith "abc" "a" -1)"#, "false"),
+            (r#"(.startsWith "héllo" "é" 1)"#, "true"),
+            (r#"(.startsWith "héllo" "x" 1)"#, "false"),
+            (r#"(.startsWith "hé" "ééé" 1)"#, "false"),
+            (
                 "(str/blank? 5)",
                 "java.lang.IllegalArgumentException: No matching field found: length for class java.lang.Long",
+            ),
+        ],
+    );
+    // Large splits answer through the lazy span vector with the
+    // same observable surface as a plain vector of pieces.
+    check(
+        &mut eval,
+        &[
+            (
+                "(def big-toks (str/split (str/join \" \" (range 40)) #\" \"))",
+                "#'user/big-toks",
+            ),
+            ("(class big-toks)", "clojure.lang.PersistentVector"),
+            ("(vector? big-toks)", "true"),
+            ("(count big-toks)", "40"),
+            ("(nth big-toks 39)", "\"39\""),
+            ("(get big-toks 3)", "\"3\""),
+            ("(big-toks 7)", "\"7\""),
+            ("(= big-toks (mapv str (range 40)))", "true"),
+            ("(= (hash big-toks) (hash (mapv str (range 40))))", "true"),
+            ("(subvec big-toks 2 5)", "[\"2\" \"3\" \"4\"]"),
+            (
+                "(class (subvec big-toks 2 5))",
+                "clojure.lang.APersistentVector$SubVector",
+            ),
+            ("(= (mapv parse-long big-toks) (vec (range 40)))", "true"),
+            ("(meta (with-meta big-toks {:a 1}))", "{:a 1}"),
+            ("(compare big-toks (mapv str (range 40)))", "0"),
+            ("(peek (conj big-toks \"x\"))", "\"x\""),
+            ("(peek big-toks)", "\"39\""),
+            ("(find big-toks 3)", "[3 \"3\"]"),
+            ("(find big-toks 99)", "nil"),
+            ("(contains? big-toks 39)", "true"),
+            ("(contains? big-toks 40)", "false"),
+            ("(get big-toks 99)", "nil"),
+            ("(apply get [big-toks 3])", "\"3\""),
+            ("(apply nth [big-toks 3])", "\"3\""),
+            ("(apply nth [big-toks 99 :nf])", ":nf"),
+            ("(apply count [big-toks])", "40"),
+            ("(empty big-toks)", "[]"),
+            ("(first big-toks)", "\"0\""),
+            ("(last big-toks)", "\"39\""),
+            ("(+ 1 (count (nth big-toks 5)))", "2"),
+            ("(count (filterv seq big-toks))", "40"),
+            ("(filterv (fn [s] (= s \"7\")) big-toks)", "[\"7\"]"),
+            ("(pop (subvec big-toks 0 1))", "[]"),
+            ("(conj {} (subvec big-toks 0 2))", "{\"0\" \"1\"}"),
+            (
+                "(try (conj {} big-toks) (catch Exception e (class e)))",
+                "java.lang.IllegalArgumentException",
+            ),
+            ("(nth (assoc big-toks 0 \"z\") 0)", "\"z\""),
+            ("(count (pop big-toks))", "39"),
+            (
+                "(try (subvec big-toks 3 2) (catch Exception e (class e)))",
+                "java.lang.IndexOutOfBoundsException",
+            ),
+            (
+                "(try (subvec big-toks -1 2) (catch Exception e (class e)))",
+                "java.lang.IndexOutOfBoundsException",
+            ),
+            ("(subvec big-toks 40 40)", "[]"),
+            (
+                "(mapv parse-long (str/split (str/join \" \" (concat (range 20) [\"x\"] (range 20))) #\" \"))",
+                "[0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 nil 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19]",
             ),
         ],
     );
@@ -458,6 +552,31 @@ fn natives_boot_no_longer_reaches_still_answer() {
                 r#"(#'clojure.core/throw-npe! "steppair")"#,
                 "java.lang.NullPointerException: steppair",
             ),
+        ],
+    );
+}
+
+#[test]
+fn string_join_and_contains_cases() {
+    let mut eval = booted();
+    eval.eval_source("(require '[clojure.string :as str])")
+        .unwrap();
+    check(
+        &mut eval,
+        &[
+            (r#"(str/join "," ["a" "b" "c"])"#, r#""a,b,c""#),
+            (r#"(str/join \- [1 2 3])"#, r#""1-2-3""#),
+            (r#"(str/join nil ["x" "y"])"#, r#""xy""#),
+            (r#"(str/join "," [])"#, r#""""#),
+            (r#"(str/join "," [42])"#, r#""42""#),
+            (r#"(str/join "," (seq [10 20 30]))"#, r#""10,20,30""#),
+            (r#"(contains? [1 2 3] 0)"#, "true"),
+            (r#"(contains? [1 2 3] 2)"#, "true"),
+            (r#"(contains? [1 2 3] 3)"#, "false"),
+            (r#"(contains? [1 2 3] -1)"#, "false"),
+            (r#"(contains? [1 2 3] :foo)"#, "false"),
+            (r#"(contains? nil 0)"#, "false"),
+            (r#"(apply contains? [nil 0])"#, "false"),
         ],
     );
 }

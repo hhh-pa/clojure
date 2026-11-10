@@ -21,25 +21,6 @@
 
 use clj_value::{TransientKind, Value};
 
-/// An intrinsic's fast path: the inline answer for the args, or
-/// `None` to run the native.
-pub(crate) type Fast = fn(&[&Value]) -> Option<Value>;
-
-/// The `clojure.core` three-argument calls with inline fast paths
-/// (the one- and two-argument ops compile in `crate::vm_ops`).
-const TABLE: &[(&str, Fast)] = &[("nth", nth), ("get", get), ("assoc!", assoc_bang)];
-
-/// The fast path for a three-argument direct call to the
-/// `clojure.core` native `call` analyzed (by the native's own name,
-/// never the var's; `None`: the general direct call).
-pub(crate) fn intrinsic_of(call: &crate::expr::DirectCall) -> Option<Fast> {
-    let name = crate::vm_ops::core_name(call)?;
-    let (_, fast) = TABLE
-        .iter()
-        .find(|(n, _)| *n == name && call.args.len() == 3)?;
-    Some(*fast)
-}
-
 /// `mod` over `Int`s (`None` for a zero divisor): Java `%`
 /// adjusted to the divisor's sign (`(mod MIN -1)` is 0).
 pub(crate) fn java_mod(x: i64, y: i64) -> Option<i64> {
@@ -56,15 +37,11 @@ pub(crate) fn java_mod(x: i64, y: i64) -> Option<i64> {
 
 /// An index that every `int`-coercing reader takes as-is
 /// (`0..=i32::MAX`).
-fn index(v: &Value) -> Option<usize> {
+pub(crate) fn index(v: &Value) -> Option<usize> {
     match v {
         Value::Int(n) if (0..=i64::from(i32::MAX)).contains(n) => usize::try_from(*n).ok(),
         _ => None,
     }
-}
-
-fn nth(args: &[&Value]) -> Option<Value> {
-    nth_of(args[0], args[1], args.get(2).copied())
 }
 
 /// `nth` of a vector, transient vector, or string at an `int`
@@ -75,19 +52,30 @@ pub(crate) fn nth_of(coll: &Value, idx: &Value, not_found: Option<&Value>) -> Op
     let Value::Int(n) = idx else {
         return None;
     };
-    let n = i32::try_from(*n).ok()?;
-    let i = usize::try_from(n).ok();
-    let found = match coll {
-        Value::Vector(v) => i.and_then(|i| v.get(i)),
-        Value::Array(a) => i.and_then(|i| (i < a.len()).then(|| crate::arrays::array_read(a, i))),
-        Value::Str(s) => i.and_then(|i| crate::coll::str_char_at(s, i).map(Value::Char)),
-        Value::Transient(t) => transient_nth(t, i)?,
-        _ => return None,
-    };
-    match (found, not_found) {
+    let i = usize::try_from(i32::try_from(*n).ok()?).ok();
+    match (nth_item(coll, i)?, not_found) {
         (Some(v), _) => Some(v),
         (None, Some(nf)) => Some(nf.clone()),
         (None, None) => None,
+    }
+}
+
+fn nth_item(coll: &Value, i: Option<usize>) -> Option<Option<Value>> {
+    match coll {
+        Value::Vector(v) => Some(i.and_then(|i| v.get(i))),
+        Value::Array(a) => {
+            Some(i.and_then(|i| (i < a.len()).then(|| crate::arrays::array_read(a, i))))
+        }
+        Value::Str(s) => Some(i.and_then(|i| crate::coll::str_char_at(s, i).map(Value::Char))),
+        Value::Transient(t) => transient_nth(t, i),
+        Value::Extension(_) => {
+            if let Some(sp) = crate::lazy::as_splitvec(coll) {
+                Some(i.and_then(|i| sp.nth(i)))
+            } else {
+                crate::lazy::as_subvector(coll).map(|sv| i.and_then(|i| sv.nth(i)))
+            }
+        }
+        _ => None,
     }
 }
 
@@ -103,32 +91,58 @@ fn transient_nth(t: &clj_value::Transient, i: Option<usize>) -> Option<Option<Va
     }
 }
 
-fn get(args: &[&Value]) -> Option<Value> {
-    get_of(args[0], args[1], args.get(2).copied())
+/// `get` of a map/set (scalar keys), vector (in-range `int` keys),
+/// or string (`int` keys), `nil` included.
+pub(crate) fn get_of(coll: &Value, key: &Value, not_found: Option<&Value>) -> Option<Value> {
+    let found = match coll {
+        Value::Nil => Some(None),
+        Value::Map(m) => get_map(m, key),
+        Value::Set(s) => get_set(s, key),
+        Value::Vector(v) => index(key).map(|i| v.get(i)),
+        Value::Str(s) => get_str(s, key),
+        Value::Transient(t) => get_transient(t, key),
+        Value::Extension(_) => get_subvec(coll, key),
+        _ => None,
+    }?;
+    Some(found.unwrap_or_else(|| not_found.map_or(Value::Nil, Value::clone)))
 }
 
-/// `get` of a map (scalar keys) or a vector (in-range `int` keys),
-/// `nil` included.
-pub(crate) fn get_of(coll: &Value, key: &Value, not_found: Option<&Value>) -> Option<Value> {
-    let missing = || not_found.map_or(Value::Nil, Value::clone);
-    match coll {
-        Value::Nil => Some(missing()),
-        Value::Map(m) if !m.is_sorted() && is_scalar_key(key) => {
-            Some(m.get(key).cloned().unwrap_or_else(missing))
-        }
-        Value::Vector(v) => {
-            let i = index(key)?;
-            Some(v.get(i).unwrap_or_else(missing))
-        }
-        Value::Transient(t) if is_scalar_key(key) => {
-            let guard = t.lock();
-            let TransientKind::Map(tm) = &*guard else {
-                return None;
-            };
-            Some(tm.get(key).ok()?.cloned().unwrap_or_else(missing))
-        }
-        _ => None,
+fn get_map(m: &clj_value::Map, key: &Value) -> Option<Option<Value>> {
+    (!m.is_sorted() && is_scalar_key(key)).then(|| m.get(key).cloned())
+}
+
+fn get_set(s: &clj_value::Set, key: &Value) -> Option<Option<Value>> {
+    (!s.is_sorted() && is_scalar_key(key)).then(|| s.get(key).cloned())
+}
+
+fn get_subvec(coll: &Value, key: &Value) -> Option<Option<Value>> {
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Some(index(key).and_then(|i| sp.nth(i)));
     }
+    let sv = crate::lazy::as_subvector(coll)?;
+    Some(index(key).and_then(|i| sv.nth(i)))
+}
+
+fn get_str(s: &std::sync::Arc<str>, key: &Value) -> Option<Option<Value>> {
+    let Value::Int(n) = key else {
+        return None;
+    };
+    Some(
+        usize::try_from(*n as i32)
+            .ok()
+            .and_then(|i| crate::coll::str_char_at(s, i).map(Value::Char)),
+    )
+}
+
+fn get_transient(t: &clj_value::Transient, key: &Value) -> Option<Option<Value>> {
+    if !is_scalar_key(key) {
+        return None;
+    }
+    let guard = t.lock();
+    let TransientKind::Map(tm) = &*guard else {
+        return None;
+    };
+    Some(tm.get(key).ok()?.cloned())
 }
 
 /// Keys whose lookup needs no realization (equality is structural
@@ -148,6 +162,17 @@ pub(crate) fn is_scalar_key(k: &Value) -> bool {
 
 /// `count` of `nil`, a vector, map, set, or string (UTF-16 units,
 /// like the native).
+/// `count` of a live transient, by kind (`None` once frozen, so
+/// the caller falls back to the native error).
+fn transient_len(t: &clj_value::Transient) -> Option<usize> {
+    let guard = t.lock();
+    match &*guard {
+        TransientKind::Vector(tv) => tv.len().ok(),
+        TransientKind::Map(tm) => tm.len().ok(),
+        TransientKind::Set(ts) => ts.len().ok(),
+    }
+}
+
 pub(crate) fn count_of(v: &Value) -> Option<Value> {
     let n = match v {
         Value::Nil => 0,
@@ -156,16 +181,29 @@ pub(crate) fn count_of(v: &Value) -> Option<Value> {
         Value::Map(m) => m.size(),
         Value::Set(s) => s.size(),
         Value::Str(s) => crate::coll::str_utf16_len(s),
+        Value::Transient(t) => transient_len(t)?,
+        Value::Extension(_) => match crate::lazy::as_splitvec(v) {
+            Some(sp) => sp.len(),
+            None => crate::lazy::as_subvector(v)?.len(),
+        },
         _ => return None,
     };
     i64::try_from(n).ok().map(Value::Int)
 }
 
-/// `contains?` of an unsorted map or set at a scalar key.
+/// `contains?` of an unsorted map, set, vector, or nil.
 pub(crate) fn contains_test(coll: &Value, key: &Value) -> Option<bool> {
     match coll {
         Value::Map(m) if !m.is_sorted() && is_scalar_key(key) => Some(m.contains_key(key)),
         Value::Set(s) if !s.is_sorted() && is_scalar_key(key) => Some(s.contains(key)),
+        Value::Vector(v) => match key {
+            Value::Int(n) => match usize::try_from(*n as i32) {
+                Ok(idx) => Some(idx < v.len()),
+                Err(_) => Some(false),
+            },
+            _ => None,
+        },
+        Value::Nil => Some(false),
         _ => None,
     }
 }
@@ -185,27 +223,71 @@ pub(crate) fn scalar_eq(a: &Value, b: &Value) -> Option<bool> {
     })
 }
 
-/// `(assoc! t k v)` on a live transient vector (with `k` at most
-/// its length) or transient map (with a scalar key).
-fn assoc_bang(args: &[&Value]) -> Option<Value> {
-    let Value::Transient(t) = args[0] else {
-        return None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clj_value::{
+        Array, ArrayDesc, ArrayStore, BaseType, Keyword, Transient, TransientKind, TransientVector,
+        Vector,
     };
-    {
-        let mut guard = t.lock();
-        match &mut *guard {
-            TransientKind::Vector(tv) => {
-                let i = index(args[1])?;
-                if i > tv.len().ok()? {
-                    return None;
-                }
-                tv.assoc(i, args[2].clone()).ok()?;
-            }
-            TransientKind::Map(tm) if is_scalar_key(args[1]) => {
-                tm.assoc(args[1].clone(), args[2].clone()).ok()?;
-            }
-            _ => return None,
-        }
+
+    #[test]
+    fn nth_of_coverage_arms() {
+        let v = Value::Vector(Vector::new_sync());
+        assert_eq!(nth_of(&v, &Value::Nil, None), None);
+        assert_eq!(nth_of(&v, &Value::Int(99), None), None);
+
+        let s = Value::Str(std::sync::Arc::from("abc"));
+        assert_eq!(nth_of(&s, &Value::Int(0), None), Some(Value::Char('a')));
+
+        let arr = Value::Array(Array::new(
+            ArrayDesc::flat(BaseType::Object),
+            ArrayStore::Objs(vec![Value::Int(10)]),
+        ));
+        assert_eq!(nth_of(&arr, &Value::Int(0), None), Some(Value::Int(10)));
+
+        let tv = Value::Transient(Transient::new(
+            TransientKind::Vector(TransientVector::new()),
+        ));
+        assert_eq!(nth_of(&tv, &Value::Int(0), None), None);
+        assert_eq!(
+            nth_of(&tv, &Value::Int(-1), Some(&Value::Nil)),
+            Some(Value::Nil)
+        );
+
+        let tm = Value::Transient(Transient::new(TransientKind::Map(
+            clj_value::TransientMap::new(),
+        )));
+        assert_eq!(nth_of(&tm, &Value::Int(0), None), None);
+
+        let kw = Value::Keyword(Keyword::new(None, "k"));
+        assert_eq!(get_of(&tm, &Value::Vector(Vector::new_sync()), None), None);
+        assert_eq!(get_of(&tm, &kw, None), Some(Value::Nil));
+        assert_eq!(get_of(&tm, &kw, Some(&Value::Int(7))), Some(Value::Int(7)));
+        assert_eq!(get_of(&tv, &kw, None), None);
+
+        let mut t_map = clj_value::TransientMap::new();
+        t_map.assoc(kw.clone(), Value::Int(99)).unwrap();
+        let tm_with_val = Value::Transient(Transient::new(TransientKind::Map(t_map)));
+        assert_eq!(get_of(&tm_with_val, &kw, None), Some(Value::Int(99)));
+
+        // Split vectors answer nth/get/count from their spans.
+        let sp = Value::Extension(std::sync::Arc::new(clj_value::SplitVecValue::new(
+            std::sync::Arc::from("10 010 7"),
+            std::sync::Arc::from([(0, 2), (3, 3), (7, 1)]),
+        )));
+        assert_eq!(
+            nth_of(&sp, &Value::Int(1), None),
+            Some(Value::Str(std::sync::Arc::from("010")))
+        );
+        assert_eq!(
+            nth_of(&sp, &Value::Int(9), Some(&Value::Nil)),
+            Some(Value::Nil)
+        );
+        assert_eq!(
+            get_of(&sp, &Value::Int(2), None),
+            Some(Value::Str(std::sync::Arc::from("7")))
+        );
+        assert_eq!(count_of(&sp), Some(Value::Int(3)));
     }
-    Some(args[0].clone())
 }

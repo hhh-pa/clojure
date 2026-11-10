@@ -135,6 +135,11 @@ impl Reader {
         self.suppress = self.opts.suppress_read;
     }
 
+    /// Drop consumed stream chars (see [`CharStream::compact`]).
+    pub fn compact_stream(&mut self) {
+        self.stream.compact();
+    }
+
     /// The S7 `read+string` capture mark (see [`CharStream`]).
     #[must_use]
     pub fn capture_mark(&self) -> usize {
@@ -172,10 +177,16 @@ impl Reader {
         self.stream.read_line()
     }
 
-    /// Read one char, or `None` at EOF (issue #201 S8: the
-    /// `slurp`-on-reader drain; exact text, no line roundtrip).
-    pub fn read_char(&mut self) -> Option<char> {
-        self.stream.read()
+    /// Whether a `\n`-terminated line is fully buffered (see
+    /// [`CharStream::has_complete_line`]).
+    #[must_use]
+    pub fn has_complete_line(&self) -> bool {
+        self.stream.has_complete_line()
+    }
+
+    /// Drain every remaining char (see [`CharStream::drain_to_string`]).
+    pub fn drain_to_string(&mut self) -> String {
+        self.stream.drain_to_string()
     }
 
     /// Current 1-based line (live tracker position).

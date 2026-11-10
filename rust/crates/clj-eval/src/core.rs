@@ -1364,7 +1364,30 @@ fn compare_numbers(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, N
 }
 
 /// Same-type scalars and vectors (`None` when the types differ).
+/// Items of a vector-like value for `compare` (plain and
+/// primitive vectors, subvectors, split vectors — the JVM orders
+/// them all as `IPersistentVector`s).
+fn vector_like_items(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Vector(vec) => Some(vec.iter().collect()),
+        Value::PrimitiveVector(p) => Some(p.items()),
+        Value::Extension(_) => crate::lazy::as_subvector(v).map(|sv| sv.items()),
+        _ => None,
+    }
+}
+
 fn compare_same_type(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>, NativeError> {
+    // Vector-likes beyond plain vectors/entries (handled in place
+    // below) order itemwise too.
+    if matches!(x, Value::Extension(_) | Value::PrimitiveVector(_))
+        || matches!(y, Value::Extension(_) | Value::PrimitiveVector(_))
+    {
+        if let (Some(a), Some(b)) = (vector_like_items(x), vector_like_items(y)) {
+            let av = clj_value::Vector::from_vec(a);
+            let bv = clj_value::Vector::from_vec(b);
+            return Ok(Some(compare_vectors(&av, &bv)?));
+        }
+    }
     match (x, y) {
         (Value::Str(a), Value::Str(b)) => Ok(Some(compare_utf16(a, b))),
         (Value::Char(a), Value::Char(b)) => Ok(Some(a.cmp(b))),
@@ -1461,6 +1484,7 @@ fn compare_cast_err(x: &Value, y: &Value) -> NativeError {
         Value::Instant(_) => "java.util.Date",
         Value::Uri(_) => "java.net.URI",
         Value::Vector(_) | Value::MapEntry { .. } => "clojure.lang.IPersistentVector",
+        Value::Extension(_) if vector_like_items(x).is_some() => "clojure.lang.IPersistentVector",
         _ => return cce_err(x, "java.lang.Comparable"),
     };
     cce_err(y, target)
@@ -2788,7 +2812,11 @@ fn str_concat(eval: &mut Evaluator, args: &[Value]) -> Result<String, NativeErro
 
 /// Append `v`'s `str` piece ([`str_of_one`]; chars, strings and nil
 /// append in place, with no piece string).
-fn str_push(out: &mut String, eval: &mut Evaluator, v: &Value) -> Result<(), NativeError> {
+pub(crate) fn str_push(
+    out: &mut String,
+    eval: &mut Evaluator,
+    v: &Value,
+) -> Result<(), NativeError> {
     match v {
         Value::Nil => {}
         Value::Str(s) => out.push_str(s),
@@ -2816,19 +2844,28 @@ pub(crate) fn apply_str_direct(
     args: &[Value],
 ) -> Result<Option<Value>, NativeError> {
     let (coll, lead) = args.split_last().expect("apply passes its spread");
-    let items: Box<dyn Iterator<Item = Value> + '_> = match coll {
-        Value::Nil => Box::new(std::iter::empty()),
-        Value::Vector(x) => Box::new(x.iter()),
-        Value::List(l) => Box::new(l.iter().cloned()),
-        Value::Str(s) => Box::new(s.chars().map(Value::Char)),
-        _ => return Ok(None),
-    };
     let mut out = String::new();
     for arg in lead {
         str_push(&mut out, eval, arg)?;
     }
-    for item in items {
-        str_push(&mut out, eval, &item)?;
+    match coll {
+        Value::Nil => {}
+        Value::Vector(x) => {
+            if !x.push_to_string(&mut out) {
+                out.reserve(x.len());
+                for v in x.iter() {
+                    str_push(&mut out, eval, &v)?;
+                }
+            }
+        }
+        Value::List(l) => {
+            out.reserve(l.len());
+            for v in l.iter() {
+                str_push(&mut out, eval, v)?;
+            }
+        }
+        Value::Str(s) => out.push_str(s),
+        _ => return Ok(None),
     }
     Ok(Some(Value::Str(Arc::from(out.as_str()))))
 }
@@ -3718,6 +3755,14 @@ fn decimal_value(c: char) -> Option<u32> {
     (d < 10).then_some(d)
 }
 
+fn finish_long_acc(acc: u64, neg: bool) -> Option<i64> {
+    if neg {
+        (acc <= i64::MAX as u64 + 1).then_some((acc as i64).wrapping_neg())
+    } else {
+        (acc <= i64::MAX as u64).then_some(acc as i64)
+    }
+}
+
 /// `Long.parseLong`: one ASCII sign, 1+ decimal digits (any
 /// script), overflow → `None` (the caller answers nil).
 pub(crate) fn parse_long_str(s: &str) -> Option<i64> {
@@ -3725,20 +3770,48 @@ pub(crate) fn parse_long_str(s: &str) -> Option<i64> {
         Some(rest) => (true, rest),
         None => (false, s.strip_prefix('+').unwrap_or(s)),
     };
-    if digits.is_empty() {
+    let bytes = digits.as_bytes();
+    if bytes.is_empty() {
         return None;
     }
+    // One byte pass covers the all-ASCII-digits case; any byte at
+    // or above 0x80 restarts on the char path (decimal digits in
+    // any script). Up to 18 digits cannot overflow a `u64`, so
+    // the short loop skips the checked arithmetic.
+    let mut acc: u64 = 0;
+    if bytes.len() <= 18 {
+        for &b in bytes {
+            if b >= 0x80 {
+                return parse_long_chars(digits, neg);
+            }
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            acc = acc * 10 + u64::from(b - b'0');
+        }
+        return finish_long_acc(acc, neg);
+    }
+    for &b in bytes {
+        if b >= 0x80 {
+            return parse_long_chars(digits, neg);
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        acc = acc.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
+    }
+    finish_long_acc(acc, neg)
+}
+
+/// The char-wise half of `Long.parseLong` (non-ASCII digits).
+fn parse_long_chars(digits: &str, neg: bool) -> Option<i64> {
     let mut acc: u64 = 0;
     for c in digits.chars() {
         acc = acc
             .checked_mul(10)?
             .checked_add(u64::from(decimal_value(c)?))?;
     }
-    if neg {
-        (acc <= i64::MAX as u64 + 1).then_some((acc as i64).wrapping_neg())
-    } else {
-        (acc <= i64::MAX as u64).then_some(acc as i64)
-    }
+    finish_long_acc(acc, neg)
 }
 
 /// A signed `NaN`/`Infinity` spelling (exact case, like the JVM).
@@ -5175,6 +5248,36 @@ pub(crate) const TOWER_NATIVES: &[(&str, NativeFnPtr)] = &[("math-context", nati
 mod tests {
     use super::*;
 
+    /// Split vectors order as vectors; mixed vector-likes name
+    /// the interface in cast errors.
+    #[test]
+    fn compare_orders_split_vectors() {
+        use std::cmp::Ordering;
+        let sp = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from("1 2"),
+            Arc::from([(0, 1), (2, 1)]),
+        )));
+        let plain = Value::Vector(clj_value::Vector::from_vec(vec![
+            Value::Str(Arc::from("1")),
+            Value::Str(Arc::from("2")),
+        ]));
+        assert_eq!(jvm_compare(&sp, &plain).unwrap(), Ordering::Equal);
+        assert_eq!(jvm_compare(&plain, &sp).unwrap(), Ordering::Equal);
+        let err = jvm_compare(&sp, &Value::Int(1)).expect_err("cast");
+        assert!(format!("{err:?}").contains("IPersistentVector"));
+        // Primitive vectors take the same itemwise path.
+        let pv = Value::PrimitiveVector(clj_value::PrimitiveVector::new(
+            clj_value::Elem8::Int,
+            vec![Value::Int(1), Value::Int(2)],
+            None,
+        ));
+        let iv = Value::Vector(clj_value::Vector::from_vec(vec![
+            Value::Int(1),
+            Value::Int(2),
+        ]));
+        assert_eq!(jvm_compare(&pv, &iv).unwrap(), Ordering::Equal);
+    }
+
     /// `num_rank` still orders `Double` top (only called past the
     /// `either_double` guards, so user code never reaches this
     /// arm — the pin keeps the promotion lattice total).
@@ -5213,6 +5316,12 @@ mod tests {
             jvm_compare(&instant(1000), &instant(1000)).unwrap(),
             std::cmp::Ordering::Equal
         );
+    }
+
+    #[test]
+    fn str_of_one_nil_arm() {
+        let mut eval = Evaluator::new("");
+        assert_eq!(str_of_one(&mut eval, &Value::Nil).unwrap(), "");
     }
 
     /// An instant against a non-instant fails the `String`

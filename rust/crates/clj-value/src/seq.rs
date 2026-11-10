@@ -121,6 +121,28 @@ impl std::fmt::Debug for Seq {
     }
 }
 
+#[inline(always)]
+fn step_str_in_place(s: &str, pos: &mut usize, idx: &mut usize, head: &mut Value) -> bool {
+    let bytes = s.as_bytes();
+    let step = match bytes.get(*pos) {
+        Some(&b) if b < 128 => 1,
+        _ => s[*pos..].chars().next().map_or(1, char::len_utf8),
+    };
+    let next_pos = *pos + step;
+    let Some(&b) = bytes.get(next_pos) else {
+        return false;
+    };
+    let next_char = if b < 128 {
+        b as char
+    } else {
+        s[next_pos..].chars().next().expect("valid utf-8")
+    };
+    *pos = next_pos;
+    *idx += 1;
+    *head = Value::Char(next_char);
+    true
+}
+
 impl Seq {
     /// The empty seq (`more` at the end).
     #[must_use]
@@ -340,18 +362,7 @@ impl Seq {
                 }
                 None => false,
             },
-            Seq::Str { s, pos, idx, head } => {
-                let step = s[*pos..].chars().next().map_or(1, char::len_utf8);
-                match s[*pos + step..].chars().next() {
-                    Some(c) => {
-                        *pos += step;
-                        *idx += 1;
-                        *head = Value::Char(c);
-                        true
-                    }
-                    None => false,
-                }
-            }
+            Seq::Str { s, pos, idx, head } => step_str_in_place(s, pos, idx, head),
             other => match other.next() {
                 Some(rest) if !rest.is_empty() => {
                     *other = rest;
@@ -836,6 +847,278 @@ impl crate::ExtensionValue for SubVectorValue {
         8u8.hash(&mut h);
         items.len().hash(&mut h);
         for item in &items {
+            item.hash(&mut h);
+        }
+        state.write_u64(h.finish());
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The pieces of one string split, held as byte spans into the
+/// shared input instead of one allocation per piece: token-heavy
+/// splits (the tokenize-then-parse shape) then cost one span pair
+/// per token until a piece is actually read. Behaves as the
+/// persistent vector of its piece strings everywhere; generic
+/// operations go through a once-materialized
+/// [`SubVectorValue`] view.
+pub struct SplitVecValue {
+    base: Arc<str>,
+    spans: Arc<[(u32, u32)]>,
+    /// Span window: pieces are `spans[off..off + len]`.
+    off: usize,
+    len: usize,
+    /// Whether this value came from `subvec` (its JVM class is
+    /// then `APersistentVector$SubVector`, like a real subvector).
+    sub: bool,
+    view: std::sync::OnceLock<SubVectorValue>,
+    meta: Option<Map>,
+}
+
+fn cached_num_str(s: &str) -> Option<Value> {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 && bytes.len() <= 4 && bytes.iter().all(|b| b.is_ascii_digit()) {
+        static NUM_CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
+        let cache = NUM_CACHE.get_or_init(|| {
+            (0..=1024)
+                .map(|n| Arc::from(n.to_string().as_str()))
+                .collect()
+        });
+        let n: usize = s.parse().ok()?;
+        // Only the canonical rendering may come from the cache: a
+        // piece like "010" must stay verbatim, never become "10".
+        return cache
+            .get(n)
+            .filter(|arc| arc.as_ref() == s)
+            .map(|arc| Value::Str(Arc::clone(arc)));
+    }
+    None
+}
+
+/// A split piece as a string value. Single-byte pieces (always
+/// ASCII) share one cached allocation, mirroring CPython's
+/// single-char string cache: token-heavy splits over short tokens
+/// then allocate nothing per piece. Small numeric tokens share
+/// static interned string allocations.
+#[must_use]
+pub fn piece_value(s: &str) -> Value {
+    if s.len() == 1 {
+        static CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(|| {
+            (0u8..128)
+                .map(|b| Arc::from(char::from(b).to_string().as_str()))
+                .collect()
+        });
+        return Value::Str(cache[s.as_bytes()[0] as usize].clone());
+    }
+    if let Some(v) = cached_num_str(s) {
+        return v;
+    }
+    Value::Str(Arc::from(s))
+}
+
+impl SplitVecValue {
+    /// Pieces of `base` at `(start, len)` byte spans (the caller
+    /// upholds UTF-8 boundaries, as split match offsets do).
+    #[must_use]
+    pub fn new(base: Arc<str>, spans: Arc<[(u32, u32)]>) -> Self {
+        let len = spans.len();
+        Self {
+            base,
+            spans,
+            off: 0,
+            len,
+            sub: false,
+            view: std::sync::OnceLock::new(),
+            meta: None,
+        }
+    }
+
+    /// The window `start..end` of this split vector (shares the
+    /// base and span table; the caller upholds
+    /// `start <= end <= len`, like `RT.subvec`).
+    #[must_use]
+    pub fn window(&self, start: usize, end: usize) -> Self {
+        Self {
+            base: Arc::clone(&self.base),
+            spans: Arc::clone(&self.spans),
+            off: self.off + start,
+            len: end - start,
+            sub: true,
+            view: std::sync::OnceLock::new(),
+            meta: self.meta.clone(),
+        }
+    }
+
+    /// This split vector without its last piece (the JVM class
+    /// and metadata are preserved, like `pop`); the caller
+    /// upholds `len >= 1`.
+    #[must_use]
+    pub fn drop_last(&self) -> Self {
+        Self {
+            base: Arc::clone(&self.base),
+            spans: Arc::clone(&self.spans),
+            off: self.off,
+            len: self.len - 1,
+            sub: self.sub,
+            view: std::sync::OnceLock::new(),
+            meta: self.meta.clone(),
+        }
+    }
+
+    /// Whether this value is a `subvec` window (JVM class
+    /// `APersistentVector$SubVector` rather than
+    /// `PersistentVector`).
+    #[must_use]
+    pub fn is_sub(&self) -> bool {
+        self.sub
+    }
+
+    /// The piece count.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether there are no pieces.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The window's span pairs.
+    fn window_spans(&self) -> &[(u32, u32)] {
+        &self.spans[self.off..self.off + self.len]
+    }
+
+    /// The piece at `index` as a string slice (`None` past the end).
+    #[must_use]
+    pub fn piece_str(&self, index: usize) -> Option<&str> {
+        let &(start, len) = self.window_spans().get(index)?;
+        let start = start as usize;
+        Some(&self.base[start..start + len as usize])
+    }
+
+    /// The piece at `index` as a value (`None` past the end).
+    #[must_use]
+    pub fn nth(&self, index: usize) -> Option<Value> {
+        self.piece_str(index).map(piece_value)
+    }
+
+    /// The piece strings, in order.
+    #[must_use]
+    pub fn items(&self) -> Vec<Value> {
+        self.iter().collect()
+    }
+
+    /// Iterate the piece values, in order.
+    pub fn iter(&self) -> impl Iterator<Item = Value> + '_ {
+        self.window_spans().iter().map(|&(start, len)| {
+            let start = start as usize;
+            piece_value(&self.base[start..start + len as usize])
+        })
+    }
+
+    /// The materialized full-window subvector view (built once;
+    /// generic vector operations dispatch through it).
+    #[must_use]
+    pub fn view(&self) -> &SubVectorValue {
+        self.view.get_or_init(|| {
+            let items: Vec<Value> = self.iter().collect();
+            let n = items.len();
+            SubVectorValue::new(Vector::from_vec(items), 0, n).with_meta(self.meta.clone())
+        })
+    }
+
+    /// The metadata map, if any.
+    #[must_use]
+    pub fn meta(&self) -> Option<&Map> {
+        self.meta.as_ref()
+    }
+
+    /// Attach a metadata map (any materialized view is dropped:
+    /// it captured the old meta).
+    #[must_use]
+    pub fn with_meta(mut self, meta: Option<Map>) -> Self {
+        self.meta = meta;
+        self.view = std::sync::OnceLock::new();
+        self
+    }
+}
+
+impl Clone for SplitVecValue {
+    fn clone(&self) -> Self {
+        let view = std::sync::OnceLock::new();
+        if let Some(v) = self.view.get() {
+            let _ = view.set(v.clone());
+        }
+        Self {
+            base: Arc::clone(&self.base),
+            spans: Arc::clone(&self.spans),
+            off: self.off,
+            len: self.len,
+            sub: self.sub,
+            view,
+            meta: self.meta.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for SplitVecValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SplitVecValue")
+            .field("pieces", &self.len)
+            .finish()
+    }
+}
+
+impl crate::ExtensionValue for SplitVecValue {
+    fn class_name(&self) -> String {
+        if self.sub {
+            "clojure.lang.APersistentVector$SubVector".to_owned()
+        } else {
+            "clojure.lang.PersistentVector".to_owned()
+        }
+    }
+
+    fn print(&self) -> String {
+        // The printer downcasts and prints with options instead;
+        // this fallback prints readably without limits.
+        let parts: Vec<String> = self
+            .iter()
+            .map(|v| crate::pr_to_string(&v, &crate::PrintOpts::pr()))
+            .collect();
+        format!("[{}]", parts.join(" "))
+    }
+
+    fn dyn_eq(&self, other: &dyn crate::ExtensionValue) -> bool {
+        if let Some(o) = other.as_any().downcast_ref::<Self>() {
+            self.len == o.len
+                && self.window_spans().iter().zip(o.window_spans().iter()).all(
+                    |(&(s1, l1), &(s2, l2))| {
+                        self.base[s1 as usize..s1 as usize + l1 as usize]
+                            == o.base[s2 as usize..s2 as usize + l2 as usize]
+                    },
+                )
+        } else if let Some(sv) = other.as_any().downcast_ref::<SubVectorValue>() {
+            self.view().items() == sv.items()
+        } else {
+            false
+        }
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        // Fallback (`Value::hash` downcasts and writes the
+        // sequential family directly instead): digest through a
+        // fresh state, since `dyn Hasher` cannot nest.
+        let mut h = DefaultHasher::new();
+        8u8.hash(&mut h);
+        self.len.hash(&mut h);
+        for item in self.iter() {
             item.hash(&mut h);
         }
         state.write_u64(h.finish());
@@ -1979,6 +2262,77 @@ mod tests {
     }
 
     #[test]
+    fn splitvec_helpers_and_fallbacks() {
+        let base: Arc<str> = Arc::from("10 010 7");
+        let spans: Arc<[(u32, u32)]> = Arc::from([(0, 2), (3, 3), (7, 1)]);
+        let sp = super::SplitVecValue::new(Arc::clone(&base), Arc::clone(&spans));
+        assert_eq!(sp.len(), 3);
+        assert!(!sp.is_empty());
+        assert!(!sp.is_sub());
+        assert_eq!(sp.piece_str(1), Some("010"));
+        assert_eq!(sp.piece_str(3), None);
+        assert_eq!(sp.nth(0), Some(Value::Str(Arc::from("10"))));
+        assert_eq!(sp.print(), "[\"10\" \"010\" \"7\"]");
+        assert_eq!(sp.class_name(), "clojure.lang.PersistentVector");
+        let same = super::SplitVecValue::new(Arc::clone(&base), Arc::clone(&spans));
+        assert!(sp.dyn_eq(&same));
+        let sv = SubVectorValue::new(
+            Vector::from_vec(vec![
+                Value::Str(Arc::from("10")),
+                Value::Str(Arc::from("010")),
+                Value::Str(Arc::from("7")),
+            ]),
+            0,
+            3,
+        );
+        assert!(sp.dyn_eq(&sv));
+        let seq = RealizedSeq::new(Seq::eager(vec![int(1)]).expect("seq"));
+        assert!(!sp.dyn_eq(&seq));
+        assert_eq!(hash_ext(&sp), hash_ext(&same));
+        assert_eq!(sp.view().items(), sp.items());
+        let win = sp.window(1, 3);
+        assert!(win.is_sub());
+        assert_eq!(win.len(), 2);
+        assert_eq!(win.piece_str(0), Some("010"));
+        assert_eq!(win.class_name(), "clojure.lang.APersistentVector$SubVector");
+        let empty = sp.window(2, 2);
+        assert!(empty.is_empty());
+        // Value-level: equality and metadata ride the generic paths.
+        let v = Value::Extension(Arc::new(sp.clone()));
+        assert_eq!(
+            v,
+            Value::Vector(Vector::from_vec(vec![
+                Value::Str(Arc::from("10")),
+                Value::Str(Arc::from("010")),
+                Value::Str(Arc::from("7")),
+            ]))
+        );
+        assert!(v.meta().is_none());
+        let meta = crate::new_map();
+        let tagged = v.clone().with_meta(Some(meta.clone()));
+        assert_eq!(tagged.meta(), Some(&meta));
+        assert_eq!(format!("{sp:?}"), "SplitVecValue { pieces: 3 }");
+        assert_eq!(
+            crate::pr_to_string(&v, &crate::PrintOpts::pr()),
+            "[\"10\" \"010\" \"7\"]"
+        );
+        // The std hash agrees with the plain vector of the pieces.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let hv = |x: &Value| {
+            let mut h = DefaultHasher::new();
+            x.hash(&mut h);
+            h.finish()
+        };
+        let plain = Value::Vector(Vector::from_vec(vec![
+            Value::Str(Arc::from("10")),
+            Value::Str(Arc::from("010")),
+            Value::Str(Arc::from("7")),
+        ]));
+        assert_eq!(hv(&v), hv(&plain));
+    }
+
+    #[test]
     fn range_value_meta_done_overflow() {
         let r = RangeValue::new(
             RangeNum::Int(0),
@@ -2214,6 +2568,17 @@ mod tests {
         assert!(!r.advance());
         assert_eq!(r.seq().first(), Some(&Value::Char('z')));
         assert!(r.meta().is_some());
+        let mut r_utf8 = RealizedSeq::flagged(
+            Seq::string_from(Arc::from("aé!"), 0, 0).expect("chars"),
+            true,
+            true,
+            SeqKind::Str,
+        );
+        assert!(r_utf8.advance());
+        assert_eq!(r_utf8.seq().first(), Some(&Value::Char('é')));
+        assert!(r_utf8.advance());
+        assert_eq!(r_utf8.seq().first(), Some(&Value::Char('!')));
+        assert!(!r_utf8.advance());
         let mut r = RealizedSeq::flagged(
             Seq::vector_from(packed, 38).expect("items"),
             true,

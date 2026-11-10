@@ -204,3 +204,88 @@ fn transient_round_trip_preserves_collections() {
     let mut ts = TransientSet::from_set(&s);
     assert_eq!(ts.persistent().unwrap(), s);
 }
+
+#[test]
+fn map_transient_promoted_operations() {
+    let mut tm = TransientMap::new();
+    // Add 20 integer keys to trigger promotion (len >= 16 with non-keyword keys).
+    for i in 0..20 {
+        tm.assoc(int(i), int(i * 10)).unwrap();
+    }
+    assert!(tm.is_hashy());
+    assert!(!tm.is_empty().unwrap());
+    assert_eq!(tm.len().unwrap(), 20);
+
+    // Get hit and miss
+    assert_eq!(tm.get(&int(5)).unwrap(), Some(&int(50)));
+    assert_eq!(tm.get(&int(99)).unwrap(), None);
+
+    // Overwrite existing key
+    tm.assoc(int(5), int(555)).unwrap();
+    assert_eq!(tm.get(&int(5)).unwrap(), Some(&int(555)));
+
+    // Dissoc existing and missing key
+    tm.dissoc(&int(5)).unwrap();
+    assert_eq!(tm.get(&int(5)).unwrap(), None);
+    assert_eq!(tm.len().unwrap(), 19);
+    tm.dissoc(&int(999)).unwrap();
+    assert_eq!(tm.len().unwrap(), 19);
+
+    // Persistent freeze from promoted storage
+    let frozen = tm.persistent().unwrap();
+    assert_eq!(frozen.size(), 19);
+    assert_eq!(frozen.get(&int(0)), Some(&int(0)));
+    assert_eq!(frozen.get(&int(5)), None);
+
+    // Also test from_map with hashy map
+    let mut tm2 = TransientMap::from_map(&frozen);
+    assert!(tm2.is_hashy());
+    assert_eq!(tm2.len().unwrap(), 19);
+    tm2.assoc(int(100), int(200)).unwrap();
+    assert_eq!(tm2.len().unwrap(), 20);
+    let frozen2 = tm2.persistent().unwrap();
+    assert_eq!(frozen2.size(), 20);
+}
+
+#[test]
+fn set_transient_promoted_operations() {
+    let mut ts = TransientSet::new();
+    assert!(ts.is_empty().unwrap());
+    // Add 20 items to trigger promotion (>= 16 items).
+    for i in 0..20 {
+        ts.conj(int(i)).unwrap();
+    }
+    assert!(!ts.is_empty().unwrap());
+    assert_eq!(ts.len().unwrap(), 20);
+
+    // Duplicate conj on promoted set (hit)
+    ts.conj(int(5)).unwrap();
+    assert_eq!(ts.len().unwrap(), 20);
+
+    // Contains hit and miss
+    assert!(ts.contains(&int(5)).unwrap());
+    assert!(!ts.contains(&int(99)).unwrap());
+
+    // Disj existing and missing
+    ts.disj(&int(5)).unwrap();
+    assert!(!ts.contains(&int(5)).unwrap());
+    assert_eq!(ts.len().unwrap(), 19);
+    ts.disj(&int(999)).unwrap();
+    assert_eq!(ts.len().unwrap(), 19);
+
+    // Persistent freeze from promoted storage
+    let frozen = ts.persistent().unwrap();
+    assert_eq!(frozen.size(), 19);
+    assert!(frozen.contains(&int(0)));
+    assert!(!frozen.contains(&int(5)));
+
+    // Test from_set with >= 16 items
+    let mut ts2 = TransientSet::from_set(&frozen);
+    assert_eq!(ts2.len().unwrap(), 19);
+    assert!(ts2.contains(&int(0)).unwrap());
+    assert!(!ts2.contains(&int(5)).unwrap());
+    ts2.conj(int(100)).unwrap();
+    assert_eq!(ts2.len().unwrap(), 20);
+    let frozen2 = ts2.persistent().unwrap();
+    assert_eq!(frozen2.size(), 20);
+}

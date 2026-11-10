@@ -22,8 +22,8 @@ use std::sync::Arc;
 use clj_value::{
     CHAR_ESCAPES, CHAR_NAMES, ConsValue, CycleValue, ExtensionValue, HostKind, HostVal,
     IterateValue, KeySeqValue, Keyword, Map, MultiFn, PrintOpts, RangeValue, RealizedSeq,
-    RepeatValue, SubVectorValue, Symbol, ThrowClass, ValSeqValue, Value, Var, lift_ns, new_map,
-    pr_to_string,
+    RepeatValue, SplitVecValue, SubVectorValue, Symbol, ThrowClass, ValSeqValue, Value, Var,
+    lift_ns, new_map, pr_to_string,
 };
 
 use crate::core::{Reduced, cce_err, is_lazy_seq_str, print_opts, str_of_one};
@@ -227,6 +227,9 @@ fn seq_ext_token(e: &Arc<dyn ExtensionValue>) -> Option<&'static str> {
     }
     if any.downcast_ref::<SubVectorValue>().is_some() {
         return Some(TOK_SUBVEC);
+    }
+    if let Some(sp) = any.downcast_ref::<SplitVecValue>() {
+        return Some(if sp.is_sub() { TOK_SUBVEC } else { TOK_PVEC });
     }
     None
 }
@@ -1628,6 +1631,15 @@ mod tests {
             sigs: std::collections::HashMap::new(),
             takes_this: true,
         })
+    }
+
+    #[test]
+    fn splitvec_token_is_pvec_or_subvec() {
+        let sp = clj_value::SplitVecValue::new(Arc::from("1 2"), Arc::from([(0, 1), (2, 1)]));
+        let v = Value::Extension(Arc::new(sp.clone()));
+        assert_eq!(token_of(&v), Some(TOK_PVEC));
+        let w = Value::Extension(Arc::new(sp.window(0, 1)));
+        assert_eq!(token_of(&w), Some(TOK_SUBVEC));
     }
 
     #[test]
