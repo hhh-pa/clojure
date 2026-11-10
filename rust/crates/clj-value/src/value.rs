@@ -958,6 +958,19 @@ impl Vector {
         }
     }
 
+    /// The item at `index` borrowed (`None` past the end, and
+    /// `None` for typed storage, whose items box on read): the
+    /// clone-free read for comparison-style callers that only
+    /// inspect generic elements.
+    #[inline]
+    #[must_use]
+    pub fn get_ref(&self, index: usize) -> Option<&Value> {
+        match &self.inner {
+            VectorInner::Generic(t) => t.get(index),
+            _ => None,
+        }
+    }
+
     /// The items from `index` to the end of its 32-item chunk (the
     /// JVM `ChunkedSeq` chunk; empty past the end): borrowed from
     /// generic storage, boxed from typed.
