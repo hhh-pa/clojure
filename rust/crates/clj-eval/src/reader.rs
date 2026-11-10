@@ -123,9 +123,7 @@ pub(crate) fn slurp_reader(r: &StreamReader) -> Result<String, NativeError> {
     {
         let mut state = lock_state(r);
         loop {
-            while let Some(c) = state.parser.read_char() {
-                out.push(c);
-            }
+            out.push_str(&state.parser.drain_to_string());
             if !more_input(&mut state)? {
                 break;
             }
@@ -159,7 +157,7 @@ pub(crate) fn stdin_reader(eval: &mut Evaluator) -> Value {
         id: eval.next_id(),
         state: Arc::new(Mutex::new(StreamState {
             parser: Reader::new("", &ReaderOpts::default()),
-            stdin: Some(BufReader::new(std::io::stdin())),
+            stdin: Some(BufReader::with_capacity(64 * 1024, std::io::stdin())),
             closed: false,
             #[cfg(test)]
             script_lines: VecDeque::new(),
@@ -188,18 +186,40 @@ fn lock_state(reader: &StreamReader) -> std::sync::MutexGuard<'_, StreamState> {
     reader.state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Read one raw line from `src`; `None` at EOF (generic so unit
-/// tests drive it with in-memory buffers instead of process
-/// stdin).
+/// Pull one buffered fill from `src` as text; `None` at EOF
+/// (generic so unit tests drive it with in-memory buffers instead
+/// of process stdin).
 fn pull_chunk<R: BufRead>(src: &mut R) -> Result<Option<String>, NativeError> {
-    let mut chunk = String::new();
-    let n = src
-        .read_line(&mut chunk)
-        .map_err(|e| NativeError::new(ThrowClass::IOException, e.to_string()))?;
-    if n == 0 {
+    let io_err = |e: std::io::Error| NativeError::new(ThrowClass::IOException, e.to_string());
+    let buf = src.fill_buf().map_err(io_err)?;
+    if buf.is_empty() {
         return Ok(None);
     }
-    Ok(Some(chunk))
+    // Take the longest valid UTF-8 prefix of the buffered fill; a
+    // char split across the fill boundary stays buffered for the
+    // next pull (or, when it is the whole fill, the line reader
+    // reads ahead to complete it). Invalid bytes report exactly
+    // what `BufRead::read_line` reported.
+    let (text, take) = match std::str::from_utf8(buf) {
+        Ok(s) => (s.to_owned(), buf.len()),
+        Err(e) => {
+            let up = e.valid_up_to();
+            if e.error_len().is_none() && up > 0 {
+                (String::from_utf8_lossy(&buf[..up]).into_owned(), up)
+            } else if e.error_len().is_none() {
+                let mut chunk = String::new();
+                let n = src.read_line(&mut chunk).map_err(io_err)?;
+                return Ok(if n == 0 { None } else { Some(chunk) });
+            } else {
+                return Err(io_err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                )));
+            }
+        }
+    };
+    src.consume(take);
+    Ok(Some(text))
 }
 
 /// Pull one line from `src` into the parser; `false` at EOF (the
@@ -239,6 +259,20 @@ fn next_chunk(state: &mut StreamState) -> Result<Option<String>, NativeError> {
         return Ok(Some(line));
     }
     state.stdin.as_mut().map_or(Ok(None), pull_chunk)
+}
+
+/// One full line from a stream reader, feeding stdin fills until
+/// a terminator is buffered (a buffered partial line is not the
+/// EOF tail while more input may arrive); `None` at EOF.
+fn stream_read_line(state: &mut StreamState) -> Result<Option<String>, NativeError> {
+    loop {
+        if state.parser.has_complete_line() {
+            return Ok(state.parser.read_line());
+        }
+        if !more_input(state)? {
+            return Ok(state.parser.read_line());
+        }
+    }
 }
 
 /// Feed one stdin line into the parser when stdin is live;
@@ -1223,15 +1257,7 @@ fn native_read_line(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     };
     check_reader_open(reader)?;
     let mut state = lock_state(reader);
-    if let Some(line) = state.parser.read_line() {
-        return Ok(Value::Str(Arc::from(line.as_str())));
-    }
-    // Stdin readers feed one line and retry; string readers (and
-    // exhausted stdin) observe the same `None` again.
-    more_input(&mut state)?;
-    Ok(state
-        .parser
-        .read_line()
+    Ok(stream_read_line(&mut state)?
         .map(|line| Value::Str(Arc::from(line.as_str())))
         .unwrap_or(Value::Nil))
 }
@@ -1242,13 +1268,7 @@ fn native_read_line(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 pub(crate) fn reader_read_line(r: &StreamReader) -> Result<Value, NativeError> {
     check_reader_open(r)?;
     let mut state = lock_state(r);
-    if let Some(line) = state.parser.read_line() {
-        return Ok(Value::Str(Arc::from(line.as_str())));
-    }
-    more_input(&mut state)?;
-    Ok(state
-        .parser
-        .read_line()
+    Ok(stream_read_line(&mut state)?
         .map(|line| Value::Str(Arc::from(line.as_str())))
         .unwrap_or(Value::Nil))
 }
@@ -1324,14 +1344,13 @@ mod tests {
 
     #[test]
     fn pull_line_feeds_and_reports_eof() {
-        // The stdin feed over in-memory buffers: lines extend the
+        // The stdin feed over in-memory buffers: fills extend the
         // parser (normalizing), EOF reports `false`.
         let mut eval = scratch();
         let value = string_reader(&mut eval, "");
         let reader = as_reader(&value).expect("a reader");
         let mut state = lock_state(reader);
         let mut src = Cursor::new(b"a\r\nb" as &[u8]);
-        assert!(pull_line(&mut src, &mut state.parser).unwrap());
         assert!(pull_line(&mut src, &mut state.parser).unwrap());
         assert!(!pull_line(&mut src, &mut state.parser).unwrap());
         assert_eq!(state.parser.read_line(), Some("a".to_owned()));
@@ -1353,6 +1372,24 @@ mod tests {
         assert_eq!(state.parser.read_line(), Some("a".to_owned()));
         assert!(!more_input(&mut state).unwrap());
         assert_eq!(state.parser.read_line(), None);
+    }
+
+    #[test]
+    fn stream_read_line_feeds_until_terminated() {
+        // A buffered partial line is not the EOF tail while more
+        // input may arrive: the feed loops until a terminator is
+        // buffered, across as many chunks as it takes.
+        let mut eval = scratch();
+        let value = string_reader(&mut eval, "ab");
+        let reader = as_reader(&value).expect("a reader");
+        let mut state = lock_state(reader);
+        state.script_lines.push_back("c".to_owned());
+        state.script_lines.push_back("d\n".to_owned());
+        assert_eq!(
+            stream_read_line(&mut state).unwrap(),
+            Some("abcd".to_owned())
+        );
+        assert_eq!(stream_read_line(&mut state).unwrap(), None);
     }
 
     #[test]
@@ -1440,6 +1477,66 @@ mod tests {
         assert_eq!(err.class, ThrowClass::IOException);
         let mentions_utf8 = err.message.contains("stream did not contain valid UTF-8");
         assert!(mentions_utf8, "{}", err.message);
+    }
+
+    #[test]
+    fn pull_chunk_splits_at_char_boundaries() {
+        // A buffer whose fills cut inside multi-byte chars: pulls
+        // take the valid prefix and keep the split char buffered;
+        // a fill holding only a partial char reads ahead by line.
+        struct Chunky {
+            data: Vec<u8>,
+            pos: usize,
+            fill: usize,
+        }
+        impl std::io::Read for Chunky {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                let n = (self.data.len() - self.pos).min(out.len());
+                out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+        impl BufRead for Chunky {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                let end = (self.pos + self.fill).min(self.data.len());
+                Ok(&self.data[self.pos..end])
+            }
+            fn consume(&mut self, amt: usize) {
+                self.pos = (self.pos + amt).min(self.data.len());
+            }
+        }
+        fn chunky(data: &str, fill: usize) -> Chunky {
+            Chunky {
+                data: data.as_bytes().to_vec(),
+                pos: 0,
+                fill,
+            }
+        }
+        // "αβγ" = 6 bytes; fill 3 splits the second char.
+        let mut src = chunky("αβγ", 3);
+        assert_eq!(pull_chunk(&mut src).unwrap(), Some("α".to_owned()));
+        assert_eq!(pull_chunk(&mut src).unwrap(), Some("β".to_owned()));
+        assert_eq!(pull_chunk(&mut src).unwrap(), Some("γ".to_owned()));
+        assert_eq!(pull_chunk(&mut src).unwrap(), None);
+        // The `Read` side serves raw bytes in order.
+        let mut src = chunky("αx", 1);
+        let mut raw = [0u8; 2];
+        assert_eq!(std::io::Read::read(&mut src, &mut raw).unwrap(), 2);
+        assert_eq!(&raw, "α".as_bytes());
+        // Fill 1: a lone lead byte reads ahead to the line end.
+        let mut src = chunky("αx", 1);
+        assert_eq!(pull_chunk(&mut src).unwrap(), Some("αx".to_owned()));
+        assert_eq!(pull_chunk(&mut src).unwrap(), None);
+        // Invalid bytes mid-fill report the read_line message.
+        let mut src = Chunky {
+            data: vec![b'a', 0xff],
+            pos: 0,
+            fill: 8,
+        };
+        let err = pull_chunk(&mut src).unwrap_err();
+        assert_eq!(err.class, ThrowClass::IOException);
+        assert!(err.message.contains("stream did not contain valid UTF-8"));
     }
 
     #[test]
