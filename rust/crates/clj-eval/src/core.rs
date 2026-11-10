@@ -4025,19 +4025,19 @@ fn native_ex_info(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     let cause = if args.len() == 3 {
         match &args[2] {
             Value::Nil => None,
-            Value::Throwable(t) => Some(Box::new(t.clone())),
+            Value::Throwable(t) => Some(Box::new((**t).clone())),
             v => return Err(cce_err(v, "java.lang.Throwable")),
         }
     } else {
         None
     };
-    Ok(Value::Throwable(Throwable {
+    Ok(Value::Throwable(std::sync::Arc::new(Throwable {
         id: eval.next_id(),
         class: ThrowClass::ExceptionInfo,
         message,
         data,
         cause,
-    }))
+    })))
 }
 
 /// `ex-data`/`ex-message`/`ex-cause`: throwables project, anything
@@ -4064,10 +4064,9 @@ fn native_ex_message(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 fn native_ex_cause(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/ex-cause", args, &[1])?;
     Ok(match &args[0] {
-        Value::Throwable(t) => t
-            .cause
-            .as_ref()
-            .map_or(Value::Nil, |c| Value::Throwable((**c).clone())),
+        Value::Throwable(t) => t.cause.as_ref().map_or(Value::Nil, |c| {
+            Value::Throwable(std::sync::Arc::new((**c).clone()))
+        }),
         _ => Value::Nil,
     })
 }
@@ -4153,6 +4152,7 @@ fn native_throwable_map(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
         }
         return Err(cce_err(&args[0], "java.lang.Throwable"));
     };
+    let outer: &Throwable = outer;
     let mut chain: Vec<&Throwable> = Vec::new();
     let mut cursor = Some(outer);
     while let Some(link) = cursor {

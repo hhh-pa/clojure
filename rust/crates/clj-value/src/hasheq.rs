@@ -1071,13 +1071,13 @@ mod tests {
         assert_eq!(hasheq(&unbound), 7);
         assert_eq!(hash_code(&unbound), 7);
 
-        let throwable = Value::Throwable(Throwable {
+        let throwable = Value::Throwable(Arc::new(Throwable {
             id: 42,
             class: ThrowClass::Exception,
             message: None,
             data: None,
             cause: None,
-        });
+        }));
         assert_eq!(hasheq(&throwable), 42);
         assert_eq!(hash_code(&throwable), 42);
 

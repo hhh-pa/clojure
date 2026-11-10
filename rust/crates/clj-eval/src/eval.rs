@@ -1246,13 +1246,13 @@ impl Evaluator {
                 Err(Signal::Recur(values))
             }
             Expr::Throw(inner) => self.eval_throw(inner, env),
-            Expr::NewThrowable { class, message } => Ok(Value::Throwable(Throwable {
+            Expr::NewThrowable { class, message } => Ok(Value::Throwable(Arc::new(Throwable {
                 id: self.next_id(),
                 class: *class,
                 message: Some(Arc::from(message.as_str())),
                 data: None,
                 cause: None,
-            })),
+            }))),
             Expr::Try {
                 body,
                 catches,
@@ -1445,7 +1445,9 @@ impl Evaluator {
     /// anything else the cast (or `nil`) error.
     pub(crate) fn throw_value(&mut self, value: Value) -> Signal {
         match value {
-            Value::Throwable(t) => Signal::Throw(t),
+            Value::Throwable(t) => {
+                Signal::Throw(Arc::try_unwrap(t).unwrap_or_else(|a| (*a).clone()))
+            }
             // `nil` is not the cast error: the JVM throws a
             // Clojure-constructed NPE with stable text (probe29).
             Value::Nil => self.throw(NativeError::new(
@@ -2179,7 +2181,7 @@ impl Evaluator {
                 let thrown = try_thrown(signal).expect("recur cannot cross try");
                 for catch in catches {
                     if thrown.class.matches(&catch.class) {
-                        let env = env.extend(vec![Value::Throwable(thrown.clone())]);
+                        let env = env.extend(vec![Value::Throwable(Arc::new(thrown.clone()))]);
                         debug_assert_eq!(env.len() - 1, catch.slot, "catch binds one slot");
                         let result = self.eval_body(&catch.body, &env);
                         // `finally` still runs when the handler throws.

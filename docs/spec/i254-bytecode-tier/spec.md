@@ -184,6 +184,31 @@ across the whole body, superinstructions), or cut per-op
 intrinsic cost and RSS footprint. A general interpreter loop
 over the flat skeleton is now measured twice and excluded.
 
+### 1.7 Value-size slice: 64 → 32 bytes (landed)
+
+Both no-go slices fingered the 64-byte `Value` temp traffic,
+so the next slice halved the enum: every payload over 24
+bytes became a one-word `Arc` handle (`Symbol`, `Keyword`,
+`List`, `Vector`, `Map`, `Set`, `Array`, `PrimitiveVector`
+wrap an `Arc<…Data>`; `Value::Throwable` rides an
+`Arc<Throwable>`; `Var`/`Unbound` shrink through `Symbol`).
+Writers go through `Arc::make_mut` on the handle data first,
+so aliasing and minted-id/entries-`Arc` identity rules are
+exactly the old struct copy's; `Debug` output is unchanged
+(pinned in `value_size.rs`, whose budget is now 32).
+
+Local macOS A/B vs the pre-slice branch binary (identical
+stdout md5 on every run): floors empty/add/vec1 −0.7% /
+−0.4% / −7.4% INS with boot peak 4.11 → 3.82 MB; stems —
+dijkstrashortreach −6.0% INS, kmp −6.0%, boyer_moore −5.3%,
+count_strings −5.4% INS and −13.8% peak RSS, trie −6.5% INS
+and −35.1% peak RSS (228.7 → 148.4 MB), knapsack −4.2%;
+tiny-program peak RSS 3.49 → 3.26 MB. Semantics battery
+(identity/aliasing/meta/transients/exceptions/sorts)
+byte-identical old-vs-new. Gate verdict pending dispatch
+(the Linux Pin counts are authoritative; local numbers are
+directional).
+
 ## Part 2 — Technical specification
 
 ### 2.1 Current execution tiers (source of truth)

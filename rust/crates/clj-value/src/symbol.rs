@@ -37,37 +37,54 @@ fn next_symbol_id() -> u64 {
     SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// A Clojure symbol such as `foo` or `clojure.core/map`.
-#[derive(Clone, Debug)]
-pub struct Symbol {
+/// A symbol's fields, behind the handle's `Arc` so a `Symbol`
+/// (inline in every `Value`) stays one word (#254: `Value`
+/// shrinks to 32 bytes).
+#[derive(Clone)]
+struct SymbolData {
     ns: Option<Arc<str>>,
     name: Arc<str>,
     meta: Option<Arc<Map>>,
     id: u64,
 }
 
+/// A Clojure symbol such as `foo` or `clojure.core/map`.
+#[derive(Clone)]
+pub struct Symbol(Arc<SymbolData>);
+
+impl fmt::Debug for Symbol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Symbol")
+            .field("ns", &self.0.ns)
+            .field("name", &self.0.name)
+            .field("meta", &self.0.meta)
+            .field("id", &self.0.id)
+            .finish()
+    }
+}
+
 impl Symbol {
     /// Build a symbol from namespace and name parts (no metadata).
     #[must_use]
     pub fn new(ns: Option<&str>, name: &str) -> Self {
-        Self {
+        Self(Arc::new(SymbolData {
             ns: ns.map(Arc::from),
             name: Arc::from(name),
             meta: None,
             id: next_symbol_id(),
-        }
+        }))
     }
 
     /// Build a symbol from already-shared parts (no copies; tables
     /// keyed by name hand theirs over).
     #[must_use]
     pub fn from_shared(ns: Option<Arc<str>>, name: Arc<str>) -> Self {
-        Self {
+        Self(Arc::new(SymbolData {
             ns,
             name,
             meta: None,
             id: next_symbol_id(),
-        }
+        }))
     }
 
     /// `Symbol::intern` semantics (`docs/spec/t1174/reader-contract.md` §4):
@@ -86,34 +103,35 @@ impl Symbol {
     /// The namespace part, if any.
     #[must_use]
     pub fn namespace(&self) -> Option<&str> {
-        self.ns.as_deref()
+        self.0.ns.as_deref()
     }
 
     /// The name part.
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.name
+        &self.0.name
     }
 
     /// The name part's shared string (tables keyed by simple name
     /// share it instead of copying).
     #[must_use]
     pub fn name_arc(&self) -> &Arc<str> {
-        &self.name
+        &self.0.name
     }
 
     /// The metadata map, if any.
     #[must_use]
     pub fn meta(&self) -> Option<&Map> {
-        self.meta.as_deref()
+        self.0.meta.as_deref()
     }
 
     /// Return this symbol with `meta` attached (`None` clears it).
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
-        self.meta = meta.map(Arc::new);
+        let data = Arc::make_mut(&mut self.0);
+        data.meta = meta.map(Arc::new);
         // A new object on the JVM (`withMeta` news), so a new id.
-        self.id = next_symbol_id();
+        data.id = next_symbol_id();
         self
     }
 
@@ -121,7 +139,7 @@ impl Symbol {
     /// at every construction, preserved by `Clone`.
     #[must_use]
     pub fn id(&self) -> u64 {
-        self.id
+        self.0.id
     }
 }
 
@@ -129,7 +147,7 @@ impl Symbol {
 // is invisible, mirroring the JVM.
 impl PartialEq for Symbol {
     fn eq(&self, other: &Self) -> bool {
-        self.ns == other.ns && self.name == other.name
+        self.0.ns == other.0.ns && self.0.name == other.0.name
     }
 }
 
@@ -137,8 +155,8 @@ impl Eq for Symbol {}
 
 impl Hash for Symbol {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.ns.hash(state);
-        self.name.hash(state);
+        self.0.ns.hash(state);
+        self.0.name.hash(state);
     }
 }
 
@@ -155,11 +173,11 @@ pub trait SymKey {
 
 impl SymKey for Symbol {
     fn key_ns(&self) -> Option<&str> {
-        self.ns.as_deref()
+        self.0.ns.as_deref()
     }
 
     fn key_name(&self) -> &str {
-        &self.name
+        &self.0.name
     }
 }
 
@@ -205,16 +223,17 @@ impl PartialOrd for Symbol {
 
 impl Ord for Symbol {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.ns.as_deref(), self.name.as_ref()).cmp(&(other.ns.as_deref(), other.name.as_ref()))
+        (self.0.ns.as_deref(), self.0.name.as_ref())
+            .cmp(&(other.0.ns.as_deref(), other.0.name.as_ref()))
     }
 }
 
 impl fmt::Display for Symbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(ns) = &self.ns {
+        if let Some(ns) = &self.0.ns {
             write!(f, "{ns}/")?;
         }
-        write!(f, "{}", self.name)
+        write!(f, "{}", self.0.name)
     }
 }
 

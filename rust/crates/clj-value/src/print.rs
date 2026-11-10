@@ -1794,13 +1794,13 @@ mod tests {
     #[test]
     fn throwable_without_messages_prints_nils() {
         use crate::{ThrowClass, Throwable};
-        let t = Value::Throwable(Throwable {
+        let t = Value::Throwable(Arc::new(Throwable {
             id: 1,
             class: ThrowClass::Exception,
             message: None,
             data: None,
             cause: None,
-        });
+        }));
         assert_eq!(
             pr(&t),
             "#error {:cause nil :data nil :via [{:type java.lang.Exception :message nil}] :trace []}"
@@ -1812,13 +1812,13 @@ mod tests {
             data: None,
             cause: None,
         };
-        let outer = Value::Throwable(Throwable {
+        let outer = Value::Throwable(Arc::new(Throwable {
             id: 1,
             class: ThrowClass::Exception,
             message: Some(Arc::from("top")),
             data: None,
             cause: Some(Box::new(inner)),
-        });
+        }));
         assert_eq!(
             pr(&outer),
             "#error {:cause \"top\" :data nil :via [{:type java.lang.Exception :message \"top\"} {:type java.lang.RuntimeException :message nil}] :trace []}"
@@ -1909,21 +1909,21 @@ mod tests {
             var_id: 2,
         });
         assert_eq!(java_debug(&unb), "Unbound: #'y");
-        let bare = Value::Throwable(Throwable {
+        let bare = Value::Throwable(Arc::new(Throwable {
             id: 1,
             class: ThrowClass::Exception,
             message: None,
             data: None,
             cause: None,
-        });
+        }));
         assert_eq!(java_debug(&bare), "java.lang.Exception");
-        let msg = Value::Throwable(Throwable {
+        let msg = Value::Throwable(Arc::new(Throwable {
             id: 1,
             class: ThrowClass::RuntimeException,
             message: Some(Arc::from("boom")),
             data: None,
             cause: None,
-        });
+        }));
         assert_eq!(java_debug(&msg), "java.lang.RuntimeException: boom");
         let t = Transient::new(TransientKind::Vector(TransientVector::new()));
         let id = t.id();

@@ -87,13 +87,13 @@ fn install_throw_double(eval: &mut Evaluator) {
         "user",
         "s19-ex",
         Arc::new(|_, args| match args {
-            [Value::Str(m)] => Ok(Value::Throwable(Throwable {
+            [Value::Str(m)] => Ok(Value::Throwable(Arc::new(Throwable {
                 id: 0,
                 class: ThrowClass::Exception,
                 message: Some(Arc::clone(m)),
                 data: None,
                 cause: None,
-            })),
+            }))),
             _ => Err(NativeError::arity("user/s19-ex", args.len())),
         }),
     );

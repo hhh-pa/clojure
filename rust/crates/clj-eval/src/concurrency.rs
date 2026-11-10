@@ -1580,7 +1580,10 @@ impl AgentAction for EvalAction {
         // `*agent*` stays bound over the handler too (only the
         // validator runs bare).
         let bound = bind_agent(&mut self.child, agent);
-        let args = [agent.clone(), Value::Throwable(error.clone())];
+        let args = [
+            agent.clone(),
+            Value::Throwable(std::sync::Arc::new(error.clone())),
+        ];
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.child.call(handler, &args)
         }));
@@ -2062,7 +2065,9 @@ fn native_agent_error(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
         &args[0],
         "Cannot invoke \"clojure.lang.Agent.getError()\" because \"a\" is null",
     )?;
-    Ok(agent.error().map_or(Value::Nil, Value::Throwable))
+    Ok(agent
+        .error()
+        .map_or(Value::Nil, |t| Value::Throwable(std::sync::Arc::new(t))))
 }
 
 fn native_restart_agent(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -3084,13 +3089,13 @@ mod tests {
                 sym: Symbol::new(None, "u"),
                 var_id: 7,
             }),
-            Value::Throwable(Throwable {
+            Value::Throwable(std::sync::Arc::new(Throwable {
                 id: 1,
                 class: ThrowClass::RuntimeException,
                 message: None,
                 data: None,
                 cause: None,
-            }),
+            })),
             Value::Transient(Transient::new(
                 TransientKind::Vector(TransientVector::new()),
             )),

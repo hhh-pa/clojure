@@ -56,14 +56,31 @@ impl Elem8 {
     }
 }
 
-/// An immutable primitive vector: element type plus persistent
-/// items plus metadata.
-#[derive(Clone, Debug)]
-pub struct PrimitiveVector {
+/// A primitive vector's fields, behind the handle's `Arc` so a
+/// `PrimitiveVector` (inline in every `Value`) stays one word
+/// (#254: `Value` shrinks to 32 bytes).
+#[derive(Clone)]
+struct PrimitiveVectorData {
     elem: Elem8,
     inner: RpdsVector,
     meta: Option<Arc<Map>>,
     id: u64,
+}
+
+/// An immutable primitive vector: element type plus persistent
+/// items plus metadata.
+#[derive(Clone)]
+pub struct PrimitiveVector(Arc<PrimitiveVectorData>);
+
+impl std::fmt::Debug for PrimitiveVector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrimitiveVector")
+            .field("elem", &self.0.elem)
+            .field("inner", &self.0.inner)
+            .field("meta", &self.0.meta)
+            .field("id", &self.0.id)
+            .finish()
+    }
 }
 
 impl PrimitiveVector {
@@ -74,52 +91,52 @@ impl PrimitiveVector {
         for v in items {
             inner.push_back_mut(v);
         }
-        Self {
+        Self(Arc::new(PrimitiveVectorData {
             elem,
             inner,
             meta,
             id: crate::value::next_identity_id(),
-        }
+        }))
     }
 
     /// An empty vector of `elem` (fresh, no meta).
     #[must_use]
     pub fn empty(elem: Elem8) -> Self {
-        Self {
+        Self(Arc::new(PrimitiveVectorData {
             elem,
             inner: RpdsVector::new_sync(),
             meta: None,
             id: crate::value::next_identity_id(),
-        }
+        }))
     }
 
     /// The element type.
     #[must_use]
     pub fn elem(&self) -> Elem8 {
-        self.elem
+        self.0.elem
     }
 
     /// The item count.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.0.inner.len()
     }
 
     /// Whether the vector is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.0.inner.is_empty()
     }
 
     /// Iterate front to back.
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
-        self.inner.iter()
+        self.0.inner.iter()
     }
 
     /// The item at `index` (`None` when out of bounds).
     #[must_use]
     pub fn get(&self, index: usize) -> Option<&Value> {
-        self.inner.get(index)
+        self.0.inner.get(index)
     }
 
     /// The items in order.
@@ -136,13 +153,14 @@ impl PrimitiveVector {
     /// in place.
     #[must_use]
     pub fn push_back(mut self, v: Value) -> Self {
-        self.inner.push_back_mut(v);
-        Self {
-            elem: self.elem,
-            inner: self.inner,
-            meta: self.meta,
+        let data = Arc::make_mut(&mut self.0);
+        data.inner.push_back_mut(v);
+        Self(Arc::new(PrimitiveVectorData {
+            elem: data.elem,
+            inner: data.inner.clone(),
+            meta: data.meta.clone(),
             id: crate::value::next_identity_id(),
-        }
+        }))
     }
 
     /// Replace the item at `index` (`None` when out of bounds —
@@ -153,15 +171,16 @@ impl PrimitiveVector {
     /// [`push_back`](Self::push_back), in place when unique.
     #[must_use]
     pub fn set_nth(mut self, index: usize, v: Value) -> Option<Self> {
-        if !self.inner.set_mut(index, v) {
+        let data = Arc::make_mut(&mut self.0);
+        if !data.inner.set_mut(index, v) {
             return None;
         }
-        Some(Self {
-            elem: self.elem,
-            inner: self.inner,
-            meta: self.meta,
+        Some(Self(Arc::new(PrimitiveVectorData {
+            elem: data.elem,
+            inner: data.inner.clone(),
+            meta: data.meta.clone(),
             id: crate::value::next_identity_id(),
-        })
+        })))
     }
 
     /// The vector without its last item (`None` when empty — `self`
@@ -172,29 +191,31 @@ impl PrimitiveVector {
     /// [`push_back`](Self::push_back), in place when unique.
     #[must_use]
     pub fn drop_last(mut self) -> Option<Self> {
-        if !self.inner.drop_last_mut() {
+        let data = Arc::make_mut(&mut self.0);
+        if !data.inner.drop_last_mut() {
             return None;
         }
-        Some(Self {
-            elem: self.elem,
-            inner: self.inner,
-            meta: self.meta,
+        Some(Self(Arc::new(PrimitiveVectorData {
+            elem: data.elem,
+            inner: data.inner.clone(),
+            meta: data.meta.clone(),
             id: crate::value::next_identity_id(),
-        })
+        })))
     }
 
     /// The metadata map, if any.
     #[must_use]
     pub fn meta(&self) -> Option<&Map> {
-        self.meta.as_deref()
+        self.0.meta.as_deref()
     }
 
     /// Rebuild with new metadata.
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
-        self.meta = meta.map(Arc::new);
+        let data = Arc::make_mut(&mut self.0);
+        data.meta = meta.map(Arc::new);
         // A new object on the JVM (`withMeta` news), so a new id.
-        self.id = crate::value::next_identity_id();
+        data.id = crate::value::next_identity_id();
         self
     }
 
@@ -202,6 +223,6 @@ impl PrimitiveVector {
     /// at every construction, preserved by `Clone`.
     #[must_use]
     pub fn id(&self) -> u64 {
-        self.id
+        self.0.id
     }
 }

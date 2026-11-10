@@ -1734,7 +1734,7 @@ fn run_try(ev: &mut Evaluator, f: &mut Frame<'_>, code: &TryCode) -> Result<Valu
         .find(|(class, ..)| thrown.class.matches(class));
     let result = match handled {
         Some((_, r, handler)) => {
-            f.regs[*r] = Value::Throwable(thrown);
+            f.regs[*r] = Value::Throwable(Arc::new(thrown));
             handler(ev, f)
         }
         None => Err(Signal::Throw(thrown)),
@@ -2355,13 +2355,13 @@ struct CaseShape {
 
 /// A constant-message throwable (a fresh identity per evaluation).
 fn new_throwable(ev: &mut Evaluator, class: ThrowClass, message: &Arc<str>) -> Value {
-    Value::Throwable(Throwable {
+    Value::Throwable(Arc::new(Throwable {
         id: ev.next_id(),
         class,
         message: Some(Arc::clone(message)),
         data: None,
         cause: None,
-    })
+    }))
 }
 
 /// Clone with the scalar kinds inline (no call into the clone glue).

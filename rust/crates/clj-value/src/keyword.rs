@@ -11,27 +11,33 @@
 //! its arcs, so `identical?` is pointer equality.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::FxBuildHasher;
 
-/// One interned keyword's canonical arcs.
-type CanonicalKeyword = (Option<Arc<str>>, Arc<str>);
+/// One interned keyword's canonical fields, shared behind one
+/// `Arc` so a `Keyword` (inline in every `Value`) stays one word
+/// (#254: `Value` shrinks to 32 bytes).
+struct KeywordData {
+    ns: Option<Arc<str>>,
+    name: Arc<str>,
+}
 
-/// The intern tables (fence 4a): arcs canonicalized across every
-/// construction, like the JVM's `KeywordTable` (strong refs —
-/// entries live as long as the process, same as interned keywords
-/// on the JVM). Fx-hashed: every keyword construction probes them.
-/// Plain keywords (most: `:line` on every read list, `:macro` on
-/// every analyzed head) probe by `&str`, allocating only on first
-/// interning; qualified ones probe by their `(ns, name)` pair.
+/// The intern tables (fence 4a): one shared [`KeywordData`] per
+/// distinct keyword across every construction, like the JVM's
+/// `KeywordTable` (strong refs — entries live as long as the
+/// process, same as interned keywords on the JVM). Fx-hashed:
+/// every keyword construction probes them. Plain keywords (most:
+/// `:line` on every read list, `:macro` on every analyzed head)
+/// probe by `&str`, allocating only on first interning; qualified
+/// ones probe by their `(ns, name)` arc pair.
 #[derive(Default)]
 struct KeywordTable {
-    plain: HashSet<Arc<str>, FxBuildHasher>,
-    qualified: HashMap<CanonicalKeyword, CanonicalKeyword, FxBuildHasher>,
+    plain: HashMap<Arc<str>, Arc<KeywordData>, FxBuildHasher>,
+    qualified: HashMap<(Arc<str>, Arc<str>), Arc<KeywordData>, FxBuildHasher>,
 }
 
 static KEYWORD_TABLE: LazyLock<Mutex<KeywordTable>> =
@@ -51,62 +57,69 @@ macro_rules! static_keyword {
 }
 
 /// A Clojure keyword such as `:ok` or `:user/id`.
-#[derive(Clone, Debug)]
-pub struct Keyword {
-    ns: Option<Arc<str>>,
-    name: Arc<str>,
+#[derive(Clone)]
+pub struct Keyword(Arc<KeywordData>);
+
+impl fmt::Debug for Keyword {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Keyword")
+            .field("ns", &self.0.ns)
+            .field("name", &self.0.name)
+            .finish()
+    }
 }
 
 impl Keyword {
     /// Build a keyword from namespace and name parts, canonicalizing
     /// through the intern table (every construction of an equal
-    /// keyword shares the arcs).
+    /// keyword shares one [`KeywordData`]).
     #[must_use]
     pub fn new(ns: Option<&str>, name: &str) -> Self {
         let mut table = KEYWORD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ns) = ns else {
-            let name = match table.plain.get(name) {
-                Some(arc) => Arc::clone(arc),
-                None => {
-                    let arc: Arc<str> = Arc::from(name);
-                    table.plain.insert(Arc::clone(&arc));
-                    arc
-                }
-            };
-            return Self { ns: None, name };
+            if let Some(data) = table.plain.get(name) {
+                return Self(Arc::clone(data));
+            }
+            let data = Arc::new(KeywordData {
+                ns: None,
+                name: Arc::from(name),
+            });
+            table
+                .plain
+                .insert(Arc::clone(&data.name), Arc::clone(&data));
+            return Self(data);
         };
-        let entry = table
+        let data = table
             .qualified
-            .entry((Some(Arc::from(ns)), Arc::from(name)))
-            .or_insert_with_key(|k| k.clone());
-        Self {
-            ns: entry.0.clone(),
-            name: entry.1.clone(),
-        }
+            .entry((Arc::from(ns), Arc::from(name)))
+            .or_insert_with_key(|k| {
+                Arc::new(KeywordData {
+                    ns: Some(Arc::clone(&k.0)),
+                    name: Arc::clone(&k.1),
+                })
+            });
+        Self(Arc::clone(data))
     }
 
     /// The namespace part, if any.
     #[must_use]
     pub fn namespace(&self) -> Option<&str> {
-        self.ns.as_deref()
+        self.0.ns.as_deref()
     }
 
     /// The name part.
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.name
+        &self.0.name
     }
 
     /// Pointer identity for `identical?` (fence 4a): complete
     /// exactly when every construction interns (all of them route
-    /// through [`new`](Keyword::new)).
+    /// through [`new`](Keyword::new), so equal keywords share one
+    /// [`KeywordData`]).
     #[must_use]
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        match (&self.ns, &other.ns) {
-            (None, None) => Arc::ptr_eq(&self.name, &other.name),
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b) && Arc::ptr_eq(&self.name, &other.name),
-            _ => false,
-        }
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -119,7 +132,7 @@ impl PartialEq for Keyword {
         // equality decides first, so map-key scans and `=` over
         // keywords skip the string compare; the content compare
         // covers any uninterned pair (#235).
-        self.ptr_eq(other) || (self.ns == other.ns && self.name == other.name)
+        self.ptr_eq(other) || (self.0.ns == other.0.ns && self.0.name == other.0.name)
     }
 }
 
@@ -127,8 +140,8 @@ impl Eq for Keyword {}
 
 impl Hash for Keyword {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.ns.hash(state);
-        self.name.hash(state);
+        self.0.ns.hash(state);
+        self.0.name.hash(state);
     }
 }
 
@@ -140,17 +153,18 @@ impl PartialOrd for Keyword {
 
 impl Ord for Keyword {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.ns.as_deref(), self.name.as_ref()).cmp(&(other.ns.as_deref(), other.name.as_ref()))
+        (self.0.ns.as_deref(), self.0.name.as_ref())
+            .cmp(&(other.0.ns.as_deref(), other.0.name.as_ref()))
     }
 }
 
 impl fmt::Display for Keyword {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(":")?;
-        if let Some(ns) = &self.ns {
+        if let Some(ns) = &self.0.ns {
             write!(f, "{ns}/")?;
         }
-        write!(f, "{}", self.name)
+        write!(f, "{}", self.0.name)
     }
 }
 

@@ -129,13 +129,13 @@ fn install_misc(eval: &mut Evaluator, log: &Arc<Mutex<Vec<String>>>) {
         "user",
         "t-ex",
         Arc::new(|_, args| match args {
-            [Value::Str(m)] => Ok(Value::Throwable(Throwable {
+            [Value::Str(m)] => Ok(Value::Throwable(Arc::new(Throwable {
                 id: 0,
                 class: ThrowClass::ExceptionInfo,
                 message: Some(Arc::clone(m)),
                 data: None,
                 cause: None,
-            })),
+            }))),
             _ => Err(NativeError::arity("test/t-ex", args.len())),
         }),
     );

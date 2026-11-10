@@ -290,21 +290,21 @@ impl<R: BufRead, W: Write> Session<R, W> {
             SourceError::Uncaught(t) => {
                 let message = t.message.as_deref().unwrap_or("");
                 let diagnostic = Self::class_diagnostic(t.class, message);
-                (Value::Throwable(t.clone()), diagnostic)
+                (Value::Throwable(Arc::new(t.clone())), diagnostic)
             }
             SourceError::Reader(e) => {
                 let bound = self.throwable(ThrowClass::RuntimeException, e.message());
-                (Value::Throwable(bound), e.to_string())
+                (Value::Throwable(Arc::new(bound)), e.to_string())
             }
             SourceError::Compile(e) => {
                 let text = e.to_string();
                 let bound = self.throwable(ThrowClass::CompilerException, text.clone());
-                (Value::Throwable(bound), text)
+                (Value::Throwable(Arc::new(bound)), text)
             }
             SourceError::Internal(message) => {
                 let diagnostic = format!("internal error: {message}");
                 let bound = self.throwable(ThrowClass::Exception, diagnostic.clone());
-                (Value::Throwable(bound), diagnostic)
+                (Value::Throwable(Arc::new(bound)), diagnostic)
             }
         }
     }
@@ -337,12 +337,12 @@ impl<R: BufRead, W: Write> Session<R, W> {
             Signal::Throw(t) => {
                 let message = t.message.as_deref().unwrap_or("");
                 let diagnostic = Self::class_diagnostic(t.class, message);
-                (Value::Throwable(t), diagnostic)
+                (Value::Throwable(Arc::new(t)), diagnostic)
             }
             Signal::Recur(_) => {
                 let diagnostic = "internal error: recur escaped its loop or fn".to_owned();
                 let bound = self.throwable(ThrowClass::Exception, diagnostic.clone());
-                (Value::Throwable(bound), diagnostic)
+                (Value::Throwable(Arc::new(bound)), diagnostic)
             }
         }
     }
@@ -402,13 +402,13 @@ impl<R: BufRead, W: Write> Session<R, W> {
         } else {
             Some(Arc::from(err.message.as_str()))
         };
-        Value::Throwable(Throwable {
+        Value::Throwable(Arc::new(Throwable {
             id: self.eval.next_id(),
             class: err.class,
             message,
             data: err.data.clone().map(Box::new),
             cause: err.cause.clone().map(Box::new),
-        })
+        }))
     }
 
     /// The one-line `SimpleClass: message` diagnostic (bare class

@@ -308,7 +308,7 @@ fn default_ex_handler(t: &Throwable) -> Value {
 fn ex_path(eval: &mut Evaluator, exh: Option<&Value>, t: Throwable) -> Result<StepOut, Throwable> {
     let ret = match exh {
         Some(h) => {
-            let arg = Value::Throwable(t);
+            let arg = Value::Throwable(std::sync::Arc::new(t));
             call_checked(eval, h, &[arg]).map_err(|e| eval.throwable(e))?
         }
         None => default_ex_handler(&t),
