@@ -1,6 +1,7 @@
 # I254: Bytecode tier for hot loops — Specification
 
-- Status: draft for spec review; slice 1 is a go/no-go spike.
+- Status: slice 1 measured — **no-go** (see §1.5). Spike
+  reverted; this spec remains the design record.
 - Issue: [#254](https://github.com/hhh-pa/clojure/issues/254).
   Branch: `perf/254-bytecode-tier`.
 - Parents/context: #214 (performant JIT subset), #226
@@ -40,16 +41,17 @@
 ### 1.3 Acceptance criteria
 
 - [ ] This spec is committed before implementation code.
-- [ ] Slice-1 go/no-go is recorded in this spec and on #254
+- [x] Slice-1 go/no-go is recorded in this spec and on #254
   with before/after local instruction and RSS numbers for:
   empty/add loop floors, KMP/Boyer-Moore-shaped string loops,
   Dijkstra-shaped vector/transient loops, and the
-  `count_strings` matrix inner loop.
+  `count_strings` matrix inner loop. **No-go: see §1.5.**
 - [ ] Go only if slice 1 reaches at least ~35% fewer local
   retired instructions per iteration on the representative
   loop benches without a small-case RSS increase. If it does
   not, the spike is reverted or kept behind an inert path only
   if measuring proves neutral-or-better everywhere.
+  **Not met (§1.5): spike reverted, not kept inert.**
 - [ ] Tests pin eligible loops, ineligible/fallback loops,
   destructuring bindings, nested loops, captured locals,
   opaque subforms (`case`, tree-evaluated escapes), errors,
@@ -85,6 +87,64 @@
 - Given a tiny script, when run under the bytecode build,
   then boot/eval output is unchanged and peak RSS does not
   grow beyond run-to-run noise.
+
+### 1.5 Slice-1 go/no-go result (recorded 2026-11-10): NO-GO
+
+A working spike was built on this branch (whole-loop compile
+attempt with `body_mark` rewind, `Bc` dispatch over `BcCall`
+fn-pointer ops reusing `vm_ops` `Op*::apply`/`test`, per-call
+`site_direct_valid`, specialized 1–4 arity `recur`). All
+`interp_loop` tests passed and snippet outputs matched the
+baseline byte-for-byte (md5). It loses on instructions in
+every placement, so per §1.3 it was reverted in full; no
+inert path is kept. Local macOS retired instructions
+(directional only; Linux Pin is authoritative), baseline is
+`6d4d5217` (post-#250 master):
+
+| Bench | Base | Bytecode-first | Fused-first |
+| --- | --- | --- | --- |
+| empty floor | 27.30B | 34.38B (+26%) | = base |
+| add floor | 41.68B | 49.96B (+20%) | = base |
+| vec1 floor | 67.99B | 122.58B (+80%) | = base |
+| dijkstra | 2.068B | 2.471B (+19%) | 2.473B (+20%) |
+| kmp | 1.812B | 1.965B (+8%) | 1.814B (+0.1%) |
+| count_strings | 517.1M | — | 571.0M (+10%) |
+
+Peak RSS was unchanged within noise everywhere (floors
+~4.1 MB, dijkstra 23.2→22.8 MB, kmp ~11.0 MB,
+count_strings 5.19→5.21 MB), so the artifact budget was not
+the problem. The `count_strings` row uses a scaled input
+(80-char literal, `l = 10^12`); the earlier `cs_mid` input
+does not finish in 30 min on the baseline and is unusable
+as a bench.
+
+Why it loses:
+
+- The fused/flat leaves are monomorphized shape closures
+  that inline `Op*::apply` and read operands in place. The
+  spike's fn-pointer op layer adds one non-inlinable call
+  per op plus a per-instruction dispatch on top.
+- Nested computed operands round-trip through 64-byte
+  `Value` temp registers, where closures keep scalars in
+  Rust locals; `vec1` (nested `rem`/`nth`/`+`) shows the
+  cost most (+80%). §2.2 already banned this decomposition;
+  the spike confirms the ban is load-bearing.
+- On the floors the ceiling for any dispatch tier is fused
+  parity: the fused empty loop is already two inlined calls
+  per iteration (~227 ins). An enum-opcode variant of §2.2
+  removes the fn-pointer layer but still pays a dispatch
+  per instruction, so the −35% go criterion is not
+  reachable by dispatch restructuring alone.
+
+Consequence for #254's goal: the remaining gate losses are
+not dispatch-bound at this tier granularity. The levers with
+headroom left are unboxed loop state (int loop variables
+promoted to Rust locals across iterations in the fused tier,
+with overflow deopt), per-op intrinsic cost (`nth`, string
+indexing, transient ops), and the small-case RSS footprint.
+A future bytecode attempt should start from superinstruction
+patterns (test+step+recur as one unboxed instruction), not
+from a general dispatch loop.
 
 ## Part 2 — Technical specification
 
