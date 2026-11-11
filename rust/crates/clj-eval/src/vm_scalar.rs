@@ -15,33 +15,30 @@
 //! `Int`/`Char`/`Bool` values compiles here into a program that
 //! keeps the loop state, every `let` temp, and every nested loop's
 //! state as tagged scalars ([`Sv`]), reads invariant locals in
-//! place, and performs `assoc!`/`conj!` on transient vectors at the
-//! `recur` or exit that ends an iteration.
-//!
-//! Calls through vars holding closures inline (the program enters
-//! only while each var still holds its closure, see [`RootSite`]);
-//! effects may sit under `when`/`when-not` and be followed by a
-//! `let`/`if` tree before the `recur`; and a `recur` operand that is
-//! a collection read reads after the effects, as the source orders
-//! (see [`late`]).
+//! place, and performs `assoc!`/`conj!`/`pop!` on transient vectors
+//! where the source puts them: as statements anywhere in a body,
+//! under `if`/`when`, and inside nested loops. Calls through vars
+//! holding closures inline (the program enters only while each var
+//! still holds its closure, see [`RootSite`]).
 //!
 //! Every operation answers exactly what its boxed op answers, or
 //! nothing: a non-scalar read, an overflow, an out-of-range
 //! index, a non-ASCII-safe miss, an invalid call site, or an
-//! unsupported form. Nothing observable happens before an
-//! iteration commits — effects run only after every value of the
-//! iteration (its `recur` operands, its effect arguments) has
-//! computed and every effect's target has checked out — so a miss
-//! writes the iteration's starting state back to the registers and
-//! hands the loop to the boxed tiers, which re-run that iteration
-//! whole. Results, errors, evaluation order and redefinition
-//! behavior therefore all come from the ordinary road.
+//! unsupported form. Everything runs in source order, and every
+//! effect logs how to undo itself ([`Undo`]); the log clears at
+//! each iteration's head. A miss undoes the iteration's effects,
+//! newest first, writes the iteration's starting state back to the
+//! registers, and hands the loop to the boxed tiers, which re-run
+//! that iteration whole. Nothing else observes a transient while an
+//! iteration runs (the program calls no code of its own), so results,
+//! errors, evaluation order and redefinition behavior all come from
+//! the ordinary road.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use std::sync::Arc;
 
-use clj_value::{ExtensionValue, TransientKind, TransientVector, Value, Var};
+use clj_value::{ExtensionValue, Transient, TransientKind, TransientVector, Value, Var};
 use smallvec::SmallVec;
 
 use crate::eval::Evaluator;
@@ -152,6 +149,8 @@ pub(crate) enum Calc {
 pub(crate) enum Ctl {
     If(Cond, IExpr, IExpr),
     Let(Box<[(usize, IExpr)]>, IExpr),
+    /// Statements, then the value (`(do stmt… x)`).
+    Seq(Box<[Stmt]>, IExpr),
     /// A nested loop's value.
     Loop(Inner),
     /// A test as a boolean value.
@@ -178,15 +177,28 @@ pub(crate) enum Cmp {
     Eq(IExpr, IExpr),
 }
 
-/// A transient mutation at the end of an iteration.
+/// A transient vector mutation.
 #[derive(Clone)]
 pub(crate) enum Effect {
-    /// `(assoc! t k v)` with `k` inside the vector (no append).
+    /// `(assoc! t k v)` (`k` at most the count, which appends).
     Assoc(Loc, IExpr, IExpr),
     /// `(conj! t v)`.
     Conj(Loc, IExpr),
-    /// `(when test eff…)`: the effects run only when the test holds.
-    When(Cond, Box<[Effect]>),
+    /// `(pop! t)`.
+    Pop(Loc),
+}
+
+/// A form run for its effect, in source order.
+#[derive(Clone)]
+pub(crate) enum Stmt {
+    Effect(Effect),
+    /// `(if test then… else…)` over statements (`when`, `when-not`).
+    If(Cond, Box<[Stmt]>, Box<[Stmt]>),
+    Let(Box<[(usize, IExpr)]>, Box<[Stmt]>),
+    /// A nested loop run for effect (its value dropped).
+    Loop(Inner),
+    /// A scalar expression computed for its misses (value dropped).
+    Expr(IExpr),
 }
 
 /// A loop's exit value.
@@ -209,15 +221,18 @@ pub(crate) enum ExitVal {
 pub(crate) enum Leaf {
     /// `recur`: one operand per target (`None` passes the
     /// variable through unchanged).
-    Recur(Box<[Effect]>, Box<[Option<IExpr>]>),
-    Exit(Box<[Effect]>, ExitVal),
+    Recur(Box<[Option<IExpr>]>),
+    Exit(ExitVal),
 }
 
-/// A loop body: a tree of tests and temps ending in leaves.
+/// A loop body: a tree of tests, temps and statements ending in
+/// leaves.
 #[derive(Clone)]
 pub(crate) enum Node {
     If(Cond, Box<Node>, Box<Node>),
     Let(Box<[(usize, IExpr)]>, Box<Node>),
+    /// Statements, then the rest of the body.
+    Seq(Box<[Stmt]>, Box<Node>),
     Leaf(Leaf),
     Deopt,
 }
@@ -250,17 +265,6 @@ enum Co {
     Count(Sl, u16),
 }
 
-/// An effect step (operand: the effect table index).
-#[derive(Clone, Copy)]
-enum EffStep {
-    /// Miss unless the effect can run (see [`effect_step`]).
-    Check(u16),
-    /// Run a checked effect.
-    Apply(u16),
-    /// Run a lone effect (it checks and applies under one lock).
-    Once(u16),
-}
-
 /// A branch test over slots.
 #[derive(Clone, Copy)]
 enum Br {
@@ -274,11 +278,15 @@ enum Br {
 /// is laid out, code indexes after.
 #[derive(Clone, Copy)]
 enum Ins {
-    /// The outer loop's head: re-validate the call sites.
+    /// The outer loop's head: re-validate the call sites (and clear
+    /// the undo log: the last iteration's effects stand).
     Top,
     Do(Step),
     Co(Co),
-    Eff(EffStep),
+    /// Run an effect (the effect table index), logging its undo
+    /// unless nothing after it can miss before the iteration ends
+    /// (see [`mark_unlogged`]).
+    Eff(u16, bool),
     /// Jump unless the test holds.
     Br(Br, u32),
     Jmp(u32),
@@ -308,7 +316,79 @@ impl Ins {
 enum EffI {
     Assoc(u16, Sl, Sl),
     Conj(u16, Sl),
+    Pop(u16),
 }
+
+/// How to undo one applied effect (plain data: a replaced or popped
+/// item that is not an `Int` waits in [`Log::boxed`]).
+#[derive(Clone, Copy)]
+enum UndoOp {
+    /// Drop this many appended items.
+    Pops(usize),
+    /// Put the replaced item back.
+    Put(usize, Old),
+    /// Append the popped item back.
+    Push(Old),
+}
+
+/// An item an undo puts back: an `Int`, or a boxed item's index in
+/// [`Log::boxed`].
+#[derive(Clone, Copy)]
+enum Old {
+    Int(i64),
+    Boxed(usize),
+}
+
+impl Old {
+    /// `v` as an undo's item (one that is not an `Int` waits in
+    /// `boxed`; rare: the tier's effects store scalars).
+    fn of(v: Value, boxed: &mut Vec<Value>) -> Self {
+        match v {
+            Value::Int(n) => Old::Int(n),
+            v => {
+                boxed.push(v);
+                Old::Boxed(boxed.len() - 1)
+            }
+        }
+    }
+
+    /// The item back (a boxed one taken from `boxed`).
+    fn value(self, boxed: &mut [Value]) -> Value {
+        match self {
+            Old::Int(n) => Value::Int(n),
+            Old::Boxed(i) => std::mem::replace(&mut boxed[i], Value::Nil),
+        }
+    }
+}
+
+/// One applied effect's undo, on its transient.
+#[derive(Clone, Copy)]
+struct Undo<'v> {
+    t: &'v Transient,
+    op: UndoOp,
+}
+
+/// An iteration's undo log: its undos (plain data, so clearing them
+/// is free) and the items they put back that are not `Int`s.
+#[derive(Default)]
+struct Log<'v> {
+    undos: Vec<Undo<'v>>,
+    boxed: Vec<Value>,
+}
+
+/// The undo entries an iteration may log before it misses instead
+/// (bounds the log's memory; runs of appends share one entry). A
+/// program that fills it leaves the tier.
+const MAX_UNDO: usize = 1024;
+
+/// A program whose iterations average more undo entries than this,
+/// over all its runs once [`HEAVY_AFTER`] iterations have run (judged
+/// as a run ends), leaves the tier: its nested loops of effects cost
+/// more logged than on their own programs, which the boxed tiers then
+/// run. (One long run is not judged midway: a tree walk logs heavily
+/// near its root and lightly after.)
+const HEAVY_LOG: usize = 32;
+const HEAVY_AFTER: usize = 1024;
 
 /// An exit's value.
 enum ExitI {
@@ -335,8 +415,13 @@ pub(crate) struct ScalarLoop {
     /// The deepest inlined call nesting (the calls it stands for
     /// must fit under the call-depth limit).
     depth: usize,
+    /// Whether some effect logs its undo (see [`mark_unlogged`]).
+    logs: bool,
     /// The site-group id the sites validate under together.
     gid: usize,
+    /// Iterations and undo entries over all runs, for [`weigh`].
+    log_iters: AtomicUsize,
+    logged: AtomicUsize,
     /// Entries and iterations, for [`try_run`]'s give-up rule.
     entries: AtomicU32,
     iters: AtomicU32,
@@ -418,32 +503,6 @@ fn cast(c: Cast, x: Sv) -> Option<Sv> {
     }
 }
 
-/// Check (`apply` false) or perform (`apply` true) one effect:
-/// `false` when it cannot run — a live transient vector is needed,
-/// and an `assoc!` index inside it (an earlier `conj!` only grows
-/// it, so a checked batch cannot fail midway).
-fn effect_step(e: &EffI, s: &[Sv], colls: &[Coll<'_>], apply: bool) -> bool {
-    let (EffI::Assoc(c, ..) | EffI::Conj(c, _)) = e;
-    let Coll::Trans(t) = &colls[usize::from(*c)] else {
-        return false;
-    };
-    let mut guard = t.lock();
-    let TransientKind::Vector(tv) = &mut *guard else {
-        return false;
-    };
-    let len = tv.len();
-    match (e, len) {
-        (EffI::Assoc(_, k, v), Ok(n)) => {
-            match usize::try_from(s[usize::from(*k)].int_of().unwrap_or(-1)) {
-                Ok(i) if i < n => !apply || store(tv, i, s[usize::from(*v)]),
-                _ => false,
-            }
-        }
-        (EffI::Conj(_, v), Ok(_)) => !apply || push(tv, s[usize::from(*v)]),
-        (_, Err(_)) => false,
-    }
-}
-
 /// `assoc!` of a scalar (an `Int` keeps a packed buffer packed).
 #[inline(always)]
 fn store(tv: &mut TransientVector, i: usize, v: Sv) -> bool {
@@ -462,26 +521,127 @@ fn push(tv: &mut TransientVector, v: Sv) -> bool {
     }
 }
 
-/// A lone effect, all or nothing: the boxed `assoc!`/`conj!` fast
-/// paths (an `assoc!` at the end appends, as the native does).
+/// An `assoc!` index: an `int` (the native's `intValue` would
+/// truncate a wider one, which the boxed road answers).
+fn index(i: i64) -> Option<usize> {
+    usize::try_from(i).ok().filter(|i| *i <= i32::MAX as usize)
+}
+
+/// An effect nothing after which can miss (so it needs no undo):
+/// the natives' fast paths, which check the vector and the index and
+/// change nothing when they fail. `false`: it cannot run.
 #[inline(always)]
-fn effect_once(e: &EffI, s: &[Sv], colls: &[Coll<'_>]) -> bool {
-    let (EffI::Assoc(c, ..) | EffI::Conj(c, _)) = e;
+fn effect_bare(e: &EffI, s: &[Sv], colls: &[Coll<'_>]) -> bool {
+    let (EffI::Assoc(c, ..) | EffI::Conj(c, _) | EffI::Pop(c)) = e;
     let Coll::Trans(t) = &colls[usize::from(*c)] else {
         return false;
     };
     let mut guard = t.lock();
-    let TransientKind::Vector(tv) = &mut *guard else {
+    let Some(tv) = vector(&mut guard) else {
         return false;
     };
     match e {
-        EffI::Assoc(_, k, v) => match s[usize::from(*k)].int_of() {
-            Some(i) if (0..=i64::from(i32::MAX)).contains(&i) => {
-                store(tv, i as usize, s[usize::from(*v)])
-            }
-            _ => false,
-        },
         EffI::Conj(_, v) => push(tv, s[usize::from(*v)]),
+        EffI::Assoc(_, k, v) => s[usize::from(*k)]
+            .int_of()
+            .and_then(index)
+            .is_some_and(|i| store(tv, i, s[usize::from(*v)])),
+        EffI::Pop(_) => tv.pop().is_ok(),
+    }
+}
+
+/// Run one effect now and log its undo: `false` (nothing changed)
+/// when it cannot run — it needs a live transient vector, an `int`
+/// `assoc!` index of at most its count (the count appends), a
+/// non-empty vector to `pop!`, and room in the log (checked before
+/// the effect runs).
+#[inline(never)]
+fn effect_logged<'v>(e: &EffI, s: &[Sv], colls: &[Coll<'v>], log: &mut Log<'v>) -> bool {
+    let (EffI::Assoc(c, ..) | EffI::Conj(c, _) | EffI::Pop(c)) = e;
+    let (Coll::Trans(t), true) = (&colls[usize::from(*c)], log.undos.len() < MAX_UNDO) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    let Some(tv) = vector(&mut guard) else {
+        return false;
+    };
+    let op = logged(tv, e, s, &mut log.boxed);
+    drop(guard);
+    op.map(|op| log_undo(&mut log.undos, t, op)).is_some()
+}
+
+/// [`effect_logged`]'s effect: its undo, or `None` when it cannot
+/// run (nothing changed).
+fn logged(tv: &mut TransientVector, e: &EffI, s: &[Sv], boxed: &mut Vec<Value>) -> Option<UndoOp> {
+    match e {
+        EffI::Conj(_, v) => push(tv, s[usize::from(*v)]).then_some(UndoOp::Pops(1)),
+        EffI::Assoc(_, k, v) => {
+            let i = s[usize::from(*k)].int_of().and_then(index)?;
+            let v = s[usize::from(*v)];
+            // A packed-int buffer swaps in place.
+            let swapped = match v {
+                Sv { k: K::Int, v: n } => tv.swap_int(i, n),
+                _ => None,
+            };
+            if let Some(old) = swapped {
+                return Some(old.map_or(UndoOp::Pops(1), |o| UndoOp::Put(i, Old::Int(o))));
+            }
+            // `None` exactly when the index is the count (an append);
+            // past it the store fails and nothing changes.
+            let old = tv.nth_opt(i);
+            store(tv, i, v)
+                .then(|| old.map_or(UndoOp::Pops(1), |old| UndoOp::Put(i, Old::of(old, boxed))))
+        }
+        EffI::Pop(_) => {
+            let old = tv.nth_opt(tv.len().ok()?.checked_sub(1)?)?;
+            tv.pop().is_ok().then(|| UndoOp::Push(Old::of(old, boxed)))
+        }
+    }
+}
+
+/// Log an undo, folding an append into the run of appends to the
+/// same transient just before it.
+fn log_undo<'v>(log: &mut Vec<Undo<'v>>, t: &'v Transient, op: UndoOp) {
+    if matches!(op, UndoOp::Pops(1)) {
+        if let Some(Undo {
+            t: last,
+            op: UndoOp::Pops(k),
+        }) = log.last_mut()
+        {
+            if std::ptr::eq(*last, t) {
+                *k += 1;
+                return;
+            }
+        }
+    }
+    log.push(Undo { t, op });
+}
+
+/// Undo an iteration's effects, newest first (each inverse runs on
+/// the state its effect left, so it cannot fail).
+fn rollback(log: &mut Log<'_>) {
+    while let Some(Undo { t, op }) = log.undos.pop() {
+        let _ = undo(t, op, &mut log.boxed);
+    }
+    log.boxed.clear();
+}
+
+/// One effect's inverse (on the vector the effect ran on).
+fn undo(t: &Transient, op: UndoOp, boxed: &mut [Value]) -> Option<()> {
+    let mut guard = t.lock();
+    let tv = vector(&mut guard)?;
+    match op {
+        UndoOp::Pops(k) => (0..k).try_for_each(|_| tv.pop()).ok(),
+        UndoOp::Put(i, v) => tv.assoc(i, v.value(boxed)).ok(),
+        UndoOp::Push(v) => tv.conj(v.value(boxed)).ok(),
+    }
+}
+
+/// A transient's vector (`None` for a map or a set).
+fn vector(k: &mut TransientKind) -> Option<&mut TransientVector> {
+    match k {
+        TransientKind::Vector(tv) => Some(tv),
+        _ => None,
     }
 }
 
@@ -523,16 +683,6 @@ fn co_step(co: Co, s: &mut [Sv], colls: &[Coll<'_>]) -> Option<()> {
     Some(())
 }
 
-/// An effect step: `false` misses (nothing has run).
-#[inline(always)]
-fn eff_step(st: EffStep, sc: &ScalarLoop, s: &[Sv], colls: &[Coll<'_>]) -> bool {
-    match st {
-        EffStep::Check(e) => effect_step(&sc.effs[usize::from(e)], s, colls, false),
-        EffStep::Apply(e) => effect_step(&sc.effs[usize::from(e)], s, colls, true) || true,
-        EffStep::Once(e) => effect_once(&sc.effs[usize::from(e)], s, colls),
-    }
-}
-
 fn exit_value(x: &ExitI, s: &[Sv], f: &Frame<'_>) -> Value {
     match x {
         ExitI::Slot(v) => s[usize::from(*v)].value(),
@@ -541,46 +691,96 @@ fn exit_value(x: &ExitI, s: &[Sv], f: &Frame<'_>) -> Value {
     }
 }
 
+/// An effect, logged or not (see [`mark_unlogged`]).
+#[inline(never)]
+fn effect<'v>(e: &EffI, logged: bool, s: &[Sv], colls: &[Coll<'v>], log: &mut Log<'v>) -> bool {
+    if logged {
+        effect_logged(e, s, colls, log)
+    } else {
+        effect_bare(e, s, colls)
+    }
+}
+
+/// The loop head: in a program that logs (`LOGS`), the last
+/// iteration's effects stand (the log clears, its entries counted for
+/// [`weigh`]); then [`head`].
+#[inline(always)]
+fn top<const COUNT: bool, const LOGS: bool>(
+    ev: &Evaluator,
+    w: &mut Watch,
+    log: &mut Log<'_>,
+    pc: usize,
+) -> Option<usize> {
+    if LOGS {
+        w.iters += 1;
+        if !log.undos.is_empty() {
+            w.logged += log.undos.len();
+            log.undos.clear();
+            log.boxed.clear();
+        }
+    }
+    head::<COUNT>(ev, w, pc)
+}
+
+/// After a run of a program that logs: count its iterations and
+/// undo entries, and send a program that logs heavily (see
+/// [`HEAVY_LOG`]) to the boxed tiers for good.
+fn weigh(sc: &ScalarLoop, w: &Watch) {
+    let iters = sc.log_iters.fetch_add(w.iters, Ordering::Relaxed) + w.iters;
+    let logged = sc.logged.fetch_add(w.logged, Ordering::Relaxed) + w.logged;
+    if iters >= HEAVY_AFTER && logged > HEAVY_LOG * iters {
+        sc.off.store(true, Ordering::Relaxed);
+    }
+}
+
 /// The loop head: count the trip while judging, and go on unless the
 /// direct snapshot moved (another thread redefined a var, or this
 /// one's bindings changed), which hands the loop back to the boxed
 /// road, where every call validates itself.
 #[inline(always)]
-fn head<const COUNT: bool>(
-    ev: &Evaluator,
-    snap: (u64, u64),
-    trips: &mut u32,
-    pc: usize,
-) -> Option<usize> {
+fn head<const COUNT: bool>(ev: &Evaluator, w: &mut Watch, pc: usize) -> Option<usize> {
     if COUNT {
-        *trips += 1;
+        w.trips += 1;
     }
-    (ev.direct_snapshot() == snap).then_some(pc + 1)
+    (ev.direct_snapshot() == w.snap).then_some(pc + 1)
+}
+
+/// A run's bookkeeping: the direct snapshot the sites validated
+/// under at entry, the trips begun (counted while judging), and (in
+/// a program that logs) the iterations begun and the undo entries
+/// they logged.
+struct Watch {
+    snap: (u64, u64),
+    trips: u32,
+    iters: usize,
+    logged: usize,
 }
 
 /// Run the program from its head: the loop's value, or `None` at
-/// the first miss (the state slots then hold the iteration's start).
-/// `snap` is the direct snapshot the sites validated under at entry;
-/// `COUNT` also counts the iterations begun (for [`judge`]).
+/// the first miss (the state slots then hold the iteration's start,
+/// and `log` its effects). `COUNT` also counts the iterations begun
+/// (for [`judge`]); `LOGS`: the program has logged effects.
 #[inline(never)]
-fn exec<const COUNT: bool>(
+fn exec<'v, const COUNT: bool, const LOGS: bool>(
     sc: &ScalarLoop,
     ev: &mut Evaluator,
     f: &Frame<'_>,
     s: &mut [Sv],
-    colls: &[Coll<'_>],
-    snap: (u64, u64),
-    trips: &mut u32,
+    colls: &[Coll<'v>],
+    log: &mut Log<'v>,
+    w: &mut Watch,
 ) -> Option<Value> {
     let mut pc = 0usize;
     loop {
         let next = match sc.code[pc] {
             Ins::Do(st) => step(st, s).map(|()| pc + 1),
             Ins::Co(co) => co_step(co, s, colls).map(|()| pc + 1),
-            Ins::Eff(st) => eff_step(st, sc, s, colls).then_some(pc + 1),
+            Ins::Eff(e, logged) => {
+                effect(&sc.effs[usize::from(e)], logged, s, colls, log).then_some(pc + 1)
+            }
             Ins::Br(b, t) => branch(b, s).map(|holds| if holds { pc + 1 } else { t as usize }),
             Ins::Jmp(t) => Some(t as usize),
-            Ins::Top => head::<COUNT>(ev, snap, trips, pc),
+            Ins::Top => top::<COUNT, LOGS>(ev, w, log, pc),
             Ins::Exit(x) => return Some(exit_value(&sc.exits[usize::from(x)], s, f)),
             Ins::Miss => None,
         };
@@ -606,29 +806,49 @@ fn run(ev: &mut Evaluator, f: &mut Frame<'_>, sc: &ScalarLoop, targets: &[usize]
     if !may_enter(ev, sc) {
         return None;
     }
-    let snap = ev.direct_snapshot();
-    let mut trips = 0u32;
-    let out = {
-        let fr: &Frame<'_> = f;
-        let mut colls: SmallVec<[Coll<'_>; 8]> = SmallVec::new();
-        for l in sc.colls.iter() {
-            colls.push(coll_of(fr.get(*l)));
-        }
-        // Trips are counted only while the loop is being judged.
-        if sc.entries.load(Ordering::Relaxed) < JUDGE_AFTER {
-            let out = exec::<true>(sc, ev, fr, s, &colls, snap, &mut trips);
-            judge(sc, trips);
-            out
-        } else {
-            exec::<false>(sc, ev, fr, s, &colls, snap, &mut trips)
-        }
-    };
+    let out = run_program(ev, f, sc, s);
     if out.is_none() {
         for (p, r) in targets.iter().enumerate() {
             if sc.scalar[p] {
                 f.regs[*r] = s[p].value();
             }
         }
+    }
+    out
+}
+
+/// Run the program over a loaded slot file; a miss undoes the
+/// missed iteration's effects.
+fn run_program(ev: &mut Evaluator, f: &Frame<'_>, sc: &ScalarLoop, s: &mut [Sv]) -> Option<Value> {
+    let mut w = Watch {
+        snap: ev.direct_snapshot(),
+        trips: 0,
+        iters: 0,
+        logged: 0,
+    };
+    let colls: SmallVec<[Coll<'_>; 8]> = sc.colls.iter().map(|l| coll_of(f.get(*l))).collect();
+    let mut log = Log::default();
+    // Trips are counted only while the loop is being judged.
+    let judging = sc.entries.load(Ordering::Relaxed) < JUDGE_AFTER;
+    let (c, l) = (&colls[..], &mut log);
+    let out = match (judging, sc.logs) {
+        (true, true) => exec::<true, true>(sc, ev, f, s, c, l, &mut w),
+        (true, false) => exec::<true, false>(sc, ev, f, s, c, l, &mut w),
+        (false, true) => exec::<false, true>(sc, ev, f, s, c, l, &mut w),
+        (false, false) => exec::<false, false>(sc, ev, f, s, c, l, &mut w),
+    };
+    if judging {
+        judge(sc, w.trips);
+    }
+    if sc.logs {
+        weigh(sc, &w);
+    }
+    if out.is_none() {
+        // A full log: this program logs too much to stay.
+        if log.undos.len() >= MAX_UNDO {
+            sc.off.store(true, Ordering::Relaxed);
+        }
+        rollback(&mut log);
     }
     out
 }
@@ -674,7 +894,8 @@ enum Ctx<'a> {
     Inner {
         slots: &'a [usize],
         head: u32,
-        dst: Sl,
+        /// The loop value's slot (`None`: a statement loop).
+        dst: Option<Sl>,
         after: u32,
     },
 }
@@ -802,9 +1023,13 @@ impl Lower<'_> {
                 self.binds(binds);
                 self.val(body)
             }
+            Ctl::Seq(stmts, v) => {
+                self.stmts(stmts);
+                self.val(v)
+            }
             Ctl::Loop(inner) => {
                 let d = self.sl();
-                self.inner(inner, d);
+                self.inner(inner, Some(d));
                 d
             }
             Ctl::Test(c) => self.test_val(c),
@@ -900,111 +1125,99 @@ impl Lower<'_> {
 
     fn node(&mut self, n: &Node, ctx: &Ctx<'_>) {
         match n {
+            Node::Seq(stmts, rest) => {
+                // Effects that end a body over a tail reading no
+                // collection run at each of its leaves, after the leaf's
+                // values: no step that can miss follows the last of them.
+                let k = if sinks(rest) {
+                    let effect = |st: &&Stmt| matches!(st, Stmt::Effect(_));
+                    stmts.iter().rev().take_while(effect).count()
+                } else {
+                    0
+                };
+                let (now, last) = stmts.split_at(stmts.len() - k);
+                self.stmts(now);
+                self.node_then(rest, last, ctx);
+            }
+            Node::Deopt => {
+                self.miss();
+            }
+            n => self.node_then(n, &[], ctx),
+        }
+    }
+
+    /// `n` with the `pending` effects run at each of its leaves, after
+    /// the leaf's values (see [`sinks`]).
+    fn node_then(&mut self, n: &Node, pending: &[Stmt], ctx: &Ctx<'_>) {
+        match n {
             Node::If(c, a, b) => {
                 let els = self.label();
                 self.cond(c, els);
-                self.node(a, ctx);
+                self.node_then(a, pending, ctx);
                 self.place(els);
-                self.node(b, ctx);
+                self.node_then(b, pending, ctx);
             }
             Node::Let(binds, body) => {
                 self.binds(binds);
-                self.node(body, ctx);
+                self.node_then(body, pending, ctx);
             }
-            Node::Leaf(Leaf::Recur(effects, ops)) => self.recur(effects, ops, ctx),
-            Node::Leaf(Leaf::Exit(effects, val)) => self.exit(effects, val, ctx),
-            Node::Deopt => {
-                self.miss();
+            Node::Leaf(Leaf::Recur(ops)) => self.recur(ops, pending, ctx),
+            Node::Leaf(Leaf::Exit(val)) => self.exit(val, pending, ctx),
+            Node::Seq(..) | Node::Deopt => {
+                self.stmts(pending);
+                self.node(n, ctx);
             }
         }
     }
 
-    /// Effects' operand slots into the effect table, each with the
-    /// guard slot its `when`s set (`None`: unconditional). A guarded
-    /// effect's operands compute only under its guard.
-    fn effects(&mut self, effects: &[Effect], guard: Option<Sl>, ids: &mut Vec<(u16, Option<Sl>)>) {
-        for e in effects {
-            match e {
-                Effect::Assoc(t, k, v) => self.effect(guard, ids, |lw| {
-                    let c = lw.coll(*t);
-                    let k = lw.val(k);
-                    EffI::Assoc(c, k, lw.val(v))
-                }),
-                Effect::Conj(t, v) => self.effect(guard, ids, |lw| {
-                    let c = lw.coll(*t);
-                    EffI::Conj(c, lw.val(v))
-                }),
-                Effect::When(c, inner) => {
-                    let g = self.guard(c, guard);
-                    self.effects(inner, Some(g), ids);
+    /// Statements in source order.
+    fn stmts(&mut self, stmts: &[Stmt]) {
+        for st in stmts {
+            match st {
+                Stmt::Effect(e) => self.effect(e),
+                Stmt::If(c, a, b) => {
+                    let (els, end) = (self.label(), self.label());
+                    self.cond(c, els);
+                    self.stmts(a);
+                    self.code.push(Ins::Jmp(end));
+                    self.place(els);
+                    self.stmts(b);
+                    self.place(end);
+                }
+                Stmt::Let(binds, body) => {
+                    self.binds(binds);
+                    self.stmts(body);
+                }
+                Stmt::Loop(inner) => self.inner(inner, None),
+                Stmt::Expr(e) => {
+                    self.val(e);
                 }
             }
         }
     }
 
-    /// One effect's operands (under its guard) into the table.
-    fn effect(
-        &mut self,
-        guard: Option<Sl>,
-        ids: &mut Vec<(u16, Option<Sl>)>,
-        operands: impl FnOnce(&mut Self) -> EffI,
-    ) {
-        let skip = self.skip_unless(guard);
-        let eff = operands(self);
-        self.end_skip(skip);
-        self.effs.push(eff);
-        ids.push(((self.effs.len() - 1) as u16, guard));
-    }
-
-    /// A `when`'s guard slot: reset first, then set when the
-    /// enclosing guard (if any) and `c` both hold.
-    fn guard(&mut self, c: &Cond, outer: Option<Sl>) -> Sl {
-        let g = self.sl();
-        self.emit(Step::Set(g, false));
-        let no = match self.skip_unless(outer) {
-            Some(l) => l,
-            None => self.label(),
+    /// An effect: its operands in order, then the effect itself.
+    fn effect(&mut self, e: &Effect) {
+        let eff = match e {
+            Effect::Assoc(t, k, v) => {
+                let c = self.coll(*t);
+                let k = self.val(k);
+                EffI::Assoc(c, k, self.val(v))
+            }
+            Effect::Conj(t, v) => {
+                let c = self.coll(*t);
+                EffI::Conj(c, self.val(v))
+            }
+            Effect::Pop(t) => EffI::Pop(self.coll(*t)),
         };
-        self.cond(c, no);
-        self.emit(Step::Set(g, true));
-        self.place(no);
-        g
+        self.effs.push(eff);
+        self.code.push(Ins::Eff((self.effs.len() - 1) as u16, true));
     }
 
-    /// Jump over the next steps unless `guard` holds (its label).
-    fn skip_unless(&mut self, guard: Option<Sl>) -> Option<u32> {
-        guard.map(|g| {
-            let l = self.label();
-            self.code.push(Ins::Br(Br::Truthy(g), l));
-            l
-        })
-    }
-
-    fn end_skip(&mut self, skip: Option<u32>) {
-        if let Some(l) = skip {
-            self.place(l);
-        }
-    }
-
-    fn run_effects(&mut self, ids: &[(u16, Option<Sl>)]) {
-        if let [(id, g)] = ids {
-            return self.guarded(*g, EffStep::Once(*id));
-        }
-        for (id, g) in ids {
-            self.guarded(*g, EffStep::Check(*id));
-        }
-        for (id, g) in ids {
-            self.guarded(*g, EffStep::Apply(*id));
-        }
-    }
-
-    fn guarded(&mut self, g: Option<Sl>, st: EffStep) {
-        let skip = self.skip_unless(g);
-        self.code.push(Ins::Eff(st));
-        self.end_skip(skip);
-    }
-
-    fn recur(&mut self, effects: &[Effect], ops: &[Option<IExpr>], ctx: &Ctx<'_>) {
+    /// A `recur`: its operands, then `effects` (the iteration's last
+    /// statements, when the operands read no collection), then the
+    /// writes to the targets.
+    fn recur(&mut self, ops: &[Option<IExpr>], effects: &[Stmt], ctx: &Ctx<'_>) {
         let targets: Vec<usize> = match ctx {
             Ctx::Outer => (0..ops.len()).collect(),
             Ctx::Inner { slots, .. } => slots.to_vec(),
@@ -1023,18 +1236,7 @@ impl Lower<'_> {
                 }
             }));
         }
-        let mut ids = Vec::new();
-        self.effects(effects, None, &mut ids);
-        self.run_effects(&ids);
-        if !effects.is_empty() {
-            // Late reads (see [`late`]): the reads above checked them;
-            // they read again after the effects, as the source orders.
-            for (v, op) in vals.iter_mut().zip(ops) {
-                if let Some(e) = op.as_ref().filter(|e| late(e)) {
-                    *v = Some(self.val(e));
-                }
-            }
-        }
+        self.stmts(effects);
         for (t, v) in targets.iter().zip(vals) {
             if let Some(v) = v {
                 self.emit(Step::Mov(*t as Sl, v));
@@ -1046,10 +1248,22 @@ impl Lower<'_> {
         }));
     }
 
-    fn exit(&mut self, effects: &[Effect], val: &ExitVal, ctx: &Ctx<'_>) {
+    /// An exit: its value, then `effects` (sunk to it, see [`sinks`]).
+    fn exit(&mut self, val: &ExitVal, effects: &[Stmt], ctx: &Ctx<'_>) {
         if let Ctx::Inner { dst, after, .. } = ctx {
-            let e = exit_expr(val).next().unwrap_or(&IExpr::Deopt);
-            self.val_to(e, *dst);
+            match (dst, val) {
+                (Some(d), val) => {
+                    let e = exit_expr(val).next().unwrap_or(&IExpr::Deopt);
+                    self.val_to(e, *d);
+                }
+                // A statement loop's value is dropped (computed for
+                // its misses when it is a scalar expression).
+                (None, ExitVal::Expr(e)) => {
+                    self.val(e);
+                }
+                (None, _) => {}
+            }
+            self.stmts(effects);
             self.code.push(Ins::Jmp(*after));
             return;
         }
@@ -1060,14 +1274,12 @@ impl Lower<'_> {
             ExitVal::Var(p) if self.scalar[*p] => ExitI::Slot(*p as Sl),
             ExitVal::Var(p) => ExitI::Loc(Loc::Reg(self.targets[*p])),
         };
-        let mut ids = Vec::new();
-        self.effects(effects, None, &mut ids);
-        self.run_effects(&ids);
+        self.stmts(effects);
         self.exits.push(x);
         self.code.push(Ins::Exit((self.exits.len() - 1) as u16));
     }
 
-    fn inner(&mut self, inner: &Inner, dst: Sl) {
+    fn inner(&mut self, inner: &Inner, dst: Option<Sl>) {
         for (slot, e) in inner.slots.iter().zip(inner.inits.iter()) {
             self.val_to(e, *slot as Sl);
         }
@@ -1091,6 +1303,84 @@ impl Lower<'_> {
             }
         }
         self.code
+    }
+}
+
+/// Mark the effects after which no step can miss before the
+/// iteration ends (the next `Top`, or an `Exit`): nothing could ask
+/// for their undo, so they run unlogged. `true`: some effect logs.
+fn mark_unlogged(code: &mut [Ins]) -> bool {
+    // `may[pc]`: some path from `pc` misses before the iteration ends
+    // (the least fixpoint, so a loop that cannot miss stays clear).
+    let mut may = vec![false; code.len()];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for pc in (0..code.len()).rev() {
+            let at = |i: usize| may.get(i).copied().unwrap_or(true);
+            let m = match code[pc] {
+                Ins::Top | Ins::Exit(_) => false,
+                Ins::Jmp(t) => at(t as usize),
+                Ins::Br(Br::Eq(..) | Br::Truthy(_), t) => at(pc + 1) || at(t as usize),
+                Ins::Do(Step::Mov(..) | Step::Set(..)) => at(pc + 1),
+                _ => true,
+            };
+            changed |= m != may[pc];
+            may[pc] = m;
+        }
+    }
+    let mut logs = false;
+    for (pc, ins) in code.iter_mut().enumerate() {
+        if let Ins::Eff(_, log) = ins {
+            *log = may.get(pc + 1).copied().unwrap_or(true);
+            logs |= *log;
+        }
+    }
+    logs
+}
+
+/// Whether `n` is a tree of tests and temps over leaves reading no
+/// collection (effects before it may then run at its leaves instead:
+/// nothing in it can observe them).
+fn sinks(n: &Node) -> bool {
+    match n {
+        Node::If(c, a, b) => !cond_reads(c) && sinks(a) && sinks(b),
+        Node::Let(binds, body) => !binds.iter().any(|(_, e)| reads_coll(e)) && sinks(body),
+        Node::Leaf(Leaf::Recur(ops)) => !ops.iter().flatten().any(reads_coll),
+        Node::Leaf(Leaf::Exit(val)) => !exit_expr(val).any(reads_coll),
+        Node::Seq(..) | Node::Deopt => false,
+    }
+}
+
+/// Whether `e` may read a collection or run effects (an operand that
+/// must not move across an effect).
+fn reads_coll(e: &IExpr) -> bool {
+    match e {
+        IExpr::Calc(c) => match &**c {
+            Calc::Nth(..) | Calc::Count(_) => true,
+            Calc::Op1(_, a) | Calc::Cast(_, a) => reads_coll(a),
+            Calc::Op2(_, a, b) => reads_coll(a) || reads_coll(b),
+        },
+        IExpr::Ctl(c) => ctl_reads(c),
+        _ => false,
+    }
+}
+
+fn ctl_reads(c: &Ctl) -> bool {
+    match c {
+        Ctl::If(c, a, b) => cond_reads(c) || reads_coll(a) || reads_coll(b),
+        Ctl::Let(binds, body) => binds.iter().any(|(_, e)| reads_coll(e)) || reads_coll(body),
+        Ctl::Test(c) => cond_reads(c),
+        Ctl::Seq(..) | Ctl::Loop(_) => true,
+    }
+}
+
+fn cond_reads(c: &Cond) -> bool {
+    match c {
+        Cond::Leaf(Cmp::Truthy(e) | Cmp::T1(_, e)) => reads_coll(e),
+        Cond::Leaf(Cmp::T2(_, a, b) | Cmp::Eq(a, b)) => reads_coll(a) || reads_coll(b),
+        Cond::Not(c) => cond_reads(c),
+        Cond::And(a, b) | Cond::Or(a, b) => cond_reads(a) || cond_reads(b),
     }
 }
 
@@ -1236,7 +1526,8 @@ pub(crate) fn compile(
     let loads = std::mem::take(&mut lw.loads);
     let (colls, effs) = (std::mem::take(&mut lw.colls), std::mem::take(&mut lw.effs));
     let exits = std::mem::take(&mut lw.exits);
-    let code = lw.finish();
+    let mut code = lw.finish();
+    let logs = mark_unlogged(&mut code);
     Some(ScalarLoop {
         scalar: b.scalar.into(),
         init: init.into(),
@@ -1248,7 +1539,10 @@ pub(crate) fn compile(
         sites: b.sites.into(),
         roots: b.roots.into(),
         depth: b.max_depth,
+        logs,
         gid: crate::vm::next_site(),
+        log_iters: AtomicUsize::new(0),
+        logged: AtomicUsize::new(0),
         entries: AtomicU32::new(0),
         iters: AtomicU32::new(0),
         off: AtomicBool::new(false),
@@ -1261,19 +1555,23 @@ fn productive(n: &Node) -> bool {
     match n {
         Node::If(c, a, b) => !cond_misses(c) && (productive(a) || productive(b)),
         Node::Let(binds, body) => !binds.iter().any(|(_, e)| misses(e)) && productive(body),
-        Node::Leaf(Leaf::Recur(effects, ops)) => {
-            !ops.iter().flatten().any(misses) && !effects.iter().any(effect_misses)
-        }
-        Node::Leaf(Leaf::Exit(..)) | Node::Deopt => false,
+        Node::Seq(stmts, rest) => !stmts.iter().any(stmt_misses) && productive(rest),
+        Node::Leaf(Leaf::Recur(ops)) => !ops.iter().flatten().any(misses),
+        Node::Leaf(Leaf::Exit(_)) | Node::Deopt => false,
     }
 }
 
-fn effect_misses(e: &Effect) -> bool {
-    match e {
-        Effect::Assoc(_, k, v) => misses(k) || misses(v),
-        Effect::Conj(_, v) => misses(v),
-        // Its effects (and their operands) run only when it holds.
-        Effect::When(c, _) => cond_misses(c),
+/// Whether running a statement always misses.
+fn stmt_misses(s: &Stmt) -> bool {
+    match s {
+        Stmt::Effect(Effect::Assoc(_, k, v)) => misses(k) || misses(v),
+        Stmt::Effect(Effect::Conj(_, v)) | Stmt::Expr(v) => misses(v),
+        Stmt::Effect(Effect::Pop(_)) | Stmt::Loop(_) => false,
+        // Each branch runs only on its side of the test.
+        Stmt::If(c, ..) => cond_misses(c),
+        Stmt::Let(binds, body) => {
+            binds.iter().any(|(_, e)| misses(e)) || body.iter().any(stmt_misses)
+        }
     }
 }
 
@@ -1304,6 +1602,7 @@ fn ctl_misses(c: &Ctl) -> bool {
     match c {
         Ctl::If(c, a, b) => cond_misses(c) || (misses(a) && misses(b)),
         Ctl::Let(binds, body) => binds.iter().any(|(_, e)| misses(e)) || misses(body),
+        Ctl::Seq(stmts, v) => stmts.iter().any(stmt_misses) || misses(v),
         Ctl::Test(c) => cond_misses(c),
         Ctl::Loop(_) => false,
     }
@@ -1315,39 +1614,6 @@ fn cond_misses(c: &Cond) -> bool {
         Cond::Leaf(Cmp::T2(_, a, b) | Cmp::Eq(a, b)) => misses(a) || misses(b),
         Cond::Not(c) => cond_misses(c),
         Cond::And(a, b) | Cond::Or(a, b) => cond_misses(a) || cond_misses(b),
-    }
-}
-
-/// Whether `e` reads a collection (an effect's operands and the
-/// `recur` beside it run before the effects, which a collection
-/// read could observe out of order).
-fn reads_coll(e: &IExpr) -> bool {
-    match e {
-        IExpr::Calc(c) => match &**c {
-            Calc::Nth(..) | Calc::Count(_) => true,
-            Calc::Op1(_, a) | Calc::Cast(_, a) => reads_coll(a),
-            Calc::Op2(_, a, b) => reads_coll(a) || reads_coll(b),
-        },
-        IExpr::Ctl(c) => ctl_reads(c),
-        _ => false,
-    }
-}
-
-fn ctl_reads(c: &Ctl) -> bool {
-    match c {
-        Ctl::If(c, a, b) => cond_reads(c) || reads_coll(a) || reads_coll(b),
-        Ctl::Let(binds, body) => binds.iter().any(|(_, e)| reads_coll(e)) || reads_coll(body),
-        Ctl::Test(c) => cond_reads(c),
-        Ctl::Loop(_) => true,
-    }
-}
-
-fn cond_reads(c: &Cond) -> bool {
-    match c {
-        Cond::Leaf(Cmp::Truthy(e) | Cmp::T1(_, e)) => reads_coll(e),
-        Cond::Leaf(Cmp::T2(_, a, b) | Cmp::Eq(a, b)) => reads_coll(a) || reads_coll(b),
-        Cond::Not(c) => cond_reads(c),
-        Cond::And(a, b) | Cond::Or(a, b) => cond_reads(a) || cond_reads(b),
     }
 }
 
@@ -1438,8 +1704,21 @@ impl Builder<'_> {
             }
             Expr::Let { bindings, body } => self.let_expr(bindings, body),
             Expr::Loop { bindings, body } => self.inner_loop(bindings, body),
-            Expr::Do(forms) if forms.len() == 1 => self.expr(&forms[0]),
+            Expr::Do(forms) => self.seq_expr(forms),
             _ => IExpr::Deopt,
+        }
+    }
+
+    /// The value of forms run in order (a `do`, a `let` body): the
+    /// statements, then the last form's value (none is `nil`).
+    fn seq_expr(&mut self, forms: &[Expr]) -> IExpr {
+        match forms.split_last() {
+            Some((last, [])) => self.expr(last),
+            Some((last, init)) => {
+                let stmts = self.stmt_seq(init);
+                IExpr::Ctl(Box::new(Ctl::Seq(stmts.into(), self.expr(last))))
+            }
+            None => IExpr::Deopt,
         }
     }
 
@@ -1461,30 +1740,33 @@ impl Builder<'_> {
 
     fn let_expr(&mut self, bindings: &[(Pattern, Expr)], body: &[Expr]) -> IExpr {
         let mark = self.lex.len();
-        let out = match (self.bindings(bindings), body) {
-            (Some(binds), [last]) => IExpr::Ctl(Box::new(Ctl::Let(binds.into(), self.expr(last)))),
-            _ => IExpr::Deopt,
+        let out = match self.bindings(bindings) {
+            Some(binds) => IExpr::Ctl(Box::new(Ctl::Let(binds.into(), self.seq_expr(body)))),
+            None => IExpr::Deopt,
         };
         self.lex.truncate(mark);
         out
     }
 
     fn inner_loop(&mut self, bindings: &[(Pattern, Expr)], body: &[Expr]) -> IExpr {
+        self.loop_inner(bindings, body)
+            .map_or(IExpr::Deopt, |inner| IExpr::Ctl(Box::new(Ctl::Loop(inner))))
+    }
+
+    /// A nested loop (symbol bindings only).
+    fn loop_inner(&mut self, bindings: &[(Pattern, Expr)], body: &[Expr]) -> Option<Inner> {
         let mark = self.lex.len();
-        let out = match self.bindings(bindings) {
-            Some(binds) => {
-                let (slots, inits): (Vec<usize>, Vec<IExpr>) = binds.into_iter().unzip();
-                let saved = self.inner.replace(slots.clone());
-                let body = self.body(body);
-                self.inner = saved;
-                IExpr::Ctl(Box::new(Ctl::Loop(Inner {
-                    slots: slots.into(),
-                    inits: inits.into(),
-                    body,
-                })))
+        let out = self.bindings(bindings).map(|binds| {
+            let (slots, inits): (Vec<usize>, Vec<IExpr>) = binds.into_iter().unzip();
+            let saved = self.inner.replace(slots.clone());
+            let body = self.body(body);
+            self.inner = saved;
+            Inner {
+                slots: slots.into(),
+                inits: inits.into(),
+                body,
             }
-            None => IExpr::Deopt,
-        };
+        });
         self.lex.truncate(mark);
         out
     }
@@ -1496,18 +1778,37 @@ impl Builder<'_> {
     /// program enters only while the var holds that closure
     /// ([`RootSite`]) and the call depth leaves room for the calls.
     fn inline(&mut self, head: &Expr, args: &[Expr]) -> IExpr {
+        match self.inline_with(head, args, Self::seq_expr) {
+            Some((binds, value)) => IExpr::Ctl(Box::new(Ctl::Let(binds.into(), value))),
+            None => IExpr::Deopt,
+        }
+    }
+
+    /// A call run for effect, inlined as statements (its value
+    /// dropped).
+    fn inline_stmt(&mut self, head: &Expr, args: &[Expr]) -> Stmt {
+        match self.inline_with(head, args, Self::stmt_seq) {
+            Some((binds, body)) => Stmt::Let(binds.into(), body.into()),
+            None => Stmt::Expr(IExpr::Deopt),
+        }
+    }
+
+    /// [`Self::inline`]'s frame: the param bindings, and the body as
+    /// `lower` builds it in the callee's frame.
+    fn inline_with<R>(
+        &mut self,
+        head: &Expr,
+        args: &[Expr],
+        lower: impl FnOnce(&mut Self, &[Expr]) -> R,
+    ) -> Option<(Vec<(usize, IExpr)>, R)> {
         let found = match head {
             Expr::Global(var) if self.may_inline(var) => {
                 self.host.callee(var, args.len()).map(|c| (var, c))
             }
             _ => None,
         };
-        let Some((var, callee)) = found else {
-            return IExpr::Deopt;
-        };
-        let [body] = callee.arities[callee.index].body.as_slice() else {
-            return IExpr::Deopt;
-        };
+        let (var, callee) = found?;
+        let body = callee.arities[callee.index].body.as_slice();
         let mut binds = Vec::new();
         let mut lex = Vec::with_capacity(args.len());
         for a in args {
@@ -1520,17 +1821,14 @@ impl Builder<'_> {
                     Some(Lex::Slot(s))
                 }
             };
-            let Some(bound) = bound else {
-                return IExpr::Deopt;
-            };
-            lex.push(bound);
+            lex.push(bound?);
         }
         let base = std::mem::replace(&mut self.body_base, callee.base);
         let outer = std::mem::replace(&mut self.lex, lex);
         self.inlined += 1;
         self.stack.push(var.id);
         self.max_depth = self.max_depth.max(self.stack.len());
-        let value = self.expr(body);
+        let value = lower(self, body);
         self.stack.pop();
         self.lex = outer;
         self.body_base = base;
@@ -1539,7 +1837,7 @@ impl Builder<'_> {
             var: var.clone(),
             expect: Arc::clone(&callee.expect),
         });
-        IExpr::Ctl(Box::new(Ctl::Let(binds.into(), value)))
+        Some((binds, value))
     }
 
     /// Whether a call through `var` may inline here: not inside its
@@ -1645,32 +1943,18 @@ impl Builder<'_> {
         })
     }
 
-    /// A body (forms of a `loop`, `let`, or `do`): effects, then a
-    /// tail node.
+    /// A body (forms of a `loop`, `let`, or `do`): statements, then
+    /// a tail node.
     fn body(&mut self, forms: &[Expr]) -> Node {
         let Some((last, init)) = forms.split_last() else {
             return Node::Deopt;
         };
-        if init.is_empty() {
-            return self.node(last);
-        }
-        let effects: Option<Vec<Effect>> = init.iter().map(|e| self.effect(e)).collect();
-        match effects {
-            Some(effects) => self.tail(effects, last),
-            None => Node::Deopt,
-        }
-    }
-
-    /// The form after an iteration's effects: a `recur` or an exit
-    /// value, or a tree of tests and temps over them (see
-    /// [`prepend`]).
-    fn tail(&mut self, effects: Vec<Effect>, e: &Expr) -> Node {
-        match e {
-            Expr::If { .. } | Expr::Let { .. } | Expr::Do(_) => {
-                let n = self.node(e);
-                prepend(&effects, n)
-            }
-            other => self.leaf(effects, other),
+        let stmts = self.stmt_seq(init);
+        let rest = self.node(last);
+        if stmts.is_empty() {
+            rest
+        } else {
+            Node::Seq(stmts.into(), Box::new(rest))
         }
     }
 
@@ -1691,25 +1975,56 @@ impl Builder<'_> {
                 out
             }
             Expr::Do(forms) => self.body(forms),
-            other => self.leaf(Vec::new(), other),
+            other => self.leaf(other),
         }
     }
 
-    /// An effect form (outer loop only): `assoc!`/`conj!`, or a
-    /// `when` over effect forms.
-    fn effect(&mut self, e: &Expr) -> Option<Effect> {
-        if self.inner.is_some() {
-            return None;
+    /// Forms run for effect, in order.
+    fn stmt_seq(&mut self, forms: &[Expr]) -> Vec<Stmt> {
+        let mut out = Vec::new();
+        for f in forms {
+            out.extend(self.stmts_of(f));
         }
-        match e {
-            Expr::DirectNative(call) => self.effect_call(call).map(|(_, eff)| eff),
-            Expr::If { test, then, els } => self.when_effect(test, then, els),
-            _ => None,
-        }
+        out
     }
 
-    /// `(assoc! t k v)` or `(conj! t v)` over a boxed local: its
-    /// target and the effect.
+    /// The statements a form run for effect lowers to (a literal or a
+    /// local does nothing; any other value is computed for its
+    /// misses and dropped).
+    fn stmts_of(&mut self, e: &Expr) -> Vec<Stmt> {
+        let st = match e {
+            Expr::Literal(_) | Expr::Local(_) => return Vec::new(),
+            Expr::Do(forms) => return self.stmt_seq(forms),
+            Expr::If { test, then, els } => {
+                let c = self.cond(test);
+                let a = self.stmts_of(then).into();
+                Stmt::If(c, a, self.stmts_of(els).into())
+            }
+            Expr::Let { bindings, body } => {
+                let mark = self.lex.len();
+                let out = match self.bindings(bindings) {
+                    Some(binds) => Stmt::Let(binds.into(), self.stmt_seq(body).into()),
+                    None => Stmt::Expr(IExpr::Deopt),
+                };
+                self.lex.truncate(mark);
+                out
+            }
+            Expr::Loop { bindings, body } => match self.loop_inner(bindings, body) {
+                Some(inner) => Stmt::Loop(inner),
+                None => Stmt::Expr(IExpr::Deopt),
+            },
+            Expr::DirectNative(call) => match self.effect_call(call) {
+                Some((_, eff)) => Stmt::Effect(eff),
+                None => Stmt::Expr(self.call(call)),
+            },
+            Expr::Invoke { head, args, .. } => self.inline_stmt(head, args),
+            other => Stmt::Expr(self.expr(other)),
+        };
+        vec![st]
+    }
+
+    /// `(assoc! t k v)`, `(conj! t v)` or `(pop! t)` over a boxed
+    /// local: its target and the effect.
     fn effect_call(&mut self, call: &DirectCall) -> Option<(Loc, Effect)> {
         let (t, effect) = match (crate::vm_ops::core_name(call)?, call.args.as_slice()) {
             ("assoc!", [t, k, v]) => {
@@ -1720,6 +2035,10 @@ impl Builder<'_> {
                 let t = self.boxed_local(t)?;
                 (t, Effect::Conj(t, self.expr(v)))
             }
+            ("pop!", [t]) => {
+                let t = self.boxed_local(t)?;
+                (t, Effect::Pop(t))
+            }
             _ => return None,
         };
         let site = self.host.site(call);
@@ -1727,51 +2046,21 @@ impl Builder<'_> {
         Some((t, effect))
     }
 
-    /// `(when test eff…)` — `(if test (do eff…) nil)` — or
-    /// `when-not`'s `(if test nil (do eff…))`.
-    fn when_effect(&mut self, test: &Expr, then: &Expr, els: &Expr) -> Option<Effect> {
-        let nil = |e: &Expr| matches!(e, Expr::Literal(Value::Nil));
-        let (body, negate) = match (nil(then), nil(els)) {
-            (false, true) => (then, false),
-            (true, false) => (els, true),
-            _ => return None,
-        };
-        let forms = match body {
-            Expr::Do(forms) => forms.as_slice(),
-            one => std::slice::from_ref(one),
-        };
-        let test = self.cond(test);
-        let effects: Option<Vec<Effect>> = forms.iter().map(|f| self.effect(f)).collect();
-        let test = if negate {
-            Cond::Not(Box::new(test))
-        } else {
-            test
-        };
-        Some(Effect::When(test, effects?.into()))
-    }
-
     /// The iteration's end: a `recur`, or an exit value.
-    fn leaf(&mut self, effects: Vec<Effect>, e: &Expr) -> Node {
+    fn leaf(&mut self, e: &Expr) -> Node {
         if let Expr::Recur(args) = e {
-            return match self.recur(args) {
-                Some(ops) => recur_node(effects, ops),
-                None => Node::Deopt,
-            };
+            return self
+                .recur(args)
+                .map_or(Node::Deopt, |ops| Node::Leaf(Leaf::Recur(ops.into())));
         }
-        let mut effects = effects;
-        // `(assoc! t …)`/`(conj! t …)` answers the transient.
-        let call = match e {
-            Expr::DirectNative(call) if self.inner.is_none() => self.effect_call(call),
-            _ => None,
-        };
-        let val = match call {
-            Some((t, eff)) => {
-                effects.push(eff);
-                ExitVal::Box(t)
+        // `(assoc! t …)`/`(conj! t …)`/`(pop! t)` answers the transient.
+        if let Expr::DirectNative(call) = e {
+            if let Some((t, eff)) = self.effect_call(call) {
+                let exit = Node::Leaf(Leaf::Exit(ExitVal::Box(t)));
+                return Node::Seq(Box::new([Stmt::Effect(eff)]), Box::new(exit));
             }
-            None => self.exit(e),
-        };
-        exit_node(effects, val)
+        }
+        Node::Leaf(Leaf::Exit(self.exit(e)))
     }
 
     /// A `recur`'s operands (`None` for a passthrough variable).
@@ -1799,10 +2088,14 @@ impl Builder<'_> {
     }
 
     /// An exit value: a literal, an outer loop variable, a boxed
-    /// local, or a scalar expression (an inner loop's must be one).
+    /// local, or a scalar expression (an inner loop's value must be
+    /// one; a statement loop drops it).
     fn exit(&mut self, e: &Expr) -> ExitVal {
         if self.inner.is_some() {
-            return ExitVal::Expr(self.expr(e));
+            return match e {
+                Expr::Literal(v) if Sv::of(v).is_none() => ExitVal::Const(v.clone()),
+                other => ExitVal::Expr(self.expr(other)),
+            };
         }
         match e {
             Expr::Literal(v) => ExitVal::Const(v.clone()),
@@ -1812,94 +2105,6 @@ impl Builder<'_> {
             },
             other => ExitVal::Expr(self.expr(other)),
         }
-    }
-}
-
-/// Run `effects` first at every leaf of `n`. Its tests and temps
-/// then compute before the effects, so none may read a collection
-/// (an effect could change it); each leaf re-checks its own order.
-fn prepend(effects: &[Effect], n: Node) -> Node {
-    match n {
-        Node::If(c, a, b) if !cond_reads(&c) => {
-            let a = Box::new(prepend(effects, *a));
-            Node::If(c, a, Box::new(prepend(effects, *b)))
-        }
-        Node::Let(binds, body) if !binds.iter().any(|(_, e)| reads_coll(e)) => {
-            Node::Let(binds, Box::new(prepend(effects, *body)))
-        }
-        Node::Leaf(Leaf::Recur(own, ops)) => recur_node(joined(effects, own), ops.into_vec()),
-        Node::Leaf(Leaf::Exit(own, val)) => exit_node(joined(effects, own), val),
-        _ => Node::Deopt,
-    }
-}
-
-fn joined(first: &[Effect], then: Box<[Effect]>) -> Vec<Effect> {
-    first.iter().cloned().chain(then.into_vec()).collect()
-}
-
-/// A `recur` leaf, when its effects may run after its values (see
-/// [`ordered`]; [`late`] reads aside).
-fn recur_node(effects: Vec<Effect>, ops: Vec<Option<IExpr>>) -> Node {
-    if ordered(&effects, ops.iter().flatten().filter(|e| !late(e))) {
-        Node::Leaf(Leaf::Recur(effects.into(), ops.into()))
-    } else {
-        Node::Deopt
-    }
-}
-
-/// An exit leaf, when its effects may run after its value.
-fn exit_node(effects: Vec<Effect>, val: ExitVal) -> Node {
-    if ordered(&effects, exit_expr(&val)) {
-        Node::Leaf(Leaf::Exit(effects.into(), val))
-    } else {
-        Node::Deopt
-    }
-}
-
-/// A `recur` operand that reads after the iteration's effects, as
-/// the source orders: an `nth`/`count` whose own operands read no
-/// collection. It also reads before the effects, which checks it;
-/// the effects only store scalars inside vectors or grow them, so
-/// the second read cannot miss.
-fn late(e: &IExpr) -> bool {
-    match e {
-        IExpr::Calc(c) => match &**c {
-            Calc::Nth(_, i) => !reads_coll(i),
-            Calc::Count(_) => true,
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-/// Whether a leaf's effects may run after its other values: no
-/// `recur`/exit value, and no operand of a second effect, reads a
-/// collection (an earlier effect could change it, and those values
-/// compute before any effect runs).
-fn ordered<'e>(effects: &[Effect], mut values: impl Iterator<Item = &'e IExpr>) -> bool {
-    // A lone effect's operands (and tests) run before it on either
-    // road.
-    let operand_reads = effect_count(effects) > 1 && effects.iter().any(effect_reads);
-    effects.is_empty() || !(operand_reads || values.any(reads_coll))
-}
-
-/// The `assoc!`/`conj!` forms among `effects`.
-fn effect_count(effects: &[Effect]) -> usize {
-    effects
-        .iter()
-        .map(|e| match e {
-            Effect::When(_, inner) => effect_count(inner),
-            _ => 1,
-        })
-        .sum()
-}
-
-/// Whether an effect's operands or tests read a collection.
-fn effect_reads(e: &Effect) -> bool {
-    match e {
-        Effect::Assoc(_, k, v) => reads_coll(k) || reads_coll(v),
-        Effect::Conj(_, v) => reads_coll(v),
-        Effect::When(c, inner) => cond_reads(c) || inner.iter().any(effect_reads),
     }
 }
 

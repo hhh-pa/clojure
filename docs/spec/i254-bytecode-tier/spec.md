@@ -2,8 +2,9 @@
 
 - Status: slice 1 (bytecode dispatch) and the flat-scalar
   slice measured **no-go** and reverted (§1.5, §1.6); the
-  32-byte `Value` (§1.7), the unboxed loop tier (§1.8), and
-  its inlined calls and effect tails (§1.9) landed.
+  32-byte `Value` (§1.7), the unboxed loop tier (§1.8), its
+  inlined calls (§1.9), and effects in source order with an
+  undo log (§1.10) landed.
 - Issue: [#254](https://github.com/hhh-pa/clojure/issues/254).
   Branch: `perf/254-bytecode-tier`.
 - Parents/context: #214 (performant JIT subset), #226
@@ -276,6 +277,10 @@ evaluator.
 
 ### 1.9 Inlined calls, conditional effects and effect tails (landed)
 
+(The effect rules below kept §1.8's order by moving work: tests
+and temps above effects, late re-reads. §1.10 replaced them with
+effects in source order and an undo log; inlining stands.)
+
 After §1.8 the gate's tightest INS case was suffix_tree tc9
 (1.127x). Its Ukkonen build loop — about 149k iterations and
 80% of the run — never entered the unboxed tier and ran on
@@ -350,6 +355,81 @@ rows plus 15 setup rows that call top-level fns, every one
 checked against JVM Clojure 1.12 and run on both the VM and
 the tree evaluator. A separate test pins the call-depth limit
 against a loop that makes the real call.
+
+### 1.10 Effects in source order with an undo log (landed)
+
+§1.9's effect rules kept the §1.8 contract — every value of an
+iteration computes before its first effect — by moving work
+around the effects. Two gate shapes stayed out of reach.
+convex_hull's monotone chain pops from a transient inside a
+nested loop (`(loop [] … (pop! h) (recur))`) before its outer
+iteration's `conj!`, and suffix_array's construction runs effects
+inside nested loops and inlined calls. convex_hull tc4 had become
+the tightest INS case (1.114x on `2948ad16`).
+
+- **Undo log.** Effects run where the source puts them: as
+  statements anywhere in a body, under `if`/`when`/`let`, in
+  nested loops and in inlined calls. Each logs its inverse: an
+  append undoes by a pop, a replaced item is put back, a popped
+  item is pushed back. The log clears at each outer iteration's
+  head. A miss undoes the iteration's effects, newest first, and
+  hands the iteration to the boxed tiers whole, as before. Nothing
+  else can observe a transient while an iteration runs, because
+  the program calls no code of its own.
+- **More forms.**
+  - `pop!` joins `assoc!`/`conj!`.
+  - Statements may be `if`/`let` over statements, nested loops
+    (value dropped), and scalar expressions computed for their
+    misses.
+  - `do`/`let` bodies with statements work in value position.
+  - Calls run for effect inline as statements.
+- **Unlogged effects.** A backward pass over the finished program
+  marks every effect after which no step can miss before the
+  iteration ends; those need no undo. Effects that end a body over
+  a tail reading no collection run at the tail's leaves, after the
+  leaf's values. A single trailing `assoc!`/`conj!` therefore runs
+  unlogged, as cheaply as before.
+- **Cheap logging.**
+  - Undo entries are plain data: an `Int` item inline, any other
+    in a side pool.
+  - Runs of appends to one transient share an entry.
+  - A packed-int `assoc!` swaps in place
+    (`TransientVector::swap_int`).
+
+  A logged effect costs ~20 instructions more than an unlogged
+  one.
+- **Heavy loggers leave.** A program leaves the tier when it fills
+  the 1024-entry log, or when its iterations average more than 32
+  undo entries over all its runs once 1024 iterations have run.
+  Nested loops of many effects (edit-distance rows,
+  insertion-sort shifts) run cheaper on their own programs. One
+  long run is not judged midway: a suffix tree's breadth-first
+  walk logs heavily near the root and lightly after.
+
+Local macOS retired instructions (`2948ad16` → this slice):
+
+| Cases | Before | After |
+| --- | --- | --- |
+| convex_hull tc4 | 255.1M | 207.9M (−18.5%) |
+| suffix_array tc4–9 | — | −21..−31% |
+| suffix_tree tc4–9 | — | −7..−13% |
+| dijkstrashortreach tc3–7 | — | −8..−17% |
+| knapsack tc1 | — | −31.5% |
+| boyer_moore tc10–15 | — | +3..+7% |
+| edit_distance tc3–5 | — | +5% |
+| kmp, z_function, automata | — | +1..+4% |
+
+The losses are the price of the new dispatch and logging paths in
+loops that already ran unboxed; none of those cases is near the
+gate (boyer_moore stays under 0.96x CPython). Full local sweep:
+1562 gate cases, 0 wrong outputs, total instructions −3.6%.
+`tests/scalar_loop.rs` now holds 138 rows plus 21 setup rows,
+all checked against JVM Clojure 1.12 on the VM and the tree
+evaluator. They cover every undo (append, replace, append at the
+count, pop, a run of appends, a non-`Int` item, aliased
+transients, a full log) and the heavy-logging give-up; mutation
+checks confirmed that dropping the rollback or logging nothing
+fails them.
 
 ## Part 2 — Technical specification
 

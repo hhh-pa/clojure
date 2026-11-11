@@ -343,6 +343,24 @@ impl TransientVector {
         }
     }
 
+    /// Set index `idx` of a packed-int buffer to `n` (`idx == len`
+    /// appends), answering the replaced integer (`Some(None)` for an
+    /// append). `None` changes nothing: invalidated, another buffer,
+    /// or `idx` past the end (the caller's general road).
+    #[inline(always)]
+    pub fn swap_int(&mut self, idx: usize, n: i64) -> Option<Option<i64>> {
+        match &mut self.items {
+            TransientItems::Ints(x) if self.valid && idx < x.len() => {
+                Some(Some(std::mem::replace(&mut x[idx], n)))
+            }
+            TransientItems::Ints(x) if self.valid && idx == x.len() => {
+                x.push(n);
+                Some(None)
+            }
+            _ => None,
+        }
+    }
+
     /// Append an integer, returning `false` on error.
     #[inline(always)]
     pub fn conj_int_opt(&mut self, n: i64) -> bool {
@@ -1171,11 +1189,22 @@ mod tests {
         assert_eq!(tc2.read_at(1, some), Some(Value::Char('b')));
         assert_eq!(tc2.read_at(2, some), None);
 
+        // Swapping an int in place: replace, append, and every refusal
+        let mut ts = TransientVector::new();
+        assert!(ts.conj_int_opt(1));
+        assert_eq!(ts.swap_int(0, 5), Some(Some(1)));
+        assert_eq!(ts.swap_int(1, 6), Some(None));
+        assert_eq!(ts.swap_int(3, 7), None);
+        assert_eq!(ts.nth_opt(0), Some(Value::Int(5)));
+        assert_eq!(ts.nth_opt(1), Some(Value::Int(6)));
+        assert_eq!(tg.swap_int(0, 1), None);
+
         // Invalid transient
         let mut t_inv = TransientVector::new();
         let _ = t_inv.persistent().unwrap();
         assert_eq!(t_inv.nth_opt(0), None);
         assert_eq!(t_inv.read_at(0, some), None);
+        assert_eq!(t_inv.swap_int(0, 1), None);
         assert!(!t_inv.conj_int_opt(1));
         assert!(!t_inv.assoc_int_opt(0, 1));
 

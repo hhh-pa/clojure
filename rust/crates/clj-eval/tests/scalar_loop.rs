@@ -6,13 +6,16 @@
 // the terms of this license.
 
 //! #254 unboxed loop tier (`vm_scalar`): every expression, test,
-//! effect and exit shape the tier lowers, and every miss it hands
-//! back to the boxed tiers (overflow, non-scalar state or
+//! statement, effect and exit shape the tier lowers, and every miss
+//! it hands back to the boxed tiers (overflow, non-scalar state or
 //! invariants, frozen/map/persistent effect targets, out-of-range
-//! and non-integer indexes, a redefined site, effect ordering,
-//! unsupported forms). Every row runs twice — compiled by the VM
-//! and on the tree evaluator (inside `(binding [] …)`) — and both
-//! must give the JVM's value (Clojure 1.12).
+//! and non-integer indexes, a redefined site, unsupported forms) —
+//! including misses after an iteration's effects ran, which undo
+//! them (appends, replaced and popped items, runs of appends,
+//! aliased transients, a full undo log). Every row runs twice —
+//! compiled by the VM and on the tree evaluator (inside
+//! `(binding [] …)`) — and both must give the JVM's value (Clojure
+//! 1.12).
 
 use clj_eval::{Evaluator, boot};
 use clj_value::{PrintOpts, pr_to_string};
@@ -499,6 +502,98 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"(let [u (transient []) t (transient [])] (loop [i 0] (if (= i 6) [(persistent! u) (persistent! t)] (do (when (< i 3) (when (pos? i) (conj! u i))) (when (< i 4) (when (> i 1) (conj! t i) (conj! t (- i)))) (recur (inc i))))))"#,
         r#"[[1 2] [2 -2 3 -3]]"#,
     ),
+    (
+        r#"(let [t (transient [1 2 3 4 5])] (loop [i 0] (if (= i 3) (persistent! t) (do (pop! t) (recur (inc i))))))"#,
+        r#"[1 2]"#,
+    ),
+    (
+        r#"(let [t (transient [1 2 3])] (count (persistent! (loop [i 0] (if (= i 2) (pop! t) (recur (inc i)))))))"#,
+        r#"2"#,
+    ),
+    (
+        r#"(let [t (transient [])] (try (loop [i 0] (if (= i 2) :done (do (pop! t) (recur (inc i))))) (catch Exception e (.getName (class e)))))"#,
+        r#""java.lang.IllegalStateException""#,
+    ),
+    (
+        r#"(let [t (transient [1 2])] (persistent! t) (try (loop [i 0] (if (= i 2) :done (do (pop! t) (recur (inc i))))) (catch Throwable e (.getName (class e)))))"#,
+        r#""java.lang.IllegalAccessError""#,
+    ),
+    (
+        r#"(let [h (transient []) v [3 1 4 1 5 9 2 6]] (loop [i 0] (if (= i (count v)) (persistent! h) (let [x (nth v i)] (loop [] (when (and (pos? (count h)) (> (nth h (dec (count h))) x)) (pop! h) (recur))) (conj! h x) (recur (inc i))))))"#,
+        r#"[1 1 2 6]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (try (loop [i 0 a 1] (if (= i 70) :done (do (conj! t i) (recur (inc i) (* a 2))))) (catch ArithmeticException e [(count t) (.getName (class e))])))"#,
+        r#"[63 "java.lang.ArithmeticException"]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (try (loop [i 0 a 1] (if (= i 70) :done (do (conj! t a) (recur (inc i) (* (nth t i) 2))))) (catch ArithmeticException e [(count t) (nth t 62) (.getName (class e))])))"#,
+        r#"[63 4611686018427387904 "java.lang.ArithmeticException"]"#,
+    ),
+    (
+        r#"(let [t (transient [0 0 0])] (try (loop [i 0 a 1] (if (= i 70) :done (do (assoc! t 0 a) (recur (inc i) (* (nth t 0) 2))))) (catch ArithmeticException e [(persistent! t) (.getName (class e))])))"#,
+        r#"[[4611686018427387904 0 0] "java.lang.ArithmeticException"]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (try (loop [i 0 a 1] (if (= i 70) :done (do (assoc! t i a) (recur (inc i) (* (nth t i) 2))))) (catch ArithmeticException e [(count t) (.getName (class e))])))"#,
+        r#"[63 "java.lang.ArithmeticException"]"#,
+    ),
+    (
+        r#"(let [t (transient [5 6 7 8])] (try (loop [i 0 a 1] (if (= i 70) :done (do (pop! t) (conj! t a) (recur (inc i) (* (nth t 3) 2))))) (catch ArithmeticException e [(persistent! t) (.getName (class e))])))"#,
+        r#"[[5 6 7 4611686018427387904] "java.lang.ArithmeticException"]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (try (loop [i 0 a 1] (if (= i 70) :done (do (conj! t 1) (conj! t 2) (conj! t a) (recur (inc i) (* (nth t (dec (count t))) 2))))) (catch ArithmeticException e [(count t) (.getName (class e))])))"#,
+        r#"[189 "java.lang.ArithmeticException"]"#,
+    ),
+    (
+        r#"(let [t (transient [:a :b])] (try (loop [i 0] (if (= i 3) :done (do (assoc! t 0 i) (recur (+ i (nth t 1)))))) (catch Exception e [(persistent! t) (.getName (class e))])))"#,
+        r#"[[0 :b] "java.lang.ClassCastException"]"#,
+    ),
+    (
+        r#"(let [t (transient [1 2]) u t] (try (loop [i 0] (if (= i 2) :done (do (conj! t 7) (pop! u) (assoc! t 0 9) (recur (+ i (nth u 1) (nth t 5)))))) (catch Exception e [(persistent! t) (.getName (class e))])))"#,
+        r#"[[9 2] "java.lang.IndexOutOfBoundsException"]"#,
+    ),
+    (
+        r#"(let [t (transient [0])] (loop [i 0] (if (= i 2) (persistent! t) (do (loop [j 0] (when (< j 5000) (assoc! t 0 (+ j i)) (recur (inc j)))) (recur (inc i))))))"#,
+        r#"[5000]"#,
+    ),
+    (
+        r#"(let [t (transient []) u (transient [])] (loop [i 0] (if (= i 6) [(persistent! t) (persistent! u)] (do (if (zero? (rem i 2)) (conj! t i) (conj! u i)) (let [x (* i i)] (conj! t x)) (inc i) nil (recur (inc i))))))"#,
+        r#"[[0 0 1 2 4 9 4 16 25] [1 3 5]]"#,
+    ),
+    (
+        r#"(try (loop [i 0] (if (= i 3) :done (do (+ i 9223372036854775807) (recur (inc i))))) (catch ArithmeticException e (.getName (class e))))"#,
+        r#""java.lang.ArithmeticException""#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0] (if (= i 3) (persistent! t) (do (loop [j 0] (if (< j i) (do (conj! t j) (recur (inc j))) j)) (loop [j 0] (when (< j 1) (conj! t -1) (recur (inc j)))) (recur (inc i))))))"#,
+        r#"[-1 0 -1 0 1 -1]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0 a 0] (if (= i 4) [a (persistent! t)] (recur (inc i) (+ a (do (conj! t i) (* i 10)) (let [x (inc i)] (conj! t x) (* x 100)))))))"#,
+        r#"[1060 [0 1 1 2 2 3 3 4]]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0 n 0] (if (= i 3) [n (persistent! t)] (do (conj! t i) (recur (inc i) (count t))))))"#,
+        r#"[3 [0 1 2]]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0] (if (= i 2) (persistent! t) (do (let [[a] [i]] (conj! t a)) (loop [[b] [i]] (conj! t b)) (recur (inc i))))))"#,
+        r#"[0 0 1 1]"#,
+    ),
+    (
+        r#"(loop [i 0 a 0] (if (= i 2) a (recur (inc i) (+ a (if (do) 1 2)))))"#,
+        r#"4"#,
+    ),
+    (
+        r#"(let [t (transient [:a :b])] (try (loop [i 0] (if (= i 2) :done (do (pop! t) (recur (+ i (nth t 5)))))) (catch Exception e [(persistent! t) (.getName (class e))])))"#,
+        r#"[[:a] "java.lang.IndexOutOfBoundsException"]"#,
+    ),
+    (
+        r#"(let [t (transient [0 0]) s "ab"] (try (loop [i 0] (if (= i 2) :done (do (assoc! t i (nth s i)) (recur (+ i (nth t 5)))))) (catch Exception e [(persistent! t) (.getName (class e))])))"#,
+        r#"[[\a 0] "java.lang.IndexOutOfBoundsException"]"#,
+    ),
 ];
 
 #[test]
@@ -512,8 +607,9 @@ fn scalar_loops_match_the_jvm() {
 /// locals, the fn's own name, variadic or destructuring params,
 /// multimethods, maps, natives, conveyed bindings, tree-evaluator
 /// closures, recursion, nesting past the inline depth, calls past
-/// the per-loop budget, a redefined or rebound var). `(setup, form,
-/// JVM value)`.
+/// the per-loop budget, a redefined or rebound var), and loops run
+/// many times (a program that logs heavily leaves the tier).
+/// `(setup, form, JVM value)`.
 const JVM_CALL_ROWS: &[(&str, &str, &str)] = &[
     (
         r#"(defn i1-get [v i] (nth v i))"#,
@@ -589,6 +685,36 @@ const JVM_CALL_ROWS: &[(&str, &str, &str)] = &[
         r#"(defn b1 [x] (* x 2))"#,
         r#"(loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i)))))"#,
         r#"102"#,
+    ),
+    (
+        r#"(defn s1-push! [h x] (conj! h x) (conj! h (- x)))"#,
+        r#"(let [t (transient [])] (loop [i 0] (if (= i 3) (persistent! t) (do (s1-push! t i) (recur (inc i))))))"#,
+        r#"[0 0 1 -1 2 -2]"#,
+    ),
+    (
+        r#"(defn s2-add! [head nxt u x] (let [k (count nxt)] (conj! nxt (nth head u)) (assoc! head u k)))"#,
+        r#"(let [head (transient [-1 -1]) nxt (transient [])] (loop [i 0] (if (= i 5) [(persistent! head) (persistent! nxt)] (do (s2-add! head nxt (rem i 2) i) (recur (inc i))))))"#,
+        r#"[[4 3] [-1 -1 0 1 2]]"#,
+    ),
+    (
+        r#"(defn s3-f [t x] (conj! t x) (* x 3)) (defn s3-none [x])"#,
+        r#"(let [t (transient [])] (loop [i 0 a 0] (if (= i 4) [a (persistent! t)] (do (s3-none i) (recur (inc i) (+ a (s3-f t i)))))))"#,
+        r#"[18 [0 1 2 3]]"#,
+    ),
+    (
+        r#"(defn ch-pack [x y] (bit-xor (bit-or (bit-shift-left (+ x 2147483648) 32) (bit-and (+ y 2147483648) 4294967295)) -9223372036854775808)) (defn ch-chain [pts] (let [m (count pts) h (transient [])] (loop [i 0] (if (= i m) (do (when (pos? (count h)) (pop! h)) (persistent! h)) (let [p (nth pts i) px (- (unsigned-bit-shift-right (bit-xor p -9223372036854775808) 32) 2147483648) py (- (bit-and (bit-xor p -9223372036854775808) 4294967295) 2147483648)] (loop [] (when (>= (count h) 2) (let [hn (count h) b (nth h (dec hn)) a (nth h (- hn 2)) ax (- (unsigned-bit-shift-right (bit-xor a -9223372036854775808) 32) 2147483648) ay (- (bit-and (bit-xor a -9223372036854775808) 4294967295) 2147483648) bx (- (unsigned-bit-shift-right (bit-xor b -9223372036854775808) 32) 2147483648) by (- (bit-and (bit-xor b -9223372036854775808) 4294967295) 2147483648) cr (-' (*' (-' bx ax) (-' py ay)) (*' (-' by ay) (-' px ax)))] (when (<= cr 0) (pop! h) (recur))))) (conj! h p) (recur (inc i)))))))"#,
+        r#"(let [pts (vec (sort (map (fn [[x y]] (ch-pack x y)) [[0 0] [1 1] [2 0] [2 2] [0 2] [1 0] [1 2] [3 1] [-1 1] [1 -1]])))] (mapv count [(ch-chain pts) (ch-chain (vec (rseq pts)))]))"#,
+        r#"[2 3]"#,
+    ),
+    (
+        r#"(defn hv-row [t k i] (loop [r 0] (when (< r 40) (loop [j 0] (when (< j k) (assoc! t j (+ i r j)) (recur (inc j)))) (recur (inc r)))))"#,
+        r#"(let [t (transient (vec (repeat 40 0)))] (dotimes [i 30] (hv-row t 40 i)) (persistent! t))"#,
+        r#"[68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107]"#,
+    ),
+    (
+        r#"(defn lt-row [t i] (loop [r 0] (when (< r 3) (loop [j 0] (when (< j 2) (conj! t (+ i r j)) (recur (inc j)))) (recur (inc r)))))"#,
+        r#"(let [t (transient [])] (dotimes [i 40] (lt-row t i)) (reduce + (persistent! t)))"#,
+        r#"5040"#,
     ),
 ];
 
