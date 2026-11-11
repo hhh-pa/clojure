@@ -28,6 +28,7 @@
 //! vector (no allocation).
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use clj_value::{Map, Symbol, ThrowClass, Throwable, Value, Var, Vector};
@@ -139,10 +140,9 @@ pub(crate) struct TopCode {
 }
 
 /// Compile one analyzed top-level form.
-pub(crate) fn compile_top(expr: &Expr, roots: &SharedRegistry) -> TopCode {
+pub(crate) fn compile_top(expr: &Expr) -> TopCode {
     let mut c = Compiler {
         scopes: vec![Scope::new(0, Vec::new())],
-        roots: roots.clone(),
     };
     c.scopes[0].last = crate::vm_live::last_uses(std::slice::from_ref(expr), 0, 0);
     let exec = c.compile(expr);
@@ -602,18 +602,89 @@ struct Mark {
 
 struct Compiler {
     scopes: Vec<Scope>,
-    /// The var roots as of compilation (what `vm_scalar` may inline).
-    roots: SharedRegistry,
 }
 
-impl crate::vm_scalar::Host for Compiler {
+/// A `loop`'s scalar program (see [`crate::vm_scalar`]), compiled
+/// only once the loop is hot: [`HOT`] boxed `recur`s over its
+/// entries, or as many entries as the tier's trip rule judges (whose
+/// boxed history may turn the program down uncompiled), or its first
+/// entry under `Evaluator::set_eager_tier`. Most loops never get
+/// there (load-time and short ones) and skip the compile. Until then
+/// this keeps what the compile reads from the loop's scope.
+struct LazyScalar {
+    body: Arc<[Expr]>,
+    /// The scope's first own lexical index; the registers of its
+    /// locals visible in the body (the loop's own last); its `letfn`
+    /// names; the lexical indexes of its captures as of the body.
+    scope_base: usize,
+    regs: Box<[usize]>,
+    rec: Box<[usize]>,
+    captures: Box<[usize]>,
+    /// The boxed history while the program is not compiled: entries
+    /// run whole, and their iterations (`recur`s; the one that would
+    /// reach [`HOT`] compiles instead).
+    entries: AtomicU32,
+    heat: AtomicU32,
+    prog: OnceLock<Option<Box<crate::vm_scalar::ScalarLoop>>>,
+}
+
+/// Boxed `recur`s a loop runs, over all its entries, before its
+/// scalar program compiles (the rest of that entry runs on it).
+const HOT: u32 = 64;
+
+impl LazyScalar {
+    /// An outer local's place as of the body (`None`: one the body
+    /// never read, which the compile cannot ask for).
+    fn loc(&self, idx: usize) -> Option<Loc> {
+        match idx.checked_sub(self.scope_base) {
+            Some(i) => self.regs.get(i).map(|r| Loc::Reg(*r)),
+            None => (self.rec.iter().position(|i| *i == idx).map(Loc::Rec))
+                .or_else(|| self.captures.iter().position(|i| *i == idx).map(Loc::Up)),
+        }
+    }
+
+    /// The program, compiled on the first ask.
+    fn program(&self, ev: &Evaluator, targets: &[usize]) -> Option<&crate::vm_scalar::ScalarLoop> {
+        let compile = || {
+            let mut host = LateHost {
+                plan: self,
+                roots: &ev.registry,
+                lost: false,
+            };
+            let base = self.scope_base + self.regs.len();
+            let entries = self.entries.load(Ordering::Relaxed);
+            let trips = entries.saturating_add(self.heat.load(Ordering::Relaxed));
+            let history = (entries, trips);
+            let prog = crate::vm_scalar::compile(&mut host, &self.body, targets, base, history);
+            debug_assert!(
+                !host.lost,
+                "a loop body read a local its scope never placed"
+            );
+            prog.filter(|_| !host.lost).map(Box::new)
+        };
+        self.prog.get_or_init(compile).as_deref()
+    }
+}
+
+/// The scalar compile's view of a hot loop's scope (its snapshot
+/// in [`LazyScalar`]) and of the var roots now.
+struct LateHost<'a> {
+    plan: &'a LazyScalar,
+    roots: &'a SharedRegistry,
+    /// Whether the compile asked for a local the snapshot lacks (its
+    /// program is dropped).
+    lost: bool,
+}
+
+impl crate::vm_scalar::Host for LateHost<'_> {
     fn resolve_local(&mut self, idx: usize) -> Loc {
-        self.resolve(idx)
+        let loc = self.plan.loc(idx);
+        self.lost |= loc.is_none();
+        loc.unwrap_or(Loc::Reg(usize::MAX))
     }
 
     fn reads(&self, expr: &Expr, g: usize) -> bool {
-        let base = self.scopes.last().expect("a scope is always open").base;
-        crate::vm_live::may_read(expr, base, g + 1, g)
+        crate::vm_live::may_read(expr, self.plan.scope_base, g + 1, g)
     }
 
     fn site(&self, call: &DirectCall) -> crate::vm_ops::Site {
@@ -1058,7 +1129,7 @@ impl Compiler {
     /// `loop`: each binding's raw value takes a register (a symbol's
     /// is its own); destructured bindings unpack after every write,
     /// initial and `recur`, in order.
-    fn compile_loop(&mut self, bindings: &[(Pattern, Expr)], body: &[Expr]) -> Exec {
+    fn compile_loop(&mut self, bindings: &[(Pattern, Expr)], body: &Arc<[Expr]>) -> Exec {
         let mark = self.mark();
         let mut steps: Vec<LoopStep> = Vec::with_capacity(bindings.len());
         for (pat, init) in bindings {
@@ -1080,29 +1151,41 @@ impl Compiler {
             None
         };
         let int_fused = fused.as_ref().is_some_and(|f| f.int.is_some());
-        let scalar = if unpacks || int_fused {
-            None
-        } else {
-            let base = self.visible();
-            crate::vm_scalar::compile(self, body, &targets, base)
-        };
-        let body = if fused.is_some() || flat.is_some() {
+        let code = if fused.is_some() || flat.is_some() {
             konst(Value::Nil)
         } else {
             self.compile_body(body)
         };
+        let scalar = (!unpacks && !int_fused).then(|| self.lazy_scalar(body));
         self.scope().recur = saved;
         self.reset(mark);
         let code = LoopCode {
             steps,
             targets,
-            body,
+            body: code,
             unpacks,
             fused,
             flat,
             scalar,
         };
         Box::new(move |ev, f| run_loop(ev, f, &code))
+    }
+
+    /// What a loop's scalar program compiles from once the loop runs
+    /// hot (see [`LazyScalar`]): the body compiled already, so every
+    /// outer local it reads has its place in the scope.
+    fn lazy_scalar(&self, body: &Arc<[Expr]>) -> LazyScalar {
+        let s = self.scopes.last().expect("a scope is always open");
+        LazyScalar {
+            body: Arc::clone(body),
+            scope_base: s.base,
+            regs: s.locals.as_slice().into(),
+            rec: s.rec.as_slice().into(),
+            captures: s.captures.iter().map(|(i, _)| *i).collect(),
+            entries: AtomicU32::new(0),
+            heat: AtomicU32::new(0),
+            prog: OnceLock::new(),
+        }
     }
 
     /// Detect the fused loop shape: a single-form body that is an
@@ -1991,9 +2074,10 @@ struct LoopCode {
     /// The flat shape (see [`FlatLoop`]) when the loop takes it:
     /// no destructuring loop bindings, no fused shape.
     flat: Option<FlatLoop>,
-    /// The unboxed program (see [`crate::vm_scalar`]) tried first,
-    /// when no unboxed-int fused program covers the loop.
-    scalar: Option<crate::vm_scalar::ScalarLoop>,
+    /// The unboxed program (see [`crate::vm_scalar`]) tried first
+    /// once compiled, when no unboxed-int fused program covers the
+    /// loop.
+    scalar: Option<LazyScalar>,
 }
 
 /// One flat-loop step: the `let`/`if`/`do` skeleton of a loop
@@ -2108,17 +2192,67 @@ fn run_loop(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Va
             unpack(ev, f)?;
         }
     }
-    if let Some(v) = crate::vm_scalar::try_run(ev, f, code.scalar.as_ref(), &code.targets) {
-        return Ok(v);
+    if let Some(lazy) = &code.scalar {
+        let prog = match lazy.prog.get() {
+            Some(prog) => prog.as_deref(),
+            None if ev.eager_tier => lazy.program(ev, &code.targets),
+            None => return run_cold(ev, f, code, lazy),
+        };
+        if let Some(v) = crate::vm_scalar::try_run(ev, f, prog, &code.targets) {
+            return Ok(v);
+        }
     }
+    // Unused by the roads that do not tick.
+    let mut fuel = u32::MAX;
+    run_boxed::<false>(ev, f, code, &mut fuel)
+}
+
+/// Run a loop whose scalar program is not compiled yet: boxed,
+/// ticking toward [`HOT`] (see [`tick`]), and counting the entry
+/// into the history (unless it handed over). The entry that gives
+/// the history as many entries as the trip rule judges decides the
+/// program now (most such loops never `recur` much: the rule turns
+/// them down without a compile, and their entries stop counting).
+#[inline(never)]
+fn run_cold(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    lazy: &LazyScalar,
+) -> Result<Value, Signal> {
+    // At least one: concurrent entries may overshoot the heat.
+    let start = HOT.saturating_sub(lazy.heat.load(Ordering::Relaxed)).max(1);
+    let mut fuel = start;
+    let out = run_boxed::<true>(ev, f, code, &mut fuel);
+    // A hand-over refuels past `start` (the program counts that run).
+    if fuel <= start {
+        lazy.heat.fetch_add(start - fuel, Ordering::Relaxed);
+        if lazy.entries.fetch_add(1, Ordering::Relaxed) + 1 >= crate::vm_scalar::JUDGE_AFTER {
+            lazy.program(ev, &code.targets);
+        }
+    }
+    out
+}
+
+/// A loop's boxed roads (after the bindings, the scalar program
+/// declined or not yet compiled). While the program is not compiled
+/// (`TICK`), the flat and fused ones tick `fuel` at each plain
+/// `recur` (see [`tick`]); a loop that has neither destructures, and
+/// has no scalar program.
+fn run_boxed<const TICK: bool>(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    fuel: &mut u32,
+) -> Result<Value, Signal> {
     if let Some(flat) = &code.flat {
-        return run_flat(ev, f, code, flat);
+        return run_flat::<TICK>(ev, f, code, flat, fuel);
     }
     if let Some(fused) = &code.fused {
         if let Some(int) = &fused.int {
             return run_fused_int(ev, f, code, fused, int);
         }
-        return run_fused(ev, f, code, fused);
+        return run_fused::<TICK>(ev, f, code, fused, fuel);
     }
     loop {
         match (code.body)(ev, f) {
@@ -2130,6 +2264,45 @@ fn run_loop(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Va
         }
         run_unpacks(ev, f, code)?;
     }
+}
+
+/// What a ticking road does at an iteration boundary (see [`tick`]).
+enum Turn {
+    /// Run the next iteration, still ticking.
+    Go,
+    /// The scalar program ran the loop out.
+    Done(Value),
+    /// Run the rest boxed without ticking (from where a miss of the
+    /// program left the state).
+    Cool,
+}
+
+/// A ticking road's iteration boundary (the loop state is all in the
+/// target registers, as at entry): the one that spends the loop's
+/// fuel compiles its scalar program and hands the rest of the loop
+/// to it.
+#[inline(always)]
+fn tick(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode, fuel: &mut u32) -> Turn {
+    *fuel -= 1;
+    if *fuel != 0 {
+        return Turn::Go;
+    }
+    hand_over(ev, f, code, fuel).map_or(Turn::Cool, Turn::Done)
+}
+
+/// Compile the loop's program and run the rest of the loop on it
+/// (`fuel` refills past any entry's, the sign of a hand-over).
+#[cold]
+#[inline(never)]
+fn hand_over(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    fuel: &mut u32,
+) -> Option<Value> {
+    *fuel = u32::MAX;
+    let prog = code.scalar.as_ref()?.program(ev, &code.targets);
+    crate::vm_scalar::try_run(ev, f, prog, &code.targets)
 }
 
 /// A discarded evaluation's next step (see [`run_flat`]).
@@ -2165,11 +2338,12 @@ fn flat_set(
 /// replaced). A `Recur` signal from an opaque leaf (a VM `recur`
 /// inside a compiled subform, or a tree-evaluated one carrying
 /// values) restarts at the first step, like [`run_loop`].
-fn run_flat(
+fn run_flat<const TICK: bool>(
     ev: &mut Evaluator,
     f: &mut Frame<'_>,
     code: &LoopCode,
     flat: &FlatLoop,
+    fuel: &mut u32,
 ) -> Result<Value, Signal> {
     let mut pc = 0usize;
     loop {
@@ -2192,6 +2366,35 @@ fn run_flat(
             }
             Err(s) => return Err(s),
         }
+        // (The check stays out of the plain road: a ticking arm there
+        // cost a dozen instructions per `recur`.)
+        if TICK {
+            if let Some(out) = flat_turn(ev, f, code, flat, pc, fuel) {
+                return out;
+            }
+        }
+    }
+}
+
+/// A ticking flat road after a step: at an iteration boundary (only
+/// a restart lands on the first step; jumps go forward), see
+/// [`tick`]. `Some` ends this road (the program ran the loop out, or
+/// the rest of the loop runs on the plain road).
+fn flat_turn(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    flat: &FlatLoop,
+    pc: usize,
+    fuel: &mut u32,
+) -> Option<Result<Value, Signal>> {
+    if pc != 0 {
+        return None;
+    }
+    match tick(ev, f, code, fuel) {
+        Turn::Go => None,
+        Turn::Done(v) => Some(Ok(v)),
+        Turn::Cool => Some(run_flat::<false>(ev, f, code, flat, fuel)),
     }
 }
 
@@ -2317,15 +2520,22 @@ fn write_ops_n(
 /// per iteration): `fused_once`'s `None` continues, its value
 /// ends the loop, and a `Recur` signal from an opaque leaf is
 /// absorbed like [`run_loop`]'s.
-fn run_fused(
+fn run_fused<const TICK: bool>(
     ev: &mut Evaluator,
     f: &mut Frame<'_>,
     code: &LoopCode,
     fused: &FusedLoop,
+    fuel: &mut u32,
 ) -> Result<Value, Signal> {
     loop {
         match fused_once(ev, f, code, fused) {
             Ok(Some(v)) => return Ok(v),
+            // A plain `recur` (no unpacks: a ticking loop binds symbols).
+            Ok(None) if TICK => match tick(ev, f, code, fuel) {
+                Turn::Go => {}
+                Turn::Done(v) => return Ok(v),
+                Turn::Cool => return run_fused::<false>(ev, f, code, fused, fuel),
+            },
             Ok(None) => {}
             Err(Signal::Recur(values)) => absorb_recur_values(code, f, values),
             Err(s) => return Err(s),
@@ -2426,11 +2636,13 @@ fn run_fused_int(
     fused: &FusedLoop,
     int: &IntFused,
 ) -> Result<Value, Signal> {
+    // No scalar program to hand over to (see `run_loop`).
+    let mut fuel = u32::MAX;
     let mut cur_buf: SmallVec<[i64; 8]> = SmallVec::new();
     for r in code.targets.iter() {
         match f.regs[*r] {
             Value::Int(n) => cur_buf.push(n),
-            _ => return run_fused(ev, f, code, fused),
+            _ => return run_fused::<false>(ev, f, code, fused, &mut fuel),
         }
     }
     let mut snap = (u64::MAX, u64::MAX);
@@ -2461,7 +2673,7 @@ fn run_fused_int(
     for (r, v) in code.targets.iter().zip(state) {
         set_reg(&mut f.regs[*r], Value::Int(*v));
     }
-    run_fused(ev, f, code, fused)
+    run_fused::<false>(ev, f, code, fused, &mut fuel)
 }
 
 /// A tree-evaluator frame holding `locs`' values at their lexical

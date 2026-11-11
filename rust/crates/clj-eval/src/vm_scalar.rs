@@ -42,7 +42,7 @@ use clj_value::{ExtensionValue, Transient, TransientKind, TransientVector, Value
 use smallvec::SmallVec;
 
 use crate::eval::Evaluator;
-use crate::expr::{Arity, DirectCall, Expr, Pattern};
+use crate::expr::{Arity, DirectCall, Expr, Pattern, VecPattern};
 use crate::vm::{Frame, Loc};
 use crate::vm_ops::{IntCtor, IntOp1, IntOp2, IntTest1, IntTest2, IntTestCtor, Site};
 
@@ -142,6 +142,9 @@ pub(crate) enum Calc {
     Nth(Loc, IExpr),
     /// `(count coll)` over an invariant collection.
     Count(Loc),
+    /// Item `k` of the vector at `coll[i]`: a name of a
+    /// destructured `(let [[a b …] (nth coll i)] …)`.
+    Nth2(Loc, IExpr, u16),
 }
 
 /// A control form in value position.
@@ -263,6 +266,8 @@ enum Step {
 enum Co {
     Nth(Sl, u16, Sl),
     Count(Sl, u16),
+    /// Result, collection index, index slot, item.
+    Nth2(Sl, u16, Sl, u16),
 }
 
 /// A branch test over slots.
@@ -301,7 +306,7 @@ impl Ins {
     fn retarget(&mut self, from: Sl, to: Sl) -> bool {
         let d = match self {
             Ins::Do(Step::Op1(_, d, _) | Step::Op2(_, d, ..) | Step::Cast(_, d, _))
-            | Ins::Co(Co::Nth(d, ..) | Co::Count(d, _)) => d,
+            | Ins::Co(Co::Nth(d, ..) | Co::Count(d, _) | Co::Nth2(d, ..)) => d,
             _ => return false,
         };
         let hit = *d == from;
@@ -422,19 +427,28 @@ pub(crate) struct ScalarLoop {
     /// Iterations and undo entries over all runs, for [`weigh`].
     log_iters: AtomicUsize,
     logged: AtomicUsize,
-    /// Entries and iterations, for [`try_run`]'s give-up rule.
+    /// Entries and iterations (the boxed ones first), and the first
+    /// runs and early misses, for [`judge`].
     entries: AtomicU32,
     iters: AtomicU32,
+    runs: AtomicU32,
+    misses: AtomicU32,
     off: AtomicBool,
 }
 
 /// Entries before a loop's average trip count is judged.
-const JUDGE_AFTER: u32 = 32;
+pub(crate) const JUDGE_AFTER: u32 = 32;
 
 /// The average iterations per entry a loop needs to keep the tier
 /// (measured: a one- or two-iteration loop costs more to enter than
 /// its boxed iterations).
 const MIN_TRIPS: u32 = 2;
+
+/// A run that misses after finishing fewer iterations than this
+/// wasted its entry and its undo: a program whose first
+/// [`JUDGE_AFTER`] runs all end so leaves the tier (one long run
+/// among them can pay for the rest).
+const MISS_TRIPS: u32 = 8;
 
 /// A collection resolved once per run (its local cannot change
 /// while the loop runs).
@@ -475,6 +489,22 @@ fn nth(coll: &Coll<'_>, i: Sv) -> Option<Sv> {
             _ => None,
         },
         Coll::Other => None,
+    }
+}
+
+/// The scalar item `k` of the vector at `coll[i]` (a destructured
+/// `(nth coll i)`): anything but a vector there, or a non-scalar or
+/// missing item, misses.
+fn nth2(coll: &Coll<'_>, i: Sv, k: usize) -> Option<Sv> {
+    let idx = usize::try_from(i.int_of()?).ok()?;
+    let item = |v: &Value| match v {
+        Value::Vector(inner) => inner.read_at(k, Sv::of),
+        _ => None,
+    };
+    match coll {
+        Coll::Vec(v) => v.read_at(idx, item),
+        Coll::Trans(t) => vector(&mut t.lock())?.read_at(idx, item),
+        _ => None,
     }
 }
 
@@ -677,6 +707,10 @@ fn step(st: Step, s: &mut [Sv]) -> Option<()> {
 fn co_step(co: Co, s: &mut [Sv], colls: &[Coll<'_>]) -> Option<()> {
     let (d, v) = match co {
         Co::Nth(d, c, i) => (d, nth(&colls[usize::from(c)], s[usize::from(i)])?),
+        Co::Nth2(d, c, i, k) => {
+            let v = nth2(&colls[usize::from(c)], s[usize::from(i)], usize::from(k))?;
+            (d, v)
+        }
         Co::Count(d, c) => (d, count(&colls[usize::from(c)])?),
     };
     s[usize::from(d)] = v;
@@ -733,25 +767,28 @@ fn weigh(sc: &ScalarLoop, w: &Watch) {
     }
 }
 
-/// The loop head: count the trip while judging, and go on unless the
-/// direct snapshot moved (another thread redefined a var, or this
-/// one's bindings changed), which hands the loop back to the boxed
-/// road, where every call validates itself.
+/// The loop head: count the trip while judging (the trips before it
+/// belong to finished iterations), and go on unless the direct
+/// snapshot moved (another thread redefined a var, or this one's
+/// bindings changed), which hands the loop back to the boxed road,
+/// where every call validates itself.
 #[inline(always)]
 fn head<const COUNT: bool>(ev: &Evaluator, w: &mut Watch, pc: usize) -> Option<usize> {
     if COUNT {
+        w.done = w.trips;
         w.trips += 1;
     }
     (ev.direct_snapshot() == w.snap).then_some(pc + 1)
 }
 
 /// A run's bookkeeping: the direct snapshot the sites validated
-/// under at entry, the trips begun (counted while judging), and (in
-/// a program that logs) the iterations begun and the undo entries
-/// they logged.
+/// under at entry; while judging, the trips begun and those
+/// finished; and (in a program that logs) the iterations begun and
+/// the undo entries they logged.
 struct Watch {
     snap: (u64, u64),
     trips: u32,
+    done: u32,
     iters: usize,
     logged: usize,
 }
@@ -823,13 +860,14 @@ fn run_program(ev: &mut Evaluator, f: &Frame<'_>, sc: &ScalarLoop, s: &mut [Sv])
     let mut w = Watch {
         snap: ev.direct_snapshot(),
         trips: 0,
+        done: 0,
         iters: 0,
         logged: 0,
     };
     let colls: SmallVec<[Coll<'_>; 8]> = sc.colls.iter().map(|l| coll_of(f.get(*l))).collect();
     let mut log = Log::default();
     // Trips are counted only while the loop is being judged.
-    let judging = sc.entries.load(Ordering::Relaxed) < JUDGE_AFTER;
+    let judging = sc.runs.load(Ordering::Relaxed) < JUDGE_AFTER;
     let (c, l) = (&colls[..], &mut log);
     let out = match (judging, sc.logs) {
         (true, true) => exec::<true, true>(sc, ev, f, s, c, l, &mut w),
@@ -838,7 +876,7 @@ fn run_program(ev: &mut Evaluator, f: &Frame<'_>, sc: &ScalarLoop, s: &mut [Sv])
         (false, false) => exec::<false, false>(sc, ev, f, s, c, l, &mut w),
     };
     if judging {
-        judge(sc, w.trips);
+        judge(sc, out.is_some(), &w);
     }
     if sc.logs {
         weigh(sc, &w);
@@ -863,16 +901,23 @@ fn may_enter(ev: &mut Evaluator, sc: &ScalarLoop) -> bool {
     ev.calls_fit(sc.depth) && ev.group_valid(sc.gid, valid)
 }
 
-/// Count a run; after [`JUDGE_AFTER`] entries a loop averaging under
-/// [`MIN_TRIPS`] iterations per entry stops entering the tier (its
-/// setup costs more than the boxed iterations it would replace).
-fn judge(sc: &ScalarLoop, trips: u32) {
+/// Count one of the program's first [`JUDGE_AFTER`] runs. After as
+/// many entries (the loop's boxed ones first, see [`compile`]), a
+/// loop averaging under [`MIN_TRIPS`] iterations per entry stops
+/// entering the tier (its setup costs more than the boxed iterations
+/// it replaces); so does a program whose first runs all miss early
+/// (see [`MISS_TRIPS`]).
+fn judge(sc: &ScalarLoop, finished: bool, w: &Watch) {
     let entries = sc.entries.fetch_add(1, Ordering::Relaxed) + 1;
     let iters = sc
         .iters
-        .fetch_add(trips, Ordering::Relaxed)
-        .saturating_add(trips);
-    if entries == JUDGE_AFTER && iters < MIN_TRIPS * JUDGE_AFTER {
+        .fetch_add(w.trips, Ordering::Relaxed)
+        .saturating_add(w.trips);
+    let early = u32::from(!finished && w.done < MISS_TRIPS);
+    let misses = sc.misses.fetch_add(early, Ordering::Relaxed) + early;
+    let runs = sc.runs.fetch_add(1, Ordering::Relaxed) + 1;
+    let short = entries == JUDGE_AFTER && iters < MIN_TRIPS * JUDGE_AFTER;
+    if short || (runs == JUDGE_AFTER && misses == JUDGE_AFTER) {
         sc.off.store(true, Ordering::Relaxed);
     }
 }
@@ -1010,6 +1055,10 @@ impl Lower<'_> {
             Calc::Count(l) => {
                 let c = self.coll(*l);
                 Ins::Co(Co::Count(self.sl(), c))
+            }
+            Calc::Nth2(l, i, k) => {
+                let (c, i) = (self.coll(*l), self.val(i));
+                Ins::Co(Co::Nth2(self.sl(), c, i, *k))
             }
         };
         self.code.push(ins);
@@ -1357,7 +1406,7 @@ fn sinks(n: &Node) -> bool {
 fn reads_coll(e: &IExpr) -> bool {
     match e {
         IExpr::Calc(c) => match &**c {
-            Calc::Nth(..) | Calc::Count(_) => true,
+            Calc::Nth(..) | Calc::Count(_) | Calc::Nth2(..) => true,
             Calc::Op1(_, a) | Calc::Cast(_, a) => reads_coll(a),
             Calc::Op2(_, a, b) => reads_coll(a) || reads_coll(b),
         },
@@ -1471,13 +1520,17 @@ struct Builder<'h> {
 
 /// Compile `body` (one `loop`'s forms) over `targets`, whose
 /// bindings are the lexical indexes just below `body_base`: `None`
-/// when no iteration could run on scalars.
+/// when no iteration could run on scalars, or when the loop's boxed
+/// `history` (entries, trips begun) already fails [`judge`]'s trip
+/// rule.
 pub(crate) fn compile(
     host: &mut dyn Host,
     body: &[Expr],
     targets: &[usize],
     body_base: usize,
+    (entries, trips): (u32, u32),
 ) -> Option<ScalarLoop> {
+    (entries < JUDGE_AFTER || trips >= MIN_TRIPS.saturating_mul(entries)).then_some(())?;
     let n = targets.len();
     let mut b = Builder {
         host,
@@ -1543,8 +1596,10 @@ pub(crate) fn compile(
         gid: crate::vm::next_site(),
         log_iters: AtomicUsize::new(0),
         logged: AtomicUsize::new(0),
-        entries: AtomicU32::new(0),
-        iters: AtomicU32::new(0),
+        entries: AtomicU32::new(entries),
+        iters: AtomicU32::new(trips),
+        runs: AtomicU32::new(0),
+        misses: AtomicU32::new(0),
         off: AtomicBool::new(false),
     })
 }
@@ -1592,7 +1647,7 @@ fn misses(e: &IExpr) -> bool {
 
 fn calc_misses(c: &Calc) -> bool {
     match c {
-        Calc::Op1(_, a) | Calc::Cast(_, a) | Calc::Nth(_, a) => misses(a),
+        Calc::Op1(_, a) | Calc::Cast(_, a) | Calc::Nth(_, a) | Calc::Nth2(_, a, _) => misses(a),
         Calc::Op2(_, a, b) => misses(a) || misses(b),
         Calc::Count(_) => false,
     }
@@ -1725,22 +1780,75 @@ impl Builder<'_> {
     /// `let` bindings (symbols only) into fresh slots, visible to
     /// the later inits and `then` (the caller truncates `lex`).
     fn bindings(&mut self, bindings: &[(Pattern, Expr)]) -> Option<Vec<(usize, IExpr)>> {
+        self.bind_all(bindings, false)
+    }
+
+    /// `let` bindings: symbols, and vectors of symbols destructuring
+    /// an `nth` (see [`Self::vec_binding`]). (A `loop`'s destructured
+    /// binding re-destructures on every `recur`: [`Self::bindings`].)
+    fn let_bindings(&mut self, bindings: &[(Pattern, Expr)]) -> Option<Vec<(usize, IExpr)>> {
+        self.bind_all(bindings, true)
+    }
+
+    fn bind_all(
+        &mut self,
+        bindings: &[(Pattern, Expr)],
+        destructure: bool,
+    ) -> Option<Vec<(usize, IExpr)>> {
         let mut out = Vec::with_capacity(bindings.len());
         for (pat, init) in bindings {
-            if !matches!(pat, Pattern::Symbol(_)) {
-                return None;
+            match pat {
+                Pattern::Symbol(_) => {
+                    let e = self.expr(init);
+                    let s = self.slot();
+                    self.lex.push(Lex::Slot(s));
+                    out.push((s, e));
+                }
+                Pattern::Vec(vp) if destructure => self.vec_binding(vp, init, &mut out)?,
+                _ => return None,
             }
-            let e = self.expr(init);
-            let s = self.slot();
-            self.lex.push(Lex::Slot(s));
-            out.push((s, e));
         }
         Some(out)
     }
 
+    /// `[a b …]` (symbols only) bound to `(nth coll i)` over a boxed
+    /// local: the index into a temp slot, then each name to item `k`
+    /// of the vector at that index (anything else there misses, and
+    /// the boxed road answers `nth`'s `nil` defaults).
+    fn vec_binding(
+        &mut self,
+        vp: &VecPattern,
+        init: &Expr,
+        out: &mut Vec<(usize, IExpr)>,
+    ) -> Option<()> {
+        let names = vp.rest.is_none()
+            && vp.as_sym.is_none()
+            && vp.fixed.iter().all(|p| matches!(p, Pattern::Symbol(_)));
+        let Expr::DirectNative(call) = init else {
+            return None;
+        };
+        let (true, Some("nth"), [coll, i]) =
+            (names, crate::vm_ops::core_name(call), call.args.as_slice())
+        else {
+            return None;
+        };
+        let loc = self.boxed_local(coll)?;
+        let idx = self.expr(i);
+        let t = self.slot();
+        out.push((t, idx));
+        let site = self.host.site(call);
+        self.sites.push(site);
+        for k in 0..vp.fixed.len() {
+            let s = self.slot();
+            self.lex.push(Lex::Slot(s));
+            out.push((s, calc(Calc::Nth2(loc, IExpr::Slot(t), k as u16))));
+        }
+        Some(())
+    }
+
     fn let_expr(&mut self, bindings: &[(Pattern, Expr)], body: &[Expr]) -> IExpr {
         let mark = self.lex.len();
-        let out = match self.bindings(bindings) {
+        let out = match self.let_bindings(bindings) {
             Some(binds) => IExpr::Ctl(Box::new(Ctl::Let(binds.into(), self.seq_expr(body)))),
             None => IExpr::Deopt,
         };
@@ -1967,7 +2075,7 @@ impl Builder<'_> {
             }
             Expr::Let { bindings, body } => {
                 let mark = self.lex.len();
-                let out = match self.bindings(bindings) {
+                let out = match self.let_bindings(bindings) {
                     Some(binds) => Node::Let(binds.into(), Box::new(self.body(body))),
                     None => Node::Deopt,
                 };
@@ -2002,7 +2110,7 @@ impl Builder<'_> {
             }
             Expr::Let { bindings, body } => {
                 let mark = self.lex.len();
-                let out = match self.bindings(bindings) {
+                let out = match self.let_bindings(bindings) {
                     Some(binds) => Stmt::Let(binds.into(), self.stmt_seq(body).into()),
                     None => Stmt::Expr(IExpr::Deopt),
                 };

@@ -766,6 +766,12 @@ fn sort_by_index(items: &mut [Value], cmp: fn(&Value, &Value) -> std::cmp::Order
     }
     let mut idx: Vec<usize> = (0..items.len()).collect();
     idx.sort_by(|&a, &b| cmp(&items[a], &items[b]));
+    permute(items, &idx);
+}
+
+/// Apply a sort permutation in place (`idx[pos]` is the item that
+/// belongs at `pos`): each item moves once.
+fn permute(items: &mut [Value], idx: &[usize]) {
     // dest[i]: where the item now at `i` belongs.
     let mut dest = vec![0usize; items.len()];
     for (pos, &src) in idx.iter().enumerate() {
@@ -896,12 +902,56 @@ fn sort_int_vectors(items: &mut [Value]) -> bool {
     true
 }
 
+/// The longest vectors [`sort_int_tuples`] keys.
+const MAX_TUPLE: usize = 8;
+
+/// Sort vectors of one length (at most [`MAX_TUPLE`]) whose items
+/// are all `Int` by a flat copy of their items, read once: each
+/// comparison is then a slice compare, which is `compare`'s order
+/// on vectors of one length. Stable, like the other lanes; `false`
+/// for anything else.
+fn sort_int_tuples(items: &mut [Value]) -> bool {
+    let k = match items.first() {
+        Some(Value::Vector(v)) if (1..=MAX_TUPLE).contains(&v.len()) => v.len(),
+        _ => return false,
+    };
+    let mut keys: Vec<i64> = Vec::with_capacity(items.len() * k);
+    for v in items.iter() {
+        let Value::Vector(vec) = v else {
+            return false;
+        };
+        if vec.len() != k {
+            return false;
+        }
+        for i in 0..k {
+            match vec.read_at(i, int_item) {
+                Some(n) => keys.push(n),
+                None => return false,
+            }
+        }
+    }
+    let key = |i: usize| &keys[i * k..(i + 1) * k];
+    let mut idx: Vec<usize> = (0..items.len()).collect();
+    idx.sort_by(|&a, &b| key(a).cmp(key(b)));
+    permute(items, &idx);
+    true
+}
+
+/// An `Int` item's value.
+fn int_item(v: &Value) -> Option<i64> {
+    match v {
+        Value::Int(n) => Some(*n),
+        _ => None,
+    }
+}
+
 /// Default `sort` order: homogeneous fast paths first, then the
 /// generic `jvm_compare` machinery for mixed or other items.
 fn sort_default(items: &mut [Value]) -> Result<(), NativeError> {
     if sort_all_ints(items)
         || sort_all_ascii_strs(items)
         || sort_str_int_pairs(items)
+        || sort_int_tuples(items)
         || sort_int_vectors(items)
     {
         return Ok(());
@@ -1762,7 +1812,10 @@ pub(crate) const SEQS_NATIVES: &[(&str, NativeFnPtr)] = &[
 
 #[cfg(test)]
 mod sort_fast_path_tests {
-    use super::{cmp_int_vectors, cmp_ints, cmp_str_int_pair, cmp_strs, sort_by_index};
+    use super::{
+        MAX_TUPLE, cmp_int_vectors, cmp_ints, cmp_str_int_pair, cmp_strs, sort_by_index,
+        sort_int_tuples,
+    };
     use clj_value::{Value, Vector};
     use std::cmp::Ordering;
     use std::sync::Arc;
@@ -1817,6 +1870,42 @@ mod sort_fast_path_tests {
         assert_eq!(cmp_int_vectors(&ints(&[1]), &ints(&[1, 0])), Ordering::Less);
         let strs = |s: &str| Value::Vector(Vector::from_vec(vec![Value::Str(Arc::from(s))]));
         assert_eq!(cmp_int_vectors(&strs("a"), &strs("b")), Ordering::Equal);
+    }
+
+    /// Keyed tuples sort as the int-vector lane does on vectors of
+    /// one length, stably: duplicate keys keep input order (every
+    /// item is a distinct vector, told apart by its identity, which
+    /// `=` ignores); every other shape falls through.
+    #[test]
+    fn int_tuples_match_the_vector_lane() {
+        let item = |i: usize| ints(&[(i as i64 * 7) % 5, (i as i64 * 3) % 4, i as i64 % 2]);
+        let ids = |items: &[Value]| -> Vec<u64> {
+            let id = |v: &Value| if let Value::Vector(v) = v { v.id() } else { 0 };
+            items.iter().map(id).collect()
+        };
+        for n in [1usize, 2, 63, 64, 500] {
+            let mut keyed: Vec<Value> = (0..n).map(item).collect();
+            let mut lane = keyed.clone();
+            assert!(sort_int_tuples(&mut keyed));
+            lane.sort_by(cmp_int_vectors);
+            assert_eq!(keyed, lane, "n={n}");
+            assert_eq!(ids(&keyed), ids(&lane), "stable n={n}");
+        }
+        let long = vec![0i64; MAX_TUPLE + 1];
+        for mut items in [
+            vec![],
+            vec![ints(&[])],
+            vec![ints(&long)],
+            vec![ints(&[1, 2]), ints(&[1])],
+            vec![ints(&[1]), Value::Int(1)],
+            vec![
+                ints(&[1]),
+                Value::Vector(Vector::from_vec(vec![Value::Bool(true)])),
+            ],
+            vec![Value::Int(1)],
+        ] {
+            assert!(!sort_int_tuples(&mut items));
+        }
     }
 
     /// The index permutation applies the same stable order as a

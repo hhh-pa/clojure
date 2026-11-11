@@ -237,6 +237,10 @@ pub struct Evaluator {
     /// Capped ([`RECUR_POOL_MAX`]): pathological nesting never
     /// parks megabytes on a long-lived evaluator.
     recur_pool: Vec<Vec<Value>>,
+    /// Whether a `loop` compiles its unboxed program (`vm_scalar`) at
+    /// its first entry rather than once it runs hot (see
+    /// [`set_eager_tier`](Self::set_eager_tier)).
+    pub(crate) eager_tier: bool,
 }
 
 /// Pooled `recur` buffers retained per evaluator (see
@@ -328,6 +332,7 @@ impl Evaluator {
             root_epoch: 0,
             call_depth: 0,
             recur_pool: Vec::new(),
+            eager_tier: false,
         }
     }
 
@@ -386,6 +391,7 @@ impl Evaluator {
             // A fork starts with an empty pool (buffers never
             // cross threads).
             recur_pool: Vec::new(),
+            eager_tier: self.eager_tier,
         }
     }
 
@@ -868,7 +874,7 @@ impl Evaluator {
         }
         self.registry.bump_eval_seq();
         let expr = self.analyze(&expanded).map_err(|e| self.compile_err(e))?;
-        let code = crate::vm::compile_top(&expr, &self.registry);
+        let code = crate::vm::compile_top(&expr);
         match crate::vm::run_top(self, &code) {
             Ok(v) => Ok(v),
             Err(s) => Err(uncaught(s)),
@@ -950,6 +956,14 @@ impl Evaluator {
     /// this, like `var-set`).
     pub fn set_binding_top(&mut self, id: u64, value: Value) -> bool {
         self.bindings.set_top(id, value)
+    }
+
+    /// Compile each `loop`'s unboxed program (`vm_scalar`) at the
+    /// loop's first entry instead of once it has run hot (#254): the
+    /// tier then runs every loop it covers from the start, as tests
+    /// driving it with single runs need. Forks inherit the setting.
+    pub fn set_eager_tier(&mut self, on: bool) {
+        self.eager_tier = on;
     }
 
     /// Whether a var has a thread-local entry (`thread-bound?`).
@@ -1279,9 +1293,8 @@ impl Evaluator {
             ),
             Expr::If { test, then, els } => self.eval_if(test, then, els, env),
             Expr::Do(exprs) => self.eval_body(exprs, env),
-            Expr::Let { bindings, body } | Expr::Loop { bindings, body } => {
-                self.eval_let_or_loop(expr, bindings, body, env)
-            }
+            Expr::Let { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
+            Expr::Loop { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
             Expr::LetFn { fns, body } => self.eval_letfn(fns, body, env),
             Expr::Fn(fun) => Ok(Value::Extension(Arc::new(self.make_closure(fun, env)))),
             Expr::Recur(args) => {

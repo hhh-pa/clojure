@@ -161,9 +161,12 @@ pub enum Expr {
         bindings: Vec<(Pattern, Expr)>,
         body: Vec<Expr>,
     },
+    /// The body is `Arc`-shared: a loop's unboxed program builds
+    /// from it when the loop turns hot (`vm_scalar`), after the
+    /// analyzed form itself may be gone.
     Loop {
         bindings: Vec<(Pattern, Expr)>,
-        body: Vec<Expr>,
+        body: Arc<[Expr]>,
     },
     LetFn {
         fns: Vec<(String, FunExpr)>,
@@ -4181,7 +4184,7 @@ impl<'a> Analyzer<'a> {
         if is_loop {
             Ok(Expr::Loop {
                 bindings: bindings_out,
-                body,
+                body: body.into(),
             })
         } else {
             Ok(Expr::Let {

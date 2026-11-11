@@ -431,6 +431,83 @@ transients, a full log) and the heavy-logging give-up; mutation
 checks confirmed that dropping the rollback or logging nothing
 fails them.
 
+### 1.11 Int-tuple sort, `let` destructuring and lazy compile (landed)
+
+After §1.10 the two tightest gate margins were kruskal tc5 (1.032x
+CPython, the worst `recipes` INS on `edb88162`) and
+shortest_path tc8/tc0 (1.129x master, the worst `recipes-rsrs` INS:
+a 23M startup-bound case).
+
+- **Int-tuple sort.** `sort` with the default comparator over
+  vectors of one length, at most 8 `Int`s each (kruskal's
+  `[w u v]` edges), compares flat `i64` keys in a stable index sort
+  and permutes the vectors. The order is the general lane's (a unit
+  test compares the two).
+- **`let` destructuring in the tier.** A `let` binding a vector of
+  symbols over a collection item (`(let [[w u v] (nth edges i)] …)`)
+  reads the item's fields in place (`Co::Nth2`) when each is a
+  scalar. Loop bindings stay symbol-only.
+- **Lazy compile.** Every eligible loop used to compile its program
+  when its fn was defined: ~1.0M instructions of the dijkstra
+  snippet's load, mostly for loops that run briefly or never
+  (1,524M over 1,500 copies of the snippet). A loop now compiles
+  once it is hot:
+  - after 64 boxed `recur`s over its entries, when the rest of that
+    entry runs on the program (an iteration boundary holds the
+    whole state in the loop's registers, as entry does, and a miss
+    hands back from where it left the state, as before);
+  - or at its 32nd entry, when its boxed history (entries, trips)
+    is as long as the trip rule judges: too short a trip compiles
+    nothing, and the loop stops counting.
+
+  The compile reads the loop's scope from a snapshot taken when
+  the loop compiled boxed (the registers of the visible locals, the
+  `letfn` names, the captures; every local the body reads has its
+  place by then), and the var roots when it runs. Only a cold loop
+  counts its iterations: the boxed roads are monomorphized, and the
+  plain ones run the code they ran before.
+  `Evaluator::set_eager_tier` compiles at first entry instead (the
+  tier tests drive it with single runs).
+- **Judging.** The trip rule starts from the boxed history, so it
+  judges a loop's first entries, as before, however late the
+  program compiles. A new rule covers what the history cannot see:
+  a program whose first 32 runs all miss within 8 iterations leaves
+  the tier (count_strings' matrix rows miss at their first nonzero
+  cell). One long run among them keeps the program: boyer_moore's
+  shift loop misses at once on most entries and runs thousands of
+  iterations on a few.
+
+Local macOS retired instructions (`edb88162` → this slice; master
+for reference):
+
+| Case | Master | Before | After |
+| --- | --- | --- | --- |
+| kruskal tc5 | 192.5M | 182.6M | 118.9M (−34.9%) |
+| dijkstrashortreach tc8 | 45.9M | 46.2M | 45.1M |
+| dijkstra snippet load ×1500 | 16,303M | 17,827M | 16,303M |
+| suffix_array tc8 | 2,043M | 1,457M | 1,355M (−7.0%) |
+| count_strings tc8 | 1,156M | 1,083M | 1,117M (+3.1%) |
+| boyer_moore tc9 | 221.8M | 129.5M | 129.6M |
+
+A late compile shifts which entries some judged loops sample, so a
+few programs land on the other side of the trip rule (count_strings
+tc8 +3.1%, suffix_array tc8 −7.0%). Full local sweep against the
+eager build: 1562 cases, 0 wrong outputs, total instructions
++0.06%, median ratio 1.000. Peak RSS rose on a few macOS runs with
+big growing transients (suffix_array tc7 23.8 → 30.7 MB, master
+29.7 MB): the eager build with only the loop body moved behind an
+`Arc` reproduces it, and a variant of the snippet peaks at 30.6 MB
+on either build, so it tracks allocation layout rather than the
+tier. On `edb88162` the Linux gate measured these cases at
+0.94–1.01x master (18.3 MB on suffix_array tc7); the gate decides.
+
+`tests/scalar_loop.rs` holds 155 rows and 23 setup rows run with
+the eager setting, plus 12 lazy rows on the default: hand-overs
+that finish and that miss on flat and fused bodies, a hot body with
+no program, the 32nd-entry decision both ways, the miss rule, and
+outer locals reaching the late compile through registers, captures
+and the fn's own name. All are checked against JVM Clojure 1.12.
+
 ## Part 2 — Technical specification
 
 ### 2.1 Current execution tiers (source of truth)

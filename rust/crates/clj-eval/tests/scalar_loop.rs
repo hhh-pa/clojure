@@ -6,7 +6,8 @@
 // the terms of this license.
 
 //! #254 unboxed loop tier (`vm_scalar`): every expression, test,
-//! statement, effect and exit shape the tier lowers, and every miss
+//! statement, effect and exit shape the tier lowers (with `let`
+//! destructuring of an `nth`), and every miss
 //! it hands back to the boxed tiers (overflow, non-scalar state or
 //! invariants, frozen/map/persistent effect targets, out-of-range
 //! and non-integer indexes, a redefined site, unsupported forms) —
@@ -15,7 +16,9 @@
 //! aliased transients, a full undo log). Every row runs twice —
 //! compiled by the VM and on the tree evaluator (inside
 //! `(binding [] …)`) — and both must give the JVM's value (Clojure
-//! 1.12).
+//! 1.12). The VM runs compile each loop's program at its first entry
+//! (`set_eager_tier`); the lazy rows run the default, where a loop
+//! compiles once it runs hot.
 
 use clj_eval::{Evaluator, boot};
 use clj_value::{PrintOpts, pr_to_string};
@@ -31,9 +34,16 @@ fn show(eval: &mut Evaluator, form: &str) -> String {
     pr_to_string(vs.last().unwrap(), &PrintOpts::print())
 }
 
+/// An evaluator whose loops compile their programs at first entry.
+fn eager() -> Evaluator {
+    let mut eval = boot();
+    eval.set_eager_tier(true);
+    eval
+}
+
 fn check(rows: &[(&str, &str)]) {
     for (form, want) in rows {
-        let mut eval = boot();
+        let mut eval = eager();
         assert_eq!(show(&mut eval, form), *want, "VM: {form}");
         let mut eval = boot();
         let tree = format!("(binding [] {form})");
@@ -594,6 +604,71 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"(let [t (transient [0 0]) s "ab"] (try (loop [i 0] (if (= i 2) :done (do (assoc! t i (nth s i)) (recur (+ i (nth t 5)))))) (catch Exception e [(persistent! t) (.getName (class e))])))"#,
         r#"[[\a 0] "java.lang.IndexOutOfBoundsException"]"#,
     ),
+    (
+        r#"(let [v [[1 2 3] [4 5 6]]] (loop [i 0 acc 0] (if (= i 2) acc (let [[a b c] (nth v i)] (recur (inc i) (+ acc a b c))))))"#,
+        r#"21"#,
+    ),
+    (
+        r#"(let [v [[1 2] [3]]] (loop [i 0 acc 0] (if (= i 2) acc (let [[a b] (nth v i)] (recur (inc i) (+ acc a (if (nil? b) 100 b)))))))"#,
+        r#"106"#,
+    ),
+    (
+        r#"(let [v [[1 2] 5]] (try (loop [i 0 acc 0] (if (= i 2) acc (let [[a b] (nth v i)] (recur (inc i) (+ acc a b))))) (catch Exception e (.getName (class e)))))"#,
+        r#""java.lang.UnsupportedOperationException""#,
+    ),
+    (
+        r#"(let [s "ab"] (try (loop [i 0 acc 0] (if (= i 2) acc (let [[a] (nth s i)] (recur (inc i) (+ acc a))))) (catch Exception e (.getName (class e)))))"#,
+        r#""java.lang.UnsupportedOperationException""#,
+    ),
+    (
+        r#"(let [t (transient [[1 2] [3 4]])] (loop [i 0 acc 0] (if (= i 2) acc (let [[a b] (nth t i)] (recur (inc i) (+ acc (* a b)))))))"#,
+        r#"14"#,
+    ),
+    (
+        r#"(let [v [[:x 1] [2 3]]] (loop [i 0 acc []] (if (= i 2) acc (let [[a b] (nth v i)] (recur (inc i) (conj acc a b))))))"#,
+        r#"[:x 1 2 3]"#,
+    ),
+    (
+        r#"(let [v [[1 2 3]]] (loop [i 0 acc 0] (if (= i 1) acc (let [[a & r :as all] (nth v i)] (recur (inc i) (+ acc a (count r) (count all)))))))"#,
+        r#"6"#,
+    ),
+    (
+        r#"(let [v [[[1] 2]]] (loop [i 0 acc 0] (if (= i 1) acc (let [[[a] b] (nth v i)] (recur (inc i) (+ acc a b))))))"#,
+        r#"3"#,
+    ),
+    (
+        r#"(loop [i 0 acc 0] (if (= i 2) acc (let [[a b] [i (* 2 i)]] (recur (inc i) (+ acc a b)))))"#,
+        r#"3"#,
+    ),
+    (
+        r#"(let [v [[1 2]]] (loop [i 0 acc 0] (if (= i 2) acc (let [[a b] (nth v i [7 8])] (recur (inc i) (+ acc a b))))))"#,
+        r#"18"#,
+    ),
+    (
+        r#"(let [v [[1 2] [3 4]] t (transient [])] (loop [i 0] (if (= i 2) (persistent! t) (let [[a b] (nth v i)] (conj! t (+ a b)) (recur (inc i))))))"#,
+        r#"[3 7]"#,
+    ),
+    (
+        r#"(let [v [[1 2] [3 4]]] (loop [i 0 acc 0] (if (= i 2) acc (recur (inc i) (+ acc (let [[a b] (nth v i)] (* a b)))))))"#,
+        r#"14"#,
+    ),
+    (
+        r#"(vec (sort [[3 1 2] [1 2 3] [1 2 2] [3 0 0] [1 2 2]]))"#,
+        r#"[[1 2 2] [1 2 2] [1 2 3] [3 0 0] [3 1 2]]"#,
+    ),
+    (
+        r#"(loop [i 0 a 0] (if (< i 3) (recur (inc i) (+ a (let [{:keys [k]} {:k i}] k))) a))"#,
+        r#"3"#,
+    ),
+    (
+        r#"(loop [i 0] (if (< i 3) (recur (inc i)) (let [x i])))"#,
+        r#"nil"#,
+    ),
+    (r#"(loop [i 0])"#, r#"nil"#),
+    (
+        r#"(loop [i 0] (if (< i 3) (recur (inc i)) (do)))"#,
+        r#"nil"#,
+    ),
 ];
 
 #[test]
@@ -716,12 +791,22 @@ const JVM_CALL_ROWS: &[(&str, &str, &str)] = &[
         r#"(let [t (transient [])] (dotimes [i 40] (lt-row t i)) (reduce + (persistent! t)))"#,
         r#"5040"#,
     ),
+    (
+        r#"(defn kr-root! [parent x] (let [root (loop [curr x] (let [p (nth parent curr)] (if (= p curr) curr (recur p))))] (loop [curr x] (if (= curr root) root (let [nxt (nth parent curr)] (assoc! parent curr root) (recur nxt))))))"#,
+        r#"(let [edges [[4 1 2] [1 2 3] [3 1 3] [2 3 4] [5 1 4] [1 4 5]] sorted (vec (sort edges)) m (count sorted) parent (transient (vec (range 6))) sizes (transient (vec (repeat 6 1)))] (loop [i 0 total 0] (if (= i m) total (let [[w u v] (nth sorted i) ru (kr-root! parent u) rv (kr-root! parent v)] (if (= ru rv) (recur (inc i) total) (let [su (nth sizes ru) sv (nth sizes rv)] (if (>= su sv) (do (assoc! parent rv ru) (assoc! sizes ru (+ su sv)) (recur (inc i) (+ total w))) (do (assoc! parent ru rv) (assoc! sizes rv (+ su sv)) (recur (inc i) (+ total w))))))))))"#,
+        r#"7"#,
+    ),
+    (
+        r#"(defn lz-in [x] (if (and (> x 2) (< x 7)) 1 0))"#,
+        r#"(loop [i 0 a 0] (if (< i 10) (recur (inc i) (+ a (lz-in i))) a))"#,
+        r#"4"#,
+    ),
 ];
 
 #[test]
 fn inlined_calls_match_the_jvm() {
     for (setup, form, want) in JVM_CALL_ROWS {
-        let mut eval = boot();
+        let mut eval = eager();
         eval.eval_source(setup)
             .unwrap_or_else(|e| panic!("{setup}: {e}"));
         assert_eq!(show(&mut eval, form), *want, "VM: {form}");
@@ -741,7 +826,7 @@ fn inlined_calls_match_the_jvm() {
 #[test]
 fn inlined_calls_keep_the_call_depth_limit() {
     const SO: &str = "THROW java.lang.StackOverflowError: ";
-    let mut eval = boot();
+    let mut eval = eager();
     eval.eval_source(
         "(defn d-g [x] (inc x))
          (let [k 1] (defn d-h [x] (+ x k)))
@@ -760,5 +845,72 @@ fn inlined_calls_keep_the_call_depth_limit() {
         let at = |n: i32| format!("(d-deep {run} {n})");
         assert_eq!(show(&mut eval, &at(deepest - 1)), "6", "{run}");
         assert_eq!(show(&mut eval, &at(deepest)), SO, "{run}");
+    }
+}
+
+/// Lazy compile (the default): a loop runs boxed until it has
+/// `recur`ed 64 times (then hands the rest of the run to its program:
+/// flat and fused bodies, a program that finishes, one that misses,
+/// a body with no program) or has been entered 32 times (then its
+/// boxed history decides: too short a trip compiles nothing); a
+/// program whose first runs all miss early leaves the tier. Outer
+/// locals reach the late compile through registers, captures and the
+/// fn's own name.
+const LAZY_ROWS: &[(&str, &str)] = &[
+    (
+        r#"(loop [i 0 a 0] (if (< i 200) (let [b (* i 2)] (recur (inc i) (+ a b))) a))"#,
+        r#"39800"#,
+    ),
+    (
+        r#"(let [v (vec (range 300))] (loop [i 0 a 0] (if (< i 300) (recur (inc i) (+ a (nth v i))) a)))"#,
+        r#"44850"#,
+    ),
+    (
+        r#"(let [v (vec (concat (range 100) [10N] (range 10)))] (loop [i 0 a 0] (if (< i (count v)) (let [x (nth v i)] (recur (inc i) (+ a x))) a)))"#,
+        r#"5005N"#,
+    ),
+    (
+        r#"(let [v (vec (concat (range 100) [10N] (range 10)))] (loop [i 0 a 0] (if (< i (count v)) (recur (inc i) (+ a (nth v i))) a)))"#,
+        r#"5005N"#,
+    ),
+    (
+        r#"(loop [i 0 m {}] (if (< i 100) (recur (inc i) (assoc m (rem i 7) i)) (count m)))"#,
+        r#"7"#,
+    ),
+    (
+        r#"(loop [i 0 m {}] (if (< i 100) (let [k (rem i 7)] (recur (inc i) (assoc m k i))) (count m)))"#,
+        r#"7"#,
+    ),
+    (
+        r#"(do (defn lz-one [x] (loop [j x] (if (> j 0) j (recur (inc j))))) (reduce + (map lz-one (range 1 41))))"#,
+        r#"820"#,
+    ),
+    (
+        r#"(do (defn lz-two [v x] (loop [j 0 a x] (if (< j 1) (recur (inc j) (+ a (nth v j))) a))) (reduce + (map #(lz-two [5] %) (range 40))))"#,
+        r#"980"#,
+    ),
+    (
+        r#"(do (defn lz-miss [v] (loop [i 0 a 0] (if (< i (count v)) (recur (inc i) (+ a (nth v i))) a))) (reduce + (repeatedly 100 #(lz-miss [1 2N 3]))))"#,
+        r#"600N"#,
+    ),
+    (
+        r#"(let [k 5] (defn lz-cap [] (loop [i 0 a 0] (if (< i 100) (let [b (+ a k)] (recur (inc i) b)) a))) (lz-cap))"#,
+        r#"500"#,
+    ),
+    (
+        r#"(do (def lz-self (fn self [n] (loop [i 0 a 0] (if (< i 100) (let [b (+ a i)] (recur (inc i) b)) (if (pos? n) (+ a (self (dec n))) a))))) (lz-self 2))"#,
+        r#"14850"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0] (if (< i 150) (do (conj! t (* i i)) (recur (inc i))) (reduce + (persistent! t)))))"#,
+        r#"1113775"#,
+    ),
+];
+
+#[test]
+fn lazy_tier_matches_the_jvm() {
+    for (form, want) in LAZY_ROWS {
+        let mut eval = boot();
+        assert_eq!(show(&mut eval, form), *want, "lazy VM: {form}");
     }
 }
