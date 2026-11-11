@@ -447,13 +447,12 @@ mod tests {
         let plan = plan_mixed(src);
         let names: Vec<_> = plan.fns.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["a", "b"]);
-        let SubsetExpr::Do(body) = &plan.fns[1].body else {
-            panic!("do body");
-        };
-        let SubsetExpr::CallFn { index, .. } = &body[0] else {
-            panic!("call");
-        };
-        assert_eq!(*index, 0);
+        assert!(
+            matches!(&plan.fns[1].body, SubsetExpr::Do(body)
+                if matches!(&body[0], SubsetExpr::CallFn { index: 0, .. })),
+            "{:?}",
+            plan.fns[1].body
+        );
         assert!(plan.source.contains("(defn bad [x] (str x))"));
         assert!(plan.source.contains(&intern_call(1)));
         assert!(same_shape(src, &plan.source));
