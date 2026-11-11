@@ -290,6 +290,41 @@ impl TransientVector {
         }
     }
 
+    /// The item at `idx` read in place through `f` (typed storage
+    /// passes a stack copy): `None` past the end or when
+    /// invalidated. The clone-free read for callers that only
+    /// inspect the item.
+    #[inline(always)]
+    pub fn read_at<R>(&self, idx: usize, f: impl FnOnce(&Value) -> Option<R>) -> Option<R> {
+        if !self.valid {
+            return None;
+        }
+        match &self.items {
+            TransientItems::Ints(x) => f(&Value::Int(*x.get(idx)?)),
+            TransientItems::Chars(x) => f(&Value::Char(*x.get(idx)?)),
+            TransientItems::Generic(x) => f(x.get(idx)?),
+        }
+    }
+
+    /// Move the item at `idx` out of a generic buffer, leaving `nil`
+    /// until the caller writes it back with [`assoc`](Self::assoc)
+    /// (`None` when invalidated, packed, or out of bounds). The VM's
+    /// fused `(assoc! t k (conj (nth t k) x))` updates the moved item
+    /// in place, where a cloned read would leave it shared and make
+    /// `conj` copy it whole.
+    #[inline]
+    pub fn take_at(&mut self, idx: usize) -> Option<Value> {
+        if !self.valid {
+            return None;
+        }
+        match &mut self.items {
+            TransientItems::Generic(x) => x
+                .get_mut(idx)
+                .map(|slot| std::mem::replace(slot, Value::Nil)),
+            _ => None,
+        }
+    }
+
     /// Set index `idx` to an integer, returning `false` on error.
     #[inline(always)]
     pub fn assoc_int_opt(&mut self, idx: usize, n: i64) -> bool {
@@ -305,6 +340,24 @@ impl TransientVector {
                 true
             }
             _ => self.assoc(idx, Value::Int(n)).is_ok(),
+        }
+    }
+
+    /// Set index `idx` of a packed-int buffer to `n` (`idx == len`
+    /// appends), answering the replaced integer (`Some(None)` for an
+    /// append). `None` changes nothing: invalidated, another buffer,
+    /// or `idx` past the end (the caller's general road).
+    #[inline(always)]
+    pub fn swap_int(&mut self, idx: usize, n: i64) -> Option<Option<i64>> {
+        match &mut self.items {
+            TransientItems::Ints(x) if self.valid && idx < x.len() => {
+                Some(Some(std::mem::replace(&mut x[idx], n)))
+            }
+            TransientItems::Ints(x) if self.valid && idx == x.len() => {
+                x.push(n);
+                Some(None)
+            }
+            _ => None,
         }
     }
 
@@ -912,6 +965,23 @@ mod tests {
     }
 
     #[test]
+    fn take_at_moves_generic_items_only() {
+        let mut tv = TransientVector::new();
+        tv.conj(kw("a")).unwrap();
+        tv.conj(kw("b")).unwrap();
+        assert_eq!(tv.take_at(1), Some(kw("b")));
+        assert_eq!(tv.nth(1).unwrap(), Some(Value::Nil));
+        assert_eq!(tv.take_at(2), None);
+        tv.assoc(1, kw("c")).unwrap();
+        assert_eq!(tv.nth(1).unwrap(), Some(kw("c")));
+        let mut packed = TransientVector::new();
+        packed.conj_int(7).unwrap();
+        assert_eq!(packed.take_at(0), None);
+        tv.persistent().unwrap();
+        assert_eq!(tv.take_at(0), None);
+    }
+
+    #[test]
     fn error_display_matches_message() {
         assert_eq!(
             TransientError::UseAfterPersistent.to_string(),
@@ -1106,10 +1176,35 @@ mod tests {
         assert!(tc.conj_int_opt(77));
         assert_eq!(tc.nth_opt(2), Some(Value::Int(77)));
 
+        // In-place reads over every storage
+        let some = |v: &Value| Some(v.clone());
+        assert_eq!(tv.read_at(1, some), Some(Value::Int(25)));
+        assert_eq!(tv.read_at(2, some), None);
+        assert_eq!(
+            tg.read_at(0, some),
+            Some(Value::Str(std::sync::Arc::from("foo")))
+        );
+        assert_eq!(tg.read_at(2, some), None);
+        let tc2 = TransientVector::from_vector(&crate::Vector::from_chars(vec!['a', 'b']));
+        assert_eq!(tc2.read_at(1, some), Some(Value::Char('b')));
+        assert_eq!(tc2.read_at(2, some), None);
+
+        // Swapping an int in place: replace, append, and every refusal
+        let mut ts = TransientVector::new();
+        assert!(ts.conj_int_opt(1));
+        assert_eq!(ts.swap_int(0, 5), Some(Some(1)));
+        assert_eq!(ts.swap_int(1, 6), Some(None));
+        assert_eq!(ts.swap_int(3, 7), None);
+        assert_eq!(ts.nth_opt(0), Some(Value::Int(5)));
+        assert_eq!(ts.nth_opt(1), Some(Value::Int(6)));
+        assert_eq!(tg.swap_int(0, 1), None);
+
         // Invalid transient
         let mut t_inv = TransientVector::new();
         let _ = t_inv.persistent().unwrap();
         assert_eq!(t_inv.nth_opt(0), None);
+        assert_eq!(t_inv.read_at(0, some), None);
+        assert_eq!(t_inv.swap_int(0, 1), None);
         assert!(!t_inv.conj_int_opt(1));
         assert!(!t_inv.assoc_int_opt(0, 1));
 

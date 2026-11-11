@@ -754,6 +754,38 @@ fn sort_by_checked(
     Ok(())
 }
 
+/// A stable sort of 64-byte items through an index permutation:
+/// comparisons and the sort's moves traffic in `usize`s, then
+/// each item moves once when the permutation is applied. Small
+/// inputs sort in place. The comparator must be total (the
+/// specialized lanes below).
+fn sort_by_index(items: &mut [Value], cmp: fn(&Value, &Value) -> std::cmp::Ordering) {
+    if items.len() < 64 {
+        items.sort_by(cmp);
+        return;
+    }
+    let mut idx: Vec<usize> = (0..items.len()).collect();
+    idx.sort_by(|&a, &b| cmp(&items[a], &items[b]));
+    permute(items, &idx);
+}
+
+/// Apply a sort permutation in place (`idx[pos]` is the item that
+/// belongs at `pos`): each item moves once.
+fn permute(items: &mut [Value], idx: &[usize]) {
+    // dest[i]: where the item now at `i` belongs.
+    let mut dest = vec![0usize; items.len()];
+    for (pos, &src) in idx.iter().enumerate() {
+        dest[src] = pos;
+    }
+    for i in 0..items.len() {
+        while dest[i] != i {
+            let j = dest[i];
+            items.swap(i, j);
+            dest.swap(i, j);
+        }
+    }
+}
+
 /// Order two `Int` values (any other pair ties, for the
 /// guard-bypassing direct unit tests).
 fn cmp_ints(a: &Value, b: &Value) -> std::cmp::Ordering {
@@ -769,7 +801,7 @@ fn sort_all_ints(items: &mut [Value]) -> bool {
     if !items.iter().all(|v| matches!(v, Value::Int(_))) {
         return false;
     }
-    items.sort_by(cmp_ints);
+    sort_by_index(items, cmp_ints);
     true
 }
 
@@ -791,34 +823,36 @@ fn sort_all_ascii_strs(items: &mut [Value]) -> bool {
     {
         return false;
     }
-    items.sort_by(cmp_strs);
+    sort_by_index(items, cmp_strs);
     true
 }
 
-/// Whether `v` is a 2-vector `[ascii-string int]`.
+/// Whether `v` is a 2-vector `[ascii-string int]` (borrowed
+/// reads: typed storage never holds a mixed pair).
 fn is_str_int_pair(v: &Value) -> bool {
     match v {
         Value::Vector(vec) => {
             vec.len() == 2
-                && matches!(vec.get(0), Some(Value::Str(s)) if s.is_ascii())
-                && matches!(vec.get(1), Some(Value::Int(_)))
+                && matches!(vec.get_ref(0), Some(Value::Str(s)) if s.is_ascii())
+                && matches!(vec.get_ref(1), Some(Value::Int(_)))
         }
         _ => false,
     }
 }
 
-/// Order two `[ascii-string int]` pairs.
+/// Order two `[ascii-string int]` pairs (borrowed reads; a
+/// typed-storage pair cannot match the `Str` slot either way).
 fn cmp_str_int_pair(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let (Value::Vector(x), Value::Vector(y)) = (a, b) else {
         return Ordering::Equal;
     };
-    let (Some(Value::Str(p)), Some(Value::Str(q))) = (x.get(0), y.get(0)) else {
+    let (Some(Value::Str(p)), Some(Value::Str(q))) = (x.get_ref(0), y.get_ref(0)) else {
         return Ordering::Equal;
     };
-    match p.cmp(&q) {
-        Ordering::Equal => match (x.get(1), y.get(1)) {
-            (Some(Value::Int(u)), Some(Value::Int(v))) => u.cmp(&v),
+    match p.cmp(q) {
+        Ordering::Equal => match (x.get_ref(1), y.get_ref(1)) {
+            (Some(Value::Int(u)), Some(Value::Int(v))) => u.cmp(v),
             _ => Ordering::Equal,
         },
         ord => ord,
@@ -830,7 +864,7 @@ fn sort_str_int_pairs(items: &mut [Value]) -> bool {
     if items.is_empty() || !items.iter().all(is_str_int_pair) {
         return false;
     }
-    items.sort_by(cmp_str_int_pair);
+    sort_by_index(items, cmp_str_int_pair);
     true
 }
 
@@ -842,12 +876,16 @@ fn is_int_vector(v: &Value) -> bool {
     }
 }
 
-/// Order two all-`Int` vectors lexicographically.
+/// Order two all-`Int` vectors as `compare` does: the shorter
+/// first, else itemwise.
 fn cmp_int_vectors(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let (Value::Vector(x), Value::Vector(y)) = (a, b) else {
         return Ordering::Equal;
     };
+    if x.len() != y.len() {
+        return x.len().cmp(&y.len());
+    }
     for (u, w) in x.iter().zip(y.iter()) {
         if let (Value::Int(p), Value::Int(q)) = (&u, &w) {
             match p.cmp(q) {
@@ -856,7 +894,7 @@ fn cmp_int_vectors(a: &Value, b: &Value) -> std::cmp::Ordering {
             }
         }
     }
-    x.len().cmp(&y.len())
+    Ordering::Equal
 }
 
 /// Sort all-int-vector items; `false` otherwise.
@@ -864,8 +902,51 @@ fn sort_int_vectors(items: &mut [Value]) -> bool {
     if items.is_empty() || !items.iter().all(is_int_vector) {
         return false;
     }
-    items.sort_by(cmp_int_vectors);
+    sort_by_index(items, cmp_int_vectors);
     true
+}
+
+/// The longest vectors [`sort_int_tuples`] keys.
+const MAX_TUPLE: usize = 8;
+
+/// Sort vectors of one length (at most [`MAX_TUPLE`]) whose items
+/// are all `Int` by a flat copy of their items, read once: each
+/// comparison is then a slice compare, which is `compare`'s order
+/// on vectors of one length. Stable, like the other lanes; `false`
+/// for anything else.
+fn sort_int_tuples(items: &mut [Value]) -> bool {
+    let k = match items.first() {
+        Some(Value::Vector(v)) if (1..=MAX_TUPLE).contains(&v.len()) => v.len(),
+        _ => return false,
+    };
+    let mut keys: Vec<i64> = Vec::with_capacity(items.len() * k);
+    for v in items.iter() {
+        let Value::Vector(vec) = v else {
+            return false;
+        };
+        if vec.len() != k {
+            return false;
+        }
+        for i in 0..k {
+            match vec.read_at(i, int_item) {
+                Some(n) => keys.push(n),
+                None => return false,
+            }
+        }
+    }
+    let key = |i: usize| &keys[i * k..(i + 1) * k];
+    let mut idx: Vec<usize> = (0..items.len()).collect();
+    idx.sort_by(|&a, &b| key(a).cmp(key(b)));
+    permute(items, &idx);
+    true
+}
+
+/// An `Int` item's value.
+fn int_item(v: &Value) -> Option<i64> {
+    match v {
+        Value::Int(n) => Some(*n),
+        _ => None,
+    }
 }
 
 /// Default `sort` order: homogeneous fast paths first, then the
@@ -874,6 +955,7 @@ fn sort_default(items: &mut [Value]) -> Result<(), NativeError> {
     if sort_all_ints(items)
         || sort_all_ascii_strs(items)
         || sort_str_int_pairs(items)
+        || sort_int_tuples(items)
         || sort_int_vectors(items)
     {
         return Ok(());
@@ -1734,7 +1816,10 @@ pub(crate) const SEQS_NATIVES: &[(&str, NativeFnPtr)] = &[
 
 #[cfg(test)]
 mod sort_fast_path_tests {
-    use super::{cmp_int_vectors, cmp_ints, cmp_str_int_pair, cmp_strs};
+    use super::{
+        MAX_TUPLE, cmp_int_vectors, cmp_ints, cmp_str_int_pair, cmp_strs, sort_by_index,
+        sort_int_tuples,
+    };
     use clj_value::{Value, Vector};
     use std::cmp::Ordering;
     use std::sync::Arc;
@@ -1789,5 +1874,63 @@ mod sort_fast_path_tests {
         assert_eq!(cmp_int_vectors(&ints(&[1]), &ints(&[1, 0])), Ordering::Less);
         let strs = |s: &str| Value::Vector(Vector::from_vec(vec![Value::Str(Arc::from(s))]));
         assert_eq!(cmp_int_vectors(&strs("a"), &strs("b")), Ordering::Equal);
+    }
+
+    /// Keyed tuples sort as the int-vector lane does on vectors of
+    /// one length, stably: duplicate keys keep input order (every
+    /// item is a distinct vector, told apart by its identity, which
+    /// `=` ignores); every other shape falls through.
+    #[test]
+    fn int_tuples_match_the_vector_lane() {
+        let item = |i: usize| ints(&[(i as i64 * 7) % 5, (i as i64 * 3) % 4, i as i64 % 2]);
+        let ids = |items: &[Value]| -> Vec<u64> {
+            let id = |v: &Value| if let Value::Vector(v) = v { v.id() } else { 0 };
+            items.iter().map(id).collect()
+        };
+        for n in [1usize, 2, 63, 64, 500] {
+            let mut keyed: Vec<Value> = (0..n).map(item).collect();
+            let mut lane = keyed.clone();
+            assert!(sort_int_tuples(&mut keyed));
+            lane.sort_by(cmp_int_vectors);
+            assert_eq!(keyed, lane, "n={n}");
+            assert_eq!(ids(&keyed), ids(&lane), "stable n={n}");
+        }
+        let long = vec![0i64; MAX_TUPLE + 1];
+        for mut items in [
+            vec![],
+            vec![ints(&[])],
+            vec![ints(&long)],
+            vec![ints(&[1, 2]), ints(&[1])],
+            vec![ints(&[1]), Value::Int(1)],
+            vec![
+                ints(&[1]),
+                Value::Vector(Vector::from_vec(vec![Value::Bool(true)])),
+            ],
+            vec![Value::Int(1)],
+        ] {
+            assert!(!sort_int_tuples(&mut items));
+        }
+    }
+
+    /// The index permutation applies the same stable order as a
+    /// direct sort (duplicate keys keep input order), above and
+    /// below the in-place threshold.
+    #[test]
+    fn index_sort_matches_direct_sort() {
+        fn pair(word: String, tag: i64) -> Value {
+            Value::Vector(Vector::from_vec(vec![
+                Value::Str(Arc::from(word)),
+                Value::Int(tag),
+            ]))
+        }
+        for n in [0usize, 1, 63, 64, 65, 500] {
+            let mut by_index: Vec<Value> = (0..n)
+                .map(|i| pair(format!("w{}", (i * 37) % 11), i as i64))
+                .collect();
+            let mut direct = by_index.clone();
+            sort_by_index(&mut by_index, cmp_str_int_pair);
+            direct.sort_by(cmp_str_int_pair);
+            assert_eq!(by_index, direct, "n={n}");
+        }
     }
 }

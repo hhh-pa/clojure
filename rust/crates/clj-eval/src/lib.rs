@@ -65,6 +65,7 @@ pub(crate) mod vm;
 pub(crate) mod vm_intrinsics;
 pub(crate) mod vm_live;
 pub(crate) mod vm_ops;
+pub(crate) mod vm_scalar;
 // W6 (runtime-ish) — do not merge by hand, integrator resolves.
 pub mod w6_runtime;
 pub mod xform;

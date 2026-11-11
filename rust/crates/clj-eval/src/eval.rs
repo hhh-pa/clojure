@@ -237,6 +237,10 @@ pub struct Evaluator {
     /// Capped ([`RECUR_POOL_MAX`]): pathological nesting never
     /// parks megabytes on a long-lived evaluator.
     recur_pool: Vec<Vec<Value>>,
+    /// Whether a `loop` compiles its unboxed program (`vm_scalar`) at
+    /// its first entry rather than once it runs hot (see
+    /// [`set_eager_tier`](Self::set_eager_tier)).
+    pub(crate) eager_tier: bool,
 }
 
 /// Pooled `recur` buffers retained per evaluator (see
@@ -328,6 +332,7 @@ impl Evaluator {
             root_epoch: 0,
             call_depth: 0,
             recur_pool: Vec::new(),
+            eager_tier: false,
         }
     }
 
@@ -386,6 +391,7 @@ impl Evaluator {
             // A fork starts with an empty pool (buffers never
             // cross threads).
             recur_pool: Vec::new(),
+            eager_tier: self.eager_tier,
         }
     }
 
@@ -952,6 +958,14 @@ impl Evaluator {
         self.bindings.set_top(id, value)
     }
 
+    /// Compile each `loop`'s unboxed program (`vm_scalar`) at the
+    /// loop's first entry instead of once it has run hot (#254): the
+    /// tier then runs every loop it covers from the start, as tests
+    /// driving it with single runs need. Forks inherit the setting.
+    pub fn set_eager_tier(&mut self, on: bool) {
+        self.eager_tier = on;
+    }
+
     /// Whether a var has a thread-local entry (`thread-bound?`).
     pub(crate) fn is_thread_bound(&self, id: u64) -> bool {
         self.bindings.get(id).is_some()
@@ -1096,18 +1110,77 @@ impl Evaluator {
     /// line.
     #[inline(always)]
     pub(crate) fn site_direct_valid(&mut self, site: usize, call: &DirectCall) -> bool {
-        let now = (self.registry.epoch(), self.bindings.version());
-        self.vm_direct.get(site) == Some(&now) || self.site_direct_check(site, call)
+        self.site_root_valid(site, &call.var, &call.expect)
     }
 
-    /// [`site_direct_valid`](Self::site_direct_valid)'s miss: check
-    /// the var and record a valid verdict under the current epochs.
+    /// [`site_direct_valid`](Self::site_direct_valid) over a var and
+    /// the root it must still hold (also an inlined closure's site,
+    /// see `vm_scalar`).
+    #[inline(always)]
+    pub(crate) fn site_root_valid(
+        &mut self,
+        site: usize,
+        var: &Var,
+        expect: &Arc<dyn clj_value::ExtensionValue>,
+    ) -> bool {
+        let now = (self.registry.epoch(), self.bindings.version());
+        self.vm_direct.get(site) == Some(&now) || self.site_root_check(site, var, expect)
+    }
+
+    /// Whether `depth` more nested calls fit under the call-depth
+    /// limit (an inlined call skips [`guarded_call`](Self::guarded_call)'s
+    /// check, so a program with inlined calls enters only when every
+    /// real call would have passed it).
+    pub(crate) fn calls_fit(&self, depth: usize) -> bool {
+        self.call_depth + depth <= MAX_CALL_DEPTH
+    }
+
+    /// Whether a group of sites (one id for many) still validates:
+    /// the cached verdict answers inline, else `check` re-validates
+    /// every member and a valid verdict is recorded under the
+    /// current epochs (read after the check, which may have forced
+    /// a lazy var).
+    pub(crate) fn group_valid(
+        &mut self,
+        gid: usize,
+        check: impl FnOnce(&mut Self) -> bool,
+    ) -> bool {
+        let now = (self.registry.epoch(), self.bindings.version());
+        if self.vm_direct.get(gid) == Some(&now) {
+            return true;
+        }
+        let ok = check(self);
+        if ok {
+            if self.vm_direct.len() <= gid {
+                self.vm_direct.resize(gid + 1, (u64::MAX, u64::MAX));
+            }
+            self.vm_direct[gid] = (self.registry.epoch(), self.bindings.version());
+        }
+        ok
+    }
+
+    /// The epochs a cached direct verdict is keyed by: while a
+    /// snapshot is unchanged, every site validated under it
+    /// still validates (no root in the lineage was written and
+    /// this evaluator's bindings did not change).
+    #[inline(always)]
+    pub(crate) fn direct_snapshot(&self) -> (u64, u64) {
+        (self.registry.epoch(), self.bindings.version())
+    }
+
+    /// [`site_root_valid`](Self::site_root_valid)'s miss: check the
+    /// var and record a valid verdict under the current epochs.
     #[cold]
     #[inline(never)]
-    fn site_direct_check(&mut self, site: usize, call: &DirectCall) -> bool {
-        let valid = self.bindings.get(call.var.id).is_none()
-            && matches!(self.deref_var_cached(call.var.id, &call.var.sym),
-                Value::Extension(e) if Arc::ptr_eq(&e, &call.expect));
+    fn site_root_check(
+        &mut self,
+        site: usize,
+        var: &Var,
+        expect: &Arc<dyn clj_value::ExtensionValue>,
+    ) -> bool {
+        let valid = self.bindings.get(var.id).is_none()
+            && matches!(self.deref_var_cached(var.id, &var.sym),
+                Value::Extension(e) if Arc::ptr_eq(&e, expect));
         if valid {
             if self.vm_direct.len() <= site {
                 self.vm_direct.resize(site + 1, (u64::MAX, u64::MAX));
@@ -1220,9 +1293,8 @@ impl Evaluator {
             ),
             Expr::If { test, then, els } => self.eval_if(test, then, els, env),
             Expr::Do(exprs) => self.eval_body(exprs, env),
-            Expr::Let { bindings, body } | Expr::Loop { bindings, body } => {
-                self.eval_let_or_loop(expr, bindings, body, env)
-            }
+            Expr::Let { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
+            Expr::Loop { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
             Expr::LetFn { fns, body } => self.eval_letfn(fns, body, env),
             Expr::Fn(fun) => Ok(Value::Extension(Arc::new(self.make_closure(fun, env)))),
             Expr::Recur(args) => {
@@ -1237,13 +1309,13 @@ impl Evaluator {
                 Err(Signal::Recur(values))
             }
             Expr::Throw(inner) => self.eval_throw(inner, env),
-            Expr::NewThrowable { class, message } => Ok(Value::Throwable(Throwable {
+            Expr::NewThrowable { class, message } => Ok(Value::Throwable(Arc::new(Throwable {
                 id: self.next_id(),
                 class: *class,
                 message: Some(Arc::from(message.as_str())),
                 data: None,
                 cause: None,
-            })),
+            }))),
             Expr::Try {
                 body,
                 catches,
@@ -1436,7 +1508,9 @@ impl Evaluator {
     /// anything else the cast (or `nil`) error.
     pub(crate) fn throw_value(&mut self, value: Value) -> Signal {
         match value {
-            Value::Throwable(t) => Signal::Throw(t),
+            Value::Throwable(t) => {
+                Signal::Throw(Arc::try_unwrap(t).unwrap_or_else(|a| (*a).clone()))
+            }
             // `nil` is not the cast error: the JVM throws a
             // Clojure-constructed NPE with stable text (probe29).
             Value::Nil => self.throw(NativeError::new(
@@ -2170,7 +2244,7 @@ impl Evaluator {
                 let thrown = try_thrown(signal).expect("recur cannot cross try");
                 for catch in catches {
                     if thrown.class.matches(&catch.class) {
-                        let env = env.extend(vec![Value::Throwable(thrown.clone())]);
+                        let env = env.extend(vec![Value::Throwable(Arc::new(thrown.clone()))]);
                         debug_assert_eq!(env.len() - 1, catch.slot, "catch binds one slot");
                         let result = self.eval_body(&catch.body, &env);
                         // `finally` still runs when the handler throws.

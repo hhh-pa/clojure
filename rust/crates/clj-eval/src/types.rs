@@ -836,7 +836,7 @@ fn new_throwable(
     let (message, cause) = match args {
         [] => (None, None),
         [Value::Str(s)] => (Some(Arc::from(s.as_ref())), None),
-        [Value::Throwable(t)] => (Some(throwable_string(t)), Some(t.clone())),
+        [Value::Throwable(t)] => (Some(throwable_string(t)), Some((**t).clone())),
         [Value::Nil] => {
             return Err(NativeError::new(
                 ThrowClass::IllegalArgumentException,
@@ -844,18 +844,18 @@ fn new_throwable(
             ));
         }
         [_] => return Err(crate::ctor::no_ctor(name, false)),
-        [Value::Str(s), Value::Throwable(t)] => (Some(Arc::from(s.as_ref())), Some(t.clone())),
+        [Value::Str(s), Value::Throwable(t)] => (Some(Arc::from(s.as_ref())), Some((**t).clone())),
         [Value::Str(s), Value::Nil] => (Some(Arc::from(s.as_ref())), None),
         [_, _] => return Err(crate::ctor::no_ctor(name, false)),
         _ => return Err(crate::ctor::no_ctor(name, false)),
     };
-    Ok(Value::Throwable(Throwable {
+    Ok(Value::Throwable(std::sync::Arc::new(Throwable {
         id: eval.next_id(),
         class,
         message,
         data: None,
         cause: cause.map(Box::new),
-    }))
+    })))
 }
 
 /// A throwable's `toString` (`Class: message`, bare class when

@@ -191,6 +191,12 @@ impl Site {
             call,
         }
     }
+
+    /// Whether the site still resolves to its analyzed native
+    /// (the same verdict the shape closures check per call).
+    pub(crate) fn valid(&self, ev: &mut Evaluator) -> bool {
+        ev.site_direct_valid(self.sid, &self.call)
+    }
 }
 
 /// The miss: the native over the operands' values (re-validated:
@@ -1067,6 +1073,95 @@ impl Upd for Assoc {
     }
 }
 
+/// A local or literal operand of the fused transient update (see
+/// [`assoc_conj_code`]), read in place.
+pub(crate) enum InPlace {
+    Reg(usize),
+    Up(usize),
+    Kst(Value),
+}
+
+impl InPlace {
+    #[inline(always)]
+    fn get<'v>(&'v self, f: &'v Frame<'_>) -> &'v Value {
+        match self {
+            InPlace::Reg(r) => &f.regs[*r],
+            InPlace::Up(u) => &f.up[*u],
+            InPlace::Kst(v) => v,
+        }
+    }
+}
+
+/// The fused update's appended operand: side-effect free, so it
+/// may evaluate before the slot's item is read.
+pub(crate) enum PureSrc {
+    One(InPlace),
+    /// A vector literal (no metadata) of locals and literals.
+    Vec(Box<[InPlace]>),
+}
+
+impl PureSrc {
+    fn value(&self, f: &Frame<'_>) -> Value {
+        match self {
+            PureSrc::One(s) => s.get(f).clone(),
+            PureSrc::Vec(items) => Value::Vector(clj_value::Vector::from_vec(
+                items.iter().map(|s| s.get(f).clone()).collect(),
+            )),
+        }
+    }
+}
+
+/// `(assoc! t k (conj (nth t k) x))` over a transient local `t`, the
+/// same key `k` in both places, and a pure `x` (see
+/// `Compiler::try_assoc_conj`). The generic road's `nth` clones the
+/// slot's item, so `conj` sees it shared and copies it whole (an
+/// O(n) append per edge in adjacency builds). Here the item moves
+/// out of the transient, takes `x` in place through [`Conj`], and
+/// moves back. The three sites validate first, and any miss runs
+/// `generic`, whose results and errors are the natives'.
+pub(crate) fn assoc_conj_code(
+    sites: [Site; 3],
+    t: InPlace,
+    k: InPlace,
+    x: PureSrc,
+    effect: bool,
+    generic: Exec,
+) -> Exec {
+    Box::new(move |ev, f| {
+        if sites.iter().all(|s| s.valid(ev)) && assoc_conj_hit(t.get(f), k.get(f), &x, f) {
+            return Ok(if effect { Value::Nil } else { t.get(f).clone() });
+        }
+        generic(ev, f)
+    })
+}
+
+/// The fused update's inline step (`false` leaves the transient as
+/// it was).
+#[inline]
+fn assoc_conj_hit(t: &Value, k: &Value, x: &PureSrc, f: &Frame<'_>) -> bool {
+    let (Value::Transient(cell), Value::Int(n)) = (t, k) else {
+        return false;
+    };
+    let Ok(i) = usize::try_from(*n) else {
+        return false;
+    };
+    let xv = x.value(f);
+    let mut guard = cell.lock();
+    let clj_value::TransientKind::Vector(tv) = &mut *guard else {
+        return false;
+    };
+    let Some(item) = tv.take_at(i) else {
+        return false;
+    };
+    let mut args = [item, xv];
+    let (updated, hit) = match Conj::apply(&mut args) {
+        Some(v) => (v, true),
+        None => (std::mem::replace(&mut args[0], Value::Nil), false),
+    };
+    // The slot was in bounds a moment ago, so the write-back holds.
+    tv.assoc(i, updated).is_ok() && hit
+}
+
 /// `(conj coll x)`: vectors, lists, `nil`, and unsorted sets of
 /// scalars.
 pub(crate) struct Conj;
@@ -1229,6 +1324,260 @@ op2!(Ushr, |a, b| ints(a, b, |x, n| Some(
 )));
 op2!(Min, |a, b| ints(a, b, |x, y| Some(x.min(y))));
 op2!(Max, |a, b| ints(a, b, |x, y| Some(x.max(y))));
+
+/// A one-argument op over unboxed ints: the `i64` mirror of its
+/// [`Op1`] namesake's hit on an `Int` (`None` exactly where the
+/// op misses, so the caller deopts to the boxed road). A test
+/// pins the mirrors against the ops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntOp1 {
+    Inc,
+    Dec,
+    Negate,
+    BitNot,
+}
+
+impl IntOp1 {
+    #[inline(always)]
+    pub(crate) fn apply(self, x: i64) -> Option<i64> {
+        match self {
+            IntOp1::Inc => x.checked_add(1),
+            IntOp1::Dec => x.checked_sub(1),
+            IntOp1::Negate => x.checked_neg(),
+            IntOp1::BitNot => Some(!x),
+        }
+    }
+}
+
+/// A two-argument op over unboxed ints (see [`IntOp1`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntOp2 {
+    Add,
+    Sub,
+    Mul,
+    Quot,
+    Rem,
+    Mod,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Ushr,
+    Min,
+    Max,
+}
+
+impl IntOp2 {
+    #[inline(always)]
+    pub(crate) fn apply(self, x: i64, y: i64) -> Option<i64> {
+        match self {
+            IntOp2::Add | IntOp2::Sub | IntOp2::Mul => self.apply_checked(x, y),
+            IntOp2::Quot | IntOp2::Rem | IntOp2::Mod => self.apply_div(x, y),
+            _ => self.apply_bits(x, y),
+        }
+    }
+
+    #[inline(always)]
+    fn apply_checked(self, x: i64, y: i64) -> Option<i64> {
+        match self {
+            IntOp2::Add => x.checked_add(y),
+            IntOp2::Sub => x.checked_sub(y),
+            _ => x.checked_mul(y),
+        }
+    }
+
+    #[inline(always)]
+    fn apply_div(self, x: i64, y: i64) -> Option<i64> {
+        match self {
+            IntOp2::Quot => (y != 0).then(|| x.wrapping_div(y)),
+            IntOp2::Rem => (y != 0).then(|| x.wrapping_rem(y)),
+            _ => crate::vm_intrinsics::java_mod(x, y),
+        }
+    }
+
+    #[inline(always)]
+    fn apply_bits(self, x: i64, y: i64) -> Option<i64> {
+        Some(match self {
+            IntOp2::BitAnd => x & y,
+            IntOp2::BitOr => x | y,
+            IntOp2::BitXor => x ^ y,
+            IntOp2::Shl => x.wrapping_shl(y as u32),
+            IntOp2::Shr => x.wrapping_shr(y as u32),
+            IntOp2::Ushr => (x as u64).wrapping_shr(y as u32) as i64,
+            IntOp2::Min => x.min(y),
+            _ => x.max(y),
+        })
+    }
+}
+
+/// A one-argument predicate over an unboxed int (see [`IntOp1`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntTest1 {
+    Zero,
+    Pos,
+    Neg,
+}
+
+impl IntTest1 {
+    #[inline(always)]
+    pub(crate) fn test(self, x: i64) -> bool {
+        match self {
+            IntTest1::Zero => x == 0,
+            IntTest1::Pos => x > 0,
+            IntTest1::Neg => x < 0,
+        }
+    }
+}
+
+/// A two-argument predicate over unboxed ints (see [`IntOp1`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntTest2 {
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Eq,
+    NotEq,
+}
+
+impl IntTest2 {
+    #[inline(always)]
+    pub(crate) fn test(self, x: i64, y: i64) -> bool {
+        match self {
+            IntTest2::Lt => x < y,
+            IntTest2::Lte => x <= y,
+            IntTest2::Gt => x > y,
+            IntTest2::Gte => x >= y,
+            IntTest2::Eq => x == y,
+            IntTest2::NotEq => x != y,
+        }
+    }
+}
+
+/// An unboxed value op by operand count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntCtor {
+    One(IntOp1),
+    Two(IntOp2),
+}
+
+/// An unboxed test op by operand count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntTestCtor {
+    One(IntTest1),
+    Two(IntTest2),
+}
+
+/// The unboxed one-argument value ops by core name (the primed
+/// spellings share the op; the miss road differs, as in
+/// [`UNARY`]).
+const INT_UNARY: &[(&str, IntOp1)] = &[
+    ("inc", IntOp1::Inc),
+    ("inc'", IntOp1::Inc),
+    ("dec", IntOp1::Dec),
+    ("dec'", IntOp1::Dec),
+    ("-", IntOp1::Negate),
+    ("-'", IntOp1::Negate),
+    ("bit-not", IntOp1::BitNot),
+];
+
+/// The unboxed two-argument value ops by core name ([`BINARY`]).
+const INT_BINARY: &[(&str, IntOp2)] = &[
+    ("+", IntOp2::Add),
+    ("+'", IntOp2::Add),
+    ("-", IntOp2::Sub),
+    ("-'", IntOp2::Sub),
+    ("*", IntOp2::Mul),
+    ("*'", IntOp2::Mul),
+    ("quot", IntOp2::Quot),
+    ("rem", IntOp2::Rem),
+    ("mod", IntOp2::Mod),
+    ("bit-and", IntOp2::BitAnd),
+    ("bit-or", IntOp2::BitOr),
+    ("bit-xor", IntOp2::BitXor),
+    ("bit-shift-left", IntOp2::Shl),
+    ("bit-shift-right", IntOp2::Shr),
+    ("unsigned-bit-shift-right", IntOp2::Ushr),
+    ("min", IntOp2::Min),
+    ("max", IntOp2::Max),
+];
+
+/// The unboxed one-argument tests by core name.
+const INT_TEST1: &[(&str, IntTest1)] = &[
+    ("zero?", IntTest1::Zero),
+    ("pos?", IntTest1::Pos),
+    ("neg?", IntTest1::Neg),
+];
+
+/// The unboxed two-argument tests by core name (`=` and `==`
+/// agree on `Int` pairs).
+const INT_TEST2: &[(&str, IntTest2)] = &[
+    ("<", IntTest2::Lt),
+    ("<=", IntTest2::Lte),
+    (">", IntTest2::Gt),
+    (">=", IntTest2::Gte),
+    ("=", IntTest2::Eq),
+    ("==", IntTest2::Eq),
+    ("not=", IntTest2::NotEq),
+];
+
+fn int_value_named(name: &str, arity: usize) -> Option<IntCtor> {
+    match arity {
+        1 => INT_UNARY
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, op)| IntCtor::One(*op)),
+        2 => INT_BINARY
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, op)| IntCtor::Two(*op)),
+        _ => None,
+    }
+}
+
+fn int_test_named(name: &str, arity: usize) -> Option<IntTestCtor> {
+    match arity {
+        1 => INT_TEST1
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, op)| IntTestCtor::One(*op)),
+        2 => INT_TEST2
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, op)| IntTestCtor::Two(*op)),
+        _ => None,
+    }
+}
+
+/// The unboxed value op for `call`, when its fixed-arity op has
+/// an `Int`-pair hit the driver can mirror. The caller still
+/// validates the call's site per stretch, like the shapes.
+pub(crate) fn int_value_op(call: &DirectCall) -> Option<IntCtor> {
+    int_value_named(core_name(call)?, call.args.len())
+}
+
+/// The binary op an n-ary (three or more arguments) call folds
+/// left with, for the ops `clojure.core` defines as that fold
+/// (`(+ a b c)` is `(+ (+ a b) c)`, each step checked).
+pub(crate) fn int_fold_op(call: &DirectCall) -> Option<IntOp2> {
+    const FOLDS: &[&str] = &[
+        "+", "+'", "-", "-'", "*", "*'", "bit-and", "bit-or", "bit-xor", "min", "max",
+    ];
+    let name = core_name(call)?;
+    if call.args.len() < 3 || !FOLDS.contains(&name) {
+        return None;
+    }
+    INT_BINARY
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, op)| *op)
+}
+
+/// The unboxed test op for `call` (see [`int_value_op`]).
+pub(crate) fn int_test_op(call: &DirectCall) -> Option<IntTestCtor> {
+    int_test_named(core_name(call)?, call.args.len())
+}
 pub(crate) struct Nth;
 
 impl Op2 for Nth {
@@ -1843,5 +2192,108 @@ mod tests {
             clj_value::TransientMap::new(),
         )));
         assert_eq!(<PopBang as Op1>::apply(&tm), None);
+    }
+
+    /// The unboxed mirrors hit and miss exactly where their ops
+    /// do, over edge-valued `Int` inputs.
+    #[test]
+    fn int_ops_mirror_op_hits() {
+        const EDGE: &[i64] = &[
+            0,
+            1,
+            -1,
+            2,
+            -2,
+            3,
+            63,
+            64,
+            -64,
+            65,
+            i64::MAX,
+            i64::MIN,
+            i64::MAX - 1,
+            i64::MIN + 1,
+            1 << 32,
+            -(1 << 32),
+        ];
+        fn unbox(v: Option<Value>) -> Option<i64> {
+            match v {
+                Some(Value::Int(n)) => Some(n),
+                _ => None,
+            }
+        }
+        for &x in EDGE {
+            let vx = Value::Int(x);
+            assert_eq!(IntOp1::Inc.apply(x), unbox(<Inc as Op1>::apply(&vx)));
+            assert_eq!(IntOp1::Dec.apply(x), unbox(<Dec as Op1>::apply(&vx)));
+            assert_eq!(IntOp1::Negate.apply(x), unbox(<Negate as Op1>::apply(&vx)));
+            assert_eq!(IntOp1::BitNot.apply(x), unbox(<BitNot as Op1>::apply(&vx)));
+            assert_eq!(IntTest1::Zero.test(x), <Zero as Op1>::test(&vx).unwrap());
+            assert_eq!(IntTest1::Pos.test(x), <Pos as Op1>::test(&vx).unwrap());
+            assert_eq!(IntTest1::Neg.test(x), <Neg as Op1>::test(&vx).unwrap());
+            for &y in EDGE {
+                let vy = Value::Int(y);
+                macro_rules! pair {
+                    ($int:expr, $op:ty) => {
+                        assert_eq!(
+                            $int.apply(x, y),
+                            unbox(<$op as Op2>::apply(&vx, &vy)),
+                            "{:?} on ({x}, {y})",
+                            $int
+                        )
+                    };
+                }
+                pair!(IntOp2::Add, Add);
+                pair!(IntOp2::Sub, Sub);
+                pair!(IntOp2::Mul, Mul);
+                pair!(IntOp2::Quot, Quot);
+                pair!(IntOp2::Rem, Rem);
+                pair!(IntOp2::Mod, Mod);
+                pair!(IntOp2::BitAnd, BitAnd);
+                pair!(IntOp2::BitOr, BitOr);
+                pair!(IntOp2::BitXor, BitXor);
+                pair!(IntOp2::Shl, Shl);
+                pair!(IntOp2::Shr, Shr);
+                pair!(IntOp2::Ushr, Ushr);
+                pair!(IntOp2::Min, Min);
+                pair!(IntOp2::Max, Max);
+                macro_rules! cmp {
+                    ($int:expr, $op:ty) => {
+                        assert_eq!(
+                            $int.test(x, y),
+                            <$op as Op2>::test(&vx, &vy).unwrap(),
+                            "{:?} on ({x}, {y})",
+                            $int
+                        )
+                    };
+                }
+                cmp!(IntTest2::Lt, Lt);
+                cmp!(IntTest2::Lte, Lte);
+                cmp!(IntTest2::Gt, Gt);
+                cmp!(IntTest2::Gte, Gte);
+                cmp!(IntTest2::Eq, Eq);
+                cmp!(IntTest2::Eq, NumEq);
+                cmp!(IntTest2::NotEq, NotEq);
+            }
+        }
+        // The name mapping covers the primed spellings and stays
+        // inside the fixed-arity int ops.
+        assert!(matches!(
+            int_value_named("inc'", 1),
+            Some(IntCtor::One(IntOp1::Inc))
+        ));
+        assert!(matches!(
+            int_value_named("+'", 2),
+            Some(IntCtor::Two(IntOp2::Add))
+        ));
+        assert!(matches!(
+            int_test_named("==", 2),
+            Some(IntTestCtor::Two(IntTest2::Eq))
+        ));
+        assert_eq!(int_value_named("nth", 2), None);
+        assert_eq!(int_value_named("inc", 2), None);
+        assert_eq!(int_value_named("+", 3), None);
+        assert_eq!(int_test_named("zero?", 2), None);
+        assert_eq!(int_test_named("<", 3), None);
     }
 }

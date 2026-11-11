@@ -343,7 +343,7 @@ fn sort_default_fast_path_rows() {
     );
     assert_eq!(
         run_last(&mut eval, "(sort [[1 2] [1 1] [0 9] [1]])"),
-        "([0 9] [1] [1 1] [1 2])"
+        "([1] [0 9] [1 1] [1 2])"
     );
     assert_eq!(
         run_last(&mut eval, "(sort [[\"b\" 1] [\"a\" 2] [\"b\" 0]])"),

@@ -289,14 +289,19 @@ fn vector_items(v: &Value) -> Option<Vec<Value>> {
     }
 }
 
+/// `APersistentVector.compareTo`: the shorter vector first (its
+/// items never compared), else itemwise.
 fn compare_item_slices(a: &[Value], b: &[Value]) -> Result<Ordering, CompareError> {
+    if a.len() != b.len() {
+        return Ok(a.len().cmp(&b.len()));
+    }
     for (x, y) in a.iter().zip(b.iter()) {
         let ord = compare(x, y)?;
         if ord != Ordering::Equal {
             return Ok(ord);
         }
     }
-    Ok(a.len().cmp(&b.len()))
+    Ok(Ordering::Equal)
 }
 
 #[cfg(test)]
@@ -386,6 +391,23 @@ mod tests {
         let two = Value::Vector(Vector::from_vec(vec![Value::Int(2)]));
         assert_eq!(compare(&one, &two), Ok(Ordering::Less));
         assert_eq!(compare(&two, &one), Ok(Ordering::Greater));
+    }
+
+    /// The shorter vector orders first whatever its items (JVM
+    /// `APersistentVector.compareTo`), so items of a longer one are
+    /// never compared: `[2]` < `[1 2 3]`, and `[:a]` < `[1 2]`
+    /// without a cast failure.
+    #[test]
+    fn vectors_order_by_count_first() {
+        let v = |items: Vec<Value>| Value::Vector(Vector::from_vec(items));
+        let short = v(vec![Value::Int(2)]);
+        let long = v(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        assert_eq!(compare(&short, &long), Ok(Ordering::Less));
+        assert_eq!(compare(&long, &short), Ok(Ordering::Greater));
+        let kw = v(vec![Value::Keyword(Keyword::new(None, "a"))]);
+        let ints = v(vec![Value::Int(1), Value::Int(2)]);
+        assert_eq!(compare(&kw, &ints), Ok(Ordering::Less));
+        assert_eq!(compare(&ints, &kw), Ok(Ordering::Greater));
     }
 
     /// Tower pairs compare exactly (no `Double` involved) or as

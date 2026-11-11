@@ -656,12 +656,61 @@ fn core_r4_compare_order() {
     assert_eq!(run_last(&mut eval, "(compare true false)"), "1");
     assert_eq!(run_last(&mut eval, "(compare false false)"), "0");
     assert_eq!(run_last(&mut eval, "(compare 'a 'b)"), "-1");
-    // Lexicographic vectors (743, 749-767).
+    // Vectors: count first, then itemwise (743, 749-767).
     assert_eq!(run_last(&mut eval, "(compare [1] [1])"), "0");
     assert_eq!(run_last(&mut eval, "(compare [1] [1 2])"), "-1");
     assert_eq!(run_last(&mut eval, "(compare [1 2] [1])"), "1");
     assert_eq!(run_last(&mut eval, "(compare [2] [1])"), "1");
     assert_eq!(run_last(&mut eval, "(compare [] [])"), "0");
+}
+
+/// Vectors order by count first, then itemwise (JVM
+/// `APersistentVector.compareTo`, gvec's alike): the shorter vector
+/// sorts first whatever its items, which are then never compared (no
+/// cast failure across kinds). Map entries, subvecs and `vector-of`
+/// order the same, and so do `sort` (its int-vector lane included),
+/// `sort-by` keys and sorted collections. Every row is JVM Clojure
+/// 1.12's answer.
+#[test]
+fn compare_orders_vectors_by_count_first() {
+    let mut eval = boot();
+    for (src, want) in [
+        ("(compare [2] [1 2 3])", "-1"),
+        ("(compare [1 2 3] [2])", "1"),
+        ("(compare [] [1])", "-1"),
+        ("(compare [1] [])", "1"),
+        ("(compare [1 3] [1 2 0])", "-1"),
+        ("(compare [1 2] [1 2])", "0"),
+        ("(compare [:a] [1 2])", "-1"),
+        ("(compare [1 2] [:a])", "1"),
+        ("(compare (first {1 2}) [1 2 3])", "-1"),
+        ("(compare [0] (first {1 2}))", "-1"),
+        ("(compare (subvec [1 2 3] 1) [5])", "1"),
+        ("(compare [5] (subvec [1 2 3] 1))", "-1"),
+        ("(compare (vector-of :long 1 2) [3])", "1"),
+        ("(compare [3] (vector-of :long 1 2))", "-1"),
+        ("(compare [[1 2]] [[3]])", "1"),
+        ("(compare [[3] 0] [[1 2] 0])", "-1"),
+        ("(compare [\"b\"] [\"a\" \"c\"])", "-1"),
+        (
+            "(sort [[3] [1 2 3] [2 2] [1 1]])",
+            "([3] [1 1] [2 2] [1 2 3])",
+        ),
+        ("(sort [[1 :a] [2]])", "([2] [1 :a])"),
+        (
+            "(sort [[5 5 5] [9] [1 9] [] [0 0 0 0]])",
+            "([] [9] [1 9] [5 5 5] [0 0 0 0])",
+        ),
+        ("(sort [[1 \"b\"] [\"a\"]])", "([\"a\"] [1 \"b\"])"),
+        ("(sort-by first [[[2] 1] [[1 1] 2]])", "([[2] 1] [[1 1] 2])"),
+        ("(sorted-set [1 2 3] [4] [2 2])", "#{[4] [2 2] [1 2 3]}"),
+        (
+            "(into (sorted-map) {[1 2 3] :a, [4] :b, [2 2] :c})",
+            "{[4] :b, [2 2] :c, [1 2 3] :a}",
+        ),
+    ] {
+        assert_eq!(run_last(&mut eval, src), want, "{src}");
+    }
 }
 
 #[test]

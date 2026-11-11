@@ -1776,6 +1776,19 @@ fn str_scan(s: &Arc<str>) -> Option<StrScan> {
     Some(scan)
 }
 
+/// Whether `s` is all ASCII (so `nth` is a byte read), through the
+/// scan memo for big strings: O(1) after the first ask, so a loop
+/// entered once per item never rescans a long text.
+pub(crate) fn str_ascii(s: &Arc<str>) -> bool {
+    if s.len() <= STR_SCAN_SMALL_MAX {
+        return s.is_ascii();
+    }
+    if let Some(ascii) = with_scan_hit(s, |scan| matches!(scan, StrScan::Ascii)) {
+        return ascii;
+    }
+    matches!(str_scan(s), Some(StrScan::Ascii))
+}
+
 /// Scan a string once: ASCII short-circuits (no table);
 /// otherwise tabulate char→byte offsets (capped).
 fn build_str_scan(s: &str) -> Option<StrScan> {

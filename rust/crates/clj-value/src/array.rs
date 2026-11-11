@@ -181,12 +181,28 @@ impl ArrayStore {
     }
 }
 
-/// A Java array value: identity plus a shared mutable cell.
-#[derive(Clone, Debug)]
-pub struct Array {
+/// An array's fields, behind the handle's `Arc` so an `Array`
+/// (inline in every `Value`) stays one word (#254: `Value`
+/// shrinks to 32 bytes).
+#[derive(Clone)]
+struct ArrayData {
     id: u64,
     desc: ArrayDesc,
     cell: Arc<Mutex<ArrayStore>>,
+}
+
+/// A Java array value: identity plus a shared mutable cell.
+#[derive(Clone)]
+pub struct Array(Arc<ArrayData>);
+
+impl std::fmt::Debug for Array {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Array")
+            .field("id", &self.0.id)
+            .field("desc", &self.0.desc)
+            .field("cell", &self.0.cell)
+            .finish()
+    }
 }
 
 impl Array {
@@ -195,47 +211,49 @@ impl Array {
     #[must_use]
     pub fn new(desc: ArrayDesc, store: ArrayStore) -> Self {
         debug_assert_eq!(desc.dims > 1, matches!(store, ArrayStore::Arrays(_)));
-        Self {
+        Self(Arc::new(ArrayData {
             id: ARRAY_ID.fetch_add(1, Ordering::Relaxed),
             desc,
             cell: Arc::new(Mutex::new(store)),
-        }
+        }))
     }
 
     /// The print/hash identity.
     #[must_use]
     pub fn id(&self) -> u64 {
-        self.id
+        self.0.id
     }
 
     /// The full type descriptor.
     #[must_use]
     pub fn desc(&self) -> &ArrayDesc {
-        &self.desc
+        &self.0.desc
     }
 
     /// The JVM descriptor string (`[I`, …).
     #[must_use]
     pub fn descriptor(&self) -> String {
-        self.desc.descriptor()
+        self.0.desc.descriptor()
     }
 
     /// Whether `other` shares this array's cell (`=`).
     #[must_use]
     pub fn same_cell(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.cell, &other.cell)
+        Arc::ptr_eq(&self.0.cell, &other.0.cell)
     }
 
     /// Lock the cell (short critical sections only; poison is
     /// unreachable — natives never panic under the lock).
     pub fn lock(&self) -> MutexGuard<'_, ArrayStore> {
-        self.cell.lock().unwrap_or_else(|e| e.into_inner())
+        self.0.cell.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Take the boxed reference slots if uniquely owned, or return None.
     #[must_use]
     pub fn try_take_objs(&self) -> Option<Vec<Value>> {
-        if Arc::strong_count(&self.cell) == 1 {
+        // The data handle is the cell's only owner path, so a
+        // unique handle is exactly the old unique-cell test.
+        if Arc::strong_count(&self.0) == 1 {
             let mut guard = self.lock();
             if let ArrayStore::Objs(v) = &mut *guard {
                 return Some(std::mem::take(v));
@@ -282,6 +300,6 @@ impl Array {
     /// descriptor, cloned slots (`aclone` — inners shared).
     #[must_use]
     pub fn shallow_clone(&self) -> Self {
-        Self::new(self.desc.clone(), self.lock().clone())
+        Self::new(self.0.desc.clone(), self.lock().clone())
     }
 }

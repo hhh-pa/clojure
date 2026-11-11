@@ -505,13 +505,13 @@ mod tests {
 
     #[test]
     fn throwable_prints_error_form() {
-        let t = Value::Throwable(Throwable {
+        let t = Value::Throwable(Arc::new(Throwable {
             id: 1,
             class: ThrowClass::Exception,
             message: Some(Arc::from("boom")),
             data: None,
             cause: None,
-        });
+        }));
         assert_eq!(
             pr(&t),
             "#error {:cause \"boom\" :data nil :via [{:type java.lang.Exception :message \"boom\"}] :trace []}"
@@ -534,7 +534,7 @@ mod tests {
             data: Some(Box::new(Value::Int(7))),
             cause: Some(Box::new(root)),
         };
-        let top = Value::Throwable(Throwable {
+        let top = Value::Throwable(Arc::new(Throwable {
             id: 1,
             class: ThrowClass::ExceptionInfo,
             message: Some(Arc::from("top")),
@@ -543,7 +543,7 @@ mod tests {
                 Value::Str(Arc::from("s")),
             ])))),
             cause: Some(Box::new(mid)),
-        });
+        }));
         assert_eq!(
             pr(&top),
             concat!(
@@ -908,13 +908,13 @@ mod tests {
     }
 
     fn throwable(id: u64, message: &str) -> Value {
-        Value::Throwable(Throwable {
+        Value::Throwable(Arc::new(Throwable {
             id,
             class: ThrowClass::Exception,
             message: Some(Arc::from(message)),
             data: Some(Box::new(Value::Int(id as i64))),
             cause: None,
-        })
+        }))
     }
 
     #[test]
@@ -953,7 +953,7 @@ mod tests {
 
         // Throwables never compare by message or data.
         let t1 = throwable(1, "boom");
-        let t1_other_payload = Value::Throwable(Throwable {
+        let t1_other_payload = Value::Throwable(Arc::new(Throwable {
             id: 1,
             class: ThrowClass::Error,
             message: Some(Arc::from("different")),
@@ -965,7 +965,7 @@ mod tests {
                 data: None,
                 cause: None,
             })),
-        });
+        }));
         assert_eq!(t1, t1_other_payload);
         assert_eq!(hash_of(&t1), hash_of(&t1_other_payload));
         assert_ne!(t1, throwable(2, "boom"));

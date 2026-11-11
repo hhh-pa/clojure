@@ -11,19 +11,41 @@
 //! metadata) ride behind `Arc`s. These pins fail loudly if a variant
 //! regrows past the budget.
 
-use clj_value::{Future, Map, Promise, Set, Transient, Value};
+use clj_value::{
+    Array, ArrayDesc, ArrayStore, BaseType, Elem8, Future, Map, PrimitiveVector, Promise, Set,
+    Transient, Value, Vector,
+};
 
-/// The whole-enum budget: 64 bytes (was 112 before the sidecar and
+/// The whole-enum budget: 32 bytes (was 112 before the sidecar and
 /// metadata arcs, 72 before map identity moved onto the entries
-/// `Arc`). Lower is welcome — tighten the bound if a variant
-/// shrinks for real.
+/// `Arc`, 64 before the collection/symbol payloads became one-word
+/// `Arc` handles in #254). Lower is welcome — tighten the bound if
+/// a variant shrinks for real.
 #[test]
 fn value_stays_compact() {
     assert!(
-        size_of::<Value>() <= 64,
+        size_of::<Value>() <= 32,
         "Value grew to {} bytes; keep large payloads behind Arc (see #221 R1)",
         size_of::<Value>()
     );
+}
+
+/// The one-word handle types keep their pre-handle `Debug` shape
+/// (struct name and field names, #254): the manual impls print
+/// through the `Arc` exactly like the old derives.
+#[test]
+fn handle_debug_matches_struct_shape() {
+    let v = format!("{:?}", Vector::from_vec(vec![Value::Int(1)]));
+    assert!(v.starts_with("Vector { inner: "), "{v}");
+    let s = format!("{:?}", clj_value::new_set().insert(Value::Int(1)));
+    assert!(s.starts_with("Set { inner: "), "{s}");
+    let a = format!(
+        "{:?}",
+        Array::new(ArrayDesc::flat(BaseType::Int), ArrayStore::Ints(vec![1]))
+    );
+    assert!(a.starts_with("Array { id: "), "{a}");
+    let p = format!("{:?}", PrimitiveVector::empty(Elem8::Int));
+    assert!(p.starts_with("PrimitiveVector { elem: "), "{p}");
 }
 
 /// Per-struct budgets behind the enum pin: each large payload stays
@@ -31,8 +53,8 @@ fn value_stays_compact() {
 #[test]
 fn large_payloads_stay_indirect() {
     for (name, size, budget) in [
-        ("Map", size_of::<Map>(), 64),
-        ("Set", size_of::<Set>(), 64),
+        ("Map", size_of::<Map>(), 8),
+        ("Set", size_of::<Set>(), 8),
         ("Transient", size_of::<Transient>(), 24),
         ("Future", size_of::<Future>(), 24),
         ("Promise", size_of::<Promise>(), 24),

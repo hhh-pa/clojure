@@ -403,3 +403,143 @@ fn flat_loop_shapes() {
         "[0 2 2]"
     );
 }
+
+/// The unboxed-int fused driver (#254): eligible loops (int test
+/// plus int-op recur operands) keep exact boxed semantics across
+/// every deopt edge — overflow, promotion, divide by zero,
+/// non-int state and sources, site redefinition, captures.
+#[test]
+fn int_loop_shapes() {
+    let mut eval = boot();
+    // gcd: swaps plus `rem` and a `zero?` test.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [a 1071 b 462] (if (zero? b) a (recur b (rem a b))))"
+        ),
+        "21"
+    );
+    // Captured bound (an upvalue source), `+` accumulation.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn [n] (loop [i 0 s 0] (if (< i n) (recur (inc i) (+ s i)) s))) 100)"
+        ),
+        "4950"
+    );
+    // Loop-invariant register source in an operand.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [k 5] (loop [i 0 s 0] (if (< i 4) (recur (inc i) (+ s k)) s)))"
+        ),
+        "20"
+    );
+    // Shift counts mask to 6 bits; `dec` countdown with `pos?`.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 3 x 1] (if (pos? i) (recur (dec i) (bit-shift-left x 65)) x))"
+        ),
+        "8"
+    );
+    // Wide state rotates like the boxed write-after-all.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [n 0 a 1 b 2 c 3 d 4 e 5] (if (< n 7) (recur (inc n) b c d e a) [a b c d e]))"
+        ),
+        "[3 4 5 1 2]"
+    );
+    // The exit branch reads the written-back state (a closure
+    // over the loop var sees the final value, not the entry one).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [f (loop [i 0] (if (< i 7) (recur (inc i)) (fn [] i)))] (f))"
+        ),
+        "7"
+    );
+    // `+'` promotes past `Long/MAX_VALUE` on the deopt iteration.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 0 s 9223372036854775800] (if (< i 10) (recur (inc i) (+' s 3)) s))"
+        ),
+        "9223372036854775830N"
+    );
+    // Non-int state at entry: the boxed road from the start.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(loop [i 0.0 s 0] (if (< i 5) (recur (inc i) (+ s 1)) [i s]))"
+        ),
+        "[5.0 5]"
+    );
+    // A non-int invariant test source deopts on the test read.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [n 5.0] (loop [i 0] (if (< i n) (recur (inc i)) i)))"
+        ),
+        "5"
+    );
+    // An invariant register operand (a fn argument), and its
+    // non-int deopt on the operand read.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn [k] (loop [i 0 s 0] (if (< i 4) (recur (inc i) (+ s k)) s))) 5)"
+        ),
+        "20"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn [k] (loop [i 0 s 0] (if (< i 4) (recur (inc i) (+ s k)) s))) 5.0)"
+        ),
+        "20.0"
+    );
+    // A bound captured through a nested fn (an upvalue source).
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "((fn [n] ((fn [] (loop [i 0 s 0] (if (< i n) (recur (inc i) (+ s i)) s))))) 100)"
+        ),
+        "4950"
+    );
+    // A `letfn` sibling as a recur operand is not an int source:
+    // the loop stays boxed and still runs.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(letfn [(f [] 42) (g [] (loop [i 0 h (fn [] 0)] (if (< i 1) (recur (inc i) f) (h))))] (g))"
+        ),
+        "42"
+    );
+    // A redefined op site deopts: the redefined `inc` steps by 3,
+    // so the boxed road takes 4 iterations, not 10.
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(with-redefs [inc (fn [x] (+ x 3))] (loop [i 0 c 0] (if (< i 10) (recur (inc i) (+ c 1)) c)))"
+        ),
+        "4"
+    );
+    // Plain `+` overflow and `quot` by zero throw exactly the
+    // boxed errors (raised by the boxed re-run of the iteration).
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(loop [i 0 s 9223372036854775800] (if (< i 10) (recur (inc i) (+ s 3)) s))"
+        ),
+        "java.lang.ArithmeticException | long overflow"
+    );
+    assert_eq!(
+        uncaught(
+            &mut eval,
+            "(loop [i 10 d 1] (if (>= d 0) (recur (quot i d) (dec d)) i))"
+        ),
+        "java.lang.ArithmeticException | / by zero"
+    );
+}

@@ -28,12 +28,13 @@
 //! vector (no allocation).
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use clj_value::{Map, Symbol, ThrowClass, Throwable, Value, Var, Vector};
 use smallvec::SmallVec;
 
-use crate::env::Env;
+use crate::env::{Env, SharedRegistry};
 use crate::error::Signal;
 use crate::eval::Evaluator;
 use crate::expr::{Arity, CaseTest, Catch, DirectCall, Expr, FunExpr, Pattern, pattern_count};
@@ -82,6 +83,9 @@ pub(crate) enum Loc {
 pub(crate) struct CompiledFun {
     pub(crate) display: Arc<str>,
     pub(crate) source: Arc<[Arity]>,
+    /// The lexical index of the first param (locals below it are
+    /// captured or the fn's own `letfn` names).
+    pub(crate) base: usize,
     arities: Vec<CompiledArity>,
 }
 
@@ -600,6 +604,125 @@ struct Compiler {
     scopes: Vec<Scope>,
 }
 
+/// A `loop`'s scalar program (see [`crate::vm_scalar`]), compiled
+/// only once the loop is hot: [`HOT`] boxed `recur`s over its
+/// entries, or as many entries as the tier's trip rule judges (whose
+/// boxed history may turn the program down uncompiled), or its first
+/// entry under `Evaluator::set_eager_tier`. Most loops never get
+/// there (load-time and short ones) and skip the compile. Until then
+/// this keeps what the compile reads from the loop's scope.
+struct LazyScalar {
+    body: Arc<[Expr]>,
+    /// The scope's first own lexical index; the registers of its
+    /// locals visible in the body (the loop's own last); its `letfn`
+    /// names; the lexical indexes of its captures as of the body.
+    scope_base: usize,
+    regs: Box<[usize]>,
+    rec: Box<[usize]>,
+    captures: Box<[usize]>,
+    /// The boxed history while the program is not compiled: entries
+    /// run whole, and their iterations (`recur`s; the one that would
+    /// reach [`HOT`] compiles instead).
+    entries: AtomicU32,
+    heat: AtomicU32,
+    prog: OnceLock<Option<Box<crate::vm_scalar::ScalarLoop>>>,
+}
+
+/// Boxed `recur`s a loop runs, over all its entries, before its
+/// scalar program compiles (the rest of that entry runs on it).
+const HOT: u32 = 64;
+
+impl LazyScalar {
+    /// An outer local's place as of the body (`None`: one the body
+    /// never read, which the compile cannot ask for).
+    fn loc(&self, idx: usize) -> Option<Loc> {
+        match idx.checked_sub(self.scope_base) {
+            Some(i) => self.regs.get(i).map(|r| Loc::Reg(*r)),
+            None => (self.rec.iter().position(|i| *i == idx).map(Loc::Rec))
+                .or_else(|| self.captures.iter().position(|i| *i == idx).map(Loc::Up)),
+        }
+    }
+
+    /// The program, compiled on the first ask.
+    fn program(&self, ev: &Evaluator, targets: &[usize]) -> Option<&crate::vm_scalar::ScalarLoop> {
+        let compile = || {
+            let mut host = LateHost {
+                plan: self,
+                roots: &ev.registry,
+                lost: false,
+            };
+            let base = self.scope_base + self.regs.len();
+            let entries = self.entries.load(Ordering::Relaxed);
+            let trips = entries.saturating_add(self.heat.load(Ordering::Relaxed));
+            let history = (entries, trips);
+            let prog = crate::vm_scalar::compile(&mut host, &self.body, targets, base, history);
+            debug_assert!(
+                !host.lost,
+                "a loop body read a local its scope never placed"
+            );
+            prog.filter(|_| !host.lost).map(Box::new)
+        };
+        self.prog.get_or_init(compile).as_deref()
+    }
+}
+
+/// The scalar compile's view of a hot loop's scope (its snapshot
+/// in [`LazyScalar`]) and of the var roots now.
+struct LateHost<'a> {
+    plan: &'a LazyScalar,
+    roots: &'a SharedRegistry,
+    /// Whether the compile asked for a local the snapshot lacks (its
+    /// program is dropped).
+    lost: bool,
+}
+
+impl crate::vm_scalar::Host for LateHost<'_> {
+    fn resolve_local(&mut self, idx: usize) -> Loc {
+        let loc = self.plan.loc(idx);
+        self.lost |= loc.is_none();
+        loc.unwrap_or(Loc::Reg(usize::MAX))
+    }
+
+    fn reads(&self, expr: &Expr, g: usize) -> bool {
+        crate::vm_live::may_read(expr, self.plan.scope_base, g + 1, g)
+    }
+
+    fn site(&self, call: &DirectCall) -> crate::vm_ops::Site {
+        crate::vm_ops::Site::new(site_of(call))
+    }
+
+    fn callee(&self, var: &Var, argc: usize) -> Option<crate::vm_scalar::Callee> {
+        inline_callee(&self.roots.root_or_unbound(var.id, &var.sym), argc)
+    }
+}
+
+/// The arity a call with `argc` args runs on `root` when its body
+/// may inline (see [`crate::vm_scalar::Callee`]): a VM closure
+/// without conveyed bindings whose fixed arity for the count binds
+/// symbols only — the arity [`fixed_target`] would run.
+fn inline_callee(root: &Value, argc: usize) -> Option<crate::vm_scalar::Callee> {
+    let Value::Extension(expect) = root else {
+        return None;
+    };
+    let closure = crate::ext::as_closure(root)?;
+    let code = closure.vm.as_ref().filter(|_| closure.conveyed.is_none())?;
+    let fun = &code.fun;
+    let index = fun
+        .source
+        .iter()
+        .position(|a| a.rest.is_none() && a.fixed.len() == argc)?;
+    fun.source[index]
+        .fixed
+        .iter()
+        .all(|p| matches!(p, Pattern::Symbol(_)))
+        .then(|| crate::vm_scalar::Callee {
+            base: fun.base,
+            arities: Arc::clone(&fun.source),
+            index,
+            expect: Arc::clone(expect),
+        })
+}
+
 impl Compiler {
     fn scope(&mut self) -> &mut Scope {
         self.scopes.last_mut().expect("a scope is always open")
@@ -784,12 +907,67 @@ impl Compiler {
     /// built just to drop).
     fn compile_effect(&mut self, expr: &Expr) -> Exec {
         if let Expr::DirectNative(call) = expr {
+            if let Some(code) = self.try_assoc_conj(call, true) {
+                return code;
+            }
             if let Some(ctor) = crate::vm_ops::effect_ctor(call) {
                 let ops = self.in_place_operands(call);
                 return ctor.code(site_of(call), ops);
             }
         }
         self.compile(expr)
+    }
+
+    /// The fused transient update `(assoc! t k (conj (nth t k) x))`
+    /// (see [`crate::vm_ops::assoc_conj_code`]): `t` one local in
+    /// both places, `k` the same local or `Int` literal in both, and
+    /// `x` a local, literal, or metadata-free vector literal of
+    /// those. The call's ordinary code compiles first (the same
+    /// registers and last-use moves) and runs on every miss.
+    fn try_assoc_conj(&mut self, call: &DirectCall, effect: bool) -> Option<Exec> {
+        let (t, k, x, conj, nth) = assoc_conj_shape(call)?;
+        let generic = match crate::vm_ops::effect_ctor(call) {
+            Some(ctor) if effect => {
+                let ops = self.in_place_operands(call);
+                ctor.code(site_of(call), ops)
+            }
+            _ => self.compile_direct_plain(call),
+        };
+        let srcs = (self.in_place(t), self.in_place(k), self.pure_src(x));
+        let (Some(t), Some(k), Some(x)) = srcs else {
+            return Some(generic);
+        };
+        let sites = [call, conj, nth].map(|c| crate::vm_ops::Site::new(site_of(c)));
+        Some(crate::vm_ops::assoc_conj_code(
+            sites, t, k, x, effect, generic,
+        ))
+    }
+
+    /// A local (not a `letfn` member) or literal, read in place.
+    fn in_place(&mut self, e: &Expr) -> Option<crate::vm_ops::InPlace> {
+        use crate::vm_ops::InPlace;
+        match e {
+            Expr::Literal(v) => Some(InPlace::Kst(v.clone())),
+            Expr::Local(idx) => match self.resolve(*idx) {
+                Loc::Reg(r) => Some(InPlace::Reg(r)),
+                Loc::Up(u) => Some(InPlace::Up(u)),
+                Loc::Rec(_) => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The fused update's appended operand (see [`Self::try_assoc_conj`]).
+    fn pure_src(&mut self, e: &Expr) -> Option<crate::vm_ops::PureSrc> {
+        use crate::vm_ops::PureSrc;
+        match e {
+            Expr::VecLit(items, None) if !items.is_empty() => items
+                .iter()
+                .map(|i| self.in_place(i))
+                .collect::<Option<Vec<_>>>()
+                .map(|v| PureSrc::Vec(v.into())),
+            other => self.in_place(other).map(PureSrc::One),
+        }
     }
 
     fn compile_body(&mut self, body: &[Expr]) -> Exec {
@@ -951,7 +1129,7 @@ impl Compiler {
     /// `loop`: each binding's raw value takes a register (a symbol's
     /// is its own); destructured bindings unpack after every write,
     /// initial and `recur`, in order.
-    fn compile_loop(&mut self, bindings: &[(Pattern, Expr)], body: &[Expr]) -> Exec {
+    fn compile_loop(&mut self, bindings: &[(Pattern, Expr)], body: &Arc<[Expr]>) -> Exec {
         let mark = self.mark();
         let mut steps: Vec<LoopStep> = Vec::with_capacity(bindings.len());
         for (pat, init) in bindings {
@@ -966,28 +1144,48 @@ impl Compiler {
         let targets: Arc<[usize]> = steps.iter().map(|(r, ..)| *r).collect();
         let unpacks = steps.iter().any(|(_, _, u)| u.is_some());
         let saved = std::mem::replace(&mut self.scope().recur, Arc::clone(&targets));
-        let fused = self.try_fused_loop(body, targets.len());
+        let fused = self.try_fused_loop(body, &targets, unpacks);
         let flat = if fused.is_none() && !unpacks {
             Some(self.compile_flat_loop(body, targets.len()))
         } else {
             None
         };
-        let body = if fused.is_some() || flat.is_some() {
+        let int_fused = fused.as_ref().is_some_and(|f| f.int.is_some());
+        let code = if fused.is_some() || flat.is_some() {
             konst(Value::Nil)
         } else {
             self.compile_body(body)
         };
+        let scalar = (!unpacks && !int_fused).then(|| self.lazy_scalar(body));
         self.scope().recur = saved;
         self.reset(mark);
         let code = LoopCode {
             steps,
             targets,
-            body,
+            body: code,
             unpacks,
             fused,
             flat,
+            scalar,
         };
         Box::new(move |ev, f| run_loop(ev, f, &code))
+    }
+
+    /// What a loop's scalar program compiles from once the loop runs
+    /// hot (see [`LazyScalar`]): the body compiled already, so every
+    /// outer local it reads has its place in the scope.
+    fn lazy_scalar(&self, body: &Arc<[Expr]>) -> LazyScalar {
+        let s = self.scopes.last().expect("a scope is always open");
+        LazyScalar {
+            body: Arc::clone(body),
+            scope_base: s.base,
+            regs: s.locals.as_slice().into(),
+            rec: s.rec.as_slice().into(),
+            captures: s.captures.iter().map(|(i, _)| *i).collect(),
+            entries: AtomicU32::new(0),
+            heat: AtomicU32::new(0),
+            prog: OnceLock::new(),
+        }
     }
 
     /// Detect the fused loop shape: a single-form body that is an
@@ -995,7 +1193,13 @@ impl Compiler {
     /// Parts compile in `compile_if` order (test, then, els) so
     /// register allocation and last-use moves match the generic
     /// path exactly.
-    fn try_fused_loop(&mut self, body: &[Expr], arity: usize) -> Option<FusedLoop> {
+    fn try_fused_loop(
+        &mut self,
+        body: &[Expr],
+        targets: &[usize],
+        unpacks: bool,
+    ) -> Option<FusedLoop> {
+        let arity = targets.len();
         let [Expr::If { test, then, els }] = body else {
             return None;
         };
@@ -1005,7 +1209,7 @@ impl Compiler {
                 (None, Some(args)) => (args, false),
                 _ => return None,
             };
-        let test = self.compile_test(test);
+        let test_code = self.compile_test(test);
         // Compile in source order: then-branch before els-branch.
         let (then_ops, exit) = if recur_when_true {
             let ops: Vec<Operand> = recur_args.iter().map(|a| self.operand(a, true)).collect();
@@ -1015,11 +1219,131 @@ impl Compiler {
             let ops: Vec<Operand> = recur_args.iter().map(|a| self.operand(a, true)).collect();
             (ops, exit)
         };
+        // Classified last (pure inspection over the same AST;
+        // `resolve` is idempotent once the parts compiled).
+        let int = if unpacks {
+            None
+        } else {
+            self.try_int_fused(test, recur_args, targets, &then_ops)
+        };
         Some(FusedLoop {
-            test,
+            test: test_code,
             exit,
             ops: then_ops,
             recur_when_true,
+            int,
+        })
+    }
+
+    /// An unboxed source for `e`: an `Int` literal, or a local
+    /// (loop variables by state position; other registers are
+    /// loop-invariant, captures immutable).
+    fn int_src(&mut self, e: &Expr, targets: &[usize]) -> Option<IntSrc> {
+        match e {
+            Expr::Literal(Value::Int(n)) => Some(IntSrc::Kst(*n)),
+            Expr::Local(idx) => match self.resolve(*idx) {
+                Loc::Reg(r) => Some(match targets.iter().position(|t| *t == r) {
+                    Some(p) => IntSrc::State(p),
+                    None => IntSrc::Reg(r),
+                }),
+                Loc::Up(u) => Some(IntSrc::Up(u)),
+                Loc::Rec(_) => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// An unboxed operand for a `recur` argument (its site is
+    /// recorded only when the whole call classifies).
+    fn int_operand(
+        &mut self,
+        e: &Expr,
+        targets: &[usize],
+        sites: &mut Vec<crate::vm_ops::Site>,
+    ) -> Option<IntOperand> {
+        if let Expr::DirectNative(call) = e {
+            if let Some(ctor) = crate::vm_ops::int_value_op(call) {
+                let op = match ctor {
+                    crate::vm_ops::IntCtor::One(op) => {
+                        IntOperand::One(op, self.int_src(&call.args[0], targets)?)
+                    }
+                    crate::vm_ops::IntCtor::Two(op) => IntOperand::Two(
+                        op,
+                        self.int_src(&call.args[0], targets)?,
+                        self.int_src(&call.args[1], targets)?,
+                    ),
+                };
+                sites.push(crate::vm_ops::Site::new(site_of(call)));
+                return Some(op);
+            }
+        }
+        self.int_src(e, targets).map(IntOperand::Src)
+    }
+
+    /// An unboxed test for the loop's branch (see
+    /// [`int_operand`](Self::int_operand)).
+    fn int_test(
+        &mut self,
+        e: &Expr,
+        targets: &[usize],
+        sites: &mut Vec<crate::vm_ops::Site>,
+    ) -> Option<IntTest> {
+        let Expr::DirectNative(call) = e else {
+            return None;
+        };
+        let test = match crate::vm_ops::int_test_op(call)? {
+            crate::vm_ops::IntTestCtor::One(op) => {
+                IntTest::One(op, self.int_src(&call.args[0], targets)?)
+            }
+            crate::vm_ops::IntTestCtor::Two(op) => IntTest::Two(
+                op,
+                self.int_src(&call.args[0], targets)?,
+                self.int_src(&call.args[1], targets)?,
+            ),
+        };
+        sites.push(crate::vm_ops::Site::new(site_of(call)));
+        Some(test)
+    }
+
+    /// The unboxed program for a fused loop, when the test and
+    /// every `recur` operand mirror on `i64` and no compiled
+    /// operand moves a non-target register out (a last-use take
+    /// the unboxed stretch would not perform).
+    fn try_int_fused(
+        &mut self,
+        test: &Expr,
+        recur_args: &[Expr],
+        targets: &[usize],
+        ops: &[Operand],
+    ) -> Option<IntFused> {
+        // Defensive: liveness never marks a loop-carried read as
+        // last-use (the boxed road would break too), but a
+        // non-target take must not slip past the stretch.
+        let clear = !ops.iter().any(|op| match op {
+            Operand::Loc(Loc::Reg(r), true) => !targets.contains(r),
+            _ => false,
+        });
+        clear
+            .then(|| self.build_int_fused(test, recur_args, targets))
+            .flatten()
+    }
+
+    fn build_int_fused(
+        &mut self,
+        test: &Expr,
+        recur_args: &[Expr],
+        targets: &[usize],
+    ) -> Option<IntFused> {
+        let mut sites = Vec::new();
+        let test = self.int_test(test, targets, &mut sites)?;
+        let mut int_ops = Vec::with_capacity(recur_args.len());
+        for a in recur_args {
+            int_ops.push(self.int_operand(a, targets, &mut sites)?);
+        }
+        Some(IntFused {
+            test,
+            ops: int_ops.into_boxed_slice(),
+            sites: sites.into_boxed_slice(),
         })
     }
 
@@ -1179,6 +1503,7 @@ impl Compiler {
         let compiled = CompiledFun {
             display: Arc::from(fun.display.as_str()),
             source: Arc::clone(&fun.arities),
+            base,
             arities,
         };
         (Arc::new(compiled), captures)
@@ -1462,6 +1787,13 @@ impl Compiler {
     /// operand shape ([`crate::vm_ops`]), the other intrinsics read
     /// registers and literals in place.
     fn compile_direct(&mut self, call: &DirectCall) -> Exec {
+        if let Some(code) = self.try_assoc_conj(call, false) {
+            return code;
+        }
+        self.compile_direct_plain(call)
+    }
+
+    fn compile_direct_plain(&mut self, call: &DirectCall) -> Exec {
         if let Some(ctor) = crate::vm_ops::value_ctor(call) {
             let ops = self.in_place_operands(call);
             return ctor.code(site_of(call), ops);
@@ -1608,7 +1940,7 @@ fn run_try(ev: &mut Evaluator, f: &mut Frame<'_>, code: &TryCode) -> Result<Valu
         .find(|(class, ..)| thrown.class.matches(class));
     let result = match handled {
         Some((_, r, handler)) => {
-            f.regs[*r] = Value::Throwable(thrown);
+            f.regs[*r] = Value::Throwable(Arc::new(thrown));
             handler(ev, f)
         }
         None => Err(Signal::Throw(thrown)),
@@ -1701,7 +2033,7 @@ fn recur_n(targets: Arc<[usize]>, ops: Vec<Operand>) -> Exec {
 /// An `and`/`or` step over the let-bound local `g`: `(let* [g a]
 /// (if g b g))` answers `(a, b, true)`, `(let* [g a] (if g g b))`
 /// `(a, b, false)`.
-fn and_or_shape(expr: &Expr, g: usize) -> Option<(&Expr, &Expr, bool)> {
+pub(crate) fn and_or_shape(expr: &Expr, g: usize) -> Option<(&Expr, &Expr, bool)> {
     let Expr::Let { bindings, body } = expr else {
         return None;
     };
@@ -1742,6 +2074,10 @@ struct LoopCode {
     /// The flat shape (see [`FlatLoop`]) when the loop takes it:
     /// no destructuring loop bindings, no fused shape.
     flat: Option<FlatLoop>,
+    /// The unboxed program (see [`crate::vm_scalar`]) tried first
+    /// once compiled, when no unboxed-int fused program covers the
+    /// loop.
+    scalar: Option<LazyScalar>,
 }
 
 /// One flat-loop step: the `let`/`if`/`do` skeleton of a loop
@@ -1780,6 +2116,49 @@ struct FusedLoop {
     exit: Exec,
     ops: Vec<Operand>,
     recur_when_true: bool,
+    /// The unboxed-int program for the same test/operands, when
+    /// every piece mirrors on `i64` (see [`run_fused_int`]).
+    int: Option<IntFused>,
+}
+
+/// An unboxed-int operand source.
+#[derive(Clone, Copy)]
+enum IntSrc {
+    /// A loop variable, by position in the loop targets.
+    State(usize),
+    /// A loop-invariant register.
+    Reg(usize),
+    /// A captured local.
+    Up(usize),
+    /// An integer literal.
+    Kst(i64),
+}
+
+/// One unboxed `recur` operand: a source, or a direct int op
+/// over sources.
+enum IntOperand {
+    Src(IntSrc),
+    One(crate::vm_ops::IntOp1, IntSrc),
+    Two(crate::vm_ops::IntOp2, IntSrc, IntSrc),
+}
+
+/// An unboxed branch test over sources.
+enum IntTest {
+    One(crate::vm_ops::IntTest1, IntSrc),
+    Two(crate::vm_ops::IntTest2, IntSrc, IntSrc),
+}
+
+/// A fused loop's unboxed-int program: while the loop state
+/// stays `Int` and every site stays valid, iterations run on
+/// `i64` locals with no `Value` traffic. The first miss
+/// (non-`Int` state or source, an overflowing or otherwise
+/// missing op, an invalid site, the exit test) writes the
+/// state back boxed and hands the loop to [`run_fused`], so
+/// every observable behavior comes from the ordinary road.
+struct IntFused {
+    test: IntTest,
+    ops: Box<[IntOperand]>,
+    sites: Box<[crate::vm_ops::Site]>,
 }
 
 /// Run a `loop`: bind in order (each init sees the earlier names),
@@ -1813,11 +2192,67 @@ fn run_loop(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Va
             unpack(ev, f)?;
         }
     }
+    if let Some(lazy) = &code.scalar {
+        let prog = match lazy.prog.get() {
+            Some(prog) => prog.as_deref(),
+            None if ev.eager_tier => lazy.program(ev, &code.targets),
+            None => return run_cold(ev, f, code, lazy),
+        };
+        if let Some(v) = crate::vm_scalar::try_run(ev, f, prog, &code.targets) {
+            return Ok(v);
+        }
+    }
+    // Unused by the roads that do not tick.
+    let mut fuel = u32::MAX;
+    run_boxed::<false>(ev, f, code, &mut fuel)
+}
+
+/// Run a loop whose scalar program is not compiled yet: boxed,
+/// ticking toward [`HOT`] (see [`tick`]), and counting the entry
+/// into the history (unless it handed over). The entry that gives
+/// the history as many entries as the trip rule judges decides the
+/// program now (most such loops never `recur` much: the rule turns
+/// them down without a compile, and their entries stop counting).
+#[inline(never)]
+fn run_cold(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    lazy: &LazyScalar,
+) -> Result<Value, Signal> {
+    // At least one: concurrent entries may overshoot the heat.
+    let start = HOT.saturating_sub(lazy.heat.load(Ordering::Relaxed)).max(1);
+    let mut fuel = start;
+    let out = run_boxed::<true>(ev, f, code, &mut fuel);
+    // A hand-over refuels past `start` (the program counts that run).
+    if fuel <= start {
+        lazy.heat.fetch_add(start - fuel, Ordering::Relaxed);
+        if lazy.entries.fetch_add(1, Ordering::Relaxed) + 1 >= crate::vm_scalar::JUDGE_AFTER {
+            lazy.program(ev, &code.targets);
+        }
+    }
+    out
+}
+
+/// A loop's boxed roads (after the bindings, the scalar program
+/// declined or not yet compiled). While the program is not compiled
+/// (`TICK`), the flat and fused ones tick `fuel` at each plain
+/// `recur` (see [`tick`]); a loop that has neither destructures, and
+/// has no scalar program.
+fn run_boxed<const TICK: bool>(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    fuel: &mut u32,
+) -> Result<Value, Signal> {
     if let Some(flat) = &code.flat {
-        return run_flat(ev, f, code, flat);
+        return run_flat::<TICK>(ev, f, code, flat, fuel);
     }
     if let Some(fused) = &code.fused {
-        return run_fused(ev, f, code, fused);
+        if let Some(int) = &fused.int {
+            return run_fused_int(ev, f, code, fused, int);
+        }
+        return run_fused::<TICK>(ev, f, code, fused, fuel);
     }
     loop {
         match (code.body)(ev, f) {
@@ -1829,6 +2264,45 @@ fn run_loop(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode) -> Result<Va
         }
         run_unpacks(ev, f, code)?;
     }
+}
+
+/// What a ticking road does at an iteration boundary (see [`tick`]).
+enum Turn {
+    /// Run the next iteration, still ticking.
+    Go,
+    /// The scalar program ran the loop out.
+    Done(Value),
+    /// Run the rest boxed without ticking (from where a miss of the
+    /// program left the state).
+    Cool,
+}
+
+/// A ticking road's iteration boundary (the loop state is all in the
+/// target registers, as at entry): the one that spends the loop's
+/// fuel compiles its scalar program and hands the rest of the loop
+/// to it.
+#[inline(always)]
+fn tick(ev: &mut Evaluator, f: &mut Frame<'_>, code: &LoopCode, fuel: &mut u32) -> Turn {
+    *fuel -= 1;
+    if *fuel != 0 {
+        return Turn::Go;
+    }
+    hand_over(ev, f, code, fuel).map_or(Turn::Cool, Turn::Done)
+}
+
+/// Compile the loop's program and run the rest of the loop on it
+/// (`fuel` refills past any entry's, the sign of a hand-over).
+#[cold]
+#[inline(never)]
+fn hand_over(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    fuel: &mut u32,
+) -> Option<Value> {
+    *fuel = u32::MAX;
+    let prog = code.scalar.as_ref()?.program(ev, &code.targets);
+    crate::vm_scalar::try_run(ev, f, prog, &code.targets)
 }
 
 /// A discarded evaluation's next step (see [`run_flat`]).
@@ -1864,11 +2338,12 @@ fn flat_set(
 /// replaced). A `Recur` signal from an opaque leaf (a VM `recur`
 /// inside a compiled subform, or a tree-evaluated one carrying
 /// values) restarts at the first step, like [`run_loop`].
-fn run_flat(
+fn run_flat<const TICK: bool>(
     ev: &mut Evaluator,
     f: &mut Frame<'_>,
     code: &LoopCode,
     flat: &FlatLoop,
+    fuel: &mut u32,
 ) -> Result<Value, Signal> {
     let mut pc = 0usize;
     loop {
@@ -1891,6 +2366,35 @@ fn run_flat(
             }
             Err(s) => return Err(s),
         }
+        // (The check stays out of the plain road: a ticking arm there
+        // cost a dozen instructions per `recur`.)
+        if TICK {
+            if let Some(out) = flat_turn(ev, f, code, flat, pc, fuel) {
+                return out;
+            }
+        }
+    }
+}
+
+/// A ticking flat road after a step: at an iteration boundary (only
+/// a restart lands on the first step; jumps go forward), see
+/// [`tick`]. `Some` ends this road (the program ran the loop out, or
+/// the rest of the loop runs on the plain road).
+fn flat_turn(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    flat: &FlatLoop,
+    pc: usize,
+    fuel: &mut u32,
+) -> Option<Result<Value, Signal>> {
+    if pc != 0 {
+        return None;
+    }
+    match tick(ev, f, code, fuel) {
+        Turn::Go => None,
+        Turn::Done(v) => Some(Ok(v)),
+        Turn::Cool => Some(run_flat::<false>(ev, f, code, flat, fuel)),
     }
 }
 
@@ -2016,15 +2520,22 @@ fn write_ops_n(
 /// per iteration): `fused_once`'s `None` continues, its value
 /// ends the loop, and a `Recur` signal from an opaque leaf is
 /// absorbed like [`run_loop`]'s.
-fn run_fused(
+fn run_fused<const TICK: bool>(
     ev: &mut Evaluator,
     f: &mut Frame<'_>,
     code: &LoopCode,
     fused: &FusedLoop,
+    fuel: &mut u32,
 ) -> Result<Value, Signal> {
     loop {
         match fused_once(ev, f, code, fused) {
             Ok(Some(v)) => return Ok(v),
+            // A plain `recur` (no unpacks: a ticking loop binds symbols).
+            Ok(None) if TICK => match tick(ev, f, code, fuel) {
+                Turn::Go => {}
+                Turn::Done(v) => return Ok(v),
+                Turn::Cool => return run_fused::<false>(ev, f, code, fused, fuel),
+            },
             Ok(None) => {}
             Err(Signal::Recur(values)) => absorb_recur_values(code, f, values),
             Err(s) => return Err(s),
@@ -2048,6 +2559,123 @@ fn fused_once(
     Ok(None)
 }
 
+/// An unboxed source's value (`None` for a non-`Int` read: the
+/// stretch deopts).
+#[inline(always)]
+fn int_src_value(src: &IntSrc, f: &Frame<'_>, state: &[i64]) -> Option<i64> {
+    let v = match src {
+        IntSrc::State(p) => return Some(state[*p]),
+        IntSrc::Reg(r) => &f.regs[*r],
+        IntSrc::Up(u) => &f.up[*u],
+        IntSrc::Kst(n) => return Some(*n),
+    };
+    match v {
+        Value::Int(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// The unboxed test's verdict (`None` deopts).
+#[inline(always)]
+fn int_test_value(test: &IntTest, f: &Frame<'_>, state: &[i64]) -> Option<bool> {
+    match test {
+        IntTest::One(op, a) => Some(op.test(int_src_value(a, f, state)?)),
+        IntTest::Two(op, a, b) => {
+            Some(op.test(int_src_value(a, f, state)?, int_src_value(b, f, state)?))
+        }
+    }
+}
+
+/// The next unboxed state (every operand read from the current
+/// state first, like the boxed write-after-all; `next` is
+/// pre-sized to the state; `false` deopts).
+#[inline(always)]
+fn int_next_state(int: &IntFused, f: &Frame<'_>, state: &[i64], next: &mut [i64]) -> bool {
+    for (slot, op) in next.iter_mut().zip(&int.ops) {
+        let v = match op {
+            IntOperand::Src(a) => int_src_value(a, f, state),
+            IntOperand::One(op, a) => int_src_value(a, f, state).and_then(|x| op.apply(x)),
+            IntOperand::Two(op, a, b) => {
+                match (int_src_value(a, f, state), int_src_value(b, f, state)) {
+                    (Some(x), Some(y)) => op.apply(x, y),
+                    _ => None,
+                }
+            }
+        };
+        match v {
+            Some(v) => *slot = v,
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Whether every site of the program still validates, checking
+/// under a fresh snapshot (the sentinel start forces the first
+/// stretch's validation through here).
+#[inline(always)]
+fn int_sites_ok(ev: &mut Evaluator, int: &IntFused, snap: &mut (u64, u64)) -> bool {
+    if ev.direct_snapshot() == *snap {
+        return true;
+    }
+    let ok = int.sites.iter().all(|s| s.valid(ev));
+    *snap = ev.direct_snapshot();
+    ok
+}
+
+/// The unboxed stretch of a fused loop (see [`IntFused`]): runs
+/// plain iterations on `i64` locals and deopts to [`run_fused`]
+/// with the state written back at the first miss or exit. The
+/// iteration that deopts has run nothing observable (the test
+/// and operands are pure int reads), so the boxed road re-runs
+/// it whole.
+fn run_fused_int(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    code: &LoopCode,
+    fused: &FusedLoop,
+    int: &IntFused,
+) -> Result<Value, Signal> {
+    // No scalar program to hand over to (see `run_loop`).
+    let mut fuel = u32::MAX;
+    let mut cur_buf: SmallVec<[i64; 8]> = SmallVec::new();
+    for r in code.targets.iter() {
+        match f.regs[*r] {
+            Value::Int(n) => cur_buf.push(n),
+            _ => return run_fused::<false>(ev, f, code, fused, &mut fuel),
+        }
+    }
+    let mut snap = (u64::MAX, u64::MAX);
+    let mut nxt_buf: SmallVec<[i64; 8]> = SmallVec::new();
+    nxt_buf.resize(cur_buf.len(), 0);
+    // Ping-pong the two buffers (a per-iteration copy of the
+    // state would dominate the stretch it saves).
+    let mut flipped = false;
+    loop {
+        let (state, next): (&[i64], &mut [i64]) = if flipped {
+            (&nxt_buf, &mut cur_buf)
+        } else {
+            (&cur_buf, &mut nxt_buf)
+        };
+        if !int_sites_ok(ev, int, &mut snap) {
+            break;
+        }
+        match int_test_value(&int.test, f, state) {
+            Some(t) if t == fused.recur_when_true => {}
+            _ => break,
+        }
+        if !int_next_state(int, f, state, next) {
+            break;
+        }
+        flipped = !flipped;
+    }
+    let state: &[i64] = if flipped { &nxt_buf } else { &cur_buf };
+    for (r, v) in code.targets.iter().zip(state) {
+        set_reg(&mut f.regs[*r], Value::Int(*v));
+    }
+    run_fused::<false>(ev, f, code, fused, &mut fuel)
+}
+
 /// A tree-evaluator frame holding `locs`' values at their lexical
 /// indexes.
 fn frame_env(f: &Frame<'_>, locs: &[Loc]) -> Env {
@@ -2068,13 +2696,13 @@ struct CaseShape {
 
 /// A constant-message throwable (a fresh identity per evaluation).
 fn new_throwable(ev: &mut Evaluator, class: ThrowClass, message: &Arc<str>) -> Value {
-    Value::Throwable(Throwable {
+    Value::Throwable(Arc::new(Throwable {
         id: ev.next_id(),
         class,
         message: Some(Arc::clone(message)),
         data: None,
         cause: None,
-    })
+    }))
 }
 
 /// Clone with the scalar kinds inline (no call into the clone glue).
@@ -2092,7 +2720,10 @@ pub(crate) fn clone_value(v: &Value) -> Value {
 #[inline(always)]
 fn set_reg(slot: &mut Value, v: Value) {
     let old = std::mem::replace(slot, v);
-    if matches!(old, Value::Int(_) | Value::Nil | Value::Bool(_)) {
+    if matches!(
+        old,
+        Value::Int(_) | Value::Nil | Value::Bool(_) | Value::Char(_) | Value::Double(_)
+    ) {
         std::mem::forget(old);
     }
 }
@@ -2205,6 +2836,41 @@ fn direct_general(site: Arc<DirectCall>, ops: Vec<Operand>) -> Exec {
         eval_operands(ev, f, &ops, &mut values)?;
         ev.call_direct_values(&site, &mut values)
     })
+}
+
+/// The direct call `e` makes to `clojure.core/<name>` with `argc`
+/// arguments.
+fn core_call<'e>(e: &'e Expr, name: &str, argc: usize) -> Option<&'e DirectCall> {
+    match e {
+        Expr::DirectNative(call)
+            if call.args.len() == argc && crate::vm_ops::core_name(call) == Some(name) =>
+        {
+            Some(call)
+        }
+        _ => None,
+    }
+}
+
+/// `(assoc! t k (conj (nth t k) x))`'s parts: the transient local,
+/// the key, the appended form, and the `conj` and `nth` calls.
+type AssocConj<'e> = (&'e Expr, &'e Expr, &'e Expr, &'e DirectCall, &'e DirectCall);
+
+/// The fused transient update's shape (see
+/// `Compiler::try_assoc_conj`): one local `t` and the same key (a
+/// local or `Int` literal) in both places.
+fn assoc_conj_shape(call: &DirectCall) -> Option<AssocConj<'_>> {
+    let ([t, k, upd], Some("assoc!")) = (&call.args[..], crate::vm_ops::core_name(call)) else {
+        return None;
+    };
+    let conj = core_call(upd, "conj", 2)?;
+    let nth = core_call(&conj.args[0], "nth", 2)?;
+    let same_t = matches!((t, &nth.args[0]), (Expr::Local(a), Expr::Local(b)) if a == b);
+    let same_k = match (k, &nth.args[1]) {
+        (Expr::Local(a), Expr::Local(b)) => a == b,
+        (Expr::Literal(Value::Int(a)), Expr::Literal(Value::Int(b))) => a == b,
+        _ => false,
+    };
+    (same_t && same_k).then_some((t, k, &conj.args[1], conj, nth))
 }
 
 /// A direct call's site record (the analyzed call minus its

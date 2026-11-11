@@ -5275,7 +5275,7 @@ fn throwable_message(t: &clj_value::Throwable) -> Value {
 fn throwable_cause(t: &clj_value::Throwable) -> Value {
     t.cause
         .clone()
-        .map(|c| Value::Throwable(*c))
+        .map(|c| Value::Throwable(std::sync::Arc::new(*c)))
         .unwrap_or(Value::Nil)
 }
 
