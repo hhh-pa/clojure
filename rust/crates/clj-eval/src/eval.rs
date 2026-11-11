@@ -868,7 +868,7 @@ impl Evaluator {
         }
         self.registry.bump_eval_seq();
         let expr = self.analyze(&expanded).map_err(|e| self.compile_err(e))?;
-        let code = crate::vm::compile_top(&expr);
+        let code = crate::vm::compile_top(&expr, &self.registry);
         match crate::vm::run_top(self, &code) {
             Ok(v) => Ok(v),
             Err(s) => Err(uncaught(s)),
@@ -1096,8 +1096,29 @@ impl Evaluator {
     /// line.
     #[inline(always)]
     pub(crate) fn site_direct_valid(&mut self, site: usize, call: &DirectCall) -> bool {
+        self.site_root_valid(site, &call.var, &call.expect)
+    }
+
+    /// [`site_direct_valid`](Self::site_direct_valid) over a var and
+    /// the root it must still hold (also an inlined closure's site,
+    /// see `vm_scalar`).
+    #[inline(always)]
+    pub(crate) fn site_root_valid(
+        &mut self,
+        site: usize,
+        var: &Var,
+        expect: &Arc<dyn clj_value::ExtensionValue>,
+    ) -> bool {
         let now = (self.registry.epoch(), self.bindings.version());
-        self.vm_direct.get(site) == Some(&now) || self.site_direct_check(site, call)
+        self.vm_direct.get(site) == Some(&now) || self.site_root_check(site, var, expect)
+    }
+
+    /// Whether `depth` more nested calls fit under the call-depth
+    /// limit (an inlined call skips [`guarded_call`](Self::guarded_call)'s
+    /// check, so a program with inlined calls enters only when every
+    /// real call would have passed it).
+    pub(crate) fn calls_fit(&self, depth: usize) -> bool {
+        self.call_depth + depth <= MAX_CALL_DEPTH
     }
 
     /// Whether a group of sites (one id for many) still validates:
@@ -1133,14 +1154,19 @@ impl Evaluator {
         (self.registry.epoch(), self.bindings.version())
     }
 
-    /// [`site_direct_valid`](Self::site_direct_valid)'s miss: check
-    /// the var and record a valid verdict under the current epochs.
+    /// [`site_root_valid`](Self::site_root_valid)'s miss: check the
+    /// var and record a valid verdict under the current epochs.
     #[cold]
     #[inline(never)]
-    fn site_direct_check(&mut self, site: usize, call: &DirectCall) -> bool {
-        let valid = self.bindings.get(call.var.id).is_none()
-            && matches!(self.deref_var_cached(call.var.id, &call.var.sym),
-                Value::Extension(e) if Arc::ptr_eq(&e, &call.expect));
+    fn site_root_check(
+        &mut self,
+        site: usize,
+        var: &Var,
+        expect: &Arc<dyn clj_value::ExtensionValue>,
+    ) -> bool {
+        let valid = self.bindings.get(var.id).is_none()
+            && matches!(self.deref_var_cached(var.id, &var.sym),
+                Value::Extension(e) if Arc::ptr_eq(&e, expect));
         if valid {
             if self.vm_direct.len() <= site {
                 self.vm_direct.resize(site + 1, (u64::MAX, u64::MAX));

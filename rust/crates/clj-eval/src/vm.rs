@@ -33,7 +33,7 @@ use std::sync::{Arc, OnceLock};
 use clj_value::{Map, Symbol, ThrowClass, Throwable, Value, Var, Vector};
 use smallvec::SmallVec;
 
-use crate::env::Env;
+use crate::env::{Env, SharedRegistry};
 use crate::error::Signal;
 use crate::eval::Evaluator;
 use crate::expr::{Arity, CaseTest, Catch, DirectCall, Expr, FunExpr, Pattern, pattern_count};
@@ -82,6 +82,9 @@ pub(crate) enum Loc {
 pub(crate) struct CompiledFun {
     pub(crate) display: Arc<str>,
     pub(crate) source: Arc<[Arity]>,
+    /// The lexical index of the first param (locals below it are
+    /// captured or the fn's own `letfn` names).
+    pub(crate) base: usize,
     arities: Vec<CompiledArity>,
 }
 
@@ -136,9 +139,10 @@ pub(crate) struct TopCode {
 }
 
 /// Compile one analyzed top-level form.
-pub(crate) fn compile_top(expr: &Expr) -> TopCode {
+pub(crate) fn compile_top(expr: &Expr, roots: &SharedRegistry) -> TopCode {
     let mut c = Compiler {
         scopes: vec![Scope::new(0, Vec::new())],
+        roots: roots.clone(),
     };
     c.scopes[0].last = crate::vm_live::last_uses(std::slice::from_ref(expr), 0, 0);
     let exec = c.compile(expr);
@@ -598,6 +602,8 @@ struct Mark {
 
 struct Compiler {
     scopes: Vec<Scope>,
+    /// The var roots as of compilation (what `vm_scalar` may inline).
+    roots: SharedRegistry,
 }
 
 impl crate::vm_scalar::Host for Compiler {
@@ -613,6 +619,37 @@ impl crate::vm_scalar::Host for Compiler {
     fn site(&self, call: &DirectCall) -> crate::vm_ops::Site {
         crate::vm_ops::Site::new(site_of(call))
     }
+
+    fn callee(&self, var: &Var, argc: usize) -> Option<crate::vm_scalar::Callee> {
+        inline_callee(&self.roots.root_or_unbound(var.id, &var.sym), argc)
+    }
+}
+
+/// The arity a call with `argc` args runs on `root` when its body
+/// may inline (see [`crate::vm_scalar::Callee`]): a VM closure
+/// without conveyed bindings whose fixed arity for the count binds
+/// symbols only — the arity [`fixed_target`] would run.
+fn inline_callee(root: &Value, argc: usize) -> Option<crate::vm_scalar::Callee> {
+    let Value::Extension(expect) = root else {
+        return None;
+    };
+    let closure = crate::ext::as_closure(root)?;
+    let code = closure.vm.as_ref().filter(|_| closure.conveyed.is_none())?;
+    let fun = &code.fun;
+    let index = fun
+        .source
+        .iter()
+        .position(|a| a.rest.is_none() && a.fixed.len() == argc)?;
+    fun.source[index]
+        .fixed
+        .iter()
+        .all(|p| matches!(p, Pattern::Symbol(_)))
+        .then(|| crate::vm_scalar::Callee {
+            base: fun.base,
+            arities: Arc::clone(&fun.source),
+            index,
+            expect: Arc::clone(expect),
+        })
 }
 
 impl Compiler {
@@ -1383,6 +1420,7 @@ impl Compiler {
         let compiled = CompiledFun {
             display: Arc::from(fun.display.as_str()),
             source: Arc::clone(&fun.arities),
+            base,
             arities,
         };
         (Arc::new(compiled), captures)

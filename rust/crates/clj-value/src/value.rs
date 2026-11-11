@@ -1043,6 +1043,18 @@ impl Vector {
         }
     }
 
+    /// The item at `index` read in place through `f` (typed storage
+    /// passes a stack copy; `None` past the end): the clone-free
+    /// read for callers that only inspect the item.
+    #[inline(always)]
+    pub fn read_at<R>(&self, index: usize, f: impl FnOnce(&Value) -> Option<R>) -> Option<R> {
+        match &self.0.inner {
+            VectorInner::Generic(t) => f(t.get(index)?),
+            VectorInner::Ints(t) => f(&Value::Int(*t.get(index)?)),
+            VectorInner::Chars(t) => f(&Value::Char(*t.get(index)?)),
+        }
+    }
+
     /// The item at `index` borrowed (`None` past the end, and
     /// `None` for typed storage, whose items box on read): the
     /// clone-free read for comparison-style callers that only

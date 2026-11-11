@@ -513,3 +513,20 @@ fn vector_into_vec_and_array_try_take_objs() {
     );
     assert!(arr_ints.try_take_objs().is_none());
 }
+
+/// `read_at` reads every storage in place: packed ints and chars
+/// pass a stack copy, generic items are borrowed; past the end is
+/// `None` (#254 scalar tier reads).
+#[test]
+fn read_at_matches_get_over_every_storage() {
+    let some = |v: &Value| Some(v.clone());
+    let packed = Vector::from_vec(ints(3));
+    let chars = Vector::from_chars(vec!['x', 'y']);
+    let mixed = Vector::from_vec(vec![Value::Int(1), Value::Bool(true)]);
+    for v in [&packed, &chars, &mixed] {
+        for i in 0..4 {
+            assert_eq!(v.read_at(i, some), v.get(i), "{i}");
+        }
+    }
+    assert_eq!(chars.read_at(1, some), Some(Value::Char('y')));
+}

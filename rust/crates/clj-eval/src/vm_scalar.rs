@@ -18,6 +18,13 @@
 //! place, and performs `assoc!`/`conj!` on transient vectors at the
 //! `recur` or exit that ends an iteration.
 //!
+//! Calls through vars holding closures inline (the program enters
+//! only while each var still holds its closure, see [`RootSite`]);
+//! effects may sit under `when`/`when-not` and be followed by a
+//! `let`/`if` tree before the `recur`; and a `recur` operand that is
+//! a collection read reads after the effects, as the source orders
+//! (see [`late`]).
+//!
 //! Every operation answers exactly what its boxed op answers, or
 //! nothing: a non-scalar read, an overflow, an out-of-range
 //! index, a non-ASCII-safe miss, an invalid call site, or an
@@ -32,11 +39,13 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use clj_value::{TransientKind, Value};
+use std::sync::Arc;
+
+use clj_value::{ExtensionValue, TransientKind, TransientVector, Value, Var};
 use smallvec::SmallVec;
 
 use crate::eval::Evaluator;
-use crate::expr::{DirectCall, Expr, Pattern};
+use crate::expr::{Arity, DirectCall, Expr, Pattern};
 use crate::vm::{Frame, Loc};
 use crate::vm_ops::{IntCtor, IntOp1, IntOp2, IntTest1, IntTest2, IntTestCtor, Site};
 
@@ -113,6 +122,7 @@ pub(crate) enum Cast {
 }
 
 /// A scalar expression.
+#[derive(Clone)]
 pub(crate) enum IExpr {
     /// A loop variable, `let` temp, or nested loop variable.
     Slot(usize),
@@ -126,6 +136,7 @@ pub(crate) enum IExpr {
 }
 
 /// A computing operation.
+#[derive(Clone)]
 pub(crate) enum Calc {
     Op1(IntOp1, IExpr),
     Op2(IntOp2, IExpr, IExpr),
@@ -137,6 +148,7 @@ pub(crate) enum Calc {
 }
 
 /// A control form in value position.
+#[derive(Clone)]
 pub(crate) enum Ctl {
     If(Cond, IExpr, IExpr),
     Let(Box<[(usize, IExpr)]>, IExpr),
@@ -147,6 +159,7 @@ pub(crate) enum Ctl {
 }
 
 /// A branch test.
+#[derive(Clone)]
 pub(crate) enum Cond {
     Leaf(Cmp),
     Not(Box<Cond>),
@@ -155,6 +168,7 @@ pub(crate) enum Cond {
 }
 
 /// A comparison or truth test.
+#[derive(Clone)]
 pub(crate) enum Cmp {
     Truthy(IExpr),
     T1(IntTest1, IExpr),
@@ -165,14 +179,18 @@ pub(crate) enum Cmp {
 }
 
 /// A transient mutation at the end of an iteration.
+#[derive(Clone)]
 pub(crate) enum Effect {
     /// `(assoc! t k v)` with `k` inside the vector (no append).
     Assoc(Loc, IExpr, IExpr),
     /// `(conj! t v)`.
     Conj(Loc, IExpr),
+    /// `(when test eff…)`: the effects run only when the test holds.
+    When(Cond, Box<[Effect]>),
 }
 
 /// A loop's exit value.
+#[derive(Clone)]
 pub(crate) enum ExitVal {
     Expr(IExpr),
     /// A literal (`nil`, a keyword …).
@@ -187,6 +205,7 @@ pub(crate) enum ExitVal {
 }
 
 /// The end of one iteration.
+#[derive(Clone)]
 pub(crate) enum Leaf {
     /// `recur`: one operand per target (`None` passes the
     /// variable through unchanged).
@@ -195,6 +214,7 @@ pub(crate) enum Leaf {
 }
 
 /// A loop body: a tree of tests and temps ending in leaves.
+#[derive(Clone)]
 pub(crate) enum Node {
     If(Cond, Box<Node>, Box<Node>),
     Let(Box<[(usize, IExpr)]>, Box<Node>),
@@ -203,6 +223,7 @@ pub(crate) enum Node {
 }
 
 /// A nested loop used as a value.
+#[derive(Clone)]
 pub(crate) struct Inner {
     slots: Box<[usize]>,
     inits: Box<[IExpr]>,
@@ -309,6 +330,11 @@ pub(crate) struct ScalarLoop {
     effs: Box<[EffI]>,
     exits: Box<[ExitI]>,
     sites: Box<[Site]>,
+    /// The inlined callees' vars, each still holding its closure.
+    roots: Box<[RootSite]>,
+    /// The deepest inlined call nesting (the calls it stands for
+    /// must fit under the call-depth limit).
+    depth: usize,
     /// The site-group id the sites validate under together.
     gid: usize,
     /// Entries and iterations, for [`try_run`]'s give-up rule.
@@ -358,9 +384,9 @@ fn nth(coll: &Coll<'_>, i: Sv) -> Option<Sv> {
             k: K::Char,
             v: i64::from(u32::from(c)),
         }),
-        Coll::Vec(v) => Sv::of(&v.get(idx)?),
+        Coll::Vec(v) => v.read_at(idx, Sv::of),
         Coll::Trans(t) => match &*t.lock() {
-            TransientKind::Vector(tv) => Sv::of(&tv.nth_opt(idx)?),
+            TransientKind::Vector(tv) => tv.read_at(idx, Sv::of),
             _ => None,
         },
         Coll::Other => None,
@@ -409,12 +435,30 @@ fn effect_step(e: &EffI, s: &[Sv], colls: &[Coll<'_>], apply: bool) -> bool {
     match (e, len) {
         (EffI::Assoc(_, k, v), Ok(n)) => {
             match usize::try_from(s[usize::from(*k)].int_of().unwrap_or(-1)) {
-                Ok(i) if i < n => !apply || tv.assoc(i, s[usize::from(*v)].value()).is_ok(),
+                Ok(i) if i < n => !apply || store(tv, i, s[usize::from(*v)]),
                 _ => false,
             }
         }
-        (EffI::Conj(_, v), Ok(_)) => !apply || tv.conj(s[usize::from(*v)].value()).is_ok(),
+        (EffI::Conj(_, v), Ok(_)) => !apply || push(tv, s[usize::from(*v)]),
         (_, Err(_)) => false,
+    }
+}
+
+/// `assoc!` of a scalar (an `Int` keeps a packed buffer packed).
+#[inline(always)]
+fn store(tv: &mut TransientVector, i: usize, v: Sv) -> bool {
+    match v {
+        Sv { k: K::Int, v: n } => tv.assoc_int_opt(i, n),
+        v => tv.assoc(i, v.value()).is_ok(),
+    }
+}
+
+/// `conj!` of a scalar (an `Int` keeps a packed buffer packed).
+#[inline(always)]
+fn push(tv: &mut TransientVector, v: Sv) -> bool {
+    match v {
+        Sv { k: K::Int, v: n } => tv.conj_int_opt(n),
+        v => tv.conj(v.value()).is_ok(),
     }
 }
 
@@ -431,16 +475,13 @@ fn effect_once(e: &EffI, s: &[Sv], colls: &[Coll<'_>]) -> bool {
         return false;
     };
     match e {
-        EffI::Assoc(_, k, v) => match (s[usize::from(*k)].int_of(), s[usize::from(*v)]) {
-            (Some(i), _) if !(0..=i64::from(i32::MAX)).contains(&i) => false,
-            (Some(i), Sv { k: K::Int, v: n }) => tv.assoc_int_opt(i as usize, n),
-            (Some(i), v) => tv.assoc(i as usize, v.value()).is_ok(),
-            (None, _) => false,
+        EffI::Assoc(_, k, v) => match s[usize::from(*k)].int_of() {
+            Some(i) if (0..=i64::from(i32::MAX)).contains(&i) => {
+                store(tv, i as usize, s[usize::from(*v)])
+            }
+            _ => false,
         },
-        EffI::Conj(_, v) => match s[usize::from(*v)] {
-            Sv { k: K::Int, v: n } => tv.conj_int_opt(n),
-            v => tv.conj(v.value()).is_ok(),
-        },
+        EffI::Conj(_, v) => push(tv, s[usize::from(*v)]),
     }
 }
 
@@ -562,15 +603,14 @@ fn run(ev: &mut Evaluator, f: &mut Frame<'_>, sc: &ScalarLoop, targets: &[usize]
     for (slot, l) in sc.loads.iter() {
         s[usize::from(*slot)] = Sv::of(f.get(*l))?;
     }
-    // One cached verdict per evaluator for the whole site group.
-    if !ev.group_valid(sc.gid, |ev| sc.sites.iter().all(|s| s.valid(ev))) {
+    if !may_enter(ev, sc) {
         return None;
     }
     let snap = ev.direct_snapshot();
     let mut trips = 0u32;
     let out = {
         let fr: &Frame<'_> = f;
-        let mut colls: SmallVec<[Coll<'_>; 2]> = SmallVec::new();
+        let mut colls: SmallVec<[Coll<'_>; 8]> = SmallVec::new();
         for l in sc.colls.iter() {
             colls.push(coll_of(fr.get(*l)));
         }
@@ -591,6 +631,16 @@ fn run(ev: &mut Evaluator, f: &mut Frame<'_>, sc: &ScalarLoop, targets: &[usize]
         }
     }
     out
+}
+
+/// Whether a run may start: the sites validate (one cached verdict
+/// per evaluator for the whole group) and the calls the program
+/// inlines fit under the call-depth limit.
+fn may_enter(ev: &mut Evaluator, sc: &ScalarLoop) -> bool {
+    let valid = |ev: &mut Evaluator| {
+        sc.sites.iter().all(|s| s.valid(ev)) && sc.roots.iter().all(|r| r.valid(ev))
+    };
+    ev.calls_fit(sc.depth) && ev.group_valid(sc.gid, valid)
 }
 
 /// Count a run; after [`JUDGE_AFTER`] entries a loop averaging under
@@ -869,37 +919,89 @@ impl Lower<'_> {
         }
     }
 
-    /// An effect's operand slots into the effect table.
-    fn effects(&mut self, effects: &[Effect]) -> Vec<u16> {
-        let mut ids = Vec::with_capacity(effects.len());
+    /// Effects' operand slots into the effect table, each with the
+    /// guard slot its `when`s set (`None`: unconditional). A guarded
+    /// effect's operands compute only under its guard.
+    fn effects(&mut self, effects: &[Effect], guard: Option<Sl>, ids: &mut Vec<(u16, Option<Sl>)>) {
         for e in effects {
-            let eff = match e {
-                Effect::Assoc(t, k, v) => {
-                    let c = self.coll(*t);
-                    let k = self.val(k);
-                    EffI::Assoc(c, k, self.val(v))
+            match e {
+                Effect::Assoc(t, k, v) => self.effect(guard, ids, |lw| {
+                    let c = lw.coll(*t);
+                    let k = lw.val(k);
+                    EffI::Assoc(c, k, lw.val(v))
+                }),
+                Effect::Conj(t, v) => self.effect(guard, ids, |lw| {
+                    let c = lw.coll(*t);
+                    EffI::Conj(c, lw.val(v))
+                }),
+                Effect::When(c, inner) => {
+                    let g = self.guard(c, guard);
+                    self.effects(inner, Some(g), ids);
                 }
-                Effect::Conj(t, v) => {
-                    let c = self.coll(*t);
-                    EffI::Conj(c, self.val(v))
-                }
-            };
-            self.effs.push(eff);
-            ids.push((self.effs.len() - 1) as u16);
+            }
         }
-        ids
     }
 
-    fn run_effects(&mut self, ids: &[u16]) {
-        if let [id] = ids {
-            return self.code.push(Ins::Eff(EffStep::Once(*id)));
+    /// One effect's operands (under its guard) into the table.
+    fn effect(
+        &mut self,
+        guard: Option<Sl>,
+        ids: &mut Vec<(u16, Option<Sl>)>,
+        operands: impl FnOnce(&mut Self) -> EffI,
+    ) {
+        let skip = self.skip_unless(guard);
+        let eff = operands(self);
+        self.end_skip(skip);
+        self.effs.push(eff);
+        ids.push(((self.effs.len() - 1) as u16, guard));
+    }
+
+    /// A `when`'s guard slot: reset first, then set when the
+    /// enclosing guard (if any) and `c` both hold.
+    fn guard(&mut self, c: &Cond, outer: Option<Sl>) -> Sl {
+        let g = self.sl();
+        self.emit(Step::Set(g, false));
+        let no = match self.skip_unless(outer) {
+            Some(l) => l,
+            None => self.label(),
+        };
+        self.cond(c, no);
+        self.emit(Step::Set(g, true));
+        self.place(no);
+        g
+    }
+
+    /// Jump over the next steps unless `guard` holds (its label).
+    fn skip_unless(&mut self, guard: Option<Sl>) -> Option<u32> {
+        guard.map(|g| {
+            let l = self.label();
+            self.code.push(Ins::Br(Br::Truthy(g), l));
+            l
+        })
+    }
+
+    fn end_skip(&mut self, skip: Option<u32>) {
+        if let Some(l) = skip {
+            self.place(l);
         }
-        for id in ids {
-            self.code.push(Ins::Eff(EffStep::Check(*id)));
+    }
+
+    fn run_effects(&mut self, ids: &[(u16, Option<Sl>)]) {
+        if let [(id, g)] = ids {
+            return self.guarded(*g, EffStep::Once(*id));
         }
-        for id in ids {
-            self.code.push(Ins::Eff(EffStep::Apply(*id)));
+        for (id, g) in ids {
+            self.guarded(*g, EffStep::Check(*id));
         }
+        for (id, g) in ids {
+            self.guarded(*g, EffStep::Apply(*id));
+        }
+    }
+
+    fn guarded(&mut self, g: Option<Sl>, st: EffStep) {
+        let skip = self.skip_unless(g);
+        self.code.push(Ins::Eff(st));
+        self.end_skip(skip);
     }
 
     fn recur(&mut self, effects: &[Effect], ops: &[Option<IExpr>], ctx: &Ctx<'_>) {
@@ -921,8 +1023,18 @@ impl Lower<'_> {
                 }
             }));
         }
-        let ids = self.effects(effects);
+        let mut ids = Vec::new();
+        self.effects(effects, None, &mut ids);
         self.run_effects(&ids);
+        if !effects.is_empty() {
+            // Late reads (see [`late`]): the reads above checked them;
+            // they read again after the effects, as the source orders.
+            for (v, op) in vals.iter_mut().zip(ops) {
+                if let Some(e) = op.as_ref().filter(|e| late(e)) {
+                    *v = Some(self.val(e));
+                }
+            }
+        }
         for (t, v) in targets.iter().zip(vals) {
             if let Some(v) = v {
                 self.emit(Step::Mov(*t as Sl, v));
@@ -948,7 +1060,8 @@ impl Lower<'_> {
             ExitVal::Var(p) if self.scalar[*p] => ExitI::Slot(*p as Sl),
             ExitVal::Var(p) => ExitI::Loc(Loc::Reg(self.targets[*p])),
         };
-        let ids = self.effects(effects);
+        let mut ids = Vec::new();
+        self.effects(effects, None, &mut ids);
         self.run_effects(&ids);
         self.exits.push(x);
         self.code.push(Ins::Exit((self.exits.len() - 1) as u16));
@@ -986,29 +1099,81 @@ fn loc_eq(a: Loc, b: Loc) -> bool {
     matches!((a, b), (Loc::Reg(x), Loc::Reg(y)) | (Loc::Up(x), Loc::Up(y)) | (Loc::Rec(x), Loc::Rec(y)) if x == y)
 }
 
-/// What the compiler shares with the builder: local resolution and
-/// the call-site records.
+/// What the compiler shares with the builder: local resolution,
+/// the call-site records, and the closures calls may inline.
 pub(crate) trait Host {
     fn resolve_local(&mut self, idx: usize) -> Loc;
     /// Whether `expr` may read local `g` (`vm_live::may_read` over
     /// the compiling scope).
     fn reads(&self, expr: &Expr, g: usize) -> bool;
     fn site(&self, call: &DirectCall) -> Site;
+    /// The closure `var` holds now, when a call with `argc` args
+    /// may inline it.
+    fn callee(&self, var: &Var, argc: usize) -> Option<Callee>;
+}
+
+/// A closure whose call a program inlines: the arity a call with
+/// the site's arg count runs (fixed, symbol params), over lexical
+/// indexes from `base` (lower ones are captured or the fn's own
+/// name, which the inlined body may not read).
+pub(crate) struct Callee {
+    pub(crate) base: usize,
+    pub(crate) arities: Arc<[Arity]>,
+    pub(crate) index: usize,
+    /// The var's root at compilation (the identity witness).
+    pub(crate) expect: Arc<dyn ExtensionValue>,
+}
+
+/// An inlined call's site: valid while its var has no thread
+/// binding and its root is still the inlined closure (the check a
+/// direct native site makes).
+pub(crate) struct RootSite {
+    sid: usize,
+    var: Var,
+    expect: Arc<dyn ExtensionValue>,
+}
+
+impl RootSite {
+    fn valid(&self, ev: &mut Evaluator) -> bool {
+        ev.site_root_valid(self.sid, &self.var, &self.expect)
+    }
+}
+
+/// The deepest call nesting a program inlines.
+const MAX_INLINE: usize = 4;
+
+/// The calls one loop's program inlines at most (each inlined body
+/// is walked whole while the loop compiles).
+const MAX_INLINED: usize = 16;
+
+/// A body-bound local: its slot, or (an inlined callee's param
+/// passed one of the loop body's outer locals) that local's index.
+#[derive(Clone, Copy)]
+enum Lex {
+    Slot(usize),
+    Outer(usize),
 }
 
 /// The program builder over one `loop`'s body.
 struct Builder<'h> {
     host: &'h mut dyn Host,
-    /// The first lexical index bound inside the body.
+    /// The first lexical index bound inside the body (inside an
+    /// inlined callee, its first param's).
     body_base: usize,
-    /// Body-bound lexical indexes (minus `body_base`) to slots.
-    lex: Vec<usize>,
+    /// Body-bound lexical indexes (minus `body_base`).
+    lex: Vec<Lex>,
     nslots: usize,
     targets: Vec<usize>,
     scalar: Vec<bool>,
     /// Loop variables read as collections or boxed values.
     boxed: Vec<bool>,
     sites: Vec<Site>,
+    roots: Vec<RootSite>,
+    /// The vars of the calls being inlined here (innermost last),
+    /// the deepest nesting reached, and the calls inlined so far.
+    stack: Vec<u64>,
+    max_depth: usize,
+    inlined: usize,
     /// The innermost loop's target slots (`None` for the outer
     /// loop, whose targets are slots `0..n`).
     inner: Option<Vec<usize>>,
@@ -1033,6 +1198,10 @@ pub(crate) fn compile(
         scalar: vec![false; n],
         boxed: vec![false; n],
         sites: Vec::new(),
+        roots: Vec::new(),
+        stack: Vec::new(),
+        max_depth: 0,
+        inlined: 0,
         inner: None,
     };
     let node = b.body(body);
@@ -1053,7 +1222,13 @@ pub(crate) fn compile(
         targets: &b.targets,
     };
     lw.node(&node, &Ctx::Outer);
-    (lw.nslots < usize::from(Sl::MAX)).then_some(())?;
+    // Slot, effect, exit and collection ids are `u16`s.
+    let ids = lw
+        .nslots
+        .max(lw.effs.len())
+        .max(lw.exits.len())
+        .max(lw.colls.len());
+    (ids < usize::from(Sl::MAX)).then_some(())?;
     let mut init = vec![Sv::ZERO; lw.nslots];
     for (slot, v) in &lw.consts {
         init[usize::from(*slot)] = *v;
@@ -1071,6 +1246,8 @@ pub(crate) fn compile(
         effs: effs.into(),
         exits: exits.into(),
         sites: b.sites.into(),
+        roots: b.roots.into(),
+        depth: b.max_depth,
         gid: crate::vm::next_site(),
         entries: AtomicU32::new(0),
         iters: AtomicU32::new(0),
@@ -1095,6 +1272,8 @@ fn effect_misses(e: &Effect) -> bool {
     match e {
         Effect::Assoc(_, k, v) => misses(k) || misses(v),
         Effect::Conj(_, v) => misses(v),
+        // Its effects (and their operands) run only when it holds.
+        Effect::When(c, _) => cond_misses(c),
     }
 }
 
@@ -1184,18 +1363,28 @@ impl Builder<'_> {
         self.body_base + self.lex.len()
     }
 
+    /// A local's binding (`None`: inside an inlined callee, a
+    /// captured local or the fn's own name).
+    fn lookup(&self, idx: usize) -> Option<Lex> {
+        match idx.checked_sub(self.body_base) {
+            Some(i) => self.lex.get(i).copied(),
+            None => self.stack.is_empty().then_some(Lex::Outer(idx)),
+        }
+    }
+
     /// A local read: a body-bound slot, an outer loop variable (now
     /// scalar), or an invariant in place.
     fn local(&mut self, idx: usize) -> IExpr {
-        if idx >= self.body_base {
-            return IExpr::Slot(self.lex[idx - self.body_base]);
-        }
-        match self.var(idx) {
-            Ok(p) => {
-                self.scalar[p] = true;
-                IExpr::Slot(p)
-            }
-            Err(loc) => IExpr::Loc(loc),
+        match self.lookup(idx) {
+            Some(Lex::Slot(s)) => IExpr::Slot(s),
+            Some(Lex::Outer(i)) => match self.var(i) {
+                Ok(p) => {
+                    self.scalar[p] = true;
+                    IExpr::Slot(p)
+                }
+                Err(loc) => IExpr::Loc(loc),
+            },
+            None => IExpr::Deopt,
         }
     }
 
@@ -1214,10 +1403,10 @@ impl Builder<'_> {
         let Expr::Local(idx) = e else {
             return None;
         };
-        if *idx >= self.body_base {
+        let Some(Lex::Outer(idx)) = self.lookup(*idx) else {
             return None;
-        }
-        match self.var(*idx) {
+        };
+        match self.var(idx) {
             Ok(p) => {
                 self.boxed[p] = true;
                 Some(Loc::Reg(self.targets[p]))
@@ -1226,11 +1415,22 @@ impl Builder<'_> {
         }
     }
 
+    /// Whether `e` may read local `g` (inside an inlined callee,
+    /// over the callee's frame).
+    fn reads(&self, e: &Expr, g: usize) -> bool {
+        if self.stack.is_empty() {
+            self.host.reads(e, g)
+        } else {
+            crate::vm_live::may_read(e, self.body_base, g + 1, g)
+        }
+    }
+
     fn expr(&mut self, e: &Expr) -> IExpr {
         match e {
             Expr::Literal(v) => Sv::of(v).map_or(IExpr::Deopt, IExpr::Kst),
             Expr::Local(idx) => self.local(*idx),
             Expr::DirectNative(call) => self.call(call),
+            Expr::Invoke { head, args, .. } => self.inline(head, args),
             Expr::If { test, then, els } => {
                 let c = self.cond(test);
                 let a = self.expr(then);
@@ -1253,7 +1453,7 @@ impl Builder<'_> {
             }
             let e = self.expr(init);
             let s = self.slot();
-            self.lex.push(s);
+            self.lex.push(Lex::Slot(s));
             out.push((s, e));
         }
         Some(out)
@@ -1287,6 +1487,66 @@ impl Builder<'_> {
         };
         self.lex.truncate(mark);
         out
+    }
+
+    /// A call through a var holding a closure, inlined: the params
+    /// bound (one of the body's outer locals passes as itself, so a
+    /// collection param reads it in place; anything else through a
+    /// slot), then the arity's body in the callee's own frame. The
+    /// program enters only while the var holds that closure
+    /// ([`RootSite`]) and the call depth leaves room for the calls.
+    fn inline(&mut self, head: &Expr, args: &[Expr]) -> IExpr {
+        let found = match head {
+            Expr::Global(var) if self.may_inline(var) => {
+                self.host.callee(var, args.len()).map(|c| (var, c))
+            }
+            _ => None,
+        };
+        let Some((var, callee)) = found else {
+            return IExpr::Deopt;
+        };
+        let [body] = callee.arities[callee.index].body.as_slice() else {
+            return IExpr::Deopt;
+        };
+        let mut binds = Vec::new();
+        let mut lex = Vec::with_capacity(args.len());
+        for a in args {
+            let bound = match a {
+                Expr::Local(idx) => self.lookup(*idx),
+                other => {
+                    let e = self.expr(other);
+                    let s = self.slot();
+                    binds.push((s, e));
+                    Some(Lex::Slot(s))
+                }
+            };
+            let Some(bound) = bound else {
+                return IExpr::Deopt;
+            };
+            lex.push(bound);
+        }
+        let base = std::mem::replace(&mut self.body_base, callee.base);
+        let outer = std::mem::replace(&mut self.lex, lex);
+        self.inlined += 1;
+        self.stack.push(var.id);
+        self.max_depth = self.max_depth.max(self.stack.len());
+        let value = self.expr(body);
+        self.stack.pop();
+        self.lex = outer;
+        self.body_base = base;
+        self.roots.push(RootSite {
+            sid: crate::vm::next_site(),
+            var: var.clone(),
+            expect: Arc::clone(&callee.expect),
+        });
+        IExpr::Ctl(Box::new(Ctl::Let(binds.into(), value)))
+    }
+
+    /// Whether a call through `var` may inline here: not inside its
+    /// own inlining (recursion stays a real call), and within the
+    /// nesting and per-loop budgets.
+    fn may_inline(&self, var: &Var) -> bool {
+        self.stack.len() < MAX_INLINE && self.inlined < MAX_INLINED && !self.stack.contains(&var.id)
     }
 
     /// A direct core call in value position.
@@ -1342,12 +1602,12 @@ impl Builder<'_> {
     /// A test: `and`/`or` shapes, comparison calls, else truthiness.
     fn cond(&mut self, e: &Expr) -> Cond {
         if let Some((a, b, and)) = crate::vm::and_or_shape(e, self.next_index()) {
-            if !self.host.reads(b, self.next_index()) {
+            if !self.reads(b, self.next_index()) {
                 let a = Box::new(self.cond(a));
                 // `b` is analyzed with the shape's local bound.
                 let mark = self.lex.len();
                 let g = self.slot();
-                self.lex.push(g);
+                self.lex.push(Lex::Slot(g));
                 let b = Box::new(self.cond(b));
                 self.lex.truncate(mark);
                 return if and { Cond::And(a, b) } else { Cond::Or(a, b) };
@@ -1396,8 +1656,21 @@ impl Builder<'_> {
         }
         let effects: Option<Vec<Effect>> = init.iter().map(|e| self.effect(e)).collect();
         match effects {
-            Some(effects) => self.leaf(effects, last),
+            Some(effects) => self.tail(effects, last),
             None => Node::Deopt,
+        }
+    }
+
+    /// The form after an iteration's effects: a `recur` or an exit
+    /// value, or a tree of tests and temps over them (see
+    /// [`prepend`]).
+    fn tail(&mut self, effects: Vec<Effect>, e: &Expr) -> Node {
+        match e {
+            Expr::If { .. } | Expr::Let { .. } | Expr::Do(_) => {
+                let n = self.node(e);
+                prepend(&effects, n)
+            }
+            other => self.leaf(effects, other),
         }
     }
 
@@ -1422,56 +1695,83 @@ impl Builder<'_> {
         }
     }
 
-    /// An effect form: `(assoc! t k v)` or `(conj! t v)` over a boxed
-    /// local (outer loop only).
+    /// An effect form (outer loop only): `assoc!`/`conj!`, or a
+    /// `when` over effect forms.
     fn effect(&mut self, e: &Expr) -> Option<Effect> {
-        let Expr::DirectNative(call) = e else {
-            return None;
-        };
         if self.inner.is_some() {
             return None;
         }
-        let effect = match (crate::vm_ops::core_name(call)?, call.args.as_slice()) {
+        match e {
+            Expr::DirectNative(call) => self.effect_call(call).map(|(_, eff)| eff),
+            Expr::If { test, then, els } => self.when_effect(test, then, els),
+            _ => None,
+        }
+    }
+
+    /// `(assoc! t k v)` or `(conj! t v)` over a boxed local: its
+    /// target and the effect.
+    fn effect_call(&mut self, call: &DirectCall) -> Option<(Loc, Effect)> {
+        let (t, effect) = match (crate::vm_ops::core_name(call)?, call.args.as_slice()) {
             ("assoc!", [t, k, v]) => {
                 let t = self.boxed_local(t)?;
-                Effect::Assoc(t, self.expr(k), self.expr(v))
+                (t, Effect::Assoc(t, self.expr(k), self.expr(v)))
             }
-            ("conj!", [t, v]) => Effect::Conj(self.boxed_local(t)?, self.expr(v)),
+            ("conj!", [t, v]) => {
+                let t = self.boxed_local(t)?;
+                (t, Effect::Conj(t, self.expr(v)))
+            }
             _ => return None,
         };
         let site = self.host.site(call);
         self.sites.push(site);
-        Some(effect)
+        Some((t, effect))
+    }
+
+    /// `(when test eff…)` — `(if test (do eff…) nil)` — or
+    /// `when-not`'s `(if test nil (do eff…))`.
+    fn when_effect(&mut self, test: &Expr, then: &Expr, els: &Expr) -> Option<Effect> {
+        let nil = |e: &Expr| matches!(e, Expr::Literal(Value::Nil));
+        let (body, negate) = match (nil(then), nil(els)) {
+            (false, true) => (then, false),
+            (true, false) => (els, true),
+            _ => return None,
+        };
+        let forms = match body {
+            Expr::Do(forms) => forms.as_slice(),
+            one => std::slice::from_ref(one),
+        };
+        let test = self.cond(test);
+        let effects: Option<Vec<Effect>> = forms.iter().map(|f| self.effect(f)).collect();
+        let test = if negate {
+            Cond::Not(Box::new(test))
+        } else {
+            test
+        };
+        Some(Effect::When(test, effects?.into()))
     }
 
     /// The iteration's end: a `recur`, or an exit value.
     fn leaf(&mut self, effects: Vec<Effect>, e: &Expr) -> Node {
-        match e {
-            Expr::Recur(args) => match self.recur(args) {
-                Some(ops) if ordered(&effects, ops.iter().flatten()) => {
-                    Node::Leaf(Leaf::Recur(effects.into(), ops.into()))
-                }
-                _ => Node::Deopt,
-            },
-            other => {
-                let mut effects = effects;
-                // `(assoc! t …)`/`(conj! t …)` answers the transient.
-                let val = match self.effect(other) {
-                    Some(eff) => {
-                        let (Effect::Assoc(t, ..) | Effect::Conj(t, _)) = eff;
-                        effects.push(eff);
-                        Some(ExitVal::Box(t))
-                    }
-                    None => self.exit(other),
-                };
-                match val {
-                    Some(val) if ordered(&effects, exit_expr(&val)) => {
-                        Node::Leaf(Leaf::Exit(effects.into(), val))
-                    }
-                    _ => Node::Deopt,
-                }
-            }
+        if let Expr::Recur(args) = e {
+            return match self.recur(args) {
+                Some(ops) => recur_node(effects, ops),
+                None => Node::Deopt,
+            };
         }
+        let mut effects = effects;
+        // `(assoc! t …)`/`(conj! t …)` answers the transient.
+        let call = match e {
+            Expr::DirectNative(call) if self.inner.is_none() => self.effect_call(call),
+            _ => None,
+        };
+        let val = match call {
+            Some((t, eff)) => {
+                effects.push(eff);
+                ExitVal::Box(t)
+            }
+            None => self.exit(e),
+        };
+        exit_node(effects, val)
     }
 
     /// A `recur`'s operands (`None` for a passthrough variable).
@@ -1500,18 +1800,75 @@ impl Builder<'_> {
 
     /// An exit value: a literal, an outer loop variable, a boxed
     /// local, or a scalar expression (an inner loop's must be one).
-    fn exit(&mut self, e: &Expr) -> Option<ExitVal> {
+    fn exit(&mut self, e: &Expr) -> ExitVal {
         if self.inner.is_some() {
-            return Some(ExitVal::Expr(self.expr(e)));
+            return ExitVal::Expr(self.expr(e));
         }
-        Some(match e {
+        match e {
             Expr::Literal(v) => ExitVal::Const(v.clone()),
             Expr::Local(idx) if *idx < self.body_base => match self.var(*idx) {
                 Ok(p) => ExitVal::Var(p),
                 Err(loc) => ExitVal::Box(loc),
             },
             other => ExitVal::Expr(self.expr(other)),
-        })
+        }
+    }
+}
+
+/// Run `effects` first at every leaf of `n`. Its tests and temps
+/// then compute before the effects, so none may read a collection
+/// (an effect could change it); each leaf re-checks its own order.
+fn prepend(effects: &[Effect], n: Node) -> Node {
+    match n {
+        Node::If(c, a, b) if !cond_reads(&c) => {
+            let a = Box::new(prepend(effects, *a));
+            Node::If(c, a, Box::new(prepend(effects, *b)))
+        }
+        Node::Let(binds, body) if !binds.iter().any(|(_, e)| reads_coll(e)) => {
+            Node::Let(binds, Box::new(prepend(effects, *body)))
+        }
+        Node::Leaf(Leaf::Recur(own, ops)) => recur_node(joined(effects, own), ops.into_vec()),
+        Node::Leaf(Leaf::Exit(own, val)) => exit_node(joined(effects, own), val),
+        _ => Node::Deopt,
+    }
+}
+
+fn joined(first: &[Effect], then: Box<[Effect]>) -> Vec<Effect> {
+    first.iter().cloned().chain(then.into_vec()).collect()
+}
+
+/// A `recur` leaf, when its effects may run after its values (see
+/// [`ordered`]; [`late`] reads aside).
+fn recur_node(effects: Vec<Effect>, ops: Vec<Option<IExpr>>) -> Node {
+    if ordered(&effects, ops.iter().flatten().filter(|e| !late(e))) {
+        Node::Leaf(Leaf::Recur(effects.into(), ops.into()))
+    } else {
+        Node::Deopt
+    }
+}
+
+/// An exit leaf, when its effects may run after its value.
+fn exit_node(effects: Vec<Effect>, val: ExitVal) -> Node {
+    if ordered(&effects, exit_expr(&val)) {
+        Node::Leaf(Leaf::Exit(effects.into(), val))
+    } else {
+        Node::Deopt
+    }
+}
+
+/// A `recur` operand that reads after the iteration's effects, as
+/// the source orders: an `nth`/`count` whose own operands read no
+/// collection. It also reads before the effects, which checks it;
+/// the effects only store scalars inside vectors or grow them, so
+/// the second read cannot miss.
+fn late(e: &IExpr) -> bool {
+    match e {
+        IExpr::Calc(c) => match &**c {
+            Calc::Nth(_, i) => !reads_coll(i),
+            Calc::Count(_) => true,
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -1520,13 +1877,30 @@ impl Builder<'_> {
 /// collection (an earlier effect could change it, and those values
 /// compute before any effect runs).
 fn ordered<'e>(effects: &[Effect], mut values: impl Iterator<Item = &'e IExpr>) -> bool {
-    // A lone effect's operands run before it on either road.
-    let operand_reads = effects.len() > 1
-        && effects.iter().any(|x| match x {
-            Effect::Assoc(_, k, v) => reads_coll(k) || reads_coll(v),
-            Effect::Conj(_, v) => reads_coll(v),
-        });
+    // A lone effect's operands (and tests) run before it on either
+    // road.
+    let operand_reads = effect_count(effects) > 1 && effects.iter().any(effect_reads);
     effects.is_empty() || !(operand_reads || values.any(reads_coll))
+}
+
+/// The `assoc!`/`conj!` forms among `effects`.
+fn effect_count(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .map(|e| match e {
+            Effect::When(_, inner) => effect_count(inner),
+            _ => 1,
+        })
+        .sum()
+}
+
+/// Whether an effect's operands or tests read a collection.
+fn effect_reads(e: &Effect) -> bool {
+    match e {
+        Effect::Assoc(_, k, v) => reads_coll(k) || reads_coll(v),
+        Effect::Conj(_, v) => reads_coll(v),
+        Effect::When(c, inner) => cond_reads(c) || inner.iter().any(effect_reads),
+    }
 }
 
 /// An exit value's scalar expression, if any.

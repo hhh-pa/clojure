@@ -290,6 +290,22 @@ impl TransientVector {
         }
     }
 
+    /// The item at `idx` read in place through `f` (typed storage
+    /// passes a stack copy): `None` past the end or when
+    /// invalidated. The clone-free read for callers that only
+    /// inspect the item.
+    #[inline(always)]
+    pub fn read_at<R>(&self, idx: usize, f: impl FnOnce(&Value) -> Option<R>) -> Option<R> {
+        if !self.valid {
+            return None;
+        }
+        match &self.items {
+            TransientItems::Ints(x) => f(&Value::Int(*x.get(idx)?)),
+            TransientItems::Chars(x) => f(&Value::Char(*x.get(idx)?)),
+            TransientItems::Generic(x) => f(x.get(idx)?),
+        }
+    }
+
     /// Move the item at `idx` out of a generic buffer, leaving `nil`
     /// until the caller writes it back with [`assoc`](Self::assoc)
     /// (`None` when invalidated, packed, or out of bounds). The VM's
@@ -1142,10 +1158,24 @@ mod tests {
         assert!(tc.conj_int_opt(77));
         assert_eq!(tc.nth_opt(2), Some(Value::Int(77)));
 
+        // In-place reads over every storage
+        let some = |v: &Value| Some(v.clone());
+        assert_eq!(tv.read_at(1, some), Some(Value::Int(25)));
+        assert_eq!(tv.read_at(2, some), None);
+        assert_eq!(
+            tg.read_at(0, some),
+            Some(Value::Str(std::sync::Arc::from("foo")))
+        );
+        assert_eq!(tg.read_at(2, some), None);
+        let tc2 = TransientVector::from_vector(&crate::Vector::from_chars(vec!['a', 'b']));
+        assert_eq!(tc2.read_at(1, some), Some(Value::Char('b')));
+        assert_eq!(tc2.read_at(2, some), None);
+
         // Invalid transient
         let mut t_inv = TransientVector::new();
         let _ = t_inv.persistent().unwrap();
         assert_eq!(t_inv.nth_opt(0), None);
+        assert_eq!(t_inv.read_at(0, some), None);
         assert!(!t_inv.conj_int_opt(1));
         assert!(!t_inv.assoc_int_opt(0, 1));
 

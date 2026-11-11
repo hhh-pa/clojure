@@ -399,9 +399,240 @@ const JVM_ROWS: &[(&str, &str)] = &[
         r#"(let [g (fn [t] (loop [i 0] (if (= i 3) (count t) (do (conj! t i) (recur (inc i))))))] [(g (transient [])) (with-redefs [conj! (fn [t x] t)] (g (transient [])))])"#,
         r#"[3 0]"#,
     ),
+    (
+        r#"(let [t (transient [0 0 0 0 0])] (loop [i 0 l -1] (if (= i 5) (persistent! t) (do (when (not= l -1) (assoc! t l i)) (recur (inc i) (if (zero? (rem i 2)) i -1))))))"#,
+        r#"[1 0 3 0 0]"#,
+    ),
+    (
+        r#"(let [t (transient []) u (transient [])] (loop [i 0] (if (= i 6) [(persistent! t) (persistent! u)] (do (when-not (zero? (rem i 3)) (conj! t i) (conj! u (- i))) (when (> i 1) (when (< i 4) (conj! u (* 10 i)))) (recur (inc i))))))"#,
+        r#"[[1 2 4 5] [-1 -2 20 30 -4 -5]]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0] (if (= i 6) (persistent! t) (do (when (< (count t) 3) (conj! t i)) (recur (inc i))))))"#,
+        r#"[0 1 2]"#,
+    ),
+    (
+        r#"(let [t (transient []) u (transient [])] (loop [i 0] (if (= i 5) [(persistent! t) (persistent! u)] (do (conj! t i) (when (< (count t) 3) (conj! u i)) (recur (inc i))))))"#,
+        r#"[[0 1 2 3 4] [0 1]]"#,
+    ),
+    (
+        r#"(let [v [10 20 30] t (transient [0 0 0])] (loop [i 0] (if (= i 5) (persistent! t) (do (when (< i 3) (assoc! t i (nth v i))) (recur (inc i))))))"#,
+        r#"[10 20 30]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0] (if (= i 3) (persistent! t) (do (if (= i 1) nil nil) (conj! t i) (recur (inc i))))))"#,
+        r#"[0 1 2]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0] (if (= i 3) (persistent! t) (do (when (= i 2)) (conj! t i) (recur (inc i))))))"#,
+        r#"[0 1 2]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0] (if (= i 3) (persistent! t) (do (when (= i 1) (str i)) (conj! t i) (recur (inc i))))))"#,
+        r#"[0 1 2]"#,
+    ),
+    (
+        r#"(let [t (transient []) u (transient [0 0 0])] (loop [i 0] (if (= i 3) [(persistent! t) (persistent! u)] (do (when (pos? i) (conj! t i) (assoc! u i (- i))) (recur (inc i))))))"#,
+        r#"[[1 2] [0 -1 -2]]"#,
+    ),
+    (
+        r#"(let [t (transient [0 0 0 0 0 0]) u (transient [])] (loop [i 0 a 0] (if (= i 6) [a (persistent! t) (persistent! u)] (do (conj! u i) (assoc! t i (* i i)) (let [j (inc i)] (if (= 1 (rem i 2)) (recur j (+ a 1)) (recur j (nth t i))))))))"#,
+        r#"[17 [0 1 4 9 16 25] [0 1 2 3 4 5]]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0 a 0] (if (= i 5) [a (persistent! t)] (do (conj! t i) (if (< (count t) 3) (recur (inc i) (inc a)) (recur (inc i) a))))))"#,
+        r#"[2 [0 1 2 3 4]]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0 a 0] (if (= i 4) [a (persistent! t)] (do (conj! t i) (let [n (count t)] (recur (inc i) (+ a n)))))))"#,
+        r#"[10 [0 1 2 3]]"#,
+    ),
+    (
+        r#"(let [t (transient []) u (transient [])] (loop [i 0] (if (= i 3) [(persistent! t) (persistent! u)] (do (conj! t i) (let [x (* 2 i)] (conj! u x) (do (conj! u (inc x)) (recur (inc i))))))))"#,
+        r#"[[0 1 2] [0 1 2 3 4 5]]"#,
+    ),
+    (
+        r#"(let [t (transient [])] [(loop [i 0] (do (conj! t i) (if (< i 3) (recur (inc i)) (count t)))) (loop [i 0] (do (conj! t i) (if (< i 3) (recur (inc i)) (* i 10)))) (count t)])"#,
+        r#"[4 30 8]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0] (if (= i 3) (persistent! t) (do (conj! t i) (let [[a b] [i i]] (recur (+ i (- a b) 1)))))))"#,
+        r#"[0 1 2]"#,
+    ),
+    (
+        r#"(let [t (transient [0 1 2])] (loop [i 0 a 0 b 0] (if (= i 3) [a b (persistent! t)] (do (assoc! t i (* 10 i)) (recur (inc i) (nth t i) (+ b a))))))"#,
+        r#"[20 10 [0 10 20]]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0 n 0] (if (= i 4) [n (persistent! t)] (do (conj! t i) (conj! t i) (recur (inc i) (count t))))))"#,
+        r#"[8 [0 0 1 1 2 2 3 3]]"#,
+    ),
+    (
+        r#"(let [t (transient [])] (loop [i 0 a 0] (if (= i 4) [a (persistent! t)] (do (conj! t (* i 3)) (recur (inc i) (nth t i))))))"#,
+        r#"[9 [0 3 6 9]]"#,
+    ),
+    (
+        r#"(let [t (transient [0])] (try (loop [i 0 a 0] (if (= i 4) a (do (conj! t i) (recur (inc i) (nth t 7))))) (catch Exception e (.getName (class e)))))"#,
+        r#""java.lang.IndexOutOfBoundsException""#,
+    ),
+    (
+        r#"(let [t (transient [:a 1])] [(loop [i 0 a 0] (if (= i 2) a (do (conj! t i) (recur (inc i) (nth t 1))))) (loop [i 0 a 0] (if (= i 2) a (do (conj! t i) (recur (inc i) (nth t 0)))))])"#,
+        r#"[1 :a]"#,
+    ),
+    (
+        r#"(let [t (transient [0 0]) u t] (loop [i 0 a 0] (if (= i 2) [a (persistent! t)] (do (assoc! u 0 (+ i 5)) (recur (inc i) (nth t 0))))))"#,
+        r#"[6 [6 0]]"#,
+    ),
+    (
+        r#"(let [t (transient [0 1]) v [1 0]] (loop [i 0 a 0] (if (= i 2) a (do (conj! t i) (recur (inc i) (nth t (nth v i)))))))"#,
+        r#"0"#,
+    ),
+    (
+        r#"(let [t (transient [0 1]) s "ab"] (loop [i 0 a 0 c 0] (if (= i 2) [a c] (do (conj! t i) (recur (inc i) (nth s i) (inc (nth t i)))))))"#,
+        r#"[\b 2]"#,
+    ),
+    (
+        r#"(let [t (transient [5 6]) p (persistent! (transient [7 8]))] (loop [i 0 a 0 b 0] (if (= i 2) [a b] (do (conj! t i) (recur (inc i) (nth p i) (count p))))))"#,
+        r#"[8 2]"#,
+    ),
+    (
+        r#"(let [u (transient []) t (transient [])] (loop [i 0] (if (= i 6) [(persistent! u) (persistent! t)] (do (when (< i 3) (when (pos? i) (conj! u i))) (when (< i 4) (when (> i 1) (conj! t i) (conj! t (- i)))) (recur (inc i))))))"#,
+        r#"[[1 2] [2 -2 3 -3]]"#,
+    ),
 ];
 
 #[test]
 fn scalar_loops_match_the_jvm() {
     check(JVM_ROWS);
+}
+
+/// Loops calling top-level fns (the setup defines them first, so
+/// the loop compiles while their vars hold them): inlined callees,
+/// and every callee the tier leaves to a real call (captured
+/// locals, the fn's own name, variadic or destructuring params,
+/// multimethods, maps, natives, conveyed bindings, tree-evaluator
+/// closures, recursion, nesting past the inline depth, calls past
+/// the per-loop budget, a redefined or rebound var). `(setup, form,
+/// JVM value)`.
+const JVM_CALL_ROWS: &[(&str, &str, &str)] = &[
+    (
+        r#"(defn i1-get [v i] (nth v i))"#,
+        r#"(let [v [1 2 3 4]] (loop [i 0 a 0] (if (= i 4) a (recur (inc i) (+ a (i1-get v i))))))"#,
+        r#"10"#,
+    ),
+    (
+        r#"(defn i2-find [head edges u c] (loop [e (nth head u)] (if (= e -1) -1 (let [ev (nth edges e)] (if (= (bit-shift-right ev 8) c) e (recur (dec (bit-and ev 255))))))))"#,
+        r#"(let [head (transient [1 -1]) edges (transient [(bit-shift-left 97 8) (bit-or (bit-shift-left 98 8) 1)])] (loop [i 0 a 0] (if (= i 4) a (recur (inc i) (+ (* a 10) (inc (i2-find head edges 0 (+ 96 i))))))))"#,
+        r#"120"#,
+    ),
+    (
+        r#"(defn i3-sq [x] (* x x)) (defn i3-f [x y] (+ (i3-sq x) y))"#,
+        r#"(loop [i 0 a 0] (if (= i 5) a (let [j (* i 2)] (recur (inc i) (i3-f j a)))))"#,
+        r#"120"#,
+    ),
+    (
+        r#"(defn i4-r [x] (if (zero? x) 0 (+ 2 (i4-r (dec x)))))"#,
+        r#"(loop [i 0 a 0] (if (= i 8) a (recur (inc i) (+ a (i4-r i)))))"#,
+        r#"56"#,
+    ),
+    (
+        r#"(let [k 5] (defn i5-cap [x] (+ x k)))"#,
+        r#"(loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (i5-cap i)))))"#,
+        r#"18"#,
+    ),
+    (
+        r#"(def i6-cnt (fn self [x] (if (pos? x) (inc (self (dec x))) 0)))"#,
+        r#"(loop [i 0 a 0] (if (= i 4) a (recur (inc i) (+ a (i6-cnt i)))))"#,
+        r#"6"#,
+    ),
+    (
+        r#"(defn i7-va [& xs] (count xs)) (defn i7-ds [[a b]] (+ a b)) (defmulti i7-mm (fn [x] (odd? x))) (defmethod i7-mm true [x] 1) (defmethod i7-mm false [x] 10) (def i7-m {0 1 1 2 2 3}) (def ^:dynamic i7-dn inc) (def i7-bf (bound-fn [x] (* x 3))) (binding [] (def i7-tf (fn [x] (- x)))) (defn i7-two [x y] (+ x y))"#,
+        r#"(loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (i7-va i i) (i7-ds [i i]) (i7-mm i) (i7-m i) (i7-dn i) (i7-bf i) (i7-tf i) (i7-two i i)))))"#,
+        r#"57"#,
+    ),
+    (
+        r#"(defn i8-g [x] (inc x)) (defn i8-run [] (loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (i8-g i))))))"#,
+        r#"[(i8-run) (do (defn i8-g [x] (dec x)) (i8-run)) (with-redefs [i8-g (fn [x] 100)] (i8-run)) (i8-run)]"#,
+        r#"[6 0 300 0]"#,
+    ),
+    (
+        r#"(defn ^:dynamic i9-g [x] (inc x)) (defn i9-run [] (loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (i9-g i))))))"#,
+        r#"[(i9-run) (binding [i9-g (fn [x] 7)] (i9-run)) (i9-run)]"#,
+        r#"[6 21 6]"#,
+    ),
+    (
+        r#"(defn st-find-edge [head-v edges u c] (loop [e (nth head-v u)] (if (= e -1) -1 (let [ev (nth edges e)] (if (= (bit-shift-right ev 48) c) e (recur (dec (bit-and (bit-shift-right ev 24) 16777215)))))))) (defn st-value [s] (let [n (count s)] (if (zero? n) 0 (let [t (str s "$") nt (inc n) link-v (transient [0]) start-v (transient [0]) end-v (transient [-2]) head-v (transient [-1]) edges (transient [])] (loop [pos 0 active 0 edge 0 alen 0 rem 1 last-new -1] (when (< pos nt) (if (zero? rem) (recur (inc pos) active edge alen 1 -1) (let [pos-ch (int (nth t pos)) edge (if (zero? alen) pos edge) cur-char (int (nth t edge)) e (st-find-edge head-v edges active cur-char)] (if (= e -1) (let [leaf (count link-v) ne (count edges) h0 (nth head-v active)] (conj! link-v 0) (conj! start-v pos) (conj! end-v -1) (conj! head-v -1) (conj! edges (bit-or leaf (bit-shift-left (inc h0) 24) (bit-shift-left cur-char 48))) (assoc! head-v active ne) (when (not= last-new -1) (assoc! link-v last-new active)) (let [rem-next (dec rem)] (if (zero? active) (if (pos? alen) (recur pos 0 (inc (- pos rem-next)) (dec alen) rem-next -1) (recur pos 0 edge alen rem-next -1)) (recur pos (nth link-v active) edge alen rem-next -1)))) (let [ev (nth edges e) nxt (bit-and ev 16777215) en (nth end-v nxt) nxt-start (nth start-v nxt) elen (inc (- (if (= en -1) pos en) nxt-start))] (if (>= alen elen) (recur pos nxt (+ edge elen) (- alen elen) rem last-new) (let [epos (+ nxt-start alen) epos-ch (int (nth t epos))] (if (= epos-ch pos-ch) (do (when (and (not= last-new -1) (not (zero? active))) (assoc! link-v last-new active)) (recur (inc pos) active edge (inc alen) (inc rem) -1)) (let [split-end (+ nxt-start alen -1) split (count link-v) leaf (inc split) ne (count edges)] (conj! link-v 0) (conj! start-v nxt-start) (conj! end-v split-end) (conj! head-v (inc ne)) (conj! link-v 0) (conj! start-v pos) (conj! end-v -1) (conj! head-v -1) (assoc! edges e (bit-or (bit-and ev -16777216) split)) (conj! edges (bit-or leaf (bit-shift-left pos-ch 48))) (conj! edges (bit-or nxt (bit-shift-left (inc ne) 24) (bit-shift-left epos-ch 48))) (assoc! start-v nxt epos) (when (not= last-new -1) (assoc! link-v last-new split)) (let [rem-next (dec rem)] (if (zero? active) (if (pos? alen) (recur pos 0 (inc (- pos rem-next)) (dec alen) rem-next split) (recur pos 0 edge alen rem-next split)) (recur pos (nth link-v active) edge alen rem-next split))))))))))))) (let [nst (count link-v) order (transient [0]) cnt (transient (vec (repeat nst 0)))] (assoc! link-v 0 0) (loop [qi 0] (when (< qi (count order)) (let [v (nth order qi) dv (nth link-v v) leaves (loop [e (nth head-v v) lc 0] (if (= e -1) lc (let [ev (nth edges e) w (bit-and ev 16777215) en (nth end-v w) ne (dec (bit-and (bit-shift-right ev 24) 16777215))] (if (= en -1) (recur ne (inc lc)) (let [w-len (inc (- en (nth start-v w)))] (assoc! start-v w v) (assoc! link-v w (+ dv w-len)) (conj! order w) (recur ne lc))))))] (assoc! cnt v leaves) (recur (inc qi))))) (loop [qi (dec (count order)) ans n] (if (<= qi 0) ans (let [v (nth order qi) c (nth cnt v) p (nth start-v v) _ (assoc! cnt p (+ (nth cnt p) c)) prod (* (nth link-v v) c)] (recur (dec qi) (if (> prod ans) prod ans))))))))))"#,
+        r#"(mapv st-value ["a" "ab" "aaa" "abab" "banana" "mississippi" "abcabxabcd" "zzzzzzzzzz" "abcdefghijklmnopqrstuvwxyzabcdefghij" "abracadabraabracadabra"])"#,
+        r#"[1 2 4 4 6 11 10 30 36 22]"#,
+    ),
+    (
+        r#"(defn i10-k [x] (loop [j x] (if (> j 2) (- j 2) (recur (+ j 3)))))"#,
+        r#"(let [t (transient [])] (loop [i 0] (if (= i 4) (persistent! t) (do (conj! t (i10-k i)) (recur (inc i))))))"#,
+        r#"[1 2 3 1]"#,
+    ),
+    (
+        r#"(defn i11-nil [x] nil) (defn i11-two [x] (inc x) (dec x))"#,
+        r#"(loop [i 0 a 0] (if (= i 3) a (recur (inc i) (if (i11-nil i) a (+ a (i11-two i))))))"#,
+        r#"0"#,
+    ),
+    (
+        r#"(defn i12-b [y x] (+ y x)) (let [k 3] (defn i12-a [x] (i12-b k x)))"#,
+        r#"(loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (i12-a i)))))"#,
+        r#"12"#,
+    ),
+    (
+        r#"(defn c1 [x] (inc x)) (defn c2 [x] (c1 (inc x))) (defn c3 [x] (c2 (inc x))) (defn c4 [x] (c3 (inc x))) (defn c5 [x] (c4 (inc x)))"#,
+        r#"(loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (c5 i)))))"#,
+        r#"18"#,
+    ),
+    (
+        r#"(defn b1 [x] (* x 2))"#,
+        r#"(loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i) (b1 i)))))"#,
+        r#"102"#,
+    ),
+];
+
+#[test]
+fn inlined_calls_match_the_jvm() {
+    for (setup, form, want) in JVM_CALL_ROWS {
+        let mut eval = boot();
+        eval.eval_source(setup)
+            .unwrap_or_else(|e| panic!("{setup}: {e}"));
+        assert_eq!(show(&mut eval, form), *want, "VM: {form}");
+        let mut eval = boot();
+        eval.eval_source(setup)
+            .unwrap_or_else(|e| panic!("{setup}: {e}"));
+        let tree = format!("(binding [] {form})");
+        assert_eq!(show(&mut eval, &tree), *want, "tree: {form}");
+    }
+}
+
+/// An inlined call skips the call-depth check a real call makes, so
+/// a loop with inlined calls runs on scalars only while every call
+/// it stands for fits: one frame short of the limit, the boxed road
+/// makes the call and overflows, exactly where a loop making the
+/// real call does.
+#[test]
+fn inlined_calls_keep_the_call_depth_limit() {
+    const SO: &str = "THROW java.lang.StackOverflowError: ";
+    let mut eval = boot();
+    eval.eval_source(
+        "(defn d-g [x] (inc x))
+         (let [k 1] (defn d-h [x] (+ x k)))
+         (defn d-run [] (loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (d-g i))))))
+         (defn d-real [] (loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (d-h i))))))
+         (defn d-none [] (loop [i 0 a 0] (if (= i 3) a (recur (inc i) (+ a (inc i))))))
+         (defn d-deep [f n] (if (zero? n) (f) (d-deep f (dec n))))",
+    )
+    .unwrap();
+    // The deepest a loop making no call still runs at.
+    let deepest = (49_980..50_000)
+        .take_while(|n| show(&mut eval, &format!("(d-deep d-none {n})")) == "6")
+        .last()
+        .expect("a depth that runs");
+    for run in ["d-run", "d-real"] {
+        let at = |n: i32| format!("(d-deep {run} {n})");
+        assert_eq!(show(&mut eval, &at(deepest - 1)), "6", "{run}");
+        assert_eq!(show(&mut eval, &at(deepest)), SO, "{run}");
+    }
 }

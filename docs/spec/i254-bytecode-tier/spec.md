@@ -2,8 +2,8 @@
 
 - Status: slice 1 (bytecode dispatch) and the flat-scalar
   slice measured **no-go** and reverted (§1.5, §1.6); the
-  32-byte `Value` (§1.7) and the unboxed loop tier (§1.8)
-  landed.
+  32-byte `Value` (§1.7), the unboxed loop tier (§1.8), and
+  its inlined calls and effect tails (§1.9) landed.
 - Issue: [#254](https://github.com/hhh-pa/clojure/issues/254).
   Branch: `perf/254-bytecode-tier`.
 - Parents/context: #214 (performant JIT subset), #226
@@ -273,6 +273,83 @@ instructions −15.5%, median peak RSS +0.4%. The semantics
 battery is `tests/scalar_loop.rs`: 90 rows, each checked
 against JVM Clojure 1.12 and run on both the VM and the tree
 evaluator.
+
+### 1.9 Inlined calls, conditional effects and effect tails (landed)
+
+After §1.8 the gate's tightest INS case was suffix_tree tc9
+(1.127x). Its Ukkonen build loop — about 149k iterations and
+80% of the run — never entered the unboxed tier and ran on
+the flat tier at ~7.9k instructions an iteration. It needed
+four things the builder did not lower: a call to the
+top-level `find-edge`; `(when (not= last-new -1) (assoc! …))`
+effects; a `let`/`if` tree between the effects and the
+`recur`s; and a `recur` operand, `(nth link-v active)`, that
+reads a transient the iteration's effects just wrote.
+
+- **Inlined calls.** A call through a var that holds a VM
+  closure inlines into the program. The closure must have no
+  conveyed bindings, and its fixed arity for the arg count must
+  bind symbols only — the arity `fixed_target` would run. Params
+  bind as slots; an outer local passes as itself, so a
+  collection param reads it in place. The body lowers in the
+  callee's own lexical frame, where a captured local or the fn's
+  own name misses.
+  - The program enters only while each inlined var has no thread
+    binding and still holds the closure (the direct-site check,
+    cached with the site group).
+  - It also enters only while the calls it stands for fit under
+    the call-depth limit, because an inlined call skips
+    `guarded_call`'s check.
+  - A fn never inlines into its own inlining, so recursion stays
+    a real call. Nesting stops at 4, and one loop inlines at most
+    16 calls; unbounded, the recursive `splay` cost splay_tree
+    +10% load time.
+- **Conditional effects.** `(when test eff…)` and `when-not`
+  in effect position. The test computes with the iteration's
+  values, and the guarded effects and their operands run only
+  under it.
+- **Effect tails.** Effects may be followed by a `let`/`if`/`do`
+  tree ending in `recur`s or exits. The tree's tests and temps
+  compute before the effects, which is allowed only when none
+  reads a collection, and every leaf runs the effects first.
+- **Late reads.** A `recur` operand that is an `nth`/`count`
+  whose own operands read no collection reads after the
+  iteration's effects, as the source orders. It also reads
+  before them, which checks it. Effects only store scalars
+  inside vectors or append to them, so the second read cannot
+  miss.
+- **Cheaper steps.** `nth` over vectors and transient vectors
+  reads the item in place (`read_at`: no `Value` clone or
+  drop). Batched `assoc!`/`conj!` of ints keep packed buffers
+  packed. A program's collections no longer spill to the heap
+  at entry.
+
+Every miss keeps §1.8's contract: nothing observable happens
+before an iteration's effects, and a miss hands the iteration
+back to the boxed tiers whole.
+
+Local macOS retired instructions (`21e8ff4d` → this slice):
+
+| Cases | Before | After |
+| --- | --- | --- |
+| suffix_tree tc9 | 1462M | 973M (−33%) |
+| suffix_tree tc4–8 | — | −32..−39% |
+| z_function tc9–15 | — | −20..−35% |
+| dijkstrashortreach tc3–7 | — | −4..−5% |
+| kmp tc10–15, boyer_moore tc10–15 | — | −2..−3% |
+| suffix_array tc4–9 | — | +0.8..+1.7% |
+
+suffix_array is the one loss: its last inner loop (a `when`
+effect plus a late read) now enters the tier, averaging two
+iterations an entry, where entry costs about what the
+iterations save. Its CPython ratio stays near 0.3.
+
+Full local sweep: 1562 gate cases, 0 wrong outputs, total
+instructions −5.3%. `tests/scalar_loop.rs` now holds 115
+rows plus 15 setup rows that call top-level fns, every one
+checked against JVM Clojure 1.12 and run on both the VM and
+the tree evaluator. A separate test pins the call-depth limit
+against a loop that makes the real call.
 
 ## Part 2 — Technical specification
 
