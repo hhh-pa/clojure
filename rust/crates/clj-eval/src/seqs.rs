@@ -876,12 +876,16 @@ fn is_int_vector(v: &Value) -> bool {
     }
 }
 
-/// Order two all-`Int` vectors lexicographically.
+/// Order two all-`Int` vectors as `compare` does: the shorter
+/// first, else itemwise.
 fn cmp_int_vectors(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let (Value::Vector(x), Value::Vector(y)) = (a, b) else {
         return Ordering::Equal;
     };
+    if x.len() != y.len() {
+        return x.len().cmp(&y.len());
+    }
     for (u, w) in x.iter().zip(y.iter()) {
         if let (Value::Int(p), Value::Int(q)) = (&u, &w) {
             match p.cmp(q) {
@@ -890,7 +894,7 @@ fn cmp_int_vectors(a: &Value, b: &Value) -> std::cmp::Ordering {
             }
         }
     }
-    x.len().cmp(&y.len())
+    Ordering::Equal
 }
 
 /// Sort all-int-vector items; `false` otherwise.

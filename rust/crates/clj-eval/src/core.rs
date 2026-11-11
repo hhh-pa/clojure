@@ -1448,25 +1448,24 @@ fn compare_entry_pair(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>
     }
 }
 
-/// Lexicographic vector order (recursive element `compare`).
+/// `APersistentVector.compareTo`: the shorter vector first (its
+/// items never compared), else itemwise (recursive element
+/// `compare`).
 fn compare_vectors(
     a: &clj_value::Vector,
     b: &clj_value::Vector,
 ) -> Result<std::cmp::Ordering, NativeError> {
     use std::cmp::Ordering;
-    let mut ai = a.iter();
-    let mut bi = b.iter();
-    loop {
-        match (ai.next(), bi.next()) {
-            (None, None) => return Ok(Ordering::Equal),
-            (None, _) => return Ok(Ordering::Less),
-            (_, None) => return Ok(Ordering::Greater),
-            (Some(u), Some(v)) => match jvm_compare(&u, &v)? {
-                Ordering::Equal => {}
-                ord => return Ok(ord),
-            },
+    if a.len() != b.len() {
+        return Ok(a.len().cmp(&b.len()));
+    }
+    for (u, v) in a.iter().zip(b.iter()) {
+        match jvm_compare(&u, &v)? {
+            Ordering::Equal => {}
+            ord => return Ok(ord),
         }
     }
+    Ok(Ordering::Equal)
 }
 
 /// `x.compareTo(y)`: checkcast `y` to `x`'s class (vectors name
