@@ -23,11 +23,12 @@ Issue: hhh-pa/clojure#256. Consumer: hhh-pa/clojure-code-snippet#66
 
 ### 1.2 Non-goals (S1)
 
-- Lowering new forms natively (`loop`, closures, maps, interop, …).
+- Lowering new forms natively (closures, maps, interop, seqs, …).
   That is S2, driven by sweep data.
-- Avoiding the reader at startup. S1 embeds source text. A
-  pre-read image (serialized forms) is an S2 lever once the
-  `clojure-rs-aot` leg shows reader cost.
+- Avoiding the reader at startup. S1 embeds source text, read live
+  like `run` (D4). Skipping reads for forms with no read-time
+  dependencies is an S2 lever once the `clojure-rs-aot` leg shows
+  reader cost.
 - Cross-compilation, debug info, Windows-specific work beyond
   keeping the existing MSVC link path compiling.
 
@@ -98,92 +99,101 @@ Issue: hhh-pa/clojure#256. Consumer: hhh-pa/clojure-code-snippet#66
 - Pure-subset `main` runs the tops, then calls an arity-1 `-main`
   with the argv list (T1192 FX1 D-argv).
 
-### 2.2 Design decisions
+### 2.2 Design decisions (as built)
 
-- **D1 — per-top-level classification.** `plan_mixed(text)` reads
-  all forms and plans them one at a time. A `defn` that plans
-  cleanly becomes a native `SubsetFn`. Every other form (non-`defn`
-  forms, and `defn`s that fail planning) becomes an
-  `Embedded { text, span }` item, holding its exact source slice.
-  Load order is kept as a single `Vec<TopItem>`.
+- **D1 — per-top-level classification** (`clj_eval::plan_mixed`,
+  `aot_subset/mixed.rs`). Read all forms with their char ranges
+  (`Evaluator::read_forms_ranged`). Plan each top-level
+  `(defn name ...)` alone on the throwaway planner, rolling back
+  the planner on any failure. Every other form, and every `defn`
+  that fails planning (subset *or* analyzer error), stays embedded.
 - **D2 — native eligibility is closed over natives.** A native
-  `defn` may only call native siblings and the 19 prims (the
-  planner already enforces this). It is demoted to embedded when
-  its name is (re)defined more than once in the file, when an
-  earlier embedded form defines it, or when it calls a demoted fn.
-  Demotion iterates to a fixpoint, so the native set is closed.
-  This preserves JVM var-indirection semantics for every name a
-  program could rebind (`with-redefs`/`binding` on a native var is
-  out of scope: native defns are not `^:dynamic`, and direct
-  sibling calls are what the existing pure build already does).
-- **D3 — `-main`.** The implicit argv `-main` call happens only
-  when the whole program is pure (today's contract, unchanged).
-  Mixed programs follow `run`, which never calls `-main`
-  implicitly. This is documented in the README AOT paragraph.
-  Every snippet calls `-main` explicitly, so this is what keeps
-  them from running twice.
-- **D4 — embedded image.** The module gets one private constant
-  holding the source path and the embedded items. Each item is a
-  `(offset, line, col)` header plus UTF-8 text, preceded by a
-  magic/version word (`CLJAOT01`). `main` calls
-  `rt_run_embedded(image_ptr, image_len)` once per contiguous run
-  of embedded items in load order. Native defns are interned
-  between runs by `rt_intern_native(name, fnptr, arity)`.
-  Startup-checked: a bad magic/version prints
-  `internal: bad AOT image` and exits 70.
-- **D5 — runtime frame.** The first `rt_run_embedded` call enters
-  the same binding frame `cmd_run` builds (shared helper moved
-  into `clj-eval` so `run` and `clj-rt` use one definition) and
-  requires `clojure.string`. Each item is evaluated with the
-  reader positioned at its recorded line/col, so spans and
-  `*file*` match `run`. On error the runtime prints the
-  `run_diagnostic` rendering (also shared) and returns failure.
-  Generated code then exits 1 after joining drainers, as `run`
-  does.
-- **D6 — re-entrancy (no deadlock).** Embedded code can call a
-  native defn (through its var), and that native code calls `rt_*`
-  shims while the evaluator is already borrowed by
-  `rt_run_embedded`. The runtime therefore tracks an *active
-  evaluator* in a thread-local:
-  - `rt_run_embedded` takes the lock once, publishes
-    `&mut Evaluator` in the thread-local for its dynamic extent,
-    and clears it on exit, including on panic (via a guard).
-  - Shims use the active evaluator when one is set, and otherwise
-    lock as today.
-  - The `NativeFn` wrapper created by `rt_intern_native` receives
-    `&mut Evaluator` from the interpreter and republishes it for
-    the native call's extent.
+  `defn` may call only native siblings and the 19 prims. It is
+  demoted when:
+  - its name is defined by more than one top-level def-like form,
+    or by a failed `defn`;
+  - it uses `print` (native `print` would bypass `*out*`
+    bindings);
+  - its form cannot hold the in-place replacement on its first
+    line (see D4);
+  - it calls a demoted sibling. This is iterated to a fixpoint.
 
-  Single-threaded binaries still never contend. Futures and agents
-  run on other threads and see no active evaluator, so they take
-  the lock as today.
-- **D7 — native fn values.** `rt_intern_native` wraps the C fn
-  pointer in a `NativeFn` (display `ns/name`, arity-checked with
-  the interpreter's own arity error text) and interns it into the
-  current namespace. Boxed args are cloned in, ownership follows
-  the S8 D7/D8 rules, and a null return becomes the
-  already-printed error (`NativeError` carrying the rendered
-  diagnostic, so the outer `run_diagnostic` does not print it
-  twice).
-- **D8 — CLI.** `build` tries `plan_source` first; on success it
-  runs the existing path, unchanged. On `PlanError::Subset` it
-  falls back to `plan_mixed`. Reader and analyzer errors still fail
-  the build with the same diagnostics as today. `--report` is
-  accepted in both modes. `--strict` keeps the old
-  fail-on-unsupported behavior for anyone relying on it (the
-  existing unsupported-form tests move under `--strict`).
+  Nothing goes native when any form mentions `alter-var-root`,
+  `with-redefs(-fn)`, `intern`, `ns-unmap`, `alter-meta!` or
+  `(:)refer-clojure`, the ways a program can make var identity or
+  prim resolution observable. The same applies when the source
+  fails to read or exceeds the nesting limit. Demotion never
+  changes behavior: the fallback is `run`'s own path.
+- **D3 — `-main`.** The implicit argv `-main` call stays a
+  pure-subset rule (unchanged). Mixed programs follow `run`, which
+  never calls `-main` implicitly. Every snippet calls `-main`
+  explicitly, so it runs once.
+- **D4 — embedded source (masked text, not an image).** The
+  embedded source is the `\r\n`-normalized program text. Each
+  native `defn` is rewritten in place: its first chars become
+  `(clj.aot/n K)` and every other non-newline char of the form
+  becomes a space. Every embedded form keeps its line and column,
+  so spans, `*file*`-relative diagnostics and read-time effects
+  (ns changes, data readers, `::kw`) behave exactly as under `run`,
+  because the binary reads the text live, form by form. A pre-read
+  image was rejected because `run` interleaves reads with
+  evaluation.
+- **D5 — runtime frame.** The binary's `main` calls
+  `rt_register_native(K, name, arity, trampoline)` per native, then
+  returns `rt_run_program(source, path, argv)`. The runtime boots a
+  fresh evaluator and installs `clj.aot/n` and `clj.aot/load`. It
+  then evaluates `clj_eval::script::run_script(args,
+  "(clj.aot/load)")`, the exact wrapper `cmd_run` now shares, where
+  `load` is `load_text_as_file` (the body of `load-file` minus the
+  file read). Failures print `script::run_diagnostic` (shared with
+  `run`) and exit 1. Drainers join, and stdout is flushed
+  explicitly, because C `main` returning to libc skips std's
+  at-exit flush.
+- **D6 — no re-entrancy deadlock, by separation.** The program
+  evaluator is never the global `RUNTIME` evaluator that the prim
+  shims lock. A native called from embedded code therefore enters
+  the shims freely. No thread-local evaluator pointer and no
+  `unsafe` aliasing are needed.
+- **D7 — native fn values and errors.** `(clj.aot/n K)` installs a
+  `NativeFn` named `ns/name` into the current namespace. Its closure
+  arity-checks with the interpreter's `NativeError::arity` text,
+  boxes clones of the args, and calls the trampoline. Natives are
+  lowered in JIT return mode (a failure returns null instead of
+  exiting). While a native runs, shim failures (`runtime::fail`,
+  including `rt_arity_error`) are stashed in a thread-local instead
+  of printed, and the wrapper returns the stashed `NativeError`.
+  `try`/`catch` around native calls therefore works, and uncaught
+  failures render through `run_diagnostic`.
+- **D8 — CLI.** `clj_aot::build_str(.., BuildMode)` plans the pure
+  subset first. On success the existing pure path runs, with IR
+  byte-identical to before. On *any* plan error, `BuildMode::Mixed`
+  (the CLI default) builds mixed. Reader, analyzer and nesting
+  failures then surface at runtime exactly as under `run`.
+  `BuildMode::Strict` (`build --strict`, and the library's
+  `compile_str`) keeps the old first-failure diagnostics, which the
+  existing corpus tests now pin under `--strict`. `--report` prints
+  the coverage line in both modes.
 - **D9 — runtime archive discovery** is unchanged
-  (`--runtime-archive` or next to the binary). Release archives
-  already ship it, so the snippet CI copies `libcljrt.a` next to
-  `clojure-rs` from the cargo `target/release` dir.
+  (`--runtime-archive` or next to the binary).
+
+### 2.2.1 Measured S1 coverage (local, 2026-11-11)
+
+- All 394 snippets build mixed, and all 1754 cases pass through the
+  built binaries (local sweep; stdout normalized like `snip test`,
+  exit code 0).
+- `--report` totals: 81 of 2486 top-level `defn`s go native, in 74
+  of 394 scripts. Most snippet helpers use forms outside the subset
+  (`str`, interop, seqs, maps), so S2 widening is where AOT speed
+  comes from.
 
 ### 2.3 Slices
 
-- **S1 (this PR):** D1–D9; local all-snippet sweep green; tests.
-- **S2 (follow-up issues, measured):** native `loop`/`recur`, `fn`
+- **S1 (this PR):** D1–D9; local all-snippet sweep green; tests;
+  geiger baseline +54 (FFI shims, trampoline GEP, boundary tests).
+- **S2 (follow-up issues, measured):** native `fn`
   closures, maps/sets/keywords-as-fns, destructuring, `str` /
   `println`. Lower top-level non-`defn` forms natively when they
-  fit. Pre-read image (skips the reader at startup). Each follow-up
+  fit. Pre-read forms where no read-time effects can intervene. Each follow-up
   is filed from `--report` totals plus `clojure-rs-aot` vs
   `clojure-rs` sweep ratios.
 
@@ -193,11 +203,10 @@ Issue: hhh-pa/clojure#256. Consumer: hhh-pa/clojure-code-snippet#66
    and load order, demotion fixpoint (redefinition, call into a
    demoted fn, embedded-before-native definition), spans of
    embedded slices.
-2. `clj-rt` unit tests: image decode (good, bad magic, truncated),
-   `run_embedded` frame parity (`*command-line-args*`,
-   `clojure.string` preloaded, `*file*`), error rendering equals
-   `run_diagnostic`, active-evaluator re-entry (native → shim →
-   embedded callback → native), and panic clears the thread-local.
+2. `clj-rt` unit + FFI-boundary tests: frame parity
+   (`*command-line-args*`, `clojure.string` preloaded, `*file*`),
+   interning, rethrow of stashed failures under `try`/`catch`, arity
+   text, bad intern indices, and silent trampoline failures.
 3. `clj-aot` integration tests (LLVM): the BDD scenarios above as
    build+run tests, the IR-identity test for a subset program,
    `--strict` keeps the old error, and `--report` lines.
@@ -206,10 +215,9 @@ Issue: hhh-pa/clojure#256. Consumer: hhh-pa/clojure-code-snippet#66
 
 ### Constraints
 
-- No `unsafe` beyond the existing `abi.rs` FFI surface. Each new
-  `extern "C"` shim takes its pointer and length with the same
-  documented safety contract (geiger baseline updated with
-  justification).
+- `unsafe` only at the FFI boundary: the two new `abi.rs` shims,
+  reclaiming a trampoline's owned return, and the IR GEP that loads
+  trampoline args (geiger baseline updated with justification).
 - The interpreter-only build (`--no-default-features`) is
   unaffected, because `build` stays behind the `aot` feature.
 

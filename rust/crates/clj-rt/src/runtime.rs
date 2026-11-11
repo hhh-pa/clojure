@@ -214,7 +214,12 @@ pub(crate) fn give(value: Value) -> *mut Value {
 /// message` and return null (the generated code null-checks and
 /// exits 1).
 pub(crate) fn fail(path: &str, line: u32, col: u32, err: &NativeError) -> *mut Value {
-    eprintln!("{}", error_line(path, line, col, err));
+    // Inside a native call from embedded code (issue #256), the
+    // wrapper rethrows instead: the interpreter decides whether
+    // it is caught or printed.
+    if !crate::mixed::stash(err) {
+        eprintln!("{}", error_line(path, line, col, err));
+    }
     ptr::null_mut()
 }
 

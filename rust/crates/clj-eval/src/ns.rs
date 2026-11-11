@@ -2438,16 +2438,21 @@ fn native_load_file(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
         Ok(t) => t,
         Err(e) => return Err(fs_err(&path, &e)),
     };
-    let abs = absolutize(&path);
-    // `Compiler.loadFile`: no `*ns*` isolation, no cycle guard —
-    // only `*file*`. Returns the last value (nil when empty).
-    match run_loaded(
-        eval,
-        Value::Str(Arc::from(abs.as_str())),
-        &abs,
-        &text,
-        false,
-    ) {
+    load_text_as_file(eval, &path, &text)
+}
+
+/// `load-file` over text already in hand, as if read from `path`
+/// (issue #256: AOT-built binaries load their embedded source
+/// through this). `Compiler.loadFile`: no `*ns*` isolation, no
+/// cycle guard — only `*file*`. Returns the last value (nil when
+/// empty).
+pub fn load_text_as_file(
+    eval: &mut Evaluator,
+    path: &str,
+    text: &str,
+) -> Result<Value, NativeError> {
+    let abs = absolutize(path);
+    match run_loaded(eval, Value::Str(Arc::from(abs.as_str())), &abs, text, false) {
         Ok(vals) => Ok(vals.last().cloned().unwrap_or(Value::Nil)),
         Err(e) => Err(source_to_native(eval, &abs, e)),
     }

@@ -24,7 +24,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::{Parser, Subcommand};
-use clj_eval::{Evaluator, SourceError, boot, compile_diagnostic, compile_head};
+use clj_eval::{Evaluator, SourceError, boot, compile_diagnostic};
 use clj_value::Value;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -82,6 +82,13 @@ enum Command {
         /// Link against this runtime archive instead of the autodetected one.
         #[arg(long)]
         runtime_archive: Option<PathBuf>,
+        /// Fail on the first form outside the pure AOT subset
+        /// instead of embedding it (the pre-#256 behavior).
+        #[arg(long)]
+        strict: bool,
+        /// Print the native-vs-embedded coverage line to stderr.
+        #[arg(long)]
+        report: bool,
     },
     /// JIT-run the pure subset in-process (no binary emitted).
     Jit {
@@ -109,12 +116,18 @@ fn main() -> ExitCode {
             emit_ir,
             emit_obj,
             runtime_archive,
+            strict,
+            report,
         } => cmd_build(
             &file,
             &output,
-            emit_ir.as_deref(),
-            emit_obj.as_deref(),
-            runtime_archive.as_deref(),
+            BuildArgs {
+                emit_ir: emit_ir.as_deref(),
+                emit_obj: emit_obj.as_deref(),
+                runtime_archive: runtime_archive.as_deref(),
+                strict,
+                report,
+            },
         ),
         Command::Jit { file, args } => cmd_jit(&file, &args),
     }
@@ -297,30 +310,14 @@ fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
     // requires it (27 recipe scripts rely on this). `require` is
     // idempotent, so scripts that require it themselves are
     // unaffected.
-    let inits = args_expr(args);
-    let target = clj_string(&path);
-    let script = format!(
-        "(binding [*ns* *ns* \
-         *warn-on-reflection* *warn-on-reflection* \
-         *math-context* *math-context* \
-         *print-meta* *print-meta* \
-         *print-length* *print-length* \
-         *print-level* *print-level* \
-         *print-namespace-maps* true \
-         *data-readers* *data-readers* \
-         *default-data-reader-fn* *default-data-reader-fn* \
-         *compile-path* *compile-path* \
-         *command-line-args* {inits} \
-         *unchecked-math* *unchecked-math* \
-         *assert* *assert* \
-         *1 nil *2 nil *3 nil *e nil] \
-         (require 'clojure.string) \
-         (load-file {target}))"
+    let script = clj_eval::script::run_script(
+        args,
+        &format!("(load-file {})", clj_eval::script::clj_string(&path)),
     );
     let code = match eval.eval_source(&script) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("{}", run_diagnostic(&path, &e));
+            eprintln!("{}", clj_eval::script::run_diagnostic(&path, &e));
             ExitCode::from(1)
         }
     };
@@ -334,110 +331,6 @@ fn cmd_run(file: &Path, args: &[String]) -> ExitCode {
     // and file writers write through.
     std::mem::forget(eval);
     code
-}
-
-/// The `*command-line-args*` init (pins P4): nil without args, else a
-/// quoted list of strings (a list value on read).
-fn args_expr(args: &[String]) -> String {
-    if args.is_empty() {
-        return "nil".to_owned();
-    }
-    let mut out = "(quote (".to_owned();
-    for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push_str(&clj_string(arg));
-    }
-    out.push_str("))");
-    out
-}
-
-/// A Rust string as a Clojure string literal.
-fn clj_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// The load wrapper's class: only `load-file` compile/reader failures
-/// carry a parseable ` at (site).` tail.
-const COMPILER_EXCEPTION: &str = "clojure.lang.Compiler$CompilerException";
-
-/// A `run` failure as `file:line:col: message` naming the path as
-/// passed. `load-file` wraps file errors as `... at (site).` with the
-/// real message on the cause chain, so the site is recovered from the
-/// wrapper text; anything else (notably span-less runtime throws)
-/// blames 1:1.
-fn run_diagnostic(path: &str, e: &SourceError) -> String {
-    match e {
-        SourceError::Reader(e) => {
-            let span = e.span();
-            let msg = e.message();
-            format!("{path}:{}:{}: {msg}", span.line, span.col)
-        }
-        SourceError::Compile(e) => {
-            // `compile_err` converts every bare failure to `Uncaught`
-            // before `eval_source` returns, so `e.bare` is always
-            // false here (the single caller passes `eval_source`
-            // errors only).
-            let wrapper = e.wrapper();
-            let head = compile_head(&wrapper);
-            let msg = &e.message;
-            format!("{path}:1:1: {head}: {msg}")
-        }
-        SourceError::Uncaught(t) => {
-            let outer = t.message.as_deref().unwrap_or("");
-            let compiler = t.class.jvm_name() == COMPILER_EXCEPTION;
-            match load_site(outer) {
-                Some((line, col)) if compiler => {
-                    let mut msg = outer;
-                    let mut cur = t;
-                    while let Some(next) = cur.cause.as_deref() {
-                        if let Some(m) = next.message.as_deref() {
-                            msg = m;
-                        }
-                        cur = next;
-                    }
-                    let head = compile_head(outer);
-                    format!("{path}:{line}:{col}: {head}: {msg}")
-                }
-                _ => {
-                    let class = t.class.jvm_name();
-                    format!("{path}:1:1: {class}: {outer}")
-                }
-            }
-        }
-        SourceError::Internal(msg) => format!("{path}:1:1: internal error: {msg}"),
-    }
-}
-
-/// Recover `(line, col)` from a load wrapper's trailing ` at (site).`
-/// (`site` is `file:line:col`, so the last two `:` segments parse;
-/// the file part itself may hold colons).
-fn load_site(message: &str) -> Option<(u32, u32)> {
-    let rest = message.strip_suffix(").")?;
-    let i = rest.rfind(" at (")?;
-    let site = &rest[i + 5..];
-    let mut parts = site.rsplit(':');
-    let col: u32 = parts.next()?.parse().ok()?;
-    let line: u32 = parts.next()?.parse().ok()?;
-    parts.next()?;
-    Some((line, col))
 }
 
 /// The eval pre-scan: whether the input holds code outside
@@ -628,13 +521,18 @@ impl<'a> EvalScanner<'a> {
 /// spec §2.4). The IO gate runs on every configuration (missing
 /// input is exit 3 even unlinked); only compilation itself splits
 /// on the `aot` feature.
-fn cmd_build(
-    file: &Path,
-    output: &Path,
-    emit_ir: Option<&Path>,
-    emit_obj: Option<&Path>,
-    runtime_archive: Option<&Path>,
-) -> ExitCode {
+/// `build`'s optional flags (read only by the linked backend).
+#[derive(Clone, Copy, Default)]
+#[cfg_attr(not(feature = "aot"), allow(dead_code))]
+struct BuildArgs<'a> {
+    emit_ir: Option<&'a Path>,
+    emit_obj: Option<&'a Path>,
+    runtime_archive: Option<&'a Path>,
+    strict: bool,
+    report: bool,
+}
+
+fn cmd_build(file: &Path, output: &Path, args: BuildArgs<'_>) -> ExitCode {
     if !file.exists() {
         eprintln!("build: no such file: {}", file.display());
         return ExitCode::from(3);
@@ -650,38 +548,41 @@ fn cmd_build(
             return ExitCode::from(3);
         }
     };
-    cmd_build_compile(file, &source, output, emit_ir, emit_obj, runtime_archive)
+    cmd_build_compile(file, &source, output, args)
 }
 
 /// Linked `build`: plan → LLVM → link. Plan failures print the
 /// diagnostic verbatim (exit 1); LLVM failures print `build: ...`
 /// (exit 1); IO/link failures print `build: ...` (exit 3) — C8.
 #[cfg(feature = "aot")]
-fn cmd_build_compile(
-    file: &Path,
-    source: &str,
-    output: &Path,
-    emit_ir: Option<&Path>,
-    emit_obj: Option<&Path>,
-    runtime_archive: Option<&Path>,
-) -> ExitCode {
-    use clj_aot::{CompileError, EmitOptions, LinkOptions};
+fn cmd_build_compile(file: &Path, source: &str, output: &Path, args: BuildArgs<'_>) -> ExitCode {
+    use clj_aot::{BuildMode, CompileError, EmitOptions, LinkOptions};
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_default();
     let path = file.to_string_lossy();
     let emit = EmitOptions {
-        emit_ir: emit_ir.map(std::path::Path::to_path_buf),
-        emit_obj: emit_obj.map(std::path::Path::to_path_buf),
+        emit_ir: args.emit_ir.map(std::path::Path::to_path_buf),
+        emit_obj: args.emit_obj.map(std::path::Path::to_path_buf),
     };
     let link = LinkOptions {
-        runtime_archive: runtime_archive.map(std::path::Path::to_path_buf),
+        runtime_archive: args.runtime_archive.map(std::path::Path::to_path_buf),
         exe_dir,
         linker: None,
     };
-    match clj_aot::compile_str(source, &path, output, &emit, &link) {
-        Ok(()) => ExitCode::SUCCESS,
+    let mode = if args.strict {
+        BuildMode::Strict
+    } else {
+        BuildMode::Mixed
+    };
+    match clj_aot::build_str(source, &path, output, &emit, &link, mode) {
+        Ok(report) => {
+            if args.report {
+                eprintln!("{report}");
+            }
+            ExitCode::SUCCESS
+        }
         Err(CompileError::Plan(msg)) => {
             eprintln!("{msg}");
             ExitCode::from(1)
@@ -704,9 +605,7 @@ fn cmd_build_compile(
     _file: &Path,
     _source: &str,
     _output: &Path,
-    _emit_ir: Option<&Path>,
-    _emit_obj: Option<&Path>,
-    _runtime_archive: Option<&Path>,
+    _args: BuildArgs<'_>,
 ) -> ExitCode {
     eprintln!("{}", clj_eval::compiler::UNLINKED_BUILD_LINE);
     ExitCode::from(1)
@@ -953,45 +852,6 @@ mod tests {
     }
 
     #[test]
-    fn run_diagnostic_internal_blames_script_start() {
-        let err = SourceError::Internal("boom".to_owned());
-        assert_eq!(
-            run_diagnostic("script.clj", &err),
-            "script.clj:1:1: internal error: boom"
-        );
-    }
-
-    #[test]
-    fn run_diagnostic_reader_blames_script_span() {
-        // The `Reader` arm is defensive (`cmd_run`'s generated
-        // wrapper always reads clean), so a REAL reader error from
-        // the same `read_forms` exercises the formatting.
-        let err = boot()
-            .read_forms_live(")")
-            .expect_err("stray closer must not read");
-        assert!(matches!(&err, SourceError::Reader(_)));
-        assert_eq!(
-            run_diagnostic("script.clj", &err),
-            "script.clj:1:2: Unmatched delimiter: )"
-        );
-    }
-
-    #[test]
-    fn run_diagnostic_compile_blames_script_start() {
-        // The `Compile` arm is defensive (the wrapper always
-        // compiles), so a REAL analyzer error exercises it: `nope`
-        // fails resolve — never bare (bare is macro-arity/`declare`
-        // only).
-        let mut eval = boot();
-        let err = eval.eval_source("nope").expect_err("nope must not resolve");
-        assert!(matches!(&err, SourceError::Compile(_)));
-        assert_eq!(
-            run_diagnostic("script.clj", &err),
-            "script.clj:1:1: Syntax error compiling: Unable to resolve symbol: nope in this context"
-        );
-    }
-
-    #[test]
     fn run_preloads_clojure_string_201() {
         // JVM `clojure.main <script>` loads `clojure.main` →
         // `clojure.spec.alpha` → `clojure.string`, so
@@ -1008,14 +868,6 @@ mod tests {
         let code = cmd_run(&path, &[]);
         let _ = std::fs::remove_file(&path);
         assert_eq!(code, ExitCode::SUCCESS);
-    }
-
-    #[test]
-    fn clj_string_escapes_every_special() {
-        assert_eq!(
-            clj_string("a\"b\\c\nd\re\tf\x01g\x7fh"),
-            "\"a\\\"b\\\\c\\nd\\re\\tf\\u0001g\\u007fh\""
-        );
     }
 
     #[test]
@@ -1291,9 +1143,7 @@ mod tests {
                 std::path::Path::new("in.clj"),
                 "(+ 1 2)",
                 std::path::Path::new("o"),
-                None,
-                None,
-                None
+                BuildArgs::default()
             ),
             ExitCode::from(1)
         );

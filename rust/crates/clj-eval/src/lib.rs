@@ -54,6 +54,7 @@ pub mod reader;
 pub mod reflect;
 pub mod rng;
 pub mod scalars;
+pub mod script;
 pub mod seqs;
 pub mod shell;
 pub(crate) mod stdlib_natives;
@@ -71,7 +72,8 @@ pub mod w6_runtime;
 pub mod xform;
 
 pub use aot_subset::{
-    PlanError, Prim, SubsetError, SubsetExpr, SubsetFn, SubsetProgram, plan_source,
+    MIXED_INTERN_NS, MixedProgram, PlanError, Prim, SubsetError, SubsetExpr, SubsetFn,
+    SubsetProgram, intern_call, plan_mixed, plan_source,
 };
 pub use env::{Bindings, Env, Namespace, NamespaceRegistry, SharedRegistry, VarState};
 pub use error::{
@@ -83,4 +85,4 @@ pub use expr::{
     Analyzer, Arity, Catch, Expr, FunExpr, KeyBinding, MapPattern, Pattern, VecPattern,
 };
 pub use ext::{Closure, NativeFn, NativeImpl, NsHandle, as_closure, as_native, as_ns, munge};
-pub use ns::boot;
+pub use ns::{boot, load_text_as_file};
