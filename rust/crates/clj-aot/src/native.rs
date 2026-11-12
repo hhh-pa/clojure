@@ -54,8 +54,8 @@ pub struct Unsupported(pub String);
 /// A constant-pool entry.
 #[derive(Clone, Debug, PartialEq)]
 enum Const {
-    // (`nil`, booleans, and ints are written inline, never pooled.)
-    Double(f64),
+    // (`nil`, booleans, ints, doubles, and chars are written inline,
+    // never pooled.)
     Str(String),
     Keyword(Option<String>, String),
     Symbol(Option<String>, String),
@@ -2183,6 +2183,18 @@ impl<'ctx> Lowerer<'ctx> {
                 let bit = self.ctx.bool_type().const_int(u64::from(*b), false);
                 self.write_bool(func, dest, bit);
             }
+            Value::Double(d) => {
+                let fv = self.ctx.f64_type().const_float(*d);
+                self.write_double(func, dest, fv);
+            }
+            Value::Char(c) => {
+                self.drop_v(func, dest);
+                self.write_tag(dest, TAG_CHAR);
+                let cp = self.i32t.const_int(u64::from(u32::from(*c)), false);
+                self.builder
+                    .build_store(self.byte_at(dest, 4), cp)
+                    .expect("store");
+            }
             Value::Var(var) => {
                 let k = self.var_of(var);
                 self.call("rt_n_varref", None, &[dest.into(), self.u64c(k)]);
@@ -2702,10 +2714,6 @@ impl<'ctx> Lowerer<'ctx> {
         let consts = self.consts.clone();
         for (k, c) in consts.iter().enumerate() {
             match c {
-                Const::Double(d) => {
-                    let fv = self.ctx.f64_type().const_float(*d);
-                    self.call("rt_n_double", None, &[t.into(), fv.into()]);
-                }
                 Const::Str(s) => {
                     let p = self.str_ptr(s);
                     self.call("rt_n_str", None, &[t.into(), p.into()]);
@@ -2852,7 +2860,6 @@ fn fast_op(fast: clj_eval::ext::FastArith, n: usize) -> Option<clj_eval::ext::Fa
 /// fallback).
 fn scalar_const(v: &Value) -> Option<Const> {
     Some(match v {
-        Value::Double(d) => Const::Double(*d),
         Value::Str(s) => Const::Str(s.to_string()),
         Value::Keyword(k) => Const::Keyword(k.namespace().map(str::to_owned), k.name().to_owned()),
         Value::Symbol(s) if s.meta().is_none() => {

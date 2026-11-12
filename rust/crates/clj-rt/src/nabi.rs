@@ -176,12 +176,6 @@ pub extern "C" fn rt_n_main(
 
 // ---- constant builders -------------------------------------------------
 
-/// `out = d`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rt_n_double(out: &mut Value, d: f64) {
-    *out = Value::Double(d);
-}
-
 /// `out = "…"`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_str(out: &mut Value, s: &CSlice<u8>) {
@@ -707,7 +701,6 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_declare_fn,
         rt_n_set_const,
         rt_n_main,
-        rt_n_double,
         rt_n_str,
         rt_n_kw,
         rt_n_sym,
