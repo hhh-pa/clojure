@@ -755,8 +755,12 @@ jobs:
           save-if: 'true'
       - run: cargo build --release --locked
       # Materialize the S8 runtime archive (dependency builds only
-      # emit the rlib; the staticlib ships next to the binary).
-      - run: cargo build --release --locked -p clj-rt
+      # emit the rlib; the staticlib ships next to the binary). Built
+      # as a staticlib alone: with the rlib in the same invocation,
+      # cargo skips the release profile's fat LTO for the archive
+      # (#259: 63 MB -> 19 MB, AOT/run instructions geomean
+      # 0.92 -> 0.82 locally).
+      - run: cargo rustc --release --locked -p clj-rt --crate-type staticlib
       # Same package steps as rust-release.yml: smoke-test the binary,
       # then tar it as dist/clojure-rs-<target>.tar.gz.
       - name: package binary

@@ -46,3 +46,4 @@
 (println (kw-call {:a 1}))
 (println (try ((fn [] (throw (Exception. "in fn")))) (catch Exception e (.getMessage e))))
 (println *command-line-args*)
+(println (try (doall (map (fn [x] x) [1] [2])) (catch clojure.lang.ArityException e (.getMessage e))) (map (fn ([] 0) ([x] x)) [7]))
