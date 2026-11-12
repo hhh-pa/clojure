@@ -63,3 +63,7 @@
   (loop [i 0 s s]
     (if (< i 2) (recur (inc i) (rest s)) s)))
 (println (drop-two (list 1 2 3 4)))
+(defn walk-pairs [[a b] n]
+  ;; fn-level recur rebinding a destructured param (not a plain symbol).
+  (if (pos? n) (recur [b (+ a b)] (dec n)) a))
+(println (walk-pairs [0 1] 10))
