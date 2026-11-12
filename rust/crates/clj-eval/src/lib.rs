@@ -26,6 +26,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+pub mod aot_front;
 pub mod aot_subset;
 pub mod arrays;
 #[path = "async.rs"]
@@ -60,6 +61,10 @@ pub mod jio;
 pub mod lazy;
 pub mod macros;
 pub mod multi;
+pub mod native_abi;
+
+/// The owned-args buffer native calls take (see `native_abi`).
+pub type SmallArgs = smallvec::SmallVec<[clj_value::Value; 4]>;
 pub mod ns;
 pub mod portdeps;
 pub(crate) mod printsys;
@@ -100,4 +105,4 @@ pub use expr::{
     Analyzer, Arity, Catch, Expr, FunExpr, KeyBinding, MapPattern, Pattern, VecPattern,
 };
 pub use ext::{Closure, NativeFn, NativeImpl, NsHandle, as_closure, as_native, as_ns, munge};
-pub use ns::{boot, load_text_as_file};
+pub use ns::{boot, load_native, load_text_as_file};

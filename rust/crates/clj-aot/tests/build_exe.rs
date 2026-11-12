@@ -220,9 +220,23 @@ fn mixed_binary_interns_natives_and_runs_embedded_256() {
                   (defn twice [x] (add x x))\n\
                   (defn fmt [x] (str \"<\" x \">\"))\n\
                   (println (fmt (twice (add 1 2))) *command-line-args*)\n\
-                  (print (try (add :a 1) (catch ClassCastException _ :cce)))\n";
+                  (print (try (add :a 1) (catch ClassCastException _ :cce)))\n\
+                  (eval '(def zz 5))\n(print zz)\n";
+    // `zz` only exists at run time (via `eval`), so the native front
+    // end cannot analyze the last form: the mixed path takes over.
     let (stdout, stderr, code, report) = build_mode_and_run("mixed", source, &["x"]);
-    assert_eq!(report, "aot: native 2/3 defns, embedded 3 top-level forms");
+    assert!(
+        report.starts_with("aot: native 2/3 defns, embedded 5 top-level forms (native: front end"),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("<6> (x)\n:cce5", "", 0)
+    );
+    // Without the runtime-only var the whole program goes native.
+    let native = source.replace("(eval '(def zz 5))\n(print zz)\n", "");
+    let (stdout, stderr, code, report) = build_mode_and_run("native", &native, &["x"]);
+    assert_eq!(report, "aot: native 3/3 defns, embedded 0 top-level forms");
     assert_eq!(
         (stdout.as_str(), stderr.as_str(), code),
         ("<6> (x)\n:cce", "", 0)

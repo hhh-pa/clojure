@@ -73,7 +73,7 @@ impl std::error::Error for SourceError {}
 /// An uncaught top-level signal (an escaping `recur` is
 /// impossible — every loop/fn frame catches its own — and
 /// surfaces as an internal error, never a panic).
-fn uncaught(s: Signal) -> SourceError {
+pub(crate) fn uncaught(s: Signal) -> SourceError {
     match s {
         Signal::Throw(t) => SourceError::Uncaught(t),
         Signal::Recur(_) => SourceError::Internal("recur escaped its loop or fn".to_owned()),
@@ -142,7 +142,7 @@ pub(crate) fn split_top_do(form: &Value) -> Option<Vec<&Value>> {
 /// non-numbers — characters included, which miss like on the JVM).
 /// `Int` truncates; `Double` narrows exactly like Java (`as`
 /// saturates and maps `NaN` to 0, same as `(int)`).
-fn case_int_value(v: &Value) -> Option<i32> {
+pub(crate) fn case_int_value(v: &Value) -> Option<i32> {
     match v {
         Value::Int(i) => Some(*i as i32),
         Value::Double(d) => Some(*d as i32),
@@ -151,7 +151,7 @@ fn case_int_value(v: &Value) -> Option<i32> {
 }
 
 /// `case*` dispatch-key masking (a zero mask skips the shift).
-fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
+pub(crate) fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
     if mask == 0 {
         key
     } else {
@@ -166,8 +166,8 @@ fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
 /// over one lineage (see [`fork_for_thread`](Self::fork_for_thread)).
 pub struct Evaluator {
     pub registry: SharedRegistry,
-    bindings: Bindings,
-    source: Arc<str>,
+    pub(crate) bindings: Bindings,
+    pub(crate) source: Arc<str>,
     /// `clojure.core/*ns*`'s var id once [`current_ns_name`] found it
     /// (0 = not yet; var ids start at 1).
     star_ns_id: std::sync::atomic::AtomicU64,
@@ -1650,8 +1650,13 @@ impl Evaluator {
     /// `*out*` (`"Elapsed time: <millis> msecs"`, quoted by `prn`),
     /// return the value.
     fn eval_time(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        self.time_core(&|ev: &mut Self| ev.eval(expr, env))
+    }
+
+    /// `time` around a body.
+    pub(crate) fn time_core(&mut self, body: crate::stm::TxBody<'_>) -> Result<Value, Signal> {
         let start = std::time::Instant::now();
-        let v = self.eval(expr, env)?;
+        let v = body(self)?;
         let line = Self::format_elapsed_millis(start.elapsed().as_nanos());
         crate::io::prn_str(self, &line).map_err(|e| self.throw(e))?;
         Ok(v)
@@ -1676,16 +1681,21 @@ impl Evaluator {
         body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
+        self.with_out_str_core(out, &|ev: &mut Self| ev.eval_body(body, env))
+    }
+
+    /// `with-out-str` around a body.
+    pub(crate) fn with_out_str_core(
+        &mut self,
+        out: &Symbol,
+        body: crate::stm::TxBody<'_>,
+    ) -> Result<Value, Signal> {
         let writer = crate::io::string_writer(self);
-        let out_id = self.var_id(out);
-        let pairs = vec![(
-            Var {
-                id: out_id,
-                sym: out.clone(),
-            },
-            Expr::Literal(writer.clone()),
-        )];
-        self.eval_binding(&pairs, body, env)?;
+        let var = Var {
+            id: self.var_id(out),
+            sym: out.clone(),
+        };
+        crate::native_abi::binding_call_with(self, vec![(var, writer.clone())], body)?;
         let contents = crate::io::writer_contents(&writer).unwrap_or_default();
         Ok(Value::Str(Arc::from(contents.as_str())))
     }
@@ -1702,19 +1712,25 @@ impl Evaluator {
         env: &Env,
     ) -> Result<Value, Signal> {
         let v = self.eval(s, env)?;
-        let Value::Str(text) = &v else {
-            return Err(self.throw(crate::core::cce_err(&v, "java.lang.String")));
+        self.with_in_str_core(input, &v, &|ev: &mut Self| ev.eval_body(body, env))
+    }
+
+    /// `with-in-str` over an evaluated string around a body.
+    pub(crate) fn with_in_str_core(
+        &mut self,
+        input: &Symbol,
+        v: &Value,
+        body: crate::stm::TxBody<'_>,
+    ) -> Result<Value, Signal> {
+        let Value::Str(text) = v else {
+            return Err(self.throw(crate::core::cce_err(v, "java.lang.String")));
         };
         let reader = crate::reader::string_reader(self, text);
-        let input_id = self.var_id(input);
-        let pairs = vec![(
-            Var {
-                id: input_id,
-                sym: input.clone(),
-            },
-            Expr::Literal(reader),
-        )];
-        self.eval_binding(&pairs, body, env)
+        let var = Var {
+            id: self.var_id(input),
+            sym: input.clone(),
+        };
+        crate::native_abi::binding_call_with(self, vec![(var, reader)], body)
     }
 
     /// The `case*` dispatch probe for an evaluated target: the value
@@ -1835,7 +1851,7 @@ impl Evaluator {
 
     /// Bare `UnsupportedOperationException` (the JVM `hasheq` /
     /// `hashCode` overrides on unbounded seqs).
-    fn unsupported_hash(&mut self) -> Signal {
+    pub(crate) fn unsupported_hash(&mut self) -> Signal {
         self.throw(NativeError::new(
             ThrowClass::UnsupportedOperationException,
             String::new(),
@@ -1855,9 +1871,22 @@ impl Evaluator {
         body: &[Expr],
         env: &Env,
     ) -> Result<Value, Signal> {
-        let mut saves: Vec<(u64, Option<Value>, Value)> = Vec::with_capacity(pairs.len());
+        let mut vals = Vec::with_capacity(pairs.len());
         for (var, init) in pairs {
-            let value = self.eval(init, env)?;
+            vals.push((var.clone(), self.eval(init, env)?));
+        }
+        self.with_redefs_core(vals, &|ev: &mut Self| ev.eval_body(body, env))
+    }
+
+    /// `with-redefs` over evaluated values around a body (the
+    /// interpreter's or a compiled body fn, #259).
+    pub(crate) fn with_redefs_core(
+        &mut self,
+        vals: Vec<(Var, Value)>,
+        body: crate::stm::TxBody<'_>,
+    ) -> Result<Value, Signal> {
+        let mut saves: Vec<(u64, Option<Value>, Value)> = Vec::with_capacity(vals.len());
+        for (var, value) in vals {
             let id = var.id;
             match saves.iter_mut().find(|(i, _, _)| *i == id) {
                 Some(slot) => slot.2 = value,
@@ -1872,7 +1901,7 @@ impl Evaluator {
                 st.root = Some(value.clone());
             });
         }
-        let result = catch_unwind(AssertUnwindSafe(|| self.eval_body(body, env)));
+        let result = catch_unwind(AssertUnwindSafe(|| body(self)));
         for (id, saved, _) in saves.iter().rev() {
             self.registry.with_state_mut(*id, |st| {
                 st.root = saved.clone();
@@ -1894,10 +1923,19 @@ impl Evaluator {
         env: &Env,
     ) -> Result<Value, Signal> {
         let bindings = self.eval(map, env)?;
-        let entries = crate::vars::push_entries(self, &bindings).map_err(|e| self.throw(e))?;
+        self.with_bindings_core(&bindings, &|ev: &mut Self| ev.eval_body(body, env))
+    }
+
+    /// `with-bindings*` over an evaluated binding map.
+    pub(crate) fn with_bindings_core(
+        &mut self,
+        bindings: &Value,
+        body: crate::stm::TxBody<'_>,
+    ) -> Result<Value, Signal> {
+        let entries = crate::vars::push_entries(self, bindings).map_err(|e| self.throw(e))?;
         let depth = self.bindings.depth();
         self.bindings.push_frame(entries);
-        let result = self.eval_body(body, env);
+        let result = body(self);
         self.bindings.truncate(depth);
         result
     }
@@ -1939,8 +1977,22 @@ impl Evaluator {
             fun,
             span,
         } = *parts;
+        let closure = Value::Extension(Arc::new(self.make_closure(fun, env)));
+        self.defmacro_with(sym, doc, attr, arglists, span, closure)
+    }
+
+    /// `defmacro` over a ready macro fn (the interpreter's closure or
+    /// a natively compiled one, #259).
+    pub(crate) fn defmacro_with(
+        &mut self,
+        sym: &Symbol,
+        doc: Option<&str>,
+        attr: Option<&Map>,
+        arglists: &[Value],
+        span: Span,
+        closure: Value,
+    ) -> Result<Value, Signal> {
         let id = self.registry.intern_def_target(sym);
-        let closure = self.make_closure(fun, env);
         let dynamic = Self::dynamic_of(sym);
         let cur = self.current_ns_name();
         let cur_id = self.registry.ns_id(&cur).unwrap_or(0);
@@ -1980,9 +2032,8 @@ impl Evaluator {
             let key = Value::Keyword(Keyword::new(None, key));
             meta = meta.insert(key, value);
         }
-        let root = Value::Extension(Arc::new(closure));
         self.registry.with_state_mut(id, |state| {
-            state.root = Some(root);
+            state.root = Some(closure);
             state.meta = Some(meta);
             state.dynamic = dynamic;
         });
@@ -2345,15 +2396,24 @@ impl Evaluator {
     /// monitor always releases.
     fn eval_locking(&mut self, lockee: &Expr, body: &[Expr], env: &Env) -> Result<Value, Signal> {
         let target = self.eval(lockee, env)?;
+        self.locking_core(&target, &|ev: &mut Self| ev.eval_body(body, env))
+    }
+
+    /// `locking` over an evaluated lockee around a body.
+    pub(crate) fn locking_core(
+        &mut self,
+        target: &Value,
+        body: crate::stm::TxBody<'_>,
+    ) -> Result<Value, Signal> {
         if matches!(target, Value::Nil) {
             return Err(self.throw(NativeError::new(
                 ThrowClass::NullPointerException,
                 "Cannot enter synchronized block because \"lock\" is null".to_owned(),
             )));
         }
-        let key = crate::concurrency::monitor_key(&target);
+        let key = crate::concurrency::monitor_key(target);
         let _guard = crate::concurrency::locking_acquire_key(key);
-        self.eval_body(body, env)
+        body(self)
     }
 
     /// The §E7 `IFn` table: closures/natives, keywords, symbols,
@@ -2913,6 +2973,28 @@ impl Evaluator {
     /// Run one unbounded application under the #205 call-depth
     /// guard, on a grown stack segment when the native stack runs
     /// low (see [`apply_closure`](Self::apply_closure)).
+    /// Enter one native-to-native call under the interpreter's
+    /// depth limit and stack probe (`false`: take the guarded path,
+    /// which raises `StackOverflowError` or grows the stack).
+    pub(crate) fn enter_native_call(&mut self) -> bool {
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return false;
+        }
+        self.call_depth += 1;
+        if self.call_depth % STACK_PROBE_EVERY == 0
+            && stacker::remaining_stack().is_some_and(|r| r < STACK_RED_ZONE)
+        {
+            self.call_depth -= 1;
+            return false;
+        }
+        true
+    }
+
+    /// Leave a call entered by [`enter_native_call`](Self::enter_native_call).
+    pub(crate) fn leave_native_call(&mut self) {
+        self.call_depth -= 1;
+    }
+
     pub(crate) fn guarded_call(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<Value, Signal>,
@@ -3112,7 +3194,7 @@ impl Evaluator {
     /// The `&`-pattern `gseq`: seq values (S6D: `pmap`'s `rets`)
     /// coerce through the canonical `seq` (which forces), while
     /// concrete collections keep `seq_val`'s eager lists.
-    fn destructure_gseq(&mut self, value: &Value) -> Result<Value, Signal> {
+    pub(crate) fn destructure_gseq(&mut self, value: &Value) -> Result<Value, Signal> {
         match value {
             Value::Extension(_) => crate::lazy::seq_value(self, value),
             _ => self.seq_val(value),
@@ -3799,7 +3881,7 @@ pub(crate) fn rest_list(args: &[Value]) -> Value {
 /// `nil` is `nil`; anything else delegates to `nth` (lazy
 /// seqs force and walk, subvectors index, the rest is
 /// `nth not supported`) (§E12).
-fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Signal> {
+pub(crate) fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Signal> {
     match coll {
         Value::Nil => Ok(Value::Nil),
         Value::Vector(v) => Ok(v.get(i).unwrap_or(Value::Nil)),

@@ -1,0 +1,10 @@
+;; Redefining vars that compiled code calls (native-bound user vars included).
+(def f inc)
+(defn g [x] (f x))
+(println (g 1))
+(def f dec)
+(println (g 1))
+(def f (fn [x] (* 10 x)))
+(println (g 1))
+(defn h [x] (count x))
+(println (h [1 2]))

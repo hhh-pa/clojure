@@ -170,30 +170,35 @@ pub(crate) fn eval_sync_or_io(
     body: &[Expr],
     env: &Env,
 ) -> Result<Value, Signal> {
+    let run = |ev: &mut Evaluator| ev.eval_body(body, env);
     if matches!(expr, Expr::Sync { .. }) {
-        eval_sync(eval, body, env)
+        eval_sync(eval, &run)
     } else {
-        eval_io(eval, body, env)
+        eval_io(eval, &run)
     }
 }
 
+/// A transaction or `io!` body: the interpreter's evaluated body or
+/// a natively compiled body fn (#259), re-runnable on retry.
+pub(crate) type TxBody<'a> = &'a dyn Fn(&mut Evaluator) -> Result<Value, Signal>;
+
 /// `(sync flags body…)` (and `dosync`, which expands to it): join the
 /// running transaction or begin one (§1b/§1g).
-pub(crate) fn eval_sync(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, Signal> {
+pub(crate) fn eval_sync(eval: &mut Evaluator, body: TxBody<'_>) -> Result<Value, Signal> {
     if eval.tx.is_some() {
-        sync_join(eval, body, env)
+        sync_join(eval, body)
     } else {
-        sync_begin(eval, body, env)
+        sync_begin(eval, body)
     }
 }
 
 /// The join path: one nesting level deeper, same transaction (one
 /// commit, one watch round, one outbox — §1b).
-fn sync_join(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, Signal> {
+fn sync_join(eval: &mut Evaluator, body: TxBody<'_>) -> Result<Value, Signal> {
     if let Some(tx) = eval.tx.as_mut() {
         tx.depth += 1;
     }
-    let out = eval.eval_body(body, env);
+    let out = body(eval);
     if let Some(tx) = eval.tx.as_mut() {
         tx.depth -= 1;
     }
@@ -208,14 +213,14 @@ fn sync_join(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, Si
 /// bindings stack to the entry depth — otherwise stale frames would
 /// leak into the next attempt (roots restore via the `with-redefs`
 /// guard instead; `finally` runs at `eval_try`).
-fn sync_begin(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, Signal> {
+fn sync_begin(eval: &mut Evaluator, body: TxBody<'_>) -> Result<Value, Signal> {
     let depth = eval.bindings_depth();
     // The #205 call-depth counter unwinds past attempt frames on
     // retry exactly like the bindings stack, so it restores with it.
     let call_depth = eval.call_depth;
     loop {
         begin_attempt(eval);
-        let outcome = catch_unwind(AssertUnwindSafe(|| run_attempt(eval, body, env)));
+        let outcome = catch_unwind(AssertUnwindSafe(|| run_attempt(eval, body)));
         match outcome {
             Ok(AttemptOutcome::Done(value)) => {
                 end_attempt(eval);
@@ -245,8 +250,8 @@ fn sync_begin(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, S
 
 /// One attempt: run the body, then commit (a body throw discards the
 /// attempt — nothing commits, no watches fire, no sends dispatch).
-fn run_attempt(eval: &mut Evaluator, body: &[Expr], env: &Env) -> AttemptOutcome {
-    match eval.eval_body(body, env) {
+fn run_attempt(eval: &mut Evaluator, body: TxBody<'_>) -> AttemptOutcome {
+    match body(eval) {
         Ok(value) => commit(eval, value),
         Err(signal) => AttemptOutcome::Throw(signal),
     }
@@ -682,14 +687,14 @@ fn dispatch_outbox(eval: &mut Evaluator, outbox: Vec<(Agent, QueuedAction)>) -> 
 }
 
 /// `(io! body…)`: the gate fires before body evaluation (§1b).
-pub(crate) fn eval_io(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Value, Signal> {
+pub(crate) fn eval_io(eval: &mut Evaluator, body: TxBody<'_>) -> Result<Value, Signal> {
     if eval.tx.is_some() {
         return Err(eval.throw(NativeError::new(
             ThrowClass::IllegalStateException,
             "I/O in transaction".to_owned(),
         )));
     }
-    eval.eval_body(body, env)
+    body(eval)
 }
 
 /// Refuse `await`/`await-for` inside a transaction (checked before
@@ -1322,9 +1327,10 @@ mod tests {
         }];
         let env = Env::new();
         let before = lock_readers().len();
-        let payload =
-            std::panic::catch_unwind(AssertUnwindSafe(|| sync_begin(&mut eval, &body, &env)))
-                .expect_err("foreign panic resumes");
+        let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            sync_begin(&mut eval, &|ev: &mut Evaluator| ev.eval_body(&body, &env))
+        }))
+        .expect_err("foreign panic resumes");
         assert!(
             payload.downcast_ref::<String>().is_some() || payload.downcast_ref::<&str>().is_some()
         );

@@ -97,12 +97,14 @@ pub fn run_diagnostic(path: &str, e: &SourceError) -> String {
         SourceError::Compile(e) => {
             // `compile_err` converts every bare failure to `Uncaught`
             // before `eval_source` returns, so `e.bare` is always
-            // false here (the single caller passes `eval_source`
-            // errors only).
+            // false here. `run` itself reports compile errors through
+            // the load wrapper (`Uncaught` below); the native
+            // compiler's front end reports them here, at the same
+            // site `run` names.
             let wrapper = e.wrapper();
             let head = compile_head(&wrapper);
             let msg = &e.message;
-            format!("{path}:1:1: {head}: {msg}")
+            format!("{path}:{}:{}: {head}: {msg}", e.span.line, e.span.col)
         }
         SourceError::Uncaught(t) => {
             let outer = t.message.as_deref().unwrap_or("");

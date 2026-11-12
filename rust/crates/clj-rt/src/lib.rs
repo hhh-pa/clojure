@@ -35,6 +35,12 @@ compile_error!("clj-rt requires a 64-bit host (usize FFI widths)");
 #[cfg(not(test))]
 pub mod abi;
 pub mod mixed;
+#[cfg(not(test))]
+pub mod nabi;
+// Exercised through the `rt_n_*` shims (not built under `cfg(test)`):
+// coverage comes from the CLI's in-process native JIT runs.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) mod native;
 pub(crate) mod runtime;
 
 #[cfg(not(test))]

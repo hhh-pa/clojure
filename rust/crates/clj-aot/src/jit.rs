@@ -140,17 +140,48 @@ pub fn run_str(source: &str, source_path: &str, args: &[String]) -> Result<i32, 
             .expect("lowered module declares every mapped helper");
         ee.add_global_mapping(&func, addr as usize);
     }
+    call_main(&ee, args)
+}
+
+/// Call the module's C `main` with `args` as `argv`.
+fn call_main(
+    ee: &inkwell::execution_engine::ExecutionEngine<'_>,
+    args: &[String],
+) -> Result<i32, JitError> {
     let owned = c_argv(args);
     let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
     ptrs.push(std::ptr::null());
     let argc = owned.len() as i32;
-    // Safety: `to_module_jit` always emits C `main(argc, argv)
-    // -> i32` (verified before return), so `MainFn` matches the
-    // looked-up entry; `argv` holds `argc` valid C strings plus
-    // a NUL terminator, alive across the call.
+    // Safety: both lowerings (`to_module_jit`, verified before
+    // return, and the native compiler) emit C `main(argc, argv) ->
+    // i32`, so `MainFn` matches the looked-up entry; `argv` holds
+    // `argc` valid C strings plus a NUL terminator, alive across the
+    // call.
     let code =
         unsafe { jit_err(ee.get_function::<MainFn>("main"), "entry")?.call(argc, ptrs.as_ptr()) };
     Ok(code)
+}
+
+/// JIT-run any program through the full native compiler (issue
+/// #259): the same module `build` links, executed in-process with
+/// every `rt_n_*` declaration mapped to this process's own shims.
+/// Returns the program's exit code; `Err` when the program cannot be
+/// compiled natively (the caller reports it).
+pub fn run_native_str(source: &str, source_path: &str, args: &[String]) -> Result<i32, JitError> {
+    let ctx = Context::create();
+    let (module, _) = crate::native_module(&ctx, source, source_path).map_err(|e| match e {
+        // The program's own compile error, exactly as `run` reports it.
+        crate::NativeFail::Program(diag) => JitError::Plan(diag),
+        other => JitError::Jit(other.to_string()),
+    })?;
+    let engine = module.create_jit_execution_engine(OptimizationLevel::None);
+    let ee = jit_err(engine, "engine")?;
+    for (name, addr) in cljrt::nabi::native_symbols() {
+        if let Some(func) = module.get_function(name) {
+            ee.add_global_mapping(&func, addr);
+        }
+    }
+    call_main(&ee, args)
 }
 
 #[cfg(test)]

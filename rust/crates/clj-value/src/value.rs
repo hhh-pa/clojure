@@ -2110,7 +2110,13 @@ pub fn reader_conditional(form: Value, splicing: bool) -> Value {
 
 /// A Clojure runtime value (S2 foundation; S3+ adds functions, vars,
 /// refs, and the concurrency primitives as new variants).
+/// `repr(u8)` (issue #259): natively compiled code relies on this
+/// layout — tag byte at offset 0 in declaration order (`Nil`=0,
+/// `Bool`=1 with its payload at offset 1, `Int`=2 / `Double`=3 with
+/// payloads at offset 8, `Char`=9) — pinned by `value_layout_abi`.
+/// The repr changes nothing measured: same 32 bytes, same bytes.
 #[derive(Clone, Debug)]
+#[repr(u8)]
 pub enum Value {
     /// `nil`.
     Nil,
@@ -3309,6 +3315,30 @@ mod tests {
         new_map, new_set, plain_equals,
     };
     use crate::{HostDef, HostInst, HostKind, HostVal, Keyword, Symbol};
+
+    /// The layout natively compiled code relies on (issue #259).
+    #[test]
+    fn value_layout_abi() {
+        fn bytes(v: &Value) -> [u8; 32] {
+            // SAFETY: `Value` is 32 bytes (asserted below); reading its
+            // bytes is a plain copy of initialized-or-padding memory
+            // used only for the tag/payload bytes checked here.
+            unsafe { std::mem::transmute_copy::<Value, [u8; 32]>(v) }
+        }
+        assert_eq!(std::mem::size_of::<Value>(), 32);
+        assert_eq!(std::mem::align_of::<Value>(), 8);
+        assert_eq!(bytes(&Value::Nil)[0], 0);
+        let t = bytes(&Value::Bool(true));
+        assert_eq!((t[0], t[1]), (1, 1));
+        assert_eq!(bytes(&Value::Bool(false))[1], 0);
+        let i = bytes(&Value::Int(-2));
+        assert_eq!(i[0], 2);
+        assert_eq!(i64::from_ne_bytes(i[8..16].try_into().expect("8")), -2);
+        let d = bytes(&Value::Double(1.5));
+        assert_eq!(d[0], 3);
+        assert_eq!(f64::from_ne_bytes(d[8..16].try_into().expect("8")), 1.5);
+        assert_eq!(bytes(&Value::Char('A'))[0], 9);
+    }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;

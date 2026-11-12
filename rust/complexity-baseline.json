@@ -189,6 +189,20 @@
    "cyclomatic": 16.0,
    "cognitive": 1.0,
    "justification": "fence 3c rebase: flat one-arm-per-variant hash table tipped 15->16 on the Executor arm (forced by the new variant; same id_hash shape as cells). Flat-table precedent per reviewer concurrence."
+  },
+  {
+   "file": "crates/clj-aot/src/native.rs",
+   "function": "Lowerer<'ctx>::lower",
+   "cyclomatic": 75.0,
+   "cognitive": 7.0,
+   "justification": "Issue #259 native compiler: one arm per Expr variant (the analyzer's whole IR, like Evaluator::eval); each arm delegates to a small lowering helper."
+  },
+  {
+   "file": "crates/clj-eval/src/aot_front.rs",
+   "function": "for_each_child",
+   "cyclomatic": 33.0,
+   "cognitive": 5.0,
+   "justification": "Issue #259: the Expr child walker, one arm per Expr variant (shared by free-variable analysis and the rebinding scan); flat, no nesting."
   }
  ]
 }
