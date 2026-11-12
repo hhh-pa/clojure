@@ -651,6 +651,29 @@ pub(crate) const APPLY3: &[(&str, Apply3)] = &[
     ("get", <Get3 as Op3>::apply),
 ];
 
+/// The 3+-argument forms over borrowed args for native code (#259):
+/// each row's binary op, folded (`false`) or chained like a comparison
+/// (`true`). Kept in step with [`NARY`] (pinned by
+/// `apply_tables_cover_every_specialized_op`).
+pub(crate) const APPLYN: &[(&str, Apply2, bool)] = &[
+    ("+", <Add as Op2>::apply, false),
+    ("-", <Sub as Op2>::apply, false),
+    ("*", <Mul as Op2>::apply, false),
+    ("+'", <Add as Op2>::apply, false),
+    ("-'", <Sub as Op2>::apply, false),
+    ("*'", <Mul as Op2>::apply, false),
+    ("min", <Min as Op2>::apply, false),
+    ("max", <Max as Op2>::apply, false),
+    ("bit-and", <BitAnd as Op2>::apply, false),
+    ("bit-or", <BitOr as Op2>::apply, false),
+    ("bit-xor", <BitXor as Op2>::apply, false),
+    ("<", <Lt as Op2>::apply, true),
+    ("<=", <Lte as Op2>::apply, true),
+    (">", <Gt as Op2>::apply, true),
+    (">=", <Gte as Op2>::apply, true),
+    ("==", <NumEq as Op2>::apply, true),
+];
+
 /// The three-argument ops by core name (value code).
 const TERNARY: &[Row3] = &[
     ("assoc!", shape3::<AssocBang>),
@@ -2379,7 +2402,7 @@ mod tests {
 
 #[cfg(test)]
 mod apply_tests {
-    use super::{APPLY1, APPLY2, APPLY3, BINARY, TERNARY, UNARY};
+    use super::{APPLY1, APPLY2, APPLY3, APPLYN, BINARY, NARY, TERNARY, UNARY};
 
     #[test]
     fn apply_tables_cover_every_specialized_op() {
@@ -2389,5 +2412,7 @@ mod apply_tests {
         assert_eq!(a1, UNARY.iter().map(|r| r.0).collect::<Vec<_>>());
         assert_eq!(a2, BINARY.iter().map(|r| r.0).collect::<Vec<_>>());
         assert_eq!(a3, TERNARY.iter().map(|r| r.0).collect::<Vec<_>>());
+        let an: Vec<&str> = APPLYN.iter().map(|r| r.0).collect();
+        assert_eq!(an, NARY.iter().map(|r| r.0).collect::<Vec<_>>());
     }
 }

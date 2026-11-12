@@ -67,3 +67,38 @@ fn non_native_callees_take_the_general_call() {
     let r = native_abi::call_value_owned(&mut eval, &f, args).expect("call");
     assert_eq!(r, Value::Int(5));
 }
+
+#[test]
+fn nary_ops_fold_and_chain() {
+    let (one, two, three) = (Value::Int(1), Value::Int(2), Value::Int(3));
+    let plus = native_abi::inline_op("+", 4).expect("+/4");
+    assert_eq!(
+        native_abi::apply_inline(plus, &[&one, &two, &three, &one]),
+        Some(Value::Int(7))
+    );
+    let minus = native_abi::inline_op("-", 3).expect("-/3");
+    assert_eq!(
+        native_abi::apply_inline(minus, &[&three, &one, &one]),
+        Some(Value::Int(1))
+    );
+    let lt = native_abi::inline_op("<", 3).expect("</3");
+    assert_eq!(
+        native_abi::apply_inline(lt, &[&one, &two, &three]),
+        Some(Value::Bool(true))
+    );
+    // A false pair stops the chain before an uncomparable value.
+    let s = Value::Str(std::sync::Arc::from("s"));
+    assert_eq!(
+        native_abi::apply_inline(lt, &[&two, &one, &s]),
+        Some(Value::Bool(false))
+    );
+    // Uncovered operands run the native (`None`): an overflowing fold, a
+    // non-number in a chain.
+    let max = Value::Int(i64::MAX);
+    assert_eq!(native_abi::apply_inline(plus, &[&max, &one, &one]), None);
+    assert_eq!(native_abi::apply_inline(lt, &[&one, &s, &two]), None);
+    // `assoc!`/`nth`/`get` keep their ternary op; others have no 3-ary op.
+    assert!(native_abi::inline_op("nth", 3).is_some_and(|id| id < 1 << 30));
+    assert!(native_abi::inline_op("count", 3).is_none());
+    assert!(native_abi::inline_op("+", 1).is_none());
+}

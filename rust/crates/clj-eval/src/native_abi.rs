@@ -664,22 +664,49 @@ pub fn call_core(
 /// id for [`apply_inline`]), if it has one.
 #[must_use]
 pub fn inline_op(name: &str, arity: usize) -> Option<u32> {
-    use crate::vm_ops::{APPLY1, APPLY2, APPLY3};
+    use crate::vm_ops::{APPLY1, APPLY2, APPLY3, APPLYN};
     let pos = match arity {
         1 => APPLY1.iter().position(|r| r.0 == name),
         2 => APPLY2.iter().position(|r| r.0 == name),
         3 => APPLY3.iter().position(|r| r.0 == name),
         _ => None,
     };
-    pos.map(|i| i as u32)
+    let nary = || {
+        APPLYN
+            .iter()
+            .position(|r| r.0 == name)
+            .filter(|_| arity >= 3)
+            .map(|i| i as u32 | NARY_OP)
+    };
+    pos.map(|i| i as u32).or_else(nary)
 }
+
+/// [`inline_op`]'s mark for a 3+-argument fold or comparison chain.
+const NARY_OP: u32 = 1 << 30;
 
 /// Apply inline op `id` ([`inline_op`] at `args.len()`) to borrowed
 /// args — the same inline answers the VM gives. `None`: the case is not
 /// covered (or `id` names no op), so the caller runs the native.
 #[must_use]
 pub fn apply_inline(id: u32, args: &[&Value]) -> Option<Value> {
-    use crate::vm_ops::{APPLY1, APPLY2, APPLY3};
+    use crate::vm_ops::{APPLY1, APPLY2, APPLY3, APPLYN};
+    if id != u32::MAX && id & NARY_OP != 0 {
+        // A fold of the binary op, or a comparison chain that stops at
+        // the first false pair (like `clojure.core/<`).
+        let (_, op, chain) = APPLYN.get((id & !NARY_OP) as usize)?;
+        let (first, rest) = args.split_first()?;
+        if *chain {
+            let mut prev = *first;
+            for x in rest {
+                if !op(prev, x)?.is_truthy() {
+                    return Some(Value::Bool(false));
+                }
+                prev = x;
+            }
+            return Some(Value::Bool(true));
+        }
+        return rest.iter().try_fold((*first).clone(), |acc, x| op(&acc, x));
+    }
     let i = id as usize;
     match args {
         [a] => APPLY1.get(i)?.1(a),

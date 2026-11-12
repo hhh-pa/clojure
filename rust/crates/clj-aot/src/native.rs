@@ -890,17 +890,27 @@ impl<'ctx> Lowerer<'ctx> {
         let mut f = self.begin_fn_into(func, env);
         let args = f.func.get_nth_param(1).expect("args").into_pointer_value();
         let pats: Vec<&Pattern> = arity.fixed.iter().chain(arity.rest.iter()).collect();
-        // Params: each arg cloned into its own slot, then bound.
-        let mut arg_slots = Vec::with_capacity(pats.len());
-        for i in 0..pats.len() {
-            let s = self.slot(&mut f);
-            let src = self.elem(args, i);
-            self.clone_v(f.func, s, src);
-            arg_slots.push(s);
-        }
+        // Params read the caller's argument array in place (the caller
+        // owns it for the call; compiled code never drops or moves a
+        // param). An arity that `recur`s rebinds its params, so it takes
+        // owned copies first.
+        let owned = self_recurs(&arity.body);
         let mut targets = Vec::with_capacity(pats.len());
-        for (pat, s) in pats.iter().zip(&arg_slots) {
-            let slots = self.bind_pattern(&mut f, pat, *s)?;
+        for (i, pat) in pats.iter().enumerate() {
+            let arg = self.elem(args, i);
+            let src = if owned {
+                let s = self.slot(&mut f);
+                self.clone_v(f.func, s, arg);
+                s
+            } else {
+                arg
+            };
+            let slots = if matches!(pat, Pattern::Symbol(_)) {
+                f.env.push(Some(LocalRef::Slot(src)));
+                vec![src]
+            } else {
+                self.bind_pattern(&mut f, pat, src)?
+            };
             targets.push(((*pat).clone(), slots));
         }
         let header = self.ctx.append_basic_block(f.func, "body");
@@ -1126,8 +1136,14 @@ impl<'ctx> Lowerer<'ctx> {
                 for (pat, init) in bindings {
                     let t = self.slot(f);
                     self.lower(f, init, t)?;
-                    bound.extend(self.bind_pattern(f, pat, t)?);
-                    self.drop_v(f.func, t);
+                    if matches!(pat, Pattern::Symbol(_)) {
+                        // The init's slot becomes the local's (no copy).
+                        f.env.push(Some(LocalRef::Slot(t)));
+                        bound.push(t);
+                    } else {
+                        bound.extend(self.bind_pattern(f, pat, t)?);
+                        self.drop_v(f.func, t);
+                    }
                 }
                 self.lower_body(f, body, dest)?;
                 f.env.truncate(depth);
@@ -1511,7 +1527,23 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> Result<(), Unsupported> {
         let (var, k, code) = self.direct_target(head, args.len()).expect("checked");
         let vk = self.var_of(&var);
-        let arr = self.lower_args(f, args)?;
+        // Plain locals ride in the argument array as bitwise aliases (the
+        // callee only reads its args); they are cleared, never dropped,
+        // right after the call. Computed args are owned there.
+        let (arr, elems) = self.slot_array(f, args.len());
+        let mut aliases = Vec::new();
+        for (a, e) in args.iter().zip(&elems) {
+            let local = match a {
+                Expr::Local(i) => self.borrowable(f, *i),
+                _ => None,
+            };
+            if let Some(p) = local {
+                self.copy_bits(*e, p);
+                aliases.push(*e);
+            } else {
+                self.lower(f, a, *e)?;
+            }
+        }
         let ok = self
             .call(
                 "rt_n_enter_fn",
@@ -1547,6 +1579,7 @@ impl<'ctx> Lowerer<'ctx> {
             .expect_basic("st")
             .into_int_value();
         self.call("rt_n_leave", None, &[]);
+        self.clear_aliases(&aliases);
         self.check(f, st);
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(slow_b);
@@ -1560,10 +1593,28 @@ impl<'ctx> Lowerer<'ctx> {
                 &[dest.into(), h.into(), aref.into()],
             )
             .expect("st");
+        self.clear_aliases(&aliases);
         self.check(f, st);
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
         Ok(())
+    }
+
+    /// `dest = src`'s bits without a refcount change (an alias the
+    /// caller clears with [`clear_aliases`](Self::clear_aliases)).
+    fn copy_bits(&self, dest: PointerValue<'ctx>, src: PointerValue<'ctx>) {
+        let v = self
+            .builder
+            .build_load(self.slot_ty, src, "alias")
+            .expect("load");
+        self.builder.build_store(dest, v).expect("store");
+    }
+
+    /// Reset alias slots to nil without dropping (they never owned).
+    fn clear_aliases(&self, aliases: &[PointerValue<'ctx>]) {
+        for a in aliases {
+            self.write_tag(*a, 0);
+        }
     }
 
     /// A direct-native call: inline `FastArith` int ops (falling back
@@ -2824,16 +2875,49 @@ fn host_const(v: &Value) -> Option<Const> {
     }
 }
 
+/// Whether an arity body `recur`s to the arity itself (a `recur` outside
+/// any nested `loop` or `fn`, which have their own targets).
+fn self_recurs(body: &[Expr]) -> bool {
+    fn walk(e: &Expr) -> bool {
+        match e {
+            Expr::Recur(_) => true,
+            Expr::Loop { bindings, .. } => bindings.iter().any(|(_, init)| walk(init)),
+            Expr::Fn(_) => false,
+            _ => {
+                let mut found = false;
+                for_each_child(e, &mut |c| found = found || walk(c));
+                found
+            }
+        }
+    }
+    body.iter().any(walk)
+}
+
 /// The locals a `recur` to a loop at env depth `base` may take by move:
 /// scoped inside the loop (`>= base`), held in a plain slot, and used
-/// exactly once across all the `recur` args (nested fns included, so
-/// a capture counts as a use). They are dead once `recur` rebinds. An
-/// occurrence inside a nested `loop` runs once per inner iteration, so
-/// it counts as many.
+/// at most once on any path through the `recur` args (nested fns
+/// included, so a capture counts as a use). They are dead once `recur`
+/// rebinds. An `if` uses its test plus the busier of its branches (only
+/// one runs); an occurrence inside a nested `loop` runs once per inner
+/// iteration, so it counts as many.
 fn movable_locals(f: &FnCtx<'_>, args: &[Expr], base: Option<usize>) -> Vec<usize> {
     fn count(e: &Expr, weight: usize, uses: &mut BTreeMap<usize, usize>) {
         if let Expr::Local(i) = e {
             *uses.entry(*i).or_default() += weight;
+        }
+        if let Expr::If { test, then, els } = e {
+            count(test, weight, uses);
+            let (mut a, mut b) = (BTreeMap::new(), BTreeMap::new());
+            count(then, weight, &mut a);
+            count(els, weight, &mut b);
+            for (i, n) in &b {
+                let busier = a.entry(*i).or_default();
+                *busier = (*busier).max(*n);
+            }
+            for (i, n) in a {
+                *uses.entry(i).or_default() += n;
+            }
+            return;
         }
         let inner = if matches!(e, Expr::Loop { .. }) {
             2
