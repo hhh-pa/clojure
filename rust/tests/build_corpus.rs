@@ -618,7 +618,7 @@ fn temp_source(name: &str, source: &str) -> PathBuf {
 /// runs, and failures included.
 #[test]
 fn mixed_builds_match_run_256() {
-    let cases: [(&str, &str, &[&str]); 7] = [
+    let cases: [(&str, &str, &[&str]); 8] = [
         (
             "native-and-embedded",
             "(defn sq [x] (* x x))\n(println (map sq [1 2 3]))\n",
@@ -643,6 +643,12 @@ fn mixed_builds_match_run_256() {
         ),
         ("uncaught-embedded-error", "(println 1)\n(nth [] 5)\n", &[]),
         ("trailing-print", "(print \"no newline\")\n", &[]),
+        (
+            "deep-self-recursion",
+            "(defn f [n] (if (= n 0) 0 (+ 1 (f (- n 1)))))\n\
+             (println (try (f 10000000) (catch StackOverflowError e :so)))\n",
+            &[],
+        ),
     ];
     for (name, source, args) in cases {
         let path = temp_source(name, source);

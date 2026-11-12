@@ -175,7 +175,9 @@ pub fn plan_mixed(text: &str) -> MixedProgram {
 }
 
 /// Which candidates stay native: drop redefined names, `print`
-/// users, and forms too short to hold their replacement, then
+/// users, self-recursive fns (native recursion has no depth guard,
+/// so it would crash where `run` throws `StackOverflowError`), and
+/// forms too short to hold their replacement, then
 /// close over sibling calls (a caller of a dropped fn drops).
 fn select_natives(
     fns: &[SubsetFn],
@@ -189,6 +191,7 @@ fn select_natives(
         .map(|c| {
             !redefined.contains(&c.name)
                 && !uses_print(&fns[c.plan_index].body)
+                && !calls(&fns[c.plan_index].body).contains(&c.plan_index)
                 && fits(chars, c.start, c.range.end, widest)
         })
         .collect();
@@ -471,6 +474,17 @@ mod tests {
     fn duplicate_defns_both_stay_embedded() {
         let src = "(defn a [x] (+ x 1))\n(defn a [x] (+ x 2))\n";
         assert!(plan_mixed(src).fns.is_empty());
+    }
+
+    #[test]
+    fn self_recursive_defns_stay_embedded() {
+        // Siblings only call backwards, so a self-call is the only
+        // possible cycle; its callers demote with it.
+        let src = "(defn f [n] (if (= n 0) 0 (+ 1 (f (- n 1)))))\n\
+                   (defn g [n] (f n))\n(defn h [n] (* n 2))\n";
+        let plan = plan_mixed(src);
+        let names: Vec<_> = plan.fns.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["h"]);
     }
 
     #[test]

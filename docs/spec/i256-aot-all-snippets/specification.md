@@ -114,6 +114,9 @@ Issue: hhh-pa/clojure#256. Consumer: hhh-pa/clojure-code-snippet#66
     or by a failed `defn`;
   - it uses `print` (native `print` would bypass `*out*`
     bindings);
+  - it calls itself (native recursion has no depth guard, so deep
+    recursion would crash where `run` throws a catchable
+    `StackOverflowError`; found in review of #257);
   - its form cannot hold the in-place replacement on its first
     line (see D4);
   - it calls a demoted sibling. This is iterated to a fixpoint.
