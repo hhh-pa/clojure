@@ -1532,29 +1532,136 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
+        if !self.inline_arith {
+            return self.lower_direct_owned(f, call, dest);
+        }
         let k = self.var_of(&call.var);
         let n = call.args.len();
-        let (arr, elems) = self.slot_array(f, n);
-        for (a, e) in call.args.iter().zip(&elems) {
-            self.lower(f, a, *e)?;
-        }
+        let (refs, temps) = self.arg_refs(f, &call.args, dest)?;
         let fast = fast_op(call.fast, n);
         let slow = self.ctx.append_basic_block(f.func, "native_slow");
         let done = self.ctx.append_basic_block(f.func, "native_done");
-        let core_name = (call.var.sym.namespace() == Some("clojure.core") && self.inline_arith)
+        let core_name = (call.var.sym.namespace() == Some("clojure.core"))
             .then(|| call.var.sym.name().to_owned());
-        if let (None, Some(name)) = (fast, core_name.as_deref())
-            && self.lower_intrinsic(f, name, &elems, (k, arr), dest, slow, done)?
-        {
-            return self.finish_direct(f, k, arr, n, dest, slow, done);
-        }
-        match (fast, self.inline_arith) {
-            (Some(op), true) => self.lower_fast_arith(f, op, &elems, dest, slow, done),
-            _ => {
+        let inline = match (fast, core_name.as_deref()) {
+            (None, Some(name)) => self.lower_intrinsic(f, name, &refs, dest, slow, done),
+            _ => false,
+        };
+        match (inline, fast) {
+            (false, Some(op)) => self.lower_fast_arith(f, op, &refs, dest, slow, done),
+            (false, None) => {
                 self.builder.build_unconditional_branch(slow).expect("br");
             }
+            (true, _) => {}
         }
-        self.finish_direct(f, k, arr, n, dest, slow, done)
+        // Slow path: the VM's inline op over the borrowed args, else
+        // the native (args cloned only there).
+        self.builder.position_at_end(slow);
+        let op = core_name
+            .as_deref()
+            .and_then(|name| native_abi::inline_op(name, n))
+            .unwrap_or(u32::MAX);
+        let aref = self.refs_slice(f, &refs);
+        let st = self
+            .call(
+                "rt_n_core_ref",
+                Some(self.i32t),
+                &[
+                    dest.into(),
+                    self.i32t.const_int(u64::from(op), false).into(),
+                    self.u64c(k),
+                    aref.into(),
+                ],
+            )
+            .expect("st");
+        self.check(f, st);
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        self.drop_slots(f.func, &temps);
+        Ok(())
+    }
+
+    /// [`lower_direct`](Self::lower_direct) for a program that may rebind
+    /// core vars: owned args through the var's current root.
+    fn lower_direct_owned(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let k = self.var_of(&call.var);
+        let n = call.args.len();
+        let arr = self.lower_args(f, &call.args)?;
+        let aref = self.slots_ref(f, arr, n);
+        let st = self
+            .call(
+                "rt_n_native_mv",
+                Some(self.i32t),
+                &[dest.into(), self.u64c(k), aref.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        Ok(())
+    }
+
+    /// Each argument as a slot the call may borrow: a plain local's own
+    /// slot (no clone; never `dest`, which the call writes), else a
+    /// fresh slot holding the lowered argument. Returns the pointers and
+    /// the fresh slots (`temps`, dropped after the call). Locals are
+    /// immutable, so borrowing one reads the same value its evaluation
+    /// would have copied.
+    fn arg_refs(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        args: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(Vec<PointerValue<'ctx>>, Vec<PointerValue<'ctx>>), Unsupported> {
+        let mut refs = Vec::with_capacity(args.len());
+        let mut temps = Vec::new();
+        for a in args {
+            let local = match a {
+                Expr::Local(idx) => self.borrowable(f, *idx),
+                _ => None,
+            };
+            if let Some(p) = local.filter(|p| *p != dest) {
+                refs.push(p);
+            } else {
+                let t = self.slot(f);
+                self.lower(f, a, t)?;
+                refs.push(t);
+                temps.push(t);
+            }
+        }
+        Ok((refs, temps))
+    }
+
+    /// The slot holding local `idx`'s value, when it can be borrowed
+    /// (`letfn` cells hold a cell, not the value).
+    fn borrowable(&self, f: &FnCtx<'ctx>, idx: usize) -> Option<PointerValue<'ctx>> {
+        match f.env.get(idx).copied().flatten()? {
+            LocalRef::Slot(p) => Some(p),
+            LocalRef::Captured(i) => Some(self.elem(f.captured, i)),
+            LocalRef::Cell(_) | LocalRef::CapturedCell(_) => None,
+        }
+    }
+
+    /// A `CSlice<&Value>` header over `refs` (the pointer array lives in
+    /// the entry block; the pointers are stored here, at the call).
+    fn refs_slice(&mut self, f: &FnCtx<'ctx>, refs: &[PointerValue<'ctx>]) -> PointerValue<'ctx> {
+        let fields: Vec<BasicTypeEnum<'ctx>> = vec![self.ptr.into(); refs.len()];
+        let ty = self.ctx.struct_type(&fields, false);
+        let here = self.builder.get_insert_block().expect("positioned");
+        self.builder.position_at_end(f.entry);
+        let base = self.builder.build_alloca(ty, "refs").expect("alloca");
+        self.builder.position_at_end(here);
+        for (i, r) in refs.iter().enumerate() {
+            let p = self
+                .builder
+                .build_struct_gep(ty, base, i as u32, "ref")
+                .expect("gep");
+            self.builder.build_store(p, *r).expect("store");
+        }
+        self.slots_ref(f, base, refs.len())
     }
 
     /// The analyzer's `FastArith` op inline: all-int args compute in
@@ -1655,35 +1762,6 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// The slow block (the var's native, args moved in) and the join.
     #[allow(clippy::too_many_arguments)]
-    fn finish_direct(
-        &mut self,
-        f: &mut FnCtx<'ctx>,
-        k: u64,
-        arr: PointerValue<'ctx>,
-        n: usize,
-        dest: PointerValue<'ctx>,
-        slow: BasicBlock<'ctx>,
-        done: BasicBlock<'ctx>,
-    ) -> Result<(), Unsupported> {
-        self.builder.position_at_end(slow);
-        let aref = self.slots_ref(f, arr, n);
-        let st = self
-            .call(
-                if self.inline_arith {
-                    "rt_n_core_mv"
-                } else {
-                    "rt_n_native_mv"
-                },
-                Some(self.i32t),
-                &[dest.into(), self.u64c(k), aref.into()],
-            )
-            .expect("st");
-        self.check(f, st);
-        self.builder.build_unconditional_branch(done).expect("br");
-        self.builder.position_at_end(done);
-        Ok(())
-    }
-
     /// `nil?`/`some?`/`not` of any value (no fallback needed).
     fn any_pred(&self, name: &str, v: PointerValue<'ctx>) -> IntValue<'ctx> {
         if name == "not" {
@@ -1844,46 +1922,24 @@ impl<'ctx> Lowerer<'ctx> {
     /// on `Int` args and branch to `slow` otherwise; every emitted
     /// fast path ends by branching to `done`, and the caller positions
     /// at `slow` next.
-    #[allow(clippy::too_many_arguments)]
     fn lower_intrinsic(
         &mut self,
-        f: &mut FnCtx<'ctx>,
+        f: &FnCtx<'ctx>,
         name: &str,
         a: &[PointerValue<'ctx>],
-        (k, arr): (u64, PointerValue<'ctx>),
         dest: PointerValue<'ctx>,
         slow: BasicBlock<'ctx>,
         done: BasicBlock<'ctx>,
-    ) -> Result<bool, Unsupported> {
+    ) -> bool {
         let n = a.len();
-        let intr = |me: &mut Self, f: &mut FnCtx<'ctx>, op: u64| {
-            let aref = me.slots_ref(f, arr, n);
-            let st = me
-                .call(
-                    "rt_n_intr",
-                    Some(me.i32t),
-                    &[
-                        dest.into(),
-                        me.i32t.const_int(op, false).into(),
-                        me.u64c(k),
-                        aref.into(),
-                    ],
-                )
-                .expect("st");
-            me.check(f, st);
-        };
         match (name, n) {
             ("nil?" | "some?" | "not", 1) => {
                 let r = self.any_pred(name, a[0]);
                 self.write_bool(f.func, dest, r);
             }
-            ("nth", 2 | 3) => intr(self, f, 0),
-            ("get", 2 | 3) => intr(self, f, 1),
-            ("count", 1) => intr(self, f, 2),
-            ("contains?", 2) => intr(self, f, 3),
             ("=" | "not=", 2) => {
-                // Ints inline; other scalar pairs through the VM's
-                // `scalar_eq` (no evaluator), the rest the native.
+                // Ints inline; anything else takes `slow` (the VM's
+                // inline op, then the native).
                 let other = self.ctx.append_basic_block(f.func, "eq_other");
                 self.when_ints(f, a, other);
                 let (x, y) = (self.int_payload(a[0]), self.int_payload(a[1]));
@@ -1899,7 +1955,8 @@ impl<'ctx> Lowerer<'ctx> {
                 self.write_bool(f.func, dest, r);
                 self.builder.build_unconditional_branch(done).expect("br");
                 self.builder.position_at_end(other);
-                intr(self, f, if name == "not=" { 5 } else { 4 });
+                self.builder.build_unconditional_branch(slow).expect("br");
+                return true;
             }
             ("==", 2) => {
                 self.when_ints(f, a, slow);
@@ -1930,10 +1987,10 @@ impl<'ctx> Lowerer<'ctx> {
                 let r = self.int_binop(f, name, x, y, slow);
                 self.write_int(f.func, dest, r);
             }
-            _ => return Ok(false),
+            _ => return false,
         }
         self.builder.build_unconditional_branch(done).expect("br");
-        Ok(true)
+        true
     }
 
     fn lower_const(

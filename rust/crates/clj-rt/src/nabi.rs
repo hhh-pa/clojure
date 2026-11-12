@@ -288,30 +288,22 @@ pub extern "C" fn rt_n_native_mv(out: &mut Value, k: u64, args: &mut CSlice<Valu
     finish(out, step)
 }
 
-/// [`rt_n_native_mv`] for a core var of a program that cannot rebind
-/// it: the native entry is resolved once and called directly.
+/// `out = (var-k args…)` over borrowed args, for a program that cannot
+/// rebind core vars: the VM's inline op `op` (from
+/// `native_abi::inline_op`; `u32::MAX` for none) when it covers the
+/// case, else var `k`'s native entry with the args cloned. No
+/// argument is cloned on the inline path.
 #[unsafe(no_mangle)]
-pub extern "C" fn rt_n_core_mv(out: &mut Value, k: u64, args: &mut CSlice<Value>) -> i32 {
-    let moved = take_args(args);
-    finish(
-        out,
-        with_active(|eval| native::call_core_var(eval, k as usize, moved)),
-    )
-}
-
-/// A covered-case core intrinsic (`native_abi::intrinsic` op) over
-/// borrowed args; uncovered cases run var `k`'s native (args cloned).
-#[unsafe(no_mangle)]
-pub extern "C" fn rt_n_intr(out: &mut Value, op: u32, k: u64, args: &CSlice<Value>) -> i32 {
+pub extern "C" fn rt_n_core_ref(out: &mut Value, op: u32, k: u64, args: &CSlice<&Value>) -> i32 {
     let args = args.get();
-    if let Some(v) = native_abi::intrinsic(op, args) {
+    if let Some(v) = native_abi::apply_inline(op, args) {
         *out = v;
         return 0;
     }
-    let args = args.iter().cloned().collect();
+    let owned = args.iter().map(|a| (*a).clone()).collect();
     finish(
         out,
-        with_active(|eval| native::call_core_var(eval, k as usize, args)),
+        with_active(|eval| native::call_core_var(eval, k as usize, owned)),
     )
 }
 
@@ -707,8 +699,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_varref,
         rt_n_invoke,
         rt_n_native_mv,
-        rt_n_core_mv,
-        rt_n_intr,
+        rt_n_core_ref,
         rt_n_enter_fn,
         rt_n_leave,
         rt_n_def_begin,

@@ -572,6 +572,85 @@ type Row2 = (&'static str, Ctor2<Value>, Option<Ctor2<bool>>);
 /// See [`RowN`].
 type Row1 = (&'static str, Ctor1<Value>, Option<Ctor1<bool>>);
 
+/// A one-argument inline answer over a borrowed arg.
+pub(crate) type Apply1 = fn(&Value) -> Option<Value>;
+/// A two-argument inline answer over borrowed args.
+pub(crate) type Apply2 = fn(&Value, &Value) -> Option<Value>;
+/// A three-argument inline answer over borrowed args.
+pub(crate) type Apply3 = fn(&Value, &Value, &Value) -> Option<Value>;
+
+/// The same inline ops over borrowed arguments, for natively compiled
+/// code (issue #259): by core name per arity, `None` runs the native.
+/// Kept in step with [`UNARY`]/[`BINARY`]/[`TERNARY`] (pinned by
+/// `apply_tables_cover_every_specialized_op`).
+pub(crate) const APPLY1: &[(&str, Apply1)] = &[
+    ("inc", <Inc as Op1>::apply),
+    ("-", <Negate as Op1>::apply),
+    ("dec", <Dec as Op1>::apply),
+    ("inc'", <Inc as Op1>::apply),
+    ("-'", <Negate as Op1>::apply),
+    ("dec'", <Dec as Op1>::apply),
+    ("zero?", <Zero as Op1>::apply),
+    ("pos?", <Pos as Op1>::apply),
+    ("neg?", <Neg as Op1>::apply),
+    ("even?", <Even as Op1>::apply),
+    ("odd?", <Odd as Op1>::apply),
+    ("not", <Not as Op1>::apply),
+    ("nil?", <IsNil as Op1>::apply),
+    ("some?", <IsSome as Op1>::apply),
+    ("string?", <IsString as Op1>::apply),
+    ("parse-long", <ParseLong as Op1>::apply),
+    ("count", <Count as Op1>::apply),
+    ("peek", <Peek as Op1>::apply),
+    ("pop!", <PopBang as Op1>::apply),
+    ("bit-not", <BitNot as Op1>::apply),
+    ("first", <First as Op1>::apply),
+    ("seq", <SeqOp as Op1>::apply),
+    ("empty?", <EmptyP as Op1>::apply),
+    ("int", <IntCast as Op1>::apply),
+    ("long", <LongCast as Op1>::apply),
+    ("double", <DoubleCast as Op1>::apply),
+];
+
+pub(crate) const APPLY2: &[(&str, Apply2)] = &[
+    ("+", <Add as Op2>::apply),
+    ("-", <Sub as Op2>::apply),
+    ("*", <Mul as Op2>::apply),
+    ("+'", <Add as Op2>::apply),
+    ("-'", <Sub as Op2>::apply),
+    ("*'", <Mul as Op2>::apply),
+    ("<", <Lt as Op2>::apply),
+    ("<=", <Lte as Op2>::apply),
+    (">", <Gt as Op2>::apply),
+    (">=", <Gte as Op2>::apply),
+    ("==", <NumEq as Op2>::apply),
+    ("=", <Eq as Op2>::apply),
+    ("not=", <NotEq as Op2>::apply),
+    ("quot", <Quot as Op2>::apply),
+    ("rem", <Rem as Op2>::apply),
+    ("mod", <Mod as Op2>::apply),
+    ("bit-and", <BitAnd as Op2>::apply),
+    ("bit-or", <BitOr as Op2>::apply),
+    ("bit-xor", <BitXor as Op2>::apply),
+    ("bit-shift-left", <Shl as Op2>::apply),
+    ("bit-shift-right", <Shr as Op2>::apply),
+    ("unsigned-bit-shift-right", <Ushr as Op2>::apply),
+    ("min", <Min as Op2>::apply),
+    ("max", <Max as Op2>::apply),
+    ("nth", <Nth as Op2>::apply),
+    ("get", <Get as Op2>::apply),
+    ("dissoc", <Dissoc as Op2>::apply),
+    ("contains?", <Contains as Op2>::apply),
+    ("conj!", <ConjBang as Op2>::apply),
+    ("re-matches", <ReMatches as Op2>::apply),
+];
+
+pub(crate) const APPLY3: &[(&str, Apply3)] = &[
+    ("assoc!", <AssocBang as Op3>::apply),
+    ("nth", <Nth3 as Op3>::apply),
+    ("get", <Get3 as Op3>::apply),
+];
+
 /// The three-argument ops by core name (value code).
 const TERNARY: &[Row3] = &[
     ("assoc!", shape3::<AssocBang>),
@@ -2295,5 +2374,20 @@ mod tests {
         assert_eq!(int_value_named("+", 3), None);
         assert_eq!(int_test_named("zero?", 2), None);
         assert_eq!(int_test_named("<", 3), None);
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::{APPLY1, APPLY2, APPLY3, BINARY, TERNARY, UNARY};
+
+    #[test]
+    fn apply_tables_cover_every_specialized_op() {
+        let a1: Vec<&str> = APPLY1.iter().map(|r| r.0).collect();
+        let a2: Vec<&str> = APPLY2.iter().map(|r| r.0).collect();
+        let a3: Vec<&str> = APPLY3.iter().map(|r| r.0).collect();
+        assert_eq!(a1, UNARY.iter().map(|r| r.0).collect::<Vec<_>>());
+        assert_eq!(a2, BINARY.iter().map(|r| r.0).collect::<Vec<_>>());
+        assert_eq!(a3, TERNARY.iter().map(|r| r.0).collect::<Vec<_>>());
     }
 }

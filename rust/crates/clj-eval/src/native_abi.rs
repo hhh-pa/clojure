@@ -660,21 +660,31 @@ pub fn call_core(
     }
 }
 
-/// The VM's covered-case intrinsics (`crate::vm_intrinsics`) by op
-/// code: 0 `nth`, 1 `get`, 2 `count`, 3 `contains?`, 4 `=`, 5 `not=`.
-/// `None`: the case is not covered (the caller runs the native).
+/// The VM's inline op for core fn `name` called with `arity` args (the
+/// id for [`apply_inline`]), if it has one.
 #[must_use]
-pub fn intrinsic(op: u32, args: &[Value]) -> Option<Value> {
-    use crate::vm_intrinsics as vi;
-    match (op, args) {
-        (0, [c, i]) => vi::nth_of(c, i, None),
-        (0, [c, i, nf]) => vi::nth_of(c, i, Some(nf)),
-        (1, [c, k]) => vi::get_of(c, k, None),
-        (1, [c, k, nf]) => vi::get_of(c, k, Some(nf)),
-        (2, [c]) => vi::count_of(c),
-        (3, [c, k]) => vi::contains_test(c, k).map(Value::Bool),
-        (4, [a, b]) => vi::scalar_eq(a, b).map(Value::Bool),
-        (5, [a, b]) => vi::scalar_eq(a, b).map(|e| Value::Bool(!e)),
+pub fn inline_op(name: &str, arity: usize) -> Option<u32> {
+    use crate::vm_ops::{APPLY1, APPLY2, APPLY3};
+    let pos = match arity {
+        1 => APPLY1.iter().position(|r| r.0 == name),
+        2 => APPLY2.iter().position(|r| r.0 == name),
+        3 => APPLY3.iter().position(|r| r.0 == name),
+        _ => None,
+    };
+    pos.map(|i| i as u32)
+}
+
+/// Apply inline op `id` ([`inline_op`] at `args.len()`) to borrowed
+/// args — the same inline answers the VM gives. `None`: the case is not
+/// covered (or `id` names no op), so the caller runs the native.
+#[must_use]
+pub fn apply_inline(id: u32, args: &[&Value]) -> Option<Value> {
+    use crate::vm_ops::{APPLY1, APPLY2, APPLY3};
+    let i = id as usize;
+    match args {
+        [a] => APPLY1.get(i)?.1(a),
+        [a, b] => APPLY2.get(i)?.1(a, b),
+        [a, b, c] => APPLY3.get(i)?.1(a, b, c),
         _ => None,
     }
 }
