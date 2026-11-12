@@ -632,7 +632,15 @@ fn cmd_jit(file: &Path, args: &[String]) -> ExitCode {
 #[cfg(feature = "aot")]
 fn cmd_jit_compile(file: &Path, source: &str, args: &[String]) -> ExitCode {
     let path = file.to_string_lossy();
-    match clj_aot::jit::run_str(source, &path, args) {
+    // Outside the pure subset, the full native compiler (#259) runs
+    // the program; its failure reports the subset diagnostic.
+    let result = match clj_aot::jit::run_str(source, &path, args) {
+        Err(clj_aot::jit::JitError::Plan(diag)) => {
+            clj_aot::jit::run_native_str(source, &path, args).map_err(|_| diag)
+        }
+        other => other.map_err(|e| e.to_string()),
+    };
+    match result {
         Ok(code) => ExitCode::from(code as u8),
         Err(e) => {
             eprintln!("{e}");

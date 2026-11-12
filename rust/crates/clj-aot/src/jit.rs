@@ -153,6 +153,33 @@ pub fn run_str(source: &str, source_path: &str, args: &[String]) -> Result<i32, 
     Ok(code)
 }
 
+/// JIT-run any program through the full native compiler (issue
+/// #259): the same module `build` links, executed in-process with
+/// every `rt_n_*` declaration mapped to this process's own shims.
+/// Returns the program's exit code; `Err` when the program cannot be
+/// compiled natively (the caller reports it).
+pub fn run_native_str(source: &str, source_path: &str, args: &[String]) -> Result<i32, JitError> {
+    let ctx = Context::create();
+    let (module, _) = crate::native_module(&ctx, source, source_path).map_err(JitError::Jit)?;
+    let engine = module.create_jit_execution_engine(OptimizationLevel::None);
+    let ee = jit_err(engine, "engine")?;
+    for (name, addr) in cljrt::nabi::native_symbols() {
+        if let Some(func) = module.get_function(name) {
+            ee.add_global_mapping(&func, addr);
+        }
+    }
+    let owned = c_argv(args);
+    let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+    ptrs.push(std::ptr::null());
+    let argc = owned.len() as i32;
+    // Safety: the native module's `main(argc, argv) -> i32` matches
+    // `MainFn`; `argv` holds `argc` valid C strings plus a NUL
+    // terminator, alive across the call.
+    let code =
+        unsafe { jit_err(ee.get_function::<MainFn>("main"), "entry")?.call(argc, ptrs.as_ptr()) };
+    Ok(code)
+}
+
 #[cfg(test)]
 mod tests {
     use clj_eval::plan_source;

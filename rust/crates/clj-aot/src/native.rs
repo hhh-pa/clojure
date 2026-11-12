@@ -28,7 +28,7 @@ use std::collections::{BTreeSet, HashMap};
 use clj_eval::aot_front::{FrontEnd, for_each_child};
 use clj_eval::expr::{Arity, CaseTest, Expr, FunExpr, NsClause, Pattern};
 use clj_eval::native_abi;
-use clj_value::{Keyword, Map, Symbol, Value, Vector};
+use clj_value::{Map, Symbol, Value, Vector};
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
 use inkwell::basic_block::BasicBlock;
@@ -929,8 +929,151 @@ impl<'ctx> Lowerer<'ctx> {
             Expr::CaseStar { expr, shift, mask, default, cases, skip, test } => {
                 self.lower_case(f, expr, *shift, *mask, default, cases, skip, *test, dest)
             }
-            other => Err(Unsupported(format!("form {}", expr_kind(other)))),
+            Expr::WithRedefs { pairs, body } => {
+                let exprs: Vec<Expr> = pairs.iter().map(|(_, e)| e.clone()).collect();
+                let vals = self.lower_args(f, &exprs)?;
+                let ks: Vec<u64> = pairs.iter().map(|(v, _)| self.var_of(v)).collect();
+                let karr = self.u64_array(&ks);
+                let b = self.slot(f);
+                self.body_closure(f, 0, body, b)?;
+                let st = self
+                    .call("rt_n_with_redefs", Some(self.i32t), &[dest.into(), karr.into(), vals.into(), self.u64c(pairs.len() as u64), b.into()])
+                    .expect("st");
+                self.check(f, st);
+                Ok(())
+            }
+            Expr::WithBindings { map, body } => {
+                let m = self.slot(f);
+                self.lower(f, map, m)?;
+                let b = self.slot(f);
+                self.body_closure(f, 0, body, b)?;
+                let st = self.call("rt_n_with_bindings", Some(self.i32t), &[dest.into(), m.into(), b.into()]).expect("st");
+                self.check(f, st);
+                Ok(())
+            }
+            Expr::Time { expr } => {
+                let b = self.slot(f);
+                self.body_closure(f, 0, std::slice::from_ref(expr.as_ref()), b)?;
+                let st = self.call("rt_n_time", Some(self.i32t), &[dest.into(), b.into()]).expect("st");
+                self.check(f, st);
+                Ok(())
+            }
+            Expr::WithOutStr { out, body } => {
+                let k = self.value_const(&Value::Symbol(out.clone()))?;
+                let b = self.slot(f);
+                self.body_closure(f, 0, body, b)?;
+                let st = self.call("rt_n_with_out_str", Some(self.i32t), &[dest.into(), self.u64c(k), b.into()]).expect("st");
+                self.check(f, st);
+                Ok(())
+            }
+            Expr::WithInStr { input, s, body } => {
+                let k = self.value_const(&Value::Symbol(input.clone()))?;
+                let sv = self.slot(f);
+                self.lower(f, s, sv)?;
+                let b = self.slot(f);
+                self.body_closure(f, 0, body, b)?;
+                let st = self.call("rt_n_with_in_str", Some(self.i32t), &[dest.into(), self.u64c(k), sv.into(), b.into()]).expect("st");
+                self.check(f, st);
+                Ok(())
+            }
+            Expr::Locking { lockee, body } => {
+                let t = self.slot(f);
+                self.lower(f, lockee, t)?;
+                let b = self.slot(f);
+                self.body_closure(f, 0, body, b)?;
+                let st = self.call("rt_n_locking", Some(self.i32t), &[dest.into(), t.into(), b.into()]).expect("st");
+                self.check(f, st);
+                Ok(())
+            }
+            Expr::Sync { body } | Expr::Io { body } => {
+                let io = u64::from(matches!(expr, Expr::Io { .. }));
+                let b = self.slot(f);
+                self.body_closure(f, 0, body, b)?;
+                let st = self
+                    .call("rt_n_sync", Some(self.i32t), &[dest.into(), self.i8t.const_int(io, false).into(), b.into()])
+                    .expect("st");
+                self.check(f, st);
+                Ok(())
+            }
+            Expr::LazySeqStar { body } => self.wrap_body(f, 0, "clojure.core/fn", body, dest),
+            Expr::DelayStar { display, body } => self.wrap_body(f, 1, display, body, dest),
+            Expr::BoundFn { name, fun } => {
+                let depth = f.env.len();
+                let cell = name.as_ref().map(|_| {
+                    let c = self.slot(f);
+                    self.call("rt_n_cell_new", None, &[c.into()]);
+                    f.env.push(LocalRef::Cell(c));
+                    c
+                });
+                let t = self.slot(f);
+                let base = f.env.len();
+                self.make_closure(f, fun, base, t)?;
+                self.call("rt_n_wrap_fn", None, &[dest.into(), self.i8t.const_int(2, false).into(), t.into()]);
+                if let Some(c) = cell {
+                    self.call("rt_n_cell_set", None, &[c.into(), dest.into()]);
+                }
+                f.env.truncate(depth);
+                Ok(())
+            }
+            Expr::DefMacro { sym, doc, attr, arglists, fun, span } => {
+                let desc = Value::Vector(Vector::from_vec(vec![
+                    Value::Symbol(sym.clone()),
+                    doc.as_deref().map_or(Value::Nil, |d| Value::Str(std::sync::Arc::from(d))),
+                    attr.clone().map_or(Value::Nil, Value::Map),
+                    Value::Vector(Vector::from_vec(arglists.clone())),
+                    Value::Int(i64::from(span.line)),
+                    Value::Int(i64::from(span.col)),
+                ]));
+                let k = self.value_const(&desc)?;
+                let t = self.slot(f);
+                let base = f.env.len();
+                self.make_closure(f, fun, base, t)?;
+                let st = self.call("rt_n_defmacro", Some(self.i32t), &[dest.into(), self.u64c(k), t.into()]).expect("st");
+                self.check(f, st);
+                Ok(())
+            }
+            Expr::Assert { test, message, form } => {
+                let t = self.slot(f);
+                self.lower(f, test, t)?;
+                let ok = self.truthy(t);
+                let fail_b = self.ctx.append_basic_block(f.func, "assert_fail");
+                let pass_b = self.ctx.append_basic_block(f.func, "assert_pass");
+                self.builder.build_conditional_branch(ok, pass_b, fail_b).expect("br");
+                self.builder.position_at_end(fail_b);
+                let msg = match message {
+                    Some(m) => {
+                        let ms = self.slot(f);
+                        self.lower(f, m, ms)?;
+                        ms
+                    }
+                    None => self.ptr.const_null(),
+                };
+                let fk = self.constant(Const::Str(form.clone()));
+                self.call("rt_n_assert_fail", Some(self.i32t), &[msg.into(), self.u64c(fk)]);
+                self.builder.build_unconditional_branch(f.fail).expect("br");
+                self.builder.position_at_end(pass_b);
+                self.write_nil(f.func, dest);
+                Ok(())
+            }
         }
+    }
+
+    /// A body compiled as a zero-arg fn named `display`, wrapped by
+    /// the runtime (`kind`: 0 `lazy-seq`, 1 `delay`).
+    fn wrap_body(&mut self, f: &mut FnCtx<'ctx>, kind: u64, display: &str, body: &[Expr], dest: PointerValue<'ctx>) -> Result<(), Unsupported> {
+        let fun = FunExpr {
+            display: display.to_owned(),
+            arities: std::sync::Arc::from([Arity {
+                fixed: Vec::new(),
+                rest: None,
+                body: body.to_vec(),
+            }]),
+        };
+        let t = self.slot(f);
+        let base = f.env.len();
+        self.make_closure(f, &fun, base, t)?;
+        self.call("rt_n_wrap_fn", None, &[dest.into(), self.i8t.const_int(kind, false).into(), t.into()]);
+        Ok(())
     }
 
     /// The direct-call target of `(head args…)` with `n` args: var
@@ -1770,13 +1913,6 @@ fn ns_desc(name: &str, doc: Option<&str>, attr: Option<&Map>, clauses: &[NsClaus
     Value::Vector(Vector::from_vec(items))
 }
 
-/// A short name for an `Expr` variant (diagnostics).
-fn expr_kind(e: &Expr) -> String {
-    let d = format!("{e:?}");
-    let end = d.find(|c: char| !c.is_alphanumeric()).unwrap_or(d.len());
-    d[..end].to_owned()
-}
-
 /// A symbol-safe fragment of a display name.
 fn sanitize(s: &str) -> String {
     s.chars()
@@ -1785,8 +1921,3 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-// Keep `Keyword` in scope for future builders (constant kinds).
-#[allow(dead_code)]
-fn _kw(k: &Keyword) -> &Keyword {
-    k
-}

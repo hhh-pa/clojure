@@ -73,7 +73,10 @@ pub(crate) struct Tables {
     fns: Box<[FnDesc]>,
 }
 
-static TABLES: OnceLock<Tables> = OnceLock::new();
+/// The current program's frozen tables (leaked per run: a binary
+/// runs one program; the in-process JIT may run several).
+static TABLES: std::sync::atomic::AtomicPtr<Tables> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 thread_local! {
     /// The throw a failing step left for generated code to propagate.
@@ -86,9 +89,10 @@ fn building<R>(f: impl FnOnce(&mut Building) -> R) -> R {
 }
 
 fn tables() -> &'static Tables {
-    TABLES
-        .get()
-        .expect("native program tables frozen before use")
+    let p = TABLES.load(std::sync::atomic::Ordering::Acquire);
+    assert!(!p.is_null(), "native program tables frozen before use");
+    // SAFETY: a non-null pointer is a leaked (never freed) `Tables`.
+    unsafe { &*p }
 }
 
 /// Store a failing step's signal; returns the shim status (1).
@@ -168,11 +172,12 @@ pub(crate) fn freeze() {
         .into_iter()
         .map(|d| d.expect("every declared fn index is filled"))
         .collect();
-    let _ = TABLES.set(Tables {
+    let tables = Box::leak(Box::new(Tables {
         vars: b.vars.into_boxed_slice(),
         consts: b.consts.into_boxed_slice(),
         fns: fns.into_boxed_slice(),
-    });
+    }));
+    TABLES.store(tables, std::sync::atomic::Ordering::Release);
 }
 
 /// Constant `k`.
@@ -328,6 +333,9 @@ fn call_compiled(eval: &mut Evaluator, desc: &FnDesc, captured: &[Value], args: 
 /// top-level thunks in load order inside the `load-file` frame.
 /// Returns the process exit code (0, or 1 after the diagnostic).
 pub(crate) fn run_main(path: &str, args: &[String], init: Code, tops: Vec<Code>) -> i32 {
+    // A fresh program: this thread's caches index the new tables.
+    ROOTS.with(|r| r.borrow_mut().clear());
+    CREATED.with(|c| c.borrow_mut().clear());
     let mut eval = clj_eval::boot();
     let file: Arc<str> = Arc::from(path);
     let tops: Arc<[Code]> = tops.into();
@@ -455,5 +463,36 @@ pub(crate) fn case_select(desc: &Value, v: &Value) -> Result<(i64, Value), Signa
         native_abi::CaseHit::Default => (-1, Value::Nil),
         native_abi::CaseHit::Direct(i) => (i as i64, Value::Nil),
         native_abi::CaseHit::Check(i, r) => (i as i64 | (1 << 32), r),
+    })
+}
+
+/// Constant encoding of a `defmacro`: `[sym doc attr arglists line col]`.
+pub(crate) fn run_defmacro(desc: &Value, f: Value) -> Step {
+    let Value::Vector(v) = desc else {
+        return Ok(Value::Nil);
+    };
+    let items: Vec<Value> = v.iter().collect();
+    let sym = match items.first() {
+        Some(Value::Symbol(s)) => s.clone(),
+        _ => clj_value::Symbol::new(None, "_"),
+    };
+    let doc = match items.get(1) {
+        Some(Value::Str(s)) => Some(s.to_string()),
+        _ => None,
+    };
+    let attr = match items.get(2) {
+        Some(Value::Map(m)) => Some(m.clone()),
+        _ => None,
+    };
+    let arglists: Vec<Value> = match items.get(3) {
+        Some(Value::Vector(a)) => a.iter().collect(),
+        _ => Vec::new(),
+    };
+    let num = |i: usize| match items.get(i) {
+        Some(Value::Int(n)) => *n as u32,
+        _ => 0,
+    };
+    with_active(|eval| {
+        native_abi::defmacro(eval, &sym, doc.as_deref(), attr.as_ref(), &arglists, num(4), num(5), f)
     })
 }

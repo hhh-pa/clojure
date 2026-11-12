@@ -1957,15 +1957,6 @@ pub(crate) fn native_nth_owned(
     Err(nth_unsupported(coll))
 }
 
-/// [`nth_fast`] for the native compiler's `nth` intrinsic.
-pub(crate) fn nth_fast_pub(
-    coll: &Value,
-    n: i32,
-    not_found: &Option<Value>,
-) -> Option<Result<Value, NativeError>> {
-    nth_fast(coll, n, not_found)
-}
-
 /// The `nth` fast paths (`nil`/string/negative-`not-found`/
 /// chunk/indexed; `None` falls through to array/seq dispatch).
 /// Strings dispatch before the chunk/subvector probes (disjoint

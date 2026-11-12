@@ -170,7 +170,7 @@ pub fn build_str(
 /// The full native compiler (issue #259): front end, then lowering
 /// of every unit. Returns the module and the top-level `defn` count,
 /// or why the program cannot be compiled natively (yet).
-fn native_module<'ctx>(
+pub(crate) fn native_module<'ctx>(
     ctx: &'ctx Context,
     source: &str,
     source_path: &str,

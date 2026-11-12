@@ -1305,7 +1305,7 @@ fn mark_member(eval: &mut Evaluator, member: &Value) -> Result<(), NativeError> 
         span: Span::new(1, 1),
     };
     let env = Env::new();
-    eval_sync(eval, std::slice::from_ref(&call), &env)
+    eval_sync(eval, &|ev: &mut Evaluator| ev.eval_body(std::slice::from_ref(&call), &env))
         .map(|_| ())
         .map_err(signal_to_native)
 }

@@ -164,6 +164,12 @@ pub fn try_call(
 
 /// `(binding [v x …] body)` over evaluated values.
 pub fn binding_call(eval: &mut Evaluator, pairs: Vec<(Var, Value)>, body: &Value) -> Step {
+    binding_call_with(eval, pairs, &|ev: &mut Evaluator| ev.call(body, &[]))
+}
+
+/// The `binding` core: non-dynamic vars refuse, then one frame
+/// around `body`.
+pub(crate) fn binding_call_with(eval: &mut Evaluator, pairs: Vec<(Var, Value)>, body: crate::stm::TxBody<'_>) -> Step {
     for (var, _) in &pairs {
         if !eval.registry.is_dynamic(var.id) {
             return Err(eval.throw(NativeError::new(
@@ -174,7 +180,7 @@ pub fn binding_call(eval: &mut Evaluator, pairs: Vec<(Var, Value)>, body: &Value
     }
     let depth = eval.bindings_depth();
     eval.push_frame(pairs);
-    let result = eval.call(body, &[]);
+    let result = body(eval);
     eval.pop_bindings(depth);
     result
 }
@@ -535,16 +541,6 @@ pub fn class_name_of(value: &Value) -> Option<String> {
     }
 }
 
-/// Call the current value of `var` (a direct-native call site): a
-/// native root runs its entry directly (no invoke dispatch), anything
-/// else (rebound, redefined) takes the general call.
-pub fn call_var(eval: &mut Evaluator, var: &Var, args: &[Value]) -> Step {
-    let callee = eval.deref_var_cached(var.id, &var.sym);
-    if let Some(native) = crate::ext::as_native(&callee) {
-        return (native.func)(eval, args).map_err(|e| eval.throw(e));
-    }
-    eval.call(&callee, args)
-}
 
 /// The registry's root epoch (bumps on every var root change).
 #[must_use]
@@ -585,19 +581,6 @@ pub fn call_value_owned(eval: &mut Evaluator, callee: &Value, args: smallvec::Sm
 // Valid only where the compiled program cannot rebind the core var;
 // each mirrors the core native's own fast path and falls back to it.
 
-/// `(nth coll i)` / `(nth coll i not-found)`.
-pub fn nth(eval: &mut Evaluator, coll: &Value, idx: &Value, not_found: Option<&Value>) -> Step {
-    let n = crate::core::nth_index(idx).map_err(|e| eval.throw(e))?;
-    let nf = not_found.cloned();
-    if let Some(fast) = crate::coll::nth_fast_pub(coll, n, &nf) {
-        return fast.map_err(|e| eval.throw(e));
-    }
-    let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::smallvec![coll.clone(), idx.clone()];
-    if let Some(nf) = nf {
-        args.push(nf);
-    }
-    crate::coll::native_nth_owned(eval, args).map_err(|e| eval.throw(e))
-}
 
 /// Enter a direct native-to-native call (see
 /// `Evaluator::enter_native_call`).
@@ -652,4 +635,105 @@ pub fn intrinsic(op: u32, args: &[Value]) -> Option<Value> {
         (5, [a, b]) => vi::scalar_eq(a, b).map(|e| Value::Bool(!e)),
         _ => None,
     }
+}
+
+
+// ---- extent forms over compiled body fns --------------------------------
+
+fn body_of(body: &Value) -> impl Fn(&mut Evaluator) -> Step + '_ {
+    move |ev: &mut Evaluator| ev.call(body, &[])
+}
+
+/// `with-redefs`.
+pub fn with_redefs_call(eval: &mut Evaluator, vals: Vec<(Var, Value)>, body: &Value) -> Step {
+    eval.with_redefs_core(vals, &body_of(body))
+}
+
+/// `with-bindings*`.
+pub fn with_bindings_call(eval: &mut Evaluator, map: &Value, body: &Value) -> Step {
+    eval.with_bindings_core(map, &body_of(body))
+}
+
+/// `time`.
+pub fn time_call(eval: &mut Evaluator, body: &Value) -> Step {
+    eval.time_core(&body_of(body))
+}
+
+/// `with-out-str` (binding `out`, `*out*` as written).
+pub fn with_out_str_call(eval: &mut Evaluator, out: &Symbol, body: &Value) -> Step {
+    eval.with_out_str_core(out, &body_of(body))
+}
+
+/// `with-in-str`.
+pub fn with_in_str_call(eval: &mut Evaluator, input: &Symbol, s: &Value, body: &Value) -> Step {
+    eval.with_in_str_core(input, s, &body_of(body))
+}
+
+/// `locking`.
+pub fn locking_call(eval: &mut Evaluator, target: &Value, body: &Value) -> Step {
+    eval.locking_core(target, &body_of(body))
+}
+
+/// `sync` (`dosync`): the body re-runs on retry.
+pub fn sync_call(eval: &mut Evaluator, body: &Value) -> Step {
+    crate::stm::eval_sync(eval, &body_of(body))
+}
+
+/// `io!`.
+pub fn io_call(eval: &mut Evaluator, body: &Value) -> Step {
+    crate::stm::eval_io(eval, &body_of(body))
+}
+
+/// `lazy-seq` over a compiled zero-arg body fn.
+#[must_use]
+pub fn lazy_seq(f: Value) -> Value {
+    crate::lazy::call0_value(f)
+}
+
+/// `delay` over a compiled zero-arg body fn.
+#[must_use]
+pub fn delay(f: Value) -> Value {
+    Value::Delay(clj_value::Delay::new(f))
+}
+
+/// `bound-fn`: `f` re-pushes the creation-time thread bindings around
+/// every call.
+pub fn bound_fn(eval: &mut Evaluator, f: Value) -> Value {
+    let conveyed = eval.bindings.clone();
+    let display: Arc<str> = Arc::from("clojure.core/bound-fn");
+    let func = Arc::new(move |ev: &mut Evaluator, args: &[Value]| {
+        let depth = ev.bindings_depth();
+        let frame: Vec<(Var, Value)> = conveyed.pairs().map(|(v, x)| (v.clone(), x.clone())).collect();
+        ev.push_frame(frame);
+        let out = ev.call(&f, args);
+        ev.pop_bindings(depth);
+        out.map_err(signal_to_native)
+    });
+    Value::Extension(Arc::new(crate::ext::NativeFn {
+        id: eval.next_id(),
+        display,
+        func,
+        owned: None,
+        meta: None,
+        fast: crate::ext::FastArith::None,
+    }))
+}
+
+/// `defmacro` over a compiled macro fn.
+pub fn defmacro(
+    eval: &mut Evaluator,
+    sym: &Symbol,
+    doc: Option<&str>,
+    attr: Option<&Map>,
+    arglists: &[Value],
+    line: u32,
+    col: u32,
+    f: Value,
+) -> Step {
+    eval.defmacro_with(sym, doc, attr, arglists, Span::new(line, col), f)
+}
+
+/// A failed `assert` (`message` already evaluated).
+pub fn assert_failed(eval: &mut Evaluator, message: Option<Value>, form: &str) -> Signal {
+    eval.assert_failed(message, form)
 }

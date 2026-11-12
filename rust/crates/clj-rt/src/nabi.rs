@@ -320,15 +320,6 @@ pub unsafe extern "C" fn rt_n_drop(v: *mut Value) {
     unsafe { put(v, Value::Nil) };
 }
 
-/// Clojure truthiness.
-///
-/// # Safety
-/// `v` is a valid slot.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rt_n_truthy(v: *const Value) -> u8 {
-    u8::from(unsafe { slot(v) }.is_truthy())
-}
-
 /// `out = constant k`.
 ///
 /// # Safety
@@ -373,20 +364,6 @@ pub unsafe extern "C" fn rt_n_invoke(
     unsafe { finish(out, step) }
 }
 
-/// `out = (var-k args…)` for a direct-native call site.
-///
-/// # Safety
-/// `out` valid; `args` valid for `n` slots.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rt_n_native(out: *mut Value, k: u64, args: *const Value, n: usize) -> i32 {
-    let args = unsafe { slots(args, n) };
-    let step = with_active(|eval| {
-        let callee = native::root(eval, k as usize);
-        native_abi::call_value(eval, &callee, args)
-    });
-    unsafe { finish(out, step) }
-}
-
 /// [`rt_n_native`] moving the `n` argument slots in (each left nil).
 ///
 /// # Safety
@@ -402,19 +379,6 @@ pub unsafe extern "C" fn rt_n_native_mv(out: *mut Value, k: u64, args: *mut Valu
         let callee = native::root(eval, k as usize);
         native_abi::call_value_owned(eval, &callee, moved)
     });
-    unsafe { finish(out, step) }
-}
-
-/// `out = (nth coll idx)` / `(nth coll idx nf)` (`nf` null when
-/// absent) — the `nth` intrinsic (no var lookup, borrowed args).
-///
-/// # Safety
-/// `out`, `coll`, `idx` valid; `nf` null or valid.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rt_n_nth(out: *mut Value, coll: *const Value, idx: *const Value, nf: *const Value) -> i32 {
-    let (coll, idx) = unsafe { (slot(coll), slot(idx)) };
-    let nf = (!nf.is_null()).then(|| unsafe { slot(nf) });
-    let step = with_active(|eval| native_abi::nth(eval, coll, idx, nf));
     unsafe { finish(out, step) }
 }
 
@@ -866,4 +830,214 @@ pub unsafe extern "C" fn rt_n_cell_get(out: *mut Value, cell: *const Value) {
         other => other.clone(),
     };
     unsafe { put(out, v) };
+}
+
+
+// ---- extent forms (bodies arrive as compiled zero-arg fns) -------------
+
+fn sym_const(k: u64) -> Symbol {
+    match native::constant(k as usize) {
+        Value::Symbol(s) => s.clone(),
+        _ => Symbol::new(None, "_"),
+    }
+}
+
+/// `with-redefs` of vars `ks` to `values` around the body fn.
+///
+/// # Safety
+/// `out`, `body` valid; `ks`, `values` valid for `n`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_with_redefs(out: *mut Value, ks: *const u64, values: *const Value, n: usize, body: *const Value) -> i32 {
+    let values = unsafe { slots(values, n) };
+    let vals: Vec<_> = (0..n)
+        .map(|i| (native::var(unsafe { *ks.add(i) } as usize).clone(), values[i].clone()))
+        .collect();
+    let body = unsafe { slot(body) };
+    let step = with_active(|eval| native_abi::with_redefs_call(eval, vals, body));
+    unsafe { finish(out, step) }
+}
+
+/// `with-bindings*` of `map` around the body fn.
+///
+/// # Safety
+/// `out`, `map`, `body` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_with_bindings(out: *mut Value, map: *const Value, body: *const Value) -> i32 {
+    let (map, body) = unsafe { (slot(map), slot(body)) };
+    let step = with_active(|eval| native_abi::with_bindings_call(eval, map, body));
+    unsafe { finish(out, step) }
+}
+
+/// `time` around the body fn.
+///
+/// # Safety
+/// `out`, `body` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_time(out: *mut Value, body: *const Value) -> i32 {
+    let body = unsafe { slot(body) };
+    let step = with_active(|eval| native_abi::time_call(eval, body));
+    unsafe { finish(out, step) }
+}
+
+/// `with-out-str` (out var symbol constant `sym_k`) around the body fn.
+///
+/// # Safety
+/// `out`, `body` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_with_out_str(out: *mut Value, sym_k: u64, body: *const Value) -> i32 {
+    let body = unsafe { slot(body) };
+    let sym = sym_const(sym_k);
+    let step = with_active(|eval| native_abi::with_out_str_call(eval, &sym, body));
+    unsafe { finish(out, step) }
+}
+
+/// `with-in-str` (input var symbol constant `sym_k`) of `s` around the
+/// body fn.
+///
+/// # Safety
+/// `out`, `s`, `body` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_with_in_str(out: *mut Value, sym_k: u64, s: *const Value, body: *const Value) -> i32 {
+    let (s, body) = unsafe { (slot(s), slot(body)) };
+    let sym = sym_const(sym_k);
+    let step = with_active(|eval| native_abi::with_in_str_call(eval, &sym, s, body));
+    unsafe { finish(out, step) }
+}
+
+/// `locking` on `target` around the body fn.
+///
+/// # Safety
+/// `out`, `target`, `body` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_locking(out: *mut Value, target: *const Value, body: *const Value) -> i32 {
+    let (target, body) = unsafe { (slot(target), slot(body)) };
+    let step = with_active(|eval| native_abi::locking_call(eval, target, body));
+    unsafe { finish(out, step) }
+}
+
+/// `sync` (`io` when `io != 0`) around the body fn.
+///
+/// # Safety
+/// `out`, `body` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_sync(out: *mut Value, io: u8, body: *const Value) -> i32 {
+    let body = unsafe { slot(body) };
+    let step = with_active(|eval| {
+        if io == 0 {
+            native_abi::sync_call(eval, body)
+        } else {
+            native_abi::io_call(eval, body)
+        }
+    });
+    unsafe { finish(out, step) }
+}
+
+/// `out =` a `lazy-seq` (`kind` 0), `delay` (1), or `bound-fn` (2)
+/// over the compiled fn `f`.
+///
+/// # Safety
+/// `out`, `f` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_wrap_fn(out: *mut Value, kind: u8, f: *const Value) {
+    let f = unsafe { slot(f) }.clone();
+    let v = match kind {
+        0 => native_abi::lazy_seq(f),
+        1 => native_abi::delay(f),
+        _ => with_active(|eval| native_abi::bound_fn(eval, f)),
+    };
+    unsafe { put(out, v) };
+}
+
+/// `defmacro` described by constant `k` (`[sym doc attr arglists
+/// line col]`) over the compiled macro fn `f`; `out =` the var.
+///
+/// # Safety
+/// `out`, `f` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_defmacro(out: *mut Value, k: u64, f: *const Value) -> i32 {
+    let f = unsafe { slot(f) }.clone();
+    let step = native::run_defmacro(native::constant(k as usize), f);
+    unsafe { finish(out, step) }
+}
+
+/// A failed `assert` (`msg` null when absent; the form text constant
+/// `form_k`): always 1 (pending).
+///
+/// # Safety
+/// `msg` null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_assert_fail(msg: *const Value, form_k: u64) -> i32 {
+    let msg = (!msg.is_null()).then(|| unsafe { slot(msg) }.clone());
+    let form = match native::constant(form_k as usize) {
+        Value::Str(s) => s.to_string(),
+        _ => String::new(),
+    };
+    native::fail(with_active(|eval| native_abi::assert_failed(eval, msg, &form)))
+}
+
+/// Every `rt_n_*` shim by symbol name (the in-process JIT maps a
+/// native module's declarations to these).
+#[must_use]
+pub fn native_symbols() -> Vec<(&'static str, usize)> {
+    vec![
+        ("rt_n_declare_var", rt_n_declare_var as *const () as usize),
+        ("rt_n_declare_fn", rt_n_declare_fn as *const () as usize),
+        ("rt_n_set_const", rt_n_set_const as *const () as usize),
+        ("rt_n_main", rt_n_main as *const () as usize),
+        ("rt_n_nil", rt_n_nil as *const () as usize),
+        ("rt_n_int", rt_n_int as *const () as usize),
+        ("rt_n_double", rt_n_double as *const () as usize),
+        ("rt_n_bool", rt_n_bool as *const () as usize),
+        ("rt_n_str", rt_n_str as *const () as usize),
+        ("rt_n_kw", rt_n_kw as *const () as usize),
+        ("rt_n_sym", rt_n_sym as *const () as usize),
+        ("rt_n_regex", rt_n_regex as *const () as usize),
+        ("rt_n_static_field", rt_n_static_field as *const () as usize),
+        ("rt_n_read", rt_n_read as *const () as usize),
+        ("rt_n_clone", rt_n_clone as *const () as usize),
+        ("rt_n_drop", rt_n_drop as *const () as usize),
+        ("rt_n_const", rt_n_const as *const () as usize),
+        ("rt_n_deref", rt_n_deref as *const () as usize),
+        ("rt_n_varref", rt_n_varref as *const () as usize),
+        ("rt_n_invoke", rt_n_invoke as *const () as usize),
+        ("rt_n_native_mv", rt_n_native_mv as *const () as usize),
+        ("rt_n_enter_fn", rt_n_enter_fn as *const () as usize),
+        ("rt_n_leave", rt_n_leave as *const () as usize),
+        ("rt_n_core_mv", rt_n_core_mv as *const () as usize),
+        ("rt_n_intr", rt_n_intr as *const () as usize),
+        ("rt_n_def_begin", rt_n_def_begin as *const () as usize),
+        ("rt_n_def_finish", rt_n_def_finish as *const () as usize),
+        ("rt_n_vec_lit", rt_n_vec_lit as *const () as usize),
+        ("rt_n_map_lit", rt_n_map_lit as *const () as usize),
+        ("rt_n_set_lit", rt_n_set_lit as *const () as usize),
+        ("rt_n_throw", rt_n_throw as *const () as usize),
+        ("rt_n_new_throwable", rt_n_new_throwable as *const () as usize),
+        ("rt_n_make_fn", rt_n_make_fn as *const () as usize),
+        ("rt_n_try", rt_n_try as *const () as usize),
+        ("rt_n_binding", rt_n_binding as *const () as usize),
+        ("rt_n_set_var", rt_n_set_var as *const () as usize),
+        ("rt_n_declare", rt_n_declare as *const () as usize),
+        ("rt_n_ns", rt_n_ns as *const () as usize),
+        ("rt_n_case", rt_n_case as *const () as usize),
+        ("rt_n_equiv", rt_n_equiv as *const () as usize),
+        ("rt_n_nth_nil", rt_n_nth_nil as *const () as usize),
+        ("rt_n_gseq", rt_n_gseq as *const () as usize),
+        ("rt_n_first", rt_n_first as *const () as usize),
+        ("rt_n_next", rt_n_next as *const () as usize),
+        ("rt_n_destructure", rt_n_destructure as *const () as usize),
+        ("rt_n_class", rt_n_class as *const () as usize),
+        ("rt_n_cell_new", rt_n_cell_new as *const () as usize),
+        ("rt_n_cell_set", rt_n_cell_set as *const () as usize),
+        ("rt_n_cell_get", rt_n_cell_get as *const () as usize),
+        ("rt_n_with_redefs", rt_n_with_redefs as *const () as usize),
+        ("rt_n_with_bindings", rt_n_with_bindings as *const () as usize),
+        ("rt_n_time", rt_n_time as *const () as usize),
+        ("rt_n_with_out_str", rt_n_with_out_str as *const () as usize),
+        ("rt_n_with_in_str", rt_n_with_in_str as *const () as usize),
+        ("rt_n_locking", rt_n_locking as *const () as usize),
+        ("rt_n_sync", rt_n_sync as *const () as usize),
+        ("rt_n_wrap_fn", rt_n_wrap_fn as *const () as usize),
+        ("rt_n_defmacro", rt_n_defmacro as *const () as usize),
+        ("rt_n_assert_fail", rt_n_assert_fail as *const () as usize),
+    ]
 }
