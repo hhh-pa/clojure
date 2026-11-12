@@ -23,7 +23,7 @@
 //! indexes the frame chain, so a fn created at frame length `base`
 //! captures exactly the `Local(i < base)` its arities mention.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use clj_eval::aot_front::{FrontEnd, for_each_child};
 use clj_eval::expr::{Arity, CaseTest, Expr, FunExpr, NsClause, Pattern};
@@ -107,9 +107,11 @@ struct FnCtx<'ctx> {
     env: Vec<Option<LocalRef<'ctx>>>,
     recur: Vec<RecurTarget<'ctx>>,
     captured: PointerValue<'ctx>,
-    /// Locals whose single remaining use (in the `recur` args being
-    /// lowered) may take the value by move.
-    moves: Vec<usize>,
+    /// `Expr::Local` occurrences `(node address, local)` in the `recur`
+    /// args being lowered that are their local's last use, so may move.
+    /// Such a local is never borrowed or aliased at an earlier
+    /// occurrence (the move would invalidate the reference).
+    moves: Vec<(usize, usize)>,
 }
 
 /// The program-level lowering session.
@@ -1634,11 +1636,7 @@ impl<'ctx> Lowerer<'ctx> {
         let fast = fast_op(call.fast, n);
         let core_name = (call.var.sym.namespace() == Some("clojure.core"))
             .then(|| call.var.sym.name().to_owned());
-        let moving = fast.is_none()
-            && call
-                .args
-                .iter()
-                .any(|a| matches!(a, Expr::Local(i) if f.moves.contains(i)));
+        let moving = fast.is_none() && call.args.iter().any(|a| is_move(f, a));
         if moving {
             return self.lower_direct_moving(f, call, k, core_name.as_deref(), dest);
         }
@@ -1704,7 +1702,7 @@ impl<'ctx> Lowerer<'ctx> {
         let (arr, elems) = self.slot_array(f, n);
         for (a, e) in call.args.iter().zip(&elems) {
             let moved = match a {
-                Expr::Local(i) if f.moves.contains(i) => self.borrowable(f, *i),
+                Expr::Local(i) if is_move(f, a) => self.slot_of(f, *i),
                 _ => None,
             };
             if let Some(src) = moved {
@@ -1791,6 +1789,17 @@ impl<'ctx> Lowerer<'ctx> {
     /// The slot holding local `idx`'s value, when it can be borrowed
     /// (`letfn` cells hold a cell, not the value).
     fn borrowable(&self, f: &FnCtx<'ctx>, idx: usize) -> Option<PointerValue<'ctx>> {
+        // A local some occurrence in the current `recur` args moves is
+        // copied instead: a reference taken earlier would see the
+        // moved-out slot.
+        if f.moves.iter().any(|m| m.1 == idx) {
+            return None;
+        }
+        self.slot_of(f, idx)
+    }
+
+    /// The slot holding local `idx`'s value (not a `letfn` cell).
+    fn slot_of(&self, f: &FnCtx<'ctx>, idx: usize) -> Option<PointerValue<'ctx>> {
         match f.env.get(idx).copied().flatten()? {
             LocalRef::Slot(p) => Some(p),
             LocalRef::Captured(i) => Some(self.elem(f.captured, i)),
@@ -2905,50 +2914,65 @@ fn self_recurs(body: &[Expr]) -> bool {
     body.iter().any(walk)
 }
 
-/// The locals a `recur` to a loop at env depth `base` may take by move:
-/// scoped inside the loop (`>= base`), held in a plain slot, and used
-/// at most once on any path through the `recur` args (nested fns
-/// included, so a capture counts as a use). They are dead once `recur`
-/// rebinds. An `if` uses its test plus the busier of its branches (only
-/// one runs); an occurrence inside a nested `loop` runs once per inner
-/// iteration, so it counts as many.
-fn movable_locals(f: &FnCtx<'_>, args: &[Expr], base: Option<usize>) -> Vec<usize> {
-    fn count(e: &Expr, weight: usize, uses: &mut BTreeMap<usize, usize>) {
+/// Whether `e` is an occurrence the current `recur` args move.
+fn is_move(f: &FnCtx<'_>, e: &Expr) -> bool {
+    f.moves.iter().any(|m| m.0 == expr_addr(e))
+}
+
+/// A node's address (identifies one occurrence).
+fn expr_addr(e: &Expr) -> usize {
+    std::ptr::from_ref(e) as usize
+}
+
+/// The `Expr::Local` occurrences in a `recur` to a loop at env depth
+/// `base` that may take their value by move: the local is scoped inside
+/// the loop (`>= base`, dead once `recur` rebinds) and held in a plain
+/// slot, and nothing reads it after this occurrence on its evaluation
+/// path. Found walking the args backward in evaluation order: an `if`
+/// analyzes each branch from the same "read later" set, then its test;
+/// occurrences inside a nested `loop` (repeated) or `fn` (captured)
+/// only count as reads.
+fn movable_locals(f: &FnCtx<'_>, args: &[Expr], base: Option<usize>) -> Vec<(usize, usize)> {
+    fn reads(e: &Expr, later: &mut BTreeSet<usize>) {
         if let Expr::Local(i) = e {
-            *uses.entry(*i).or_default() += weight;
+            later.insert(*i);
         }
-        if let Expr::If { test, then, els } = e {
-            count(test, weight, uses);
-            let (mut a, mut b) = (BTreeMap::new(), BTreeMap::new());
-            count(then, weight, &mut a);
-            count(els, weight, &mut b);
-            for (i, n) in &b {
-                let busier = a.entry(*i).or_default();
-                *busier = (*busier).max(*n);
+        for_each_child(e, &mut |c| reads(c, later));
+    }
+    fn walk(e: &Expr, later: &mut BTreeSet<usize>, out: &mut Vec<(usize, usize)>) {
+        match e {
+            Expr::Local(i) => {
+                if later.insert(*i) {
+                    out.push((expr_addr(e), *i));
+                }
             }
-            for (i, n) in a {
-                *uses.entry(i).or_default() += n;
+            Expr::If { test, then, els } => {
+                let mut other = later.clone();
+                walk(els, &mut other, out);
+                walk(then, later, out);
+                later.extend(other);
+                walk(test, later, out);
             }
-            return;
+            Expr::Loop { .. } | Expr::Fn(_) => reads(e, later),
+            _ => {
+                let mut kids = Vec::new();
+                for_each_child(e, &mut |c| kids.push(c));
+                for c in kids.into_iter().rev() {
+                    walk(c, later, out);
+                }
+            }
         }
-        let inner = if matches!(e, Expr::Loop { .. }) {
-            2
-        } else {
-            weight
-        };
-        for_each_child(e, &mut |c| count(c, inner, uses));
     }
     let Some(base) = base else {
         return Vec::new();
     };
-    let mut uses = BTreeMap::new();
-    for a in args {
-        count(a, 1, &mut uses);
+    let mut later = BTreeSet::new();
+    let mut out = Vec::new();
+    for a in args.iter().rev() {
+        walk(a, &mut later, &mut out);
     }
-    uses.into_iter()
-        .filter(|&(i, n)| n == 1 && i >= base)
-        .filter(|&(i, _)| matches!(f.env.get(i), Some(Some(LocalRef::Slot(_)))))
-        .map(|(i, _)| i)
+    out.into_iter()
+        .filter(|&(_, i)| i >= base && matches!(f.env.get(i), Some(Some(LocalRef::Slot(_)))))
         .collect()
 }
 

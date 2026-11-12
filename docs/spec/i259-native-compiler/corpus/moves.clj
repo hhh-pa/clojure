@@ -79,3 +79,16 @@
   (loop [i 0 acc []]
     (if (< i n) (recur (inc i) (if (empty? acc) (conj acc i) (conj acc (count acc)))) acc)))
 (println (test-and-branch 4))
+(defn read-then-move [n]
+  ;; `acc` is read in the test, then moved in whichever branch runs.
+  (loop [i 0 acc []]
+    (if (< i n)
+      (recur (inc i) (if (>= (inc (count acc)) n) (conj acc :last) (conj acc i i)))
+      acc)))
+(println (read-then-move 5))
+(defn read-after-move [n]
+  ;; The move would be first in evaluation order but `acc` is read
+  ;; later in the same args: no move there.
+  (loop [i 0 acc []]
+    (if (< i n) (recur (inc i) (conj (conj acc i) (count acc))) acc)))
+(println (read-after-move 3))
