@@ -3337,7 +3337,10 @@ mod tests {
         let d = bytes(&Value::Double(1.5));
         assert_eq!(d[0], 3);
         assert_eq!(f64::from_ne_bytes(d[8..16].try_into().expect("8")), 1.5);
-        assert_eq!(bytes(&Value::Char('A'))[0], 9);
+        let c = bytes(&Value::Char('\u{1F600}'));
+        assert_eq!(c[0], 9);
+        // The AOT compiler reads a char's code point at offset 4 (#259).
+        assert_eq!(u32::from_ne_bytes(c[4..8].try_into().expect("4")), 0x1F600);
     }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
