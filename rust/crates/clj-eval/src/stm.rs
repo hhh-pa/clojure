@@ -1327,9 +1327,10 @@ mod tests {
         }];
         let env = Env::new();
         let before = lock_readers().len();
-        let payload =
-            std::panic::catch_unwind(AssertUnwindSafe(|| sync_begin(&mut eval, &body, &env)))
-                .expect_err("foreign panic resumes");
+        let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            sync_begin(&mut eval, &|ev: &mut Evaluator| ev.eval_body(&body, &env))
+        }))
+        .expect_err("foreign panic resumes");
         assert!(
             payload.downcast_ref::<String>().is_some() || payload.downcast_ref::<&str>().is_some()
         );

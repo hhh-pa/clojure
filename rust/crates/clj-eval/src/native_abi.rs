@@ -55,6 +55,7 @@ pub fn def_begin(eval: &mut Evaluator, sym: &Symbol) -> u64 {
 
 /// `(def sym …)` second half: root, metadata, dynamic flag; returns
 /// the var.
+#[allow(clippy::too_many_arguments)]
 pub fn def_finish(
     eval: &mut Evaluator,
     id: u64,
@@ -169,7 +170,11 @@ pub fn binding_call(eval: &mut Evaluator, pairs: Vec<(Var, Value)>, body: &Value
 
 /// The `binding` core: non-dynamic vars refuse, then one frame
 /// around `body`.
-pub(crate) fn binding_call_with(eval: &mut Evaluator, pairs: Vec<(Var, Value)>, body: crate::stm::TxBody<'_>) -> Step {
+pub(crate) fn binding_call_with(
+    eval: &mut Evaluator,
+    pairs: Vec<(Var, Value)>,
+    body: crate::stm::TxBody<'_>,
+) -> Step {
     for (var, _) in &pairs {
         if !eval.registry.is_dynamic(var.id) {
             return Err(eval.throw(NativeError::new(
@@ -392,36 +397,66 @@ fn opt_str(s: Option<&String>) -> Value {
     s.map_or(Value::Nil, |s| Value::Str(Arc::from(s.as_str())))
 }
 
-fn enc_pattern<'a>(pat: &'a crate::expr::Pattern, defaults: &mut Vec<&'a crate::expr::Expr>) -> Value {
+fn enc_pattern<'a>(
+    pat: &'a crate::expr::Pattern,
+    defaults: &mut Vec<&'a crate::expr::Expr>,
+) -> Value {
     use crate::expr::Pattern;
     match pat {
         Pattern::Symbol(name) => Value::Str(Arc::from(name.as_str())),
         Pattern::Vec(v) => {
             let fixed = v.fixed.iter().map(|p| enc_pattern(p, defaults)).collect();
-            let rest = v.rest.as_ref().map_or(Value::Nil, |p| enc_pattern(p, defaults));
-            vec_lit(vec![kw("vec"), vec_lit(fixed, None), rest, opt_str(v.as_sym.as_ref())], None)
+            let rest = v
+                .rest
+                .as_ref()
+                .map_or(Value::Nil, |p| enc_pattern(p, defaults));
+            vec_lit(
+                vec![
+                    kw("vec"),
+                    vec_lit(fixed, None),
+                    rest,
+                    opt_str(v.as_sym.as_ref()),
+                ],
+                None,
+            )
         }
         Pattern::Map(m) => {
             let entries = m
                 .entries
                 .iter()
                 .map(|(p, key, or_key, req)| {
-                    vec_lit(vec![enc_pattern(p, defaults), key.clone(), or_key.clone(), Value::Bool(*req)], None)
+                    vec_lit(
+                        vec![
+                            enc_pattern(p, defaults),
+                            key.clone(),
+                            or_key.clone(),
+                            Value::Bool(*req),
+                        ],
+                        None,
+                    )
                 })
                 .collect();
             let keys = m
                 .keys
                 .iter()
-                .map(|k| vec_lit(vec![Value::Str(Arc::from(k.local.as_str())), k.key.clone(), Value::Bool(k.required)], None))
-                .collect();
-            let or_keys = m
-                .or
-                .iter()
-                .map(|(key, e)| {
-                    defaults.push(e);
-                    key.clone()
+                .map(|k| {
+                    vec_lit(
+                        vec![
+                            Value::Str(Arc::from(k.local.as_str())),
+                            k.key.clone(),
+                            Value::Bool(k.required),
+                        ],
+                        None,
+                    )
                 })
                 .collect();
+            let or_keys =
+                m.or.iter()
+                    .map(|(key, e)| {
+                        defaults.push(e);
+                        key.clone()
+                    })
+                    .collect();
             vec_lit(
                 vec![
                     kw("map"),
@@ -464,7 +499,10 @@ fn dec_pattern(v: &Value, defaults: &mut std::slice::Iter<'_, Value>) -> crate::
     };
     let is_vec = matches!(items.first(), Some(Value::Keyword(k)) if k.name() == "vec");
     if is_vec {
-        let fixed = dec_items(items.get(1)).iter().map(|p| dec_pattern(p, defaults)).collect();
+        let fixed = dec_items(items.get(1))
+            .iter()
+            .map(|p| dec_pattern(p, defaults))
+            .collect();
         let rest = match items.get(2) {
             Some(Value::Nil) | None => None,
             Some(p) => Some(Box::new(dec_pattern(p, defaults))),
@@ -496,7 +534,12 @@ fn dec_pattern(v: &Value, defaults: &mut std::slice::Iter<'_, Value>) -> crate::
         .collect();
     let or = dec_items(items.get(5))
         .into_iter()
-        .map(|key| (key, Expr::Literal(defaults.next().cloned().unwrap_or(Value::Nil))))
+        .map(|key| {
+            (
+                key,
+                Expr::Literal(defaults.next().cloned().unwrap_or(Value::Nil)),
+            )
+        })
         .collect();
     Pattern::Map(MapPattern {
         entries,
@@ -514,7 +557,12 @@ fn dec_pattern(v: &Value, defaults: &mut std::slice::Iter<'_, Value>) -> crate::
 /// Destructure `value` against an [`encode_pattern`]-encoded pattern
 /// with its `:or` defaults already evaluated, returning the bound
 /// values in binding order — the interpreter's own `destructure`.
-pub fn destructure_encoded(eval: &mut Evaluator, encoded: &Value, value: &Value, defaults: &[Value]) -> Result<Vec<Value>, Signal> {
+pub fn destructure_encoded(
+    eval: &mut Evaluator,
+    encoded: &Value,
+    value: &Value,
+    defaults: &[Value],
+) -> Result<Vec<Value>, Signal> {
     let pat = dec_pattern(encoded, &mut defaults.iter());
     let mut out = Vec::new();
     eval.destructure_in(&pat, value, &crate::env::Env::new(), &mut out)?;
@@ -541,7 +589,6 @@ pub fn class_name_of(value: &Value) -> Option<String> {
     }
 }
 
-
 /// The registry's root epoch (bumps on every var root change).
 #[must_use]
 pub fn root_epoch(eval: &Evaluator) -> u64 {
@@ -567,7 +614,11 @@ pub fn call_value(eval: &mut Evaluator, callee: &Value, args: &[Value]) -> Step 
 /// [`call_value`] taking the arguments by value: a native with an
 /// owned-args entry gets them moved in (no per-arg clone/drop, and
 /// head-releasing loopers can free as they walk).
-pub fn call_value_owned(eval: &mut Evaluator, callee: &Value, args: smallvec::SmallVec<[Value; 4]>) -> Step {
+pub fn call_value_owned(
+    eval: &mut Evaluator,
+    callee: &Value,
+    args: smallvec::SmallVec<[Value; 4]>,
+) -> Step {
     if let Some(native) = crate::ext::as_native(callee) {
         return match &native.owned {
             Some(owned) => owned(eval, args).map_err(|e| eval.throw(e)),
@@ -581,7 +632,6 @@ pub fn call_value_owned(eval: &mut Evaluator, callee: &Value, args: smallvec::Sm
 // Valid only where the compiled program cannot rebind the core var;
 // each mirrors the core native's own fast path and falls back to it.
 
-
 /// Enter a direct native-to-native call (see
 /// `Evaluator::enter_native_call`).
 pub fn enter_call(eval: &mut Evaluator) -> bool {
@@ -592,7 +642,6 @@ pub fn enter_call(eval: &mut Evaluator) -> bool {
 pub fn leave_call(eval: &mut Evaluator) {
     eval.leave_native_call();
 }
-
 
 /// A core native's entries, resolved once (the compiled program
 /// cannot rebind core vars when it uses these).
@@ -611,7 +660,11 @@ pub fn core_entry(eval: &mut Evaluator, var: &Var) -> Option<CoreEntry> {
 }
 
 /// Call a resolved core entry with moved args.
-pub fn call_core(eval: &mut Evaluator, entry: &CoreEntry, args: smallvec::SmallVec<[Value; 4]>) -> Step {
+pub fn call_core(
+    eval: &mut Evaluator,
+    entry: &CoreEntry,
+    args: smallvec::SmallVec<[Value; 4]>,
+) -> Step {
     match &entry.owned {
         Some(owned) => owned(eval, args).map_err(|e| eval.throw(e)),
         None => (entry.func)(eval, &args).map_err(|e| eval.throw(e)),
@@ -636,7 +689,6 @@ pub fn intrinsic(op: u32, args: &[Value]) -> Option<Value> {
         _ => None,
     }
 }
-
 
 // ---- extent forms over compiled body fns --------------------------------
 
@@ -703,7 +755,10 @@ pub fn bound_fn(eval: &mut Evaluator, f: Value) -> Value {
     let display: Arc<str> = Arc::from("clojure.core/bound-fn");
     let func = Arc::new(move |ev: &mut Evaluator, args: &[Value]| {
         let depth = ev.bindings_depth();
-        let frame: Vec<(Var, Value)> = conveyed.pairs().map(|(v, x)| (v.clone(), x.clone())).collect();
+        let frame: Vec<(Var, Value)> = conveyed
+            .pairs()
+            .map(|(v, x)| (v.clone(), x.clone()))
+            .collect();
         ev.push_frame(frame);
         let out = ev.call(&f, args);
         ev.pop_bindings(depth);
@@ -720,6 +775,7 @@ pub fn bound_fn(eval: &mut Evaluator, f: Value) -> Value {
 }
 
 /// `defmacro` over a compiled macro fn.
+#[allow(clippy::too_many_arguments)]
 pub fn defmacro(
     eval: &mut Evaluator,
     sym: &Symbol,

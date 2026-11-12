@@ -758,13 +758,14 @@ fn jit_runs_subset_program_in_process() {
 #[test]
 #[cfg(feature = "aot")]
 fn jit_plan_error_passes_the_diagnostic_through() {
-    // Plan failures print verbatim (no `jit: ` prefix), exit 1 —
-    // the interpreter-identical diagnostic.
+    // Outside the pure subset `jit` runs the native compiler (#259);
+    // a program the front end cannot analyze reports the subset
+    // diagnostic verbatim (no `jit: ` prefix), exit 1.
     use std::ffi::OsStr;
     let dir = jit_tmp("plan-err");
     std::fs::create_dir_all(&dir).expect("tmp dir");
     let file = dir.join("bad.clj");
-    std::fs::write(&file, "(def x 1)\n").expect("write source");
+    std::fs::write(&file, "(def x 1)\n(nope)\n").expect("write source");
     let out = jit_argv(&[OsStr::new("jit"), file.as_os_str()]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
@@ -775,6 +776,11 @@ fn jit_plan_error_passes_the_diagnostic_through() {
         )
     );
     assert!(stdout(&out).is_empty(), "stdout must stay empty");
+    let ok = dir.join("ok.clj");
+    std::fs::write(&ok, "(def x 1)\n(println (inc x))\n").expect("write source");
+    let out = jit_argv(&[OsStr::new("jit"), ok.as_os_str()]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "2\n");
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 

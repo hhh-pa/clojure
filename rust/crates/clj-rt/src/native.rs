@@ -73,14 +73,20 @@ pub(crate) struct Tables {
     fns: Box<[FnDesc]>,
 }
 
-/// The current program's frozen tables (leaked per run: a binary
-/// runs one program; the in-process JIT may run several).
-static TABLES: std::sync::atomic::AtomicPtr<Tables> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// The current program's frozen tables with their generation
+/// (leaked per run: a binary runs one program; the in-process JIT may
+/// run several).
+static TABLES: Mutex<Option<(u64, &'static Tables)>> = Mutex::new(None);
+
+/// The generation of [`TABLES`] (bumped under its lock on freeze).
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 thread_local! {
     /// The throw a failing step left for generated code to propagate.
     static PENDING: RefCell<Option<Signal>> = const { RefCell::new(None) };
+    /// This thread's view of [`TABLES`] (no lock on the hot path).
+    static CACHED: std::cell::Cell<Option<(u64, &'static Tables)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 fn building<R>(f: impl FnOnce(&mut Building) -> R) -> R {
@@ -89,10 +95,16 @@ fn building<R>(f: impl FnOnce(&mut Building) -> R) -> R {
 }
 
 fn tables() -> &'static Tables {
-    let p = TABLES.load(std::sync::atomic::Ordering::Acquire);
-    assert!(!p.is_null(), "native program tables frozen before use");
-    // SAFETY: a non-null pointer is a leaked (never freed) `Tables`.
-    unsafe { &*p }
+    let generation = GENERATION.load(std::sync::atomic::Ordering::Acquire);
+    if let Some((g, t)) = CACHED.get()
+        && g == generation
+    {
+        return t;
+    }
+    let current = TABLES.lock().expect("clj-rt native tables lock");
+    let (g, t) = current.expect("native program tables frozen before use");
+    CACHED.set(Some((g, t)));
+    t
 }
 
 /// Store a failing step's signal; returns the shim status (1).
@@ -172,12 +184,14 @@ pub(crate) fn freeze() {
         .into_iter()
         .map(|d| d.expect("every declared fn index is filled"))
         .collect();
-    let tables = Box::leak(Box::new(Tables {
+    let tables: &'static Tables = Box::leak(Box::new(Tables {
         vars: b.vars.into_boxed_slice(),
         consts: b.consts.into_boxed_slice(),
         fns: fns.into_boxed_slice(),
     }));
-    TABLES.store(tables, std::sync::atomic::Ordering::Release);
+    let mut current = TABLES.lock().expect("clj-rt native tables lock");
+    let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+    *current = Some((generation, tables));
 }
 
 /// Constant `k`.
@@ -277,7 +291,9 @@ pub(crate) fn root_is_fn(eval: &mut Evaluator, k: usize, desc: usize) -> bool {
     if !native_abi::has_thread_bindings(eval) {
         let epoch = native_abi::root_epoch(eval);
         let hit = ROOTS.with(|r| match r.borrow().get(k) {
-            Some(Some((e, Value::Extension(x)))) if *e == epoch => Some(Arc::as_ptr(x).cast::<()>() as usize == want),
+            Some(Some((e, Value::Extension(x)))) if *e == epoch => {
+                Some(Arc::as_ptr(x).cast::<()>() as usize == want)
+            }
             Some(Some((e, _))) if *e == epoch => Some(false),
             _ => None,
         });
@@ -434,22 +450,8 @@ pub(crate) fn case_select(desc: &Value, v: &Value) -> Result<(i64, Value), Signa
         return Ok((-1, Value::Nil));
     };
     let items: Vec<Value> = d.iter().collect();
-    let int = |i: usize| match items.get(i) {
-        Some(Value::Int(n)) => *n,
-        _ => 0,
-    };
-    let ints = |i: usize| -> Vec<i32> {
-        match items.get(i) {
-            Some(Value::Vector(v)) => v
-                .iter()
-                .map(|x| match x {
-                    Value::Int(n) => n as i32,
-                    _ => 0,
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
-    };
+    let int = |i: usize| int_at(&items, i);
+    let ints = |i: usize| ints_at(&items, i);
     let test = match int(2) {
         0 => CaseTest::Int,
         1 => CaseTest::HashEquiv,
@@ -493,6 +495,34 @@ pub(crate) fn run_defmacro(desc: &Value, f: Value) -> Step {
         _ => 0,
     };
     with_active(|eval| {
-        native_abi::defmacro(eval, &sym, doc.as_deref(), attr.as_ref(), &arglists, num(4), num(5), f)
+        native_abi::defmacro(
+            eval,
+            &sym,
+            doc.as_deref(),
+            attr.as_ref(),
+            &arglists,
+            num(4),
+            num(5),
+            f,
+        )
     })
+}
+
+/// `items[i]` as an int (0 when absent or not an int).
+fn int_at(items: &[Value], i: usize) -> i64 {
+    match items.get(i) {
+        Some(Value::Int(n)) => *n,
+        _ => 0,
+    }
+}
+
+/// `items[i]` as a vector of `i32`s (empty when absent).
+fn ints_at(items: &[Value], i: usize) -> Vec<i32> {
+    match items.get(i) {
+        Some(Value::Vector(v)) => v
+            .iter()
+            .map(|x| int_at(std::slice::from_ref(&x), 0) as i32)
+            .collect(),
+        _ => Vec::new(),
+    }
 }

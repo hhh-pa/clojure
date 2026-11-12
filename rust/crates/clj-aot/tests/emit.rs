@@ -491,7 +491,7 @@ fn nesting_backstops_user_macros() {
 fn mixed_emit_ir_lowers_trampolines_and_runtime_main_256() {
     let ir = tmp("mixed.ll");
     let report = clj_aot::build_str(
-        "(defn add [a b] (+ a b))\n(println (add 1 2))\n",
+        "(defn add [a b] (+ a b))\n(println (add 1 2))\n(eval '(def zz 1))\n(println zz)\n",
         "f.clj",
         &tmp("nope"),
         &EmitOptions {
@@ -502,7 +502,10 @@ fn mixed_emit_ir_lowers_trampolines_and_runtime_main_256() {
         clj_aot::BuildMode::Mixed,
     )
     .expect("mixed build");
-    assert_eq!(report, "aot: native 1/1 defns, embedded 1 top-level forms");
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 3 top-level forms (native: front end"),
+        "{report}"
+    );
     let text = std::fs::read_to_string(&ir).expect("ir");
     std::fs::remove_file(&ir).expect("cleanup");
     for needle in [
@@ -525,4 +528,33 @@ fn mixed_emit_ir_lowers_trampolines_and_runtime_main_256() {
     .unwrap_err();
     assert!(matches!(err, CompileError::Plan(_)), "{err:?}");
     assert_eq!(clj_aot::BuildMode::default(), clj_aot::BuildMode::Mixed);
+}
+
+#[test]
+fn native_emit_ir_lowers_units_constants_and_main_259() {
+    let ir = tmp("native.ll");
+    let report = clj_aot::build_str(
+        "(def k :x)\n(defn add [a b] (+ a b))\n(println (add 1 2) k \"s\" 1.5)\n",
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("native build");
+    assert_eq!(report, "aot: native 2/2 defns, embedded 0 top-level forms");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    for needle in [
+        "@rt_n_main(",
+        "@rt_n_declare_var(",
+        "@rt_n_declare_fn(",
+        "@rt_n_set_const(",
+        "@cljconst_init",
+    ] {
+        assert!(text.contains(needle), "missing {needle}:\n{text}");
+    }
 }

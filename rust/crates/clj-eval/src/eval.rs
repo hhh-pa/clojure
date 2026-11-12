@@ -1723,7 +1723,7 @@ impl Evaluator {
         body: crate::stm::TxBody<'_>,
     ) -> Result<Value, Signal> {
         let Value::Str(text) = v else {
-            return Err(self.throw(crate::core::cce_err(&v, "java.lang.String")));
+            return Err(self.throw(crate::core::cce_err(v, "java.lang.String")));
         };
         let reader = crate::reader::string_reader(self, text);
         let var = Var {

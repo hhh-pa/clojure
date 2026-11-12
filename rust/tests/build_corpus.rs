@@ -434,10 +434,11 @@ fn unsupported_files_fail_build_but_run() {
         assert_eq!(mixed_out, runout, "{stem}: mixed stdout vs run golden");
         assert!(mixed_run_err.is_empty(), "{stem}: mixed stderr");
         assert_eq!(mixed_run_code, 0, "{stem}: mixed exit");
+        // #259: `jit` runs it through the native compiler like `run`.
         let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
-        assert_eq!(jit_code, 1, "{stem}: jit exit");
-        assert!(jit_out.is_empty(), "{stem}: jit stdout: {jit_out:?}");
-        assert_eq!(jit_err, build_err, "{stem}: jit stderr == build stderr");
+        assert_eq!(jit_code, 0, "{stem}: jit exit: {}", lossy(&jit_err));
+        assert_eq!(jit_out, runout, "{stem}: jit stdout vs run golden");
+        assert!(jit_err.is_empty(), "{stem}: jit stderr");
     }
 }
 
@@ -522,9 +523,8 @@ fn nesting_limit_reports_clean_diagnostic() {
     );
     assert_eq!(lossy(&build_err), want, "19: exact text");
     let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
-    assert_eq!(jit_code, 1, "19: jit exit");
-    assert!(jit_out.is_empty(), "19: jit stdout: {jit_out:?}");
-    assert_eq!(jit_err, build_err, "19: jit stderr == build stderr");
+    assert_eq!(jit_code, 0, "19: jit exit: {}", lossy(&jit_err));
+    assert_eq!(jit_out, runout, "19: jit stdout vs golden");
     // #256: past the limit nothing goes native; the embedded
     // program runs like `run`.
     let (mixed_code, _, mixed_out, mixed_err, mixed_exit) = build_and_run("19-nesting", &path);
@@ -594,9 +594,8 @@ fn i214_unsupported_files_fail_build_but_run() {
     assert_eq!(mixed_out, runout, "{stem}: mixed stdout vs run golden");
     assert_eq!(mixed_run_code, 0, "{stem}: mixed exit");
     let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
-    assert_eq!(jit_code, 1, "{stem}: jit exit");
-    assert!(jit_out.is_empty(), "{stem}: jit stdout: {jit_out:?}");
-    assert_eq!(jit_err, build_err, "{stem}: jit stderr == build stderr");
+    assert_eq!(jit_code, 0, "{stem}: jit exit: {}", lossy(&jit_err));
+    assert_eq!(jit_out, runout, "{stem}: jit stdout vs run golden");
 }
 
 /// Lossy text of captured bytes.
@@ -691,7 +690,7 @@ fn mixed_build_reports_and_runs_without_source_256() {
     assert_eq!(built.status.code(), Some(0), "{}", lossy(&built.stderr));
     assert_eq!(
         lossy(&built.stderr),
-        "aot: native 1/2 defns, embedded 2 top-level forms\n"
+        "aot: native 2/2 defns, embedded 0 top-level forms\n"
     );
     std::fs::remove_dir_all(path.parent().expect("dir")).expect("remove source");
     let ran = Command::new(&prog).output().expect("run binary");

@@ -140,14 +140,23 @@ pub fn run_str(source: &str, source_path: &str, args: &[String]) -> Result<i32, 
             .expect("lowered module declares every mapped helper");
         ee.add_global_mapping(&func, addr as usize);
     }
+    call_main(&ee, args)
+}
+
+/// Call the module's C `main` with `args` as `argv`.
+fn call_main(
+    ee: &inkwell::execution_engine::ExecutionEngine<'_>,
+    args: &[String],
+) -> Result<i32, JitError> {
     let owned = c_argv(args);
     let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
     ptrs.push(std::ptr::null());
     let argc = owned.len() as i32;
-    // Safety: `to_module_jit` always emits C `main(argc, argv)
-    // -> i32` (verified before return), so `MainFn` matches the
-    // looked-up entry; `argv` holds `argc` valid C strings plus
-    // a NUL terminator, alive across the call.
+    // Safety: both lowerings (`to_module_jit`, verified before
+    // return, and the native compiler) emit C `main(argc, argv) ->
+    // i32`, so `MainFn` matches the looked-up entry; `argv` holds
+    // `argc` valid C strings plus a NUL terminator, alive across the
+    // call.
     let code =
         unsafe { jit_err(ee.get_function::<MainFn>("main"), "entry")?.call(argc, ptrs.as_ptr()) };
     Ok(code)
@@ -168,16 +177,7 @@ pub fn run_native_str(source: &str, source_path: &str, args: &[String]) -> Resul
             ee.add_global_mapping(&func, addr);
         }
     }
-    let owned = c_argv(args);
-    let mut ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
-    ptrs.push(std::ptr::null());
-    let argc = owned.len() as i32;
-    // Safety: the native module's `main(argc, argv) -> i32` matches
-    // `MainFn`; `argv` holds `argc` valid C strings plus a NUL
-    // terminator, alive across the call.
-    let code =
-        unsafe { jit_err(ee.get_function::<MainFn>("main"), "entry")?.call(argc, ptrs.as_ptr()) };
-    Ok(code)
+    call_main(&ee, args)
 }
 
 #[cfg(test)]
