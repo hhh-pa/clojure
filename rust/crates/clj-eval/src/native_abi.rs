@@ -534,3 +534,122 @@ pub fn class_name_of(value: &Value) -> Option<String> {
         _ => None,
     }
 }
+
+/// Call the current value of `var` (a direct-native call site): a
+/// native root runs its entry directly (no invoke dispatch), anything
+/// else (rebound, redefined) takes the general call.
+pub fn call_var(eval: &mut Evaluator, var: &Var, args: &[Value]) -> Step {
+    let callee = eval.deref_var_cached(var.id, &var.sym);
+    if let Some(native) = crate::ext::as_native(&callee) {
+        return (native.func)(eval, args).map_err(|e| eval.throw(e));
+    }
+    eval.call(&callee, args)
+}
+
+/// The registry's root epoch (bumps on every var root change).
+#[must_use]
+pub fn root_epoch(eval: &Evaluator) -> u64 {
+    eval.registry.epoch()
+}
+
+/// Whether any thread binding is live (then var reads must consult
+/// the binding stack).
+#[must_use]
+pub fn has_thread_bindings(eval: &Evaluator) -> bool {
+    !eval.bindings.is_empty()
+}
+
+/// Call `callee` (a cached var root) with `args`: a native runs its
+/// entry directly, anything else takes the general call.
+pub fn call_value(eval: &mut Evaluator, callee: &Value, args: &[Value]) -> Step {
+    if let Some(native) = crate::ext::as_native(callee) {
+        return (native.func)(eval, args).map_err(|e| eval.throw(e));
+    }
+    eval.call(callee, args)
+}
+
+/// [`call_value`] taking the arguments by value: a native with an
+/// owned-args entry gets them moved in (no per-arg clone/drop, and
+/// head-releasing loopers can free as they walk).
+pub fn call_value_owned(eval: &mut Evaluator, callee: &Value, args: smallvec::SmallVec<[Value; 4]>) -> Step {
+    if let Some(native) = crate::ext::as_native(callee) {
+        return match &native.owned {
+            Some(owned) => owned(eval, args).map_err(|e| eval.throw(e)),
+            None => (native.func)(eval, &args).map_err(|e| eval.throw(e)),
+        };
+    }
+    eval.call(callee, &args)
+}
+
+// ---- intrinsic steps (borrowed args, no var lookup) -------------------
+// Valid only where the compiled program cannot rebind the core var;
+// each mirrors the core native's own fast path and falls back to it.
+
+/// `(nth coll i)` / `(nth coll i not-found)`.
+pub fn nth(eval: &mut Evaluator, coll: &Value, idx: &Value, not_found: Option<&Value>) -> Step {
+    let n = crate::core::nth_index(idx).map_err(|e| eval.throw(e))?;
+    let nf = not_found.cloned();
+    if let Some(fast) = crate::coll::nth_fast_pub(coll, n, &nf) {
+        return fast.map_err(|e| eval.throw(e));
+    }
+    let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::smallvec![coll.clone(), idx.clone()];
+    if let Some(nf) = nf {
+        args.push(nf);
+    }
+    crate::coll::native_nth_owned(eval, args).map_err(|e| eval.throw(e))
+}
+
+/// Enter a direct native-to-native call (see
+/// `Evaluator::enter_native_call`).
+pub fn enter_call(eval: &mut Evaluator) -> bool {
+    eval.enter_native_call()
+}
+
+/// Leave a call entered with [`enter_call`].
+pub fn leave_call(eval: &mut Evaluator) {
+    eval.leave_native_call();
+}
+
+
+/// A core native's entries, resolved once (the compiled program
+/// cannot rebind core vars when it uses these).
+pub struct CoreEntry {
+    func: Arc<crate::ext::NativeImpl>,
+    owned: Option<Arc<crate::ext::OwnedNativeImpl>>,
+}
+
+/// Resolve var `var`'s root as a [`CoreEntry`] (`None`: not a native).
+pub fn core_entry(eval: &mut Evaluator, var: &Var) -> Option<CoreEntry> {
+    let root = eval.deref_var_cached(var.id, &var.sym);
+    crate::ext::as_native(&root).map(|n| CoreEntry {
+        func: Arc::clone(&n.func),
+        owned: n.owned.clone(),
+    })
+}
+
+/// Call a resolved core entry with moved args.
+pub fn call_core(eval: &mut Evaluator, entry: &CoreEntry, args: smallvec::SmallVec<[Value; 4]>) -> Step {
+    match &entry.owned {
+        Some(owned) => owned(eval, args).map_err(|e| eval.throw(e)),
+        None => (entry.func)(eval, &args).map_err(|e| eval.throw(e)),
+    }
+}
+
+/// The VM's covered-case intrinsics (`crate::vm_intrinsics`) by op
+/// code: 0 `nth`, 1 `get`, 2 `count`, 3 `contains?`, 4 `=`, 5 `not=`.
+/// `None`: the case is not covered (the caller runs the native).
+#[must_use]
+pub fn intrinsic(op: u32, args: &[Value]) -> Option<Value> {
+    use crate::vm_intrinsics as vi;
+    match (op, args) {
+        (0, [c, i]) => vi::nth_of(c, i, None),
+        (0, [c, i, nf]) => vi::nth_of(c, i, Some(nf)),
+        (1, [c, k]) => vi::get_of(c, k, None),
+        (1, [c, k, nf]) => vi::get_of(c, k, Some(nf)),
+        (2, [c]) => vi::count_of(c),
+        (3, [c, k]) => vi::contains_test(c, k).map(Value::Bool),
+        (4, [a, b]) => vi::scalar_eq(a, b).map(Value::Bool),
+        (5, [a, b]) => vi::scalar_eq(a, b).map(|e| Value::Bool(!e)),
+        _ => None,
+    }
+}

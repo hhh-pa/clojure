@@ -62,6 +62,9 @@ pub mod lazy;
 pub mod macros;
 pub mod multi;
 pub mod native_abi;
+
+/// The owned-args buffer native calls take (see `native_abi`).
+pub type SmallArgs = smallvec::SmallVec<[clj_value::Value; 4]>;
 pub mod ns;
 pub mod portdeps;
 pub(crate) mod printsys;

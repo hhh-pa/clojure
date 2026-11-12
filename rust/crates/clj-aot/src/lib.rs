@@ -188,6 +188,16 @@ fn native_module<'ctx>(
     let module = native::Lowerer::new(ctx)
         .lower_program(&front, source_path)
         .map_err(|native::Unsupported(r)| r)?;
+    // Native modules are optimized (inlining, mem2reg over scalars,
+    // CFG simplification of the inline value paths).
+    let machine = target::host_machine()?;
+    module
+        .run_passes(
+            "default<O2>",
+            &machine,
+            inkwell::passes::PassBuilderOptions::create(),
+        )
+        .map_err(|e| e.to_string())?;
     Ok((module, defns))
 }
 

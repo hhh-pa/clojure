@@ -53,6 +53,7 @@ pub(crate) struct VarSlot {
     ns: String,
     name: String,
     var: OnceLock<Var>,
+    core: OnceLock<Option<native_abi::CoreEntry>>,
 }
 
 /// Tables under construction (startup only).
@@ -127,12 +128,14 @@ pub(crate) fn declare_var(k: usize, ns: String, name: String) {
                 ns: String::new(),
                 name: String::new(),
                 var: OnceLock::new(),
+                core: OnceLock::new(),
             });
         }
         b.vars[k] = VarSlot {
             ns,
             name,
             var: OnceLock::new(),
+            core: OnceLock::new(),
         };
     });
 }
@@ -178,11 +181,41 @@ pub(crate) fn constant(k: usize) -> &'static Value {
 }
 
 /// Var `k`, interned on first use (in the then-current registry).
-pub(crate) fn var(k: usize) -> Var {
+pub(crate) fn var(k: usize) -> &'static Var {
     let slot = &tables().vars[k];
     slot.var
         .get_or_init(|| with_active(|eval| native_abi::intern_var(eval, &slot.ns, &slot.name)))
-        .clone()
+}
+
+thread_local! {
+    /// Per-var root cache `(epoch, root)`: valid while no thread
+    /// binding is live and the registry epoch is unchanged — the
+    /// interpreter's own direct-call validity rule.
+    static ROOTS: RefCell<Vec<Option<(u64, Value)>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The current value of var `k` (cached root fast path).
+pub(crate) fn root(eval: &mut Evaluator, k: usize) -> Value {
+    if native_abi::has_thread_bindings(eval) {
+        return native_abi::deref(eval, var(k));
+    }
+    let epoch = native_abi::root_epoch(eval);
+    let hit = ROOTS.with(|r| match r.borrow().get(k) {
+        Some(Some((e, v))) if *e == epoch => Some(v.clone()),
+        _ => None,
+    });
+    if let Some(v) = hit {
+        return v;
+    }
+    let v = native_abi::deref(eval, var(k));
+    ROOTS.with(|r| {
+        let mut r = r.borrow_mut();
+        if r.len() <= k {
+            r.resize(k + 1, None);
+        }
+        r[k] = Some((epoch, v.clone()));
+    });
+    v
 }
 
 /// A closure over compiled fn `k` with its captured values: a
@@ -195,14 +228,60 @@ pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> V
     let func = Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
         call_compiled(eval, &desc, &captured, args).map_err(native_abi::signal_to_native)
     });
-    Value::Extension(Arc::new(NativeFn {
+    let ext: Arc<dyn clj_value::ExtensionValue> = Arc::new(NativeFn {
         id: eval.next_id(),
         display,
         func,
         owned: None,
         meta: None,
         fast: Default::default(),
-    }))
+    });
+    CREATED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() <= k {
+            c.resize(k + 1, 0);
+        }
+        c[k] = Arc::as_ptr(&ext).cast::<()>() as usize;
+    });
+    Value::Extension(ext)
+}
+
+thread_local! {
+    /// The latest closure made per compiled fn (by data address): a
+    /// direct call site for `defn` k may call its code only while the
+    /// var's root is exactly that closure.
+    static CREATED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Var `k`'s native entry, resolved once (core vars of a program
+/// that cannot rebind them).
+pub(crate) fn core_entry(eval: &mut Evaluator, k: usize) -> Option<&'static native_abi::CoreEntry> {
+    let slot = &tables().vars[k];
+    slot.core
+        .get_or_init(|| native_abi::core_entry(eval, var(k)))
+        .as_ref()
+}
+
+/// Whether var `k`'s current root is the latest closure of compiled
+/// fn `desc` (no clone: reads the root cache).
+pub(crate) fn root_is_fn(eval: &mut Evaluator, k: usize, desc: usize) -> bool {
+    let want = CREATED.with(|c| c.borrow().get(desc).copied().unwrap_or(0));
+    if want == 0 {
+        return false;
+    }
+    if !native_abi::has_thread_bindings(eval) {
+        let epoch = native_abi::root_epoch(eval);
+        let hit = ROOTS.with(|r| match r.borrow().get(k) {
+            Some(Some((e, Value::Extension(x)))) if *e == epoch => Some(Arc::as_ptr(x).cast::<()>() as usize == want),
+            Some(Some((e, _))) if *e == epoch => Some(false),
+            _ => None,
+        });
+        if let Some(hit) = hit {
+            return hit;
+        }
+    }
+    let root = root(eval, k);
+    matches!(&root, Value::Extension(e) if Arc::as_ptr(e).cast::<()>() as usize == want)
 }
 
 /// Select the arity for `args` and run its code on this evaluator.
@@ -223,10 +302,15 @@ fn call_compiled(eval: &mut Evaluator, desc: &FnDesc, captured: &[Value], args: 
         },
     };
     native_abi::guarded(eval, |eval| {
-        let mut argv: Vec<Value> = args[..arity.fixed].to_vec();
-        if arity.variadic {
-            argv.push(native_abi::rest_args(&args[arity.fixed..]));
-        }
+        let packed: Vec<Value>;
+        let argv: &[Value] = if arity.variadic {
+            let mut v = args[..arity.fixed].to_vec();
+            v.push(native_abi::rest_args(&args[arity.fixed..]));
+            packed = v;
+            &packed
+        } else {
+            args
+        };
         let mut ret = Value::Nil;
         let status = {
             let _active = ActiveScope::enter(eval);

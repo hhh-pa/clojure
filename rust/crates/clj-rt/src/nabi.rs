@@ -344,8 +344,7 @@ pub unsafe extern "C" fn rt_n_const(out: *mut Value, k: u64) {
 /// `out` is a valid slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_n_deref(out: *mut Value, k: u64) {
-    let var = native::var(k as usize);
-    let v = with_active(|eval| native_abi::deref(eval, &var));
+    let v = with_active(|eval| native::root(eval, k as usize));
     unsafe { put(out, v) };
 }
 
@@ -355,7 +354,7 @@ pub unsafe extern "C" fn rt_n_deref(out: *mut Value, k: u64) {
 /// `out` is a valid slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_n_varref(out: *mut Value, k: u64) {
-    unsafe { put(out, Value::Var(native::var(k as usize))) };
+    unsafe { put(out, Value::Var(native::var(k as usize).clone())) };
 }
 
 /// `out = (f args…)`.
@@ -371,6 +370,111 @@ pub unsafe extern "C" fn rt_n_invoke(
 ) -> i32 {
     let (f, args) = unsafe { (slot(f), slots(args, n)) };
     let step = with_active(|eval| native_abi::invoke(eval, f, args));
+    unsafe { finish(out, step) }
+}
+
+/// `out = (var-k args…)` for a direct-native call site.
+///
+/// # Safety
+/// `out` valid; `args` valid for `n` slots.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_native(out: *mut Value, k: u64, args: *const Value, n: usize) -> i32 {
+    let args = unsafe { slots(args, n) };
+    let step = with_active(|eval| {
+        let callee = native::root(eval, k as usize);
+        native_abi::call_value(eval, &callee, args)
+    });
+    unsafe { finish(out, step) }
+}
+
+/// [`rt_n_native`] moving the `n` argument slots in (each left nil).
+///
+/// # Safety
+/// `out` valid; `args` valid and writable for `n` slots, distinct
+/// from `out`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_native_mv(out: *mut Value, k: u64, args: *mut Value, n: usize) -> i32 {
+    let mut moved: clj_eval::SmallArgs = clj_eval::SmallArgs::new();
+    for i in 0..n {
+        moved.push(unsafe { std::mem::replace(&mut *args.add(i), Value::Nil) });
+    }
+    let step = with_active(|eval| {
+        let callee = native::root(eval, k as usize);
+        native_abi::call_value_owned(eval, &callee, moved)
+    });
+    unsafe { finish(out, step) }
+}
+
+/// `out = (nth coll idx)` / `(nth coll idx nf)` (`nf` null when
+/// absent) — the `nth` intrinsic (no var lookup, borrowed args).
+///
+/// # Safety
+/// `out`, `coll`, `idx` valid; `nf` null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_nth(out: *mut Value, coll: *const Value, idx: *const Value, nf: *const Value) -> i32 {
+    let (coll, idx) = unsafe { (slot(coll), slot(idx)) };
+    let nf = (!nf.is_null()).then(|| unsafe { slot(nf) });
+    let step = with_active(|eval| native_abi::nth(eval, coll, idx, nf));
+    unsafe { finish(out, step) }
+}
+
+/// Enter a direct call of compiled `defn` `desc` through var `k`: 1
+/// when the var still holds that fn and the call depth/stack allow
+/// (the caller then calls the code and [`rt_n_leave`]), else 0 (take
+/// the general invoke).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_enter_fn(k: u64, desc: u64) -> u8 {
+    with_active(|eval| {
+        u8::from(native::root_is_fn(eval, k as usize, desc as usize) && native_abi::enter_call(eval))
+    })
+}
+
+/// Leave a call entered by [`rt_n_enter_fn`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_leave() {
+    with_active(native_abi::leave_call);
+}
+
+/// [`rt_n_native_mv`] for a core var of a program that cannot rebind
+/// it: the native entry is resolved once and called directly.
+///
+/// # Safety
+/// As [`rt_n_native_mv`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_core_mv(out: *mut Value, k: u64, args: *mut Value, n: usize) -> i32 {
+    let mut moved: clj_eval::SmallArgs = clj_eval::SmallArgs::new();
+    for i in 0..n {
+        moved.push(unsafe { std::mem::replace(&mut *args.add(i), Value::Nil) });
+    }
+    let step = with_active(|eval| match native::core_entry(eval, k as usize) {
+        Some(entry) => native_abi::call_core(eval, entry, moved),
+        None => {
+            let callee = native::root(eval, k as usize);
+            native_abi::call_value_owned(eval, &callee, moved)
+        }
+    });
+    unsafe { finish(out, step) }
+}
+
+/// A covered-case core intrinsic (`native_abi::intrinsic` op) over
+/// borrowed args; uncovered cases run var `k`'s native (args cloned).
+///
+/// # Safety
+/// `out` valid; `args` valid for `n` slots.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_n_intr(out: *mut Value, op: u32, k: u64, args: *const Value, n: usize) -> i32 {
+    let args = unsafe { slots(args, n) };
+    if let Some(v) = native_abi::intrinsic(op, args) {
+        unsafe { put(out, v) };
+        return 0;
+    }
+    let step = with_active(|eval| match native::core_entry(eval, k as usize) {
+        Some(entry) => native_abi::call_core(eval, entry, args.iter().cloned().collect()),
+        None => {
+            let callee = native::root(eval, k as usize);
+            native_abi::call_value(eval, &callee, args)
+        }
+    });
     unsafe { finish(out, step) }
 }
 
@@ -555,7 +659,7 @@ pub unsafe extern "C" fn rt_n_binding(
     let pairs: Vec<_> = (0..n)
         .map(|i| {
             (
-                native::var(unsafe { *ks.add(i) } as usize),
+                native::var(unsafe { *ks.add(i) } as usize).clone(),
                 values[i].clone(),
             )
         })
@@ -573,7 +677,7 @@ pub unsafe extern "C" fn rt_n_binding(
 pub unsafe extern "C" fn rt_n_set_var(out: *mut Value, k: u64, v: *const Value) -> i32 {
     let var = native::var(k as usize);
     let v = unsafe { slot(v) }.clone();
-    let step = with_active(|eval| native_abi::set_var(eval, &var, v));
+    let step = with_active(|eval| native_abi::set_var(eval, var, v));
     unsafe { finish(out, step) }
 }
 

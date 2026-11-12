@@ -166,7 +166,7 @@ pub(crate) fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
 /// over one lineage (see [`fork_for_thread`](Self::fork_for_thread)).
 pub struct Evaluator {
     pub registry: SharedRegistry,
-    bindings: Bindings,
+    pub(crate) bindings: Bindings,
     pub(crate) source: Arc<str>,
     /// `clojure.core/*ns*`'s var id once [`current_ns_name`] found it
     /// (0 = not yet; var ids start at 1).
@@ -2913,6 +2913,28 @@ impl Evaluator {
     /// Run one unbounded application under the #205 call-depth
     /// guard, on a grown stack segment when the native stack runs
     /// low (see [`apply_closure`](Self::apply_closure)).
+    /// Enter one native-to-native call under the interpreter's
+    /// depth limit and stack probe (`false`: take the guarded path,
+    /// which raises `StackOverflowError` or grows the stack).
+    pub(crate) fn enter_native_call(&mut self) -> bool {
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return false;
+        }
+        self.call_depth += 1;
+        if self.call_depth % STACK_PROBE_EVERY == 0
+            && stacker::remaining_stack().is_some_and(|r| r < STACK_RED_ZONE)
+        {
+            self.call_depth -= 1;
+            return false;
+        }
+        true
+    }
+
+    /// Leave a call entered by [`enter_native_call`](Self::enter_native_call).
+    pub(crate) fn leave_native_call(&mut self) {
+        self.call_depth -= 1;
+    }
+
     pub(crate) fn guarded_call(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<Value, Signal>,
