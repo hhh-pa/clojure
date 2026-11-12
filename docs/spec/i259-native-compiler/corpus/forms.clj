@@ -46,3 +46,7 @@
 (println (instance? String "x") String)
 (println ((fn [])) (let [a 1]) (do) (loop [] nil) (binding [] :empty-binding) (with-redefs [] :empty-redefs))
 (println (try (inc 1 2) (catch clojure.lang.ArityException _ :arity)) (try (dec) (catch clojure.lang.ArityException _ :arity0)))
+(defn ^{:v [(inc 1)]} meta-vec [] 1)
+(defn ^{:s #{(inc 2)}} meta-set [] 2)
+(defn ^{:m {:a (inc 3)}} meta-map [] 3)
+(println (:v (meta #'meta-vec)) (:s (meta #'meta-set)) (:m (meta #'meta-map)) (meta-vec) (meta-set) (meta-map))
