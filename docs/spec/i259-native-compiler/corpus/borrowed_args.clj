@@ -25,3 +25,5 @@
   [(get m :k) (nth (list 1 2 3) 1) (count (map inc [1 2])) (+ 1.5 2) (= [1] [1]) (max 1 2 3)])
 (println (fallbacks {:k 1}))
 (println (try (nth [1] 5) (catch IndexOutOfBoundsException _ :oob)) (try (assoc! (transient #{}) 1 1) (catch ClassCastException e (.getMessage e))))
+(defn four-args [a b c d] [(+ a b c d) (< a b c d) (str a b c d) (max a b c d)])
+(println (four-args 1 2 3 4) (four-args 4 3 2 1))

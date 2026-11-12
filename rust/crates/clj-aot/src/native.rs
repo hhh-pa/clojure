@@ -1663,19 +1663,24 @@ impl<'ctx> Lowerer<'ctx> {
             .as_deref()
             .and_then(|name| native_abi::inline_op(name, n))
             .unwrap_or(u32::MAX);
-        let aref = self.refs_slice(f, &refs);
-        let st = self
-            .call(
-                "rt_n_core_ref",
-                Some(self.i32t),
-                &[
-                    dest.into(),
-                    self.i32t.const_int(u64::from(op), false).into(),
-                    self.u64c(k),
-                    aref.into(),
-                ],
-            )
-            .expect("st");
+        let mut call_args: Vec<BasicMetadataValueEnum> = vec![
+            dest.into(),
+            self.i32t.const_int(u64::from(op), false).into(),
+            self.u64c(k),
+        ];
+        // 1-3 args go as direct operands; more through a slice.
+        let shim = match refs.len() {
+            1 => "rt_n_op1",
+            2 => "rt_n_op2",
+            3 => "rt_n_op3",
+            _ => "rt_n_core_ref",
+        };
+        if (1..=3).contains(&refs.len()) {
+            call_args.extend(refs.iter().map(|r| BasicMetadataValueEnum::from(*r)));
+        } else {
+            call_args.push(self.refs_slice(f, &refs).into());
+        }
+        let st = self.call(shim, Some(self.i32t), &call_args).expect("st");
         self.check(f, st);
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);

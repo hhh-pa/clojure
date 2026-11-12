@@ -689,31 +689,58 @@ const NARY_OP: u32 = 1 << 30;
 /// covered (or `id` names no op), so the caller runs the native.
 #[must_use]
 pub fn apply_inline(id: u32, args: &[&Value]) -> Option<Value> {
-    use crate::vm_ops::{APPLY1, APPLY2, APPLY3, APPLYN};
-    if id != u32::MAX && id & NARY_OP != 0 {
-        // A fold of the binary op, or a comparison chain that stops at
-        // the first false pair (like `clojure.core/<`).
-        let (_, op, chain) = APPLYN.get((id & !NARY_OP) as usize)?;
-        let (first, rest) = args.split_first()?;
-        if *chain {
-            let mut prev = *first;
-            for x in rest {
-                if !op(prev, x)?.is_truthy() {
-                    return Some(Value::Bool(false));
-                }
-                prev = x;
-            }
-            return Some(Value::Bool(true));
-        }
-        return rest.iter().try_fold((*first).clone(), |acc, x| op(&acc, x));
-    }
-    let i = id as usize;
+    use crate::vm_ops::APPLYN;
     match args {
-        [a] => APPLY1.get(i)?.1(a),
-        [a, b] => APPLY2.get(i)?.1(a, b),
-        [a, b, c] => APPLY3.get(i)?.1(a, b, c),
+        [a] => apply1(id, a),
+        [a, b] => apply2(id, a, b),
+        [a, b, c] => apply3(id, a, b, c),
+        _ if id != u32::MAX && id & NARY_OP != 0 => {
+            let (_, op, chain) = APPLYN.get((id & !NARY_OP) as usize)?;
+            nary(*op, *chain, args)
+        }
         _ => None,
     }
+}
+
+/// [`apply_inline`] for one arg.
+#[must_use]
+pub fn apply1(id: u32, a: &Value) -> Option<Value> {
+    crate::vm_ops::APPLY1.get(id as usize)?.1(a)
+}
+
+/// [`apply_inline`] for two args.
+#[must_use]
+pub fn apply2(id: u32, a: &Value, b: &Value) -> Option<Value> {
+    crate::vm_ops::APPLY2.get(id as usize)?.1(a, b)
+}
+
+/// [`apply_inline`] for three args (a ternary op, or a 3-arg fold or
+/// chain).
+#[must_use]
+pub fn apply3(id: u32, a: &Value, b: &Value, c: &Value) -> Option<Value> {
+    use crate::vm_ops::{APPLY3, APPLYN};
+    if id != u32::MAX && id & NARY_OP != 0 {
+        let (_, op, chain) = APPLYN.get((id & !NARY_OP) as usize)?;
+        return nary(*op, *chain, &[a, b, c]);
+    }
+    APPLY3.get(id as usize)?.1(a, b, c)
+}
+
+/// A fold of binary `op` over `args`, or (`chain`) a comparison chain
+/// stopping at the first false pair (like `clojure.core/<`).
+fn nary(op: crate::vm_ops::Apply2, chain: bool, args: &[&Value]) -> Option<Value> {
+    let (first, rest) = args.split_first()?;
+    if chain {
+        let mut prev = *first;
+        for x in rest {
+            if !op(prev, x)?.is_truthy() {
+                return Some(Value::Bool(false));
+            }
+            prev = x;
+        }
+        return Some(Value::Bool(true));
+    }
+    rest.iter().try_fold((*first).clone(), |acc, x| op(&acc, x))
 }
 
 // ---- extent forms over compiled body fns --------------------------------

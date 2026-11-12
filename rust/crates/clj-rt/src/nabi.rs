@@ -290,15 +290,66 @@ pub extern "C" fn rt_n_native_mv(out: &mut Value, k: u64, args: &mut CSlice<Valu
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_core_ref(out: &mut Value, op: u32, k: u64, args: &CSlice<&Value>) -> i32 {
     let args = args.get();
-    if let Some(v) = native_abi::apply_inline(op, args) {
-        *out = v;
-        return 0;
+    match native_abi::apply_inline(op, args) {
+        Some(v) => {
+            *out = v;
+            0
+        }
+        None => core_fallback(out, k, args),
     }
+}
+
+/// Fallback of the `rt_n_op*` shims: var `k`'s native with the args
+/// cloned.
+fn core_fallback(out: &mut Value, k: u64, args: &[&Value]) -> i32 {
     let owned = args.iter().map(|a| (*a).clone()).collect();
     finish(
         out,
         with_active(|eval| native::call_core_var(eval, k as usize, owned)),
     )
+}
+
+/// [`rt_n_core_ref`] for one borrowed arg (no argument array).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_op1(out: &mut Value, op: u32, k: u64, a: &Value) -> i32 {
+    match native_abi::apply1(op, a) {
+        Some(v) => {
+            *out = v;
+            0
+        }
+        None => core_fallback(out, k, &[a]),
+    }
+}
+
+/// [`rt_n_core_ref`] for two borrowed args (no argument array).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_op2(out: &mut Value, op: u32, k: u64, a: &Value, b: &Value) -> i32 {
+    match native_abi::apply2(op, a, b) {
+        Some(v) => {
+            *out = v;
+            0
+        }
+        None => core_fallback(out, k, &[a, b]),
+    }
+}
+
+/// [`rt_n_core_ref`] for three borrowed args (no argument array).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_op3(
+    out: &mut Value,
+    op: u32,
+    k: u64,
+    a: &Value,
+    b: &Value,
+    c: &Value,
+) -> i32 {
+    match native_abi::apply3(op, a, b, c) {
+        Some(v) => {
+            *out = v;
+            0
+        }
+        None => core_fallback(out, k, &[a, b, c]),
+    }
 }
 
 /// [`rt_n_core_ref`] over owned args (a local taken at its last use,
@@ -716,6 +767,9 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_invoke,
         rt_n_native_mv,
         rt_n_core_ref,
+        rt_n_op1,
+        rt_n_op2,
+        rt_n_op3,
         rt_n_core_own,
         rt_n_enter_fn,
         rt_n_leave,
