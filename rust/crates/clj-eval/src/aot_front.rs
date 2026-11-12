@@ -135,13 +135,27 @@ fn unit(eval: &mut Evaluator, form: &Value, front: &mut FrontEnd) -> Result<(), 
 pub fn is_env_effect(expr: &Expr) -> bool {
     match expr {
         Expr::Ns { .. } | Expr::DefMacro { .. } | Expr::Declare { .. } => true,
-        // A plain fn definition (no side effects to evaluate):
-        // macros may call it during later expansions.
-        Expr::Def { init, .. } => init.as_deref().is_none_or(|e| matches!(e, Expr::Fn(_))),
+        // A plain fn definition whose name metadata is side-effect
+        // free: macros may call it during later expansions.
+        Expr::Def { init, meta, .. } => {
+            init.as_deref().is_none_or(|e| matches!(e, Expr::Fn(_)))
+                && meta.iter().flatten().all(|(k, v)| is_pure(k) && is_pure(v))
+        }
         Expr::Invoke { head, .. } => {
             matches!(head.as_ref(), Expr::Global(var) if is_env_var(var))
         }
         Expr::DirectNative(call) => is_env_var(&call.var),
+        _ => false,
+    }
+}
+
+/// Whether evaluating `expr` cannot have side effects (constants and
+/// collection literals of constants).
+fn is_pure(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) | Expr::Quote(_) => true,
+        Expr::VecLit(items, _) | Expr::SetLit(items, _) => items.iter().all(is_pure),
+        Expr::MapLit(pairs, _) => pairs.iter().all(|(k, v)| is_pure(k) && is_pure(v)),
         _ => false,
     }
 }

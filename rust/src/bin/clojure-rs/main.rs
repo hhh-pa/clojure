@@ -633,10 +633,15 @@ fn cmd_jit(file: &Path, args: &[String]) -> ExitCode {
 fn cmd_jit_compile(file: &Path, source: &str, args: &[String]) -> ExitCode {
     let path = file.to_string_lossy();
     // Outside the pure subset, the full native compiler (#259) runs
-    // the program; its failure reports the subset diagnostic.
+    // the program. A program that does not compile reports its error
+    // like `run`; a construct the native compiler cannot lower
+    // reports the subset diagnostic.
     let result = match clj_aot::jit::run_str(source, &path, args) {
         Err(clj_aot::jit::JitError::Plan(diag)) => {
-            clj_aot::jit::run_native_str(source, &path, args).map_err(|_| diag)
+            match clj_aot::jit::run_native_str(source, &path, args) {
+                Err(clj_aot::jit::JitError::Plan(program)) => Err(program),
+                other => other.map_err(|_| diag),
+            }
         }
         other => other.map_err(|e| e.to_string()),
     };

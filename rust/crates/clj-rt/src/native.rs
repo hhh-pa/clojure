@@ -96,10 +96,8 @@ fn building<R>(f: impl FnOnce(&mut Building) -> R) -> R {
 
 fn tables() -> &'static Tables {
     let generation = GENERATION.load(std::sync::atomic::Ordering::Acquire);
-    if let Some((g, t)) = CACHED.get() {
-        if g == generation {
-            return t;
-        }
+    if let Some((_, t)) = CACHED.get().filter(|(g, _)| *g == generation) {
+        return t;
     }
     let current = TABLES.lock().expect("clj-rt native tables lock");
     let (g, t) = current.expect("native program tables frozen before use");

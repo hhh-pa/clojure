@@ -147,17 +147,24 @@ pub fn try_call(
     };
     // Catches match throws only; anything else unwinds through the
     // finally like an unmatched throw.
-    if let Signal::Throw(thrown) = &signal {
-        for (class, handler) in catches {
-            if thrown.class.matches(class) {
-                let result = eval.call(handler, &[caught(thrown.clone())]);
-                run_fin(eval)?;
-                return result;
-            }
+    let thrown = thrown_of(&signal);
+    for (class, handler) in catches {
+        if let Some(thrown) = thrown.filter(|t| t.class.matches(class)) {
+            let result = eval.call(handler, &[caught(thrown.clone())]);
+            run_fin(eval)?;
+            return result;
         }
     }
     run_fin(eval)?;
     Err(signal)
+}
+
+/// The throwable a signal carries (`None` for a non-throw signal).
+fn thrown_of(signal: &Signal) -> Option<&Throwable> {
+    match signal {
+        Signal::Throw(t) => Some(t),
+        Signal::Recur(_) => None,
+    }
 }
 
 /// `(binding [v x …] body)` over evaluated values.
@@ -774,4 +781,14 @@ pub fn defmacro(
 /// A failed `assert` (`message` already evaluated).
 pub fn assert_failed(eval: &mut Evaluator, message: Option<Value>, form: &str) -> Signal {
     eval.assert_failed(message, form)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_throws_carry_a_throwable() {
+        assert!(thrown_of(&Signal::Recur(Vec::new())).is_none());
+    }
 }

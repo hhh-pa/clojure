@@ -155,16 +155,35 @@ pub fn build_str(
                 module,
                 format!("aot: native {defns}/{defns} defns, embedded 0 top-level forms"),
             ),
-            Err(reason) => {
+            Err(fail) => {
                 let program = plan_mixed(source);
                 let module = lower::to_module_mixed(&ctx, &program, source_path)
                     .map_err(CompileError::Emit)?;
-                (module, format!("{} (native: {reason})", program.report()))
+                (module, format!("{} (native: {fail})", program.report()))
             }
         },
     };
     finish(&module, out, emit, link)?;
     Ok(report)
+}
+
+/// Why the native compiler declined a program.
+#[derive(Debug)]
+pub(crate) enum NativeFail {
+    /// The program itself does not compile (rendered exactly as `run`
+    /// reports it).
+    Program(String),
+    /// A construct the native compiler cannot lower (yet).
+    Unsupported(String),
+}
+
+impl std::fmt::Display for NativeFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Program(diag) => write!(f, "front end: {diag}"),
+            Self::Unsupported(reason) => write!(f, "{reason}"),
+        }
+    }
 }
 
 /// The full native compiler (issue #259): front end, then lowering
@@ -174,10 +193,10 @@ pub(crate) fn native_module<'ctx>(
     ctx: &'ctx Context,
     source: &str,
     source_path: &str,
-) -> Result<(inkwell::module::Module<'ctx>, usize), String> {
+) -> Result<(inkwell::module::Module<'ctx>, usize), NativeFail> {
     let mut eval = clj_eval::boot();
     let front = clj_eval::aot_front::front_end(&mut eval, source, source_path)
-        .map_err(|e| format!("front end: {e}"))?;
+        .map_err(|e| NativeFail::Program(clj_eval::script::run_diagnostic(source_path, &e)))?;
     let defns = front
         .units
         .iter()
@@ -187,17 +206,17 @@ pub(crate) fn native_module<'ctx>(
     std::mem::forget(eval);
     let module = native::Lowerer::new(ctx)
         .lower_program(&front, source_path)
-        .map_err(|native::Unsupported(r)| r)?;
+        .map_err(|native::Unsupported(r)| NativeFail::Unsupported(r))?;
     // Native modules are optimized (inlining, mem2reg over scalars,
     // CFG simplification of the inline value paths).
-    let machine = target::host_machine()?;
+    let machine = target::host_machine().map_err(NativeFail::Unsupported)?;
     module
         .run_passes(
             "default<O2>",
             &machine,
             inkwell::passes::PassBuilderOptions::create(),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| NativeFail::Unsupported(e.to_string()))?;
     Ok((module, defns))
 }
 

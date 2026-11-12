@@ -169,7 +169,11 @@ fn call_main(
 /// compiled natively (the caller reports it).
 pub fn run_native_str(source: &str, source_path: &str, args: &[String]) -> Result<i32, JitError> {
     let ctx = Context::create();
-    let (module, _) = crate::native_module(&ctx, source, source_path).map_err(JitError::Jit)?;
+    let (module, _) = crate::native_module(&ctx, source, source_path).map_err(|e| match e {
+        // The program's own compile error, exactly as `run` reports it.
+        crate::NativeFail::Program(diag) => JitError::Plan(diag),
+        other => JitError::Jit(other.to_string()),
+    })?;
     let engine = module.create_jit_execution_engine(OptimizationLevel::None);
     let ee = jit_err(engine, "engine")?;
     for (name, addr) in cljrt::nabi::native_symbols() {

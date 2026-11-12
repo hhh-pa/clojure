@@ -583,3 +583,26 @@ fn native_unreadable_constant_falls_back_to_mixed_259() {
         "{report}"
     );
 }
+
+#[test]
+fn native_build_does_not_run_side_effecting_def_metadata_259() {
+    // A fn def whose name metadata has a side effect is only analyzed
+    // at build time (the effect runs once, in the built program).
+    let ir = tmp("side.ll");
+    let report = clj_aot::build_str(
+        "(defn ^{:k (throw (ex-info \"ran at build time\" {}))} f [] 1)\n(println (f))\n",
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("native build");
+    std::fs::remove_file(&ir).expect("cleanup");
+    // Had the metadata run at build time, the front end would have
+    // failed and the build would have fallen back to mixed.
+    assert_eq!(report, "aot: native 1/1 defns, embedded 0 top-level forms");
+}
