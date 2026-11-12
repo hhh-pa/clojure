@@ -183,3 +183,58 @@ fn linked_binary_reports_runtime_errors() {
         "f.clj:1:8: java.lang.ArithmeticException: / by zero\n"
     );
 }
+
+/// `build_str` in `mode`, then run the binary with `args`.
+fn build_mode_and_run(name: &str, source: &str, args: &[&str]) -> (String, String, i32, String) {
+    let dir = tmp(name);
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let out = dir.join(format!("prog{}", exe_suffix()));
+    let report = clj_aot::build_str(
+        source,
+        "f.clj",
+        &out,
+        &EmitOptions::default(),
+        &LinkOptions {
+            runtime_archive: Some(ensure_archive()),
+            exe_dir: dir.clone(),
+            linker: None,
+        },
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let ran = Command::new(&out).args(args).output().expect("run binary");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+    (
+        String::from_utf8_lossy(&ran.stdout).into_owned(),
+        String::from_utf8_lossy(&ran.stderr).into_owned(),
+        ran.status.code().expect("exit code"),
+        report,
+    )
+}
+
+#[test]
+fn mixed_binary_interns_natives_and_runs_embedded_256() {
+    // `add` (arity 2) and `twice` (arity 1, calls `add`) go native;
+    // `fmt` and the tops stay embedded and call them through vars.
+    let source = "(defn add [a b] (+ a b))\n\
+                  (defn twice [x] (add x x))\n\
+                  (defn fmt [x] (str \"<\" x \">\"))\n\
+                  (println (fmt (twice (add 1 2))) *command-line-args*)\n\
+                  (print (try (add :a 1) (catch ClassCastException _ :cce)))\n";
+    let (stdout, stderr, code, report) = build_mode_and_run("mixed", source, &["x"]);
+    assert_eq!(report, "aot: native 2/3 defns, embedded 3 top-level forms");
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("<6> (x)\n:cce", "", 0)
+    );
+}
+
+#[test]
+fn mixed_binary_native_failure_exits_like_run_256() {
+    let (stdout, stderr, code, _) =
+        build_mode_and_run("mixed-fail", "(defn f [v] (nth v 3))\n(f [1])\n", &[]);
+    assert_eq!(stdout, "");
+    assert_eq!(code, 1);
+    assert!(stderr.starts_with("f.clj:"), "{stderr}");
+    assert!(stderr.contains("IndexOutOfBoundsException"), "{stderr}");
+}

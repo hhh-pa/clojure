@@ -162,23 +162,33 @@ watches, history vars), `locking`, `add-watch` /
 ([`rust/core-coverage.md`](rust/core-coverage.md) is normative and
 CI-enforced: listed vars must resolve, excluded ones must not).
 
-**AOT (`build`).** Compiles the pure subset — top-level fixed-arity
-`defn` over Int/Double/Bool/Str/Keyword/Vector value flow, `if`/`do`/`let`
+**AOT (`build`).** Every readable program builds (issue #256). Within
+the pure subset — top-level fixed-arity `defn` over
+Int/Double/Bool/Str/Keyword/Vector value flow, `if`/`do`/`let`/`loop`
 + direct self-recursion, calls to a closed 19-primitive set
 (`+ - * quot < <= > >= = count nth get conj long int
-transient conj! assoc! persistent!`), `print` — to a
-native binary linked against the shipped `clj-rt` runtime archive.
-Anything else fails the compile with
-`path:line:col: unsupported form in AOT subset: form (hint)`;
-runtime failures print `path:line:col: Class: message` with the
-true call-site span and exit 1. Host-only, no debug info, no
+transient conj! assoc! persistent!`), `print` — code is lowered to
+native code linked against the shipped `clj-rt` runtime archive. A
+program outside the subset builds **mixed**: each subset `defn` is
+still lowered natively, and everything else stays in the binary as
+source that the linked runtime loads at startup through `run`'s own
+pipeline (same binding frame, live reads, diagnostics and exit
+codes), with each native `defn` interned at its original load
+position. Mixed binaries need no `.clj` at runtime, bind
+`*command-line-args*` from argv, and follow `run` for `-main`
+(never called implicitly). `build --report` prints
+`aot: native N/M defns, embedded K top-level forms` to stderr;
+`build --strict` restores the old behavior of failing with
+`path:line:col: unsupported form in AOT subset: form (hint)`.
+Pure-subset binaries print runtime failures as `path:line:col:
+Class: message` and exit 1; host-only, no debug info, no
 tail-call optimization (deep self-recursion overflows like the
-JVM); `main` drops every slot and takes no arguments
-(`*command-line-args*` is unconveyed). Primitives dispatch through
+JVM); a pure binary's `main` drops every slot and passes argv to
+an arity-1 `-main` after the tops run (`*command-line-args*` is
+unconveyed there). Primitives dispatch through
 the interpreter's own natives, so AOT and `run` cannot drift.
 `jit` runs the same pure subset in-process through the LLVM JIT
-(no binary emitted); its file args reach `-main` as argv, unlike
-`build`'s unconveyed arguments.
+(no binary emitted); its file args reach `-main` as argv.
 
 ## Accepted differences
 

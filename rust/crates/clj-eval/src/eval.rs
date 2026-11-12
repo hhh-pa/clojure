@@ -611,11 +611,22 @@ impl Evaluator {
         text: &str,
         hook: &mut dyn clj_reader::ReadHooks,
     ) -> Result<Vec<Value>, SourceError> {
+        self.read_forms_into(text, hook, None)
+    }
+
+    /// [`read_forms`](Self::read_forms), optionally recording each
+    /// form's char range.
+    fn read_forms_into(
+        &mut self,
+        text: &str,
+        hook: &mut dyn clj_reader::ReadHooks,
+        ranges: Option<&mut Vec<std::ops::Range<usize>>>,
+    ) -> Result<Vec<Value>, SourceError> {
         let (reader, opts) = Self::read_forms_pre(self, text, 1);
         match opts {
             Ok(mut opts) => {
                 let mut reader = reader;
-                Self::read_forms_loop(self, &mut reader, hook, &mut opts)
+                Self::read_forms_loop(self, &mut reader, hook, &mut opts, ranges)
             }
             Err(cce) => Err(crate::reader::executing_wrap(
                 reader.line(),
@@ -625,6 +636,21 @@ impl Evaluator {
                 hook.fresh_id(),
             )),
         }
+    }
+
+    /// [`read_forms`](Self::read_forms) plus each top-level form's
+    /// char range in the `\r\n`-normalized text (issue #256: the
+    /// AOT build masks native `defn`s out of the embedded source).
+    /// A range starts after the previous form (or the skipped
+    /// leading whitespace), so trivia before a form belongs to it.
+    pub fn read_forms_ranged(
+        &mut self,
+        text: &str,
+        hook: &mut dyn clj_reader::ReadHooks,
+    ) -> Result<(Vec<Value>, Vec<std::ops::Range<usize>>), SourceError> {
+        let mut ranges = Vec::new();
+        let forms = self.read_forms_into(text, hook, Some(&mut ranges))?;
+        Ok((forms, ranges))
     }
 
     /// [`read_forms`](Self::read_forms) with the live evaluator
@@ -721,13 +747,18 @@ impl Evaluator {
         reader: &mut clj_reader::Reader,
         hook: &mut dyn clj_reader::ReadHooks,
         opts: &mut ReaderOpts,
+        mut ranges: Option<&mut Vec<std::ops::Range<usize>>>,
     ) -> Result<Vec<Value>, SourceError> {
         let mut forms = Vec::new();
         loop {
             Self::snap_data_readers(eval, opts)?;
             reader.set_opts(opts);
+            let start = reader.capture_mark();
             match reader.read_form(false, hook) {
                 Ok(Some(v)) => {
+                    if let Some(ranges) = ranges.as_deref_mut() {
+                        ranges.push(start..reader.capture_mark());
+                    }
                     Self::drain_data_readers(eval, reader, opts.suppress_read)?;
                     forms.push(Self::resolve_data_readers(eval, v, opts.suppress_read)?);
                 }

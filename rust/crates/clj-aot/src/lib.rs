@@ -31,7 +31,7 @@ pub mod target;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use clj_eval::plan_source;
+use clj_eval::{plan_mixed, plan_source};
 use inkwell::context::Context;
 
 use link::{LinkError, current_platform, find_archive, link_command, run_link};
@@ -110,8 +110,59 @@ fn temp_obj_path() -> PathBuf {
     std::env::temp_dir().join(format!("clj-aot-{}-{seq}-{nanos}.o", std::process::id()))
 }
 
+/// How `build` treats a program outside the pure subset (issue
+/// #256, spec D8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BuildMode {
+    /// Fall back to a mixed build: subset `defn`s native, the rest
+    /// embedded and loaded at startup like `run` (every readable
+    /// program builds).
+    #[default]
+    Mixed,
+    /// Fail with the first unsupported form (`build --strict`, and
+    /// the library's [`compile_str`]).
+    Strict,
+}
+
 /// Compile `source` (named `source_path` in spans) to the `out`
-/// binary: plan → module → object → link.
+/// binary, falling back per `mode`. Returns the one-line coverage
+/// report (`aot: native N/M defns, embedded K top-level forms`).
+pub fn build_str(
+    source: &str,
+    source_path: &str,
+    out: &Path,
+    emit: &EmitOptions,
+    link: &LinkOptions,
+    mode: BuildMode,
+) -> Result<String, CompileError> {
+    let ctx = Context::create();
+    let (module, report) = match plan_source(source) {
+        Ok(program) => {
+            let n = program.fns.len();
+            let module =
+                lower::to_module(&ctx, &program, source_path).map_err(CompileError::Emit)?;
+            (
+                module,
+                format!("aot: native {n}/{n} defns, embedded 0 top-level forms"),
+            )
+        }
+        Err(e) if mode == BuildMode::Strict => {
+            return Err(CompileError::Plan(e.diagnostic(source_path)));
+        }
+        Err(_) => {
+            let program = plan_mixed(source);
+            let module =
+                lower::to_module_mixed(&ctx, &program, source_path).map_err(CompileError::Emit)?;
+            (module, program.report())
+        }
+    };
+    finish(&module, out, emit, link)?;
+    Ok(report)
+}
+
+/// Compile `source` (named `source_path` in spans) to the `out`
+/// binary: plan → module → object → link, failing on the first
+/// form outside the pure subset ([`BuildMode::Strict`]).
 pub fn compile_str(
     source: &str,
     source_path: &str,
@@ -119,23 +170,31 @@ pub fn compile_str(
     emit: &EmitOptions,
     link: &LinkOptions,
 ) -> Result<(), CompileError> {
-    let program = plan_source(source).map_err(|e| CompileError::Plan(e.diagnostic(source_path)))?;
-    let ctx = Context::create();
-    let module = lower::to_module(&ctx, &program, source_path).map_err(CompileError::Emit)?;
+    build_str(source, source_path, out, emit, link, BuildMode::Strict).map(|_| ())
+}
+
+/// Emit the requested artifacts, or link the binary when none was
+/// requested (a temporary object, removed after linking).
+fn finish(
+    module: &inkwell::module::Module<'_>,
+    out: &Path,
+    emit: &EmitOptions,
+    link: &LinkOptions,
+) -> Result<(), CompileError> {
     if let Some(ir_path) = &emit.emit_ir {
         std::fs::write(ir_path, module.print_to_string().to_string())
             .map_err(|e| io_err(ir_path, e))?;
     }
     if let Some(obj_path) = &emit.emit_obj {
         let machine = target::host_machine().map_err(CompileError::Target)?;
-        target::emit_object(&machine, &module, obj_path).map_err(CompileError::Emit)?;
+        target::emit_object(&machine, module, obj_path).map_err(CompileError::Emit)?;
     }
     if emit.emit_ir.is_some() || emit.emit_obj.is_some() {
         return Ok(());
     }
     let machine = target::host_machine().map_err(CompileError::Target)?;
     let tmp = temp_obj_path();
-    target::emit_object(&machine, &module, &tmp).map_err(CompileError::Emit)?;
+    target::emit_object(&machine, module, &tmp).map_err(CompileError::Emit)?;
     let platform = current_platform();
     let archive = find_archive(&link.exe_dir, link.runtime_archive.as_deref(), platform)
         .map_err(CompileError::Link)?;

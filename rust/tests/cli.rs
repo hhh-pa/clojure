@@ -526,6 +526,7 @@ fn build_plan_error_passes_the_diagnostic_through() {
     let prog = dir.join("prog");
     let out = build_argv(&[
         OsStr::new("build"),
+        OsStr::new("--strict"),
         file.as_os_str(),
         OsStr::new("-o"),
         prog.as_os_str(),
@@ -544,7 +545,8 @@ fn build_plan_error_passes_the_diagnostic_through() {
 #[test]
 #[cfg(feature = "aot")]
 fn build_nesting_depth_exits_1_with_diagnostic() {
-    // Depth failures print verbatim (no `build: ` prefix), exit 1.
+    // Depth failures print verbatim (no `build: ` prefix), exit 1
+    // (`--strict`: a default build embeds the program instead, #256).
     use std::ffi::OsStr;
     let dir = build_tmp("nest-err");
     std::fs::create_dir_all(&dir).expect("tmp dir");
@@ -554,6 +556,7 @@ fn build_nesting_depth_exits_1_with_diagnostic() {
     let prog = dir.join("prog");
     let out = build_argv(&[
         OsStr::new("build"),
+        OsStr::new("--strict"),
         file.as_os_str(),
         OsStr::new("-o"),
         prog.as_os_str(),

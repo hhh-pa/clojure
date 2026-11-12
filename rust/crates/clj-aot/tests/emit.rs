@@ -486,3 +486,43 @@ fn nesting_backstops_user_macros() {
         )
     );
 }
+
+#[test]
+fn mixed_emit_ir_lowers_trampolines_and_runtime_main_256() {
+    let ir = tmp("mixed.ll");
+    let report = clj_aot::build_str(
+        "(defn add [a b] (+ a b))\n(println (add 1 2))\n",
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("mixed build");
+    assert_eq!(report, "aot: native 1/1 defns, embedded 1 top-level forms");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    for needle in [
+        "define ptr @cljtramp_0(ptr",
+        "call void @rt_register_native(i64 0",
+        "call i32 @rt_run_program(",
+        "(clj.aot/n 0)",
+    ] {
+        assert!(text.contains(needle), "missing {needle}:\n{text}");
+    }
+    // Strict mode keeps the first-unsupported-form failure.
+    let err = clj_aot::build_str(
+        "(println 1)\n",
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions::default(),
+        &no_link(),
+        clj_aot::BuildMode::Strict,
+    )
+    .unwrap_err();
+    assert!(matches!(err, CompileError::Plan(_)), "{err:?}");
+    assert_eq!(clj_aot::BuildMode::default(), clj_aot::BuildMode::Mixed);
+}

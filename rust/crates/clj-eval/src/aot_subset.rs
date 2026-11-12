@@ -51,6 +51,9 @@ use crate::error::{CompileError, compile_diagnostic, span_of};
 use crate::eval::{Evaluator, SourceError};
 use crate::ns::boot;
 
+mod mixed;
+pub use mixed::{MIXED_INTERN_NS, MixedProgram, intern_call, plan_mixed};
+
 /// A closed primitive call in the AOT subset (spec 2.4): the runtime
 /// delegates each to the interpreter's own native, so semantics and
 /// error texts are shared, never reimplemented.
@@ -675,6 +678,16 @@ struct Planner {
     main_next: usize,
 }
 
+/// A [`Planner`] rollback point (mixed planning retries one
+/// top-level form at a time and drops a failed form's partial
+/// registration).
+struct PlannerSnapshot {
+    fns: usize,
+    by_name: HashMap<String, usize>,
+    main: usize,
+    main_next: usize,
+}
+
 impl Planner {
     fn new() -> Self {
         Self {
@@ -683,6 +696,22 @@ impl Planner {
             main: Vec::new(),
             main_next: 0,
         }
+    }
+
+    fn snapshot(&self) -> PlannerSnapshot {
+        PlannerSnapshot {
+            fns: self.fns.len(),
+            by_name: self.by_name.clone(),
+            main: self.main.len(),
+            main_next: self.main_next,
+        }
+    }
+
+    fn restore(&mut self, snapshot: PlannerSnapshot) {
+        self.fns.truncate(snapshot.fns);
+        self.by_name = snapshot.by_name;
+        self.main.truncate(snapshot.main);
+        self.main_next = snapshot.main_next;
     }
 
     fn finish(self) -> SubsetProgram {

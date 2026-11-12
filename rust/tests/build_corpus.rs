@@ -127,6 +127,16 @@ fn build_and_run_with(
     path: &std::path::Path,
     args: &[&str],
 ) -> (i32, Vec<u8>, Vec<u8>, Vec<u8>, i32) {
+    build_and_run_flags(name, path, args, &[])
+}
+
+/// `build_and_run_with` plus extra `build` flags (`--strict`).
+fn build_and_run_flags(
+    name: &str,
+    path: &std::path::Path,
+    args: &[&str],
+    flags: &[&str],
+) -> (i32, Vec<u8>, Vec<u8>, Vec<u8>, i32) {
     let dir = tmp(name);
     std::fs::create_dir_all(&dir).expect("tmp dir");
     let prog = dir.join(format!("prog{}", exe_suffix()));
@@ -140,6 +150,7 @@ fn build_and_run_with(
             OsStr::new("--runtime-archive"),
             archive.as_os_str(),
         ])
+        .args(flags)
         .output()
         .expect("spawn clojure-rs build");
     let build_code = built.status.code().expect("build exit code");
@@ -408,13 +419,21 @@ fn unsupported_files_fail_build_but_run() {
         assert_eq!(run_code, 0, "{stem}: run exit");
         assert!(run_err.is_empty(), "{stem}: run stderr: {run_err:?}");
         assert_eq!(run_out, runout, "{stem}: run stdout vs golden");
-        let (build_code, build_err, _, _, _) = build_and_run(stem, &path);
+        let (build_code, build_err, _, _, _) = build_and_run_flags(stem, &path, &[], &["--strict"]);
         assert_eq!(build_code, 1, "{stem}: build exit");
         let want = format!(
             "{}:{line}:{col}: unsupported form in AOT subset: {form} ({hint})\n",
             path.display()
         );
         assert_eq!(lossy(&build_err), want, "{stem}: build stderr");
+        // #256: without `--strict` the same program builds mixed
+        // and prints exactly what `run` prints.
+        let (mixed_code, mixed_err, mixed_out, mixed_run_err, mixed_run_code) =
+            build_and_run(stem, &path);
+        assert_eq!(mixed_code, 0, "{stem}: mixed build: {}", lossy(&mixed_err));
+        assert_eq!(mixed_out, runout, "{stem}: mixed stdout vs run golden");
+        assert!(mixed_run_err.is_empty(), "{stem}: mixed stderr");
+        assert_eq!(mixed_run_code, 0, "{stem}: mixed exit");
         let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
         assert_eq!(jit_code, 1, "{stem}: jit exit");
         assert!(jit_out.is_empty(), "{stem}: jit stdout: {jit_out:?}");
@@ -432,7 +451,8 @@ fn malformed_files_report_direct_spans() {
     let (run_out, run_err, run_code) = run_file(&p17);
     assert_eq!(run_code, 1, "17: run exit");
     assert!(run_out.is_empty(), "17: run stdout: {run_out:?}");
-    let (build_code, build_err, _, _, _) = build_and_run("17-analyzer", &p17);
+    let (build_code, build_err, _, _, _) =
+        build_and_run_flags("17-analyzer", &p17, &[], &["--strict"]);
     assert_eq!(build_code, 1, "17: build exit");
     assert_eq!(build_err, run_err, "17: build stderr == run stderr");
     let want17 = format!(
@@ -444,6 +464,13 @@ fn malformed_files_report_direct_spans() {
     assert_eq!(jit_code, 1, "17: jit exit");
     assert!(jit_out.is_empty(), "17: jit stdout: {jit_out:?}");
     assert_eq!(jit_err, build_err, "17: jit stderr == build stderr");
+    // #256: a mixed build defers the failure to runtime, where the
+    // binary fails exactly like `run`.
+    let (mixed_code, _, mixed_out, mixed_err, mixed_exit) = build_and_run("17-analyzer", &p17);
+    assert_eq!(mixed_code, 0, "17: mixed build exit");
+    assert!(mixed_out.is_empty(), "17: mixed stdout: {mixed_out:?}");
+    assert_eq!(mixed_err, run_err, "17: mixed stderr == run stderr");
+    assert_eq!(mixed_exit, 1, "17: mixed exit");
 
     let p18 = corpus.join("unsupported/18-reader.clj");
     let (run_out, run_err, run_code) = run_file(&p18);
@@ -453,7 +480,8 @@ fn malformed_files_report_direct_spans() {
         lossy(&run_err).contains("Syntax error reading source: "),
         "18: run keeps the load wrapper: {run_err:?}"
     );
-    let (build_code, build_err, _, _, _) = build_and_run("18-reader", &p18);
+    let (build_code, build_err, _, _, _) =
+        build_and_run_flags("18-reader", &p18, &[], &["--strict"]);
     assert_eq!(build_code, 1, "18: build exit");
     let want18 = format!("{}:1:2: Unmatched delimiter: )\n", p18.display());
     assert_eq!(lossy(&build_err), want18, "18: exact text");
@@ -461,6 +489,13 @@ fn malformed_files_report_direct_spans() {
     assert_eq!(jit_code, 1, "18: jit exit");
     assert!(jit_out.is_empty(), "18: jit stdout: {jit_out:?}");
     assert_eq!(jit_err, build_err, "18: jit stderr == build stderr");
+    // #256: the mixed binary keeps `run`'s load wrapper (no
+    // divergence once the reader runs at startup).
+    let (mixed_code, _, mixed_out, mixed_err, mixed_exit) = build_and_run("18-reader", &p18);
+    assert_eq!(mixed_code, 0, "18: mixed build exit");
+    assert!(mixed_out.is_empty(), "18: mixed stdout: {mixed_out:?}");
+    assert_eq!(mixed_err, run_err, "18: mixed stderr == run stderr");
+    assert_eq!(mixed_exit, 1, "18: mixed exit");
 }
 
 #[test]
@@ -478,7 +513,8 @@ fn nesting_limit_reports_clean_diagnostic() {
     assert_eq!(run_code, 0, "19: run exit");
     assert!(run_err.is_empty(), "19: run stderr: {run_err:?}");
     assert_eq!(run_out, runout, "19: run stdout vs golden");
-    let (build_code, build_err, _, _, _) = build_and_run("19-nesting", &path);
+    let (build_code, build_err, _, _, _) =
+        build_and_run_flags("19-nesting", &path, &[], &["--strict"]);
     assert_eq!(build_code, 1, "19: build exit");
     let want = format!(
         "{}:1:164: nesting depth 41 exceeds the AOT build limit (40)\n",
@@ -489,6 +525,13 @@ fn nesting_limit_reports_clean_diagnostic() {
     assert_eq!(jit_code, 1, "19: jit exit");
     assert!(jit_out.is_empty(), "19: jit stdout: {jit_out:?}");
     assert_eq!(jit_err, build_err, "19: jit stderr == build stderr");
+    // #256: past the limit nothing goes native; the embedded
+    // program runs like `run`.
+    let (mixed_code, _, mixed_out, mixed_err, mixed_exit) = build_and_run("19-nesting", &path);
+    assert_eq!(mixed_code, 0, "19: mixed build exit");
+    assert_eq!(mixed_out, runout, "19: mixed stdout vs golden");
+    assert!(mixed_err.is_empty(), "19: mixed stderr: {mixed_err:?}");
+    assert_eq!(mixed_exit, 0, "19: mixed exit");
 }
 
 #[test]
@@ -539,13 +582,17 @@ fn i214_unsupported_files_fail_build_but_run() {
     assert_eq!(run_code, 0, "{stem}: run exit");
     assert!(run_err.is_empty(), "{stem}: run stderr: {run_err:?}");
     assert_eq!(run_out, runout, "{stem}: run stdout vs golden");
-    let (build_code, build_err, _, _, _) = build_and_run(stem, &path);
+    let (build_code, build_err, _, _, _) = build_and_run_flags(stem, &path, &[], &["--strict"]);
     assert_eq!(build_code, 1, "{stem}: build exit");
     let want = format!(
         "{}:{line}:{col}: unsupported form in AOT subset: {form} ({hint})\n",
         path.display()
     );
     assert_eq!(lossy(&build_err), want, "{stem}: build stderr");
+    let (mixed_code, mixed_err, mixed_out, _, mixed_run_code) = build_and_run(stem, &path);
+    assert_eq!(mixed_code, 0, "{stem}: mixed build: {}", lossy(&mixed_err));
+    assert_eq!(mixed_out, runout, "{stem}: mixed stdout vs run golden");
+    assert_eq!(mixed_run_code, 0, "{stem}: mixed exit");
     let (jit_out, jit_err, jit_code) = jit_file(&path, &[]);
     assert_eq!(jit_code, 1, "{stem}: jit exit");
     assert!(jit_out.is_empty(), "{stem}: jit stdout: {jit_out:?}");
@@ -555,4 +602,119 @@ fn i214_unsupported_files_fail_build_but_run() {
 /// Lossy text of captured bytes.
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Write `source` to a fresh temp file named `name.clj`.
+fn temp_source(name: &str, source: &str) -> PathBuf {
+    let dir = tmp(&format!("src-{name}"));
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let path = dir.join(format!("{name}.clj"));
+    std::fs::write(&path, source).expect("write source");
+    path
+}
+
+/// Issue #256 BDD scenarios: a mixed build prints exactly what
+/// `run` prints (stdout, stderr, exit code), with argv, stdin-less
+/// runs, and failures included.
+#[test]
+fn mixed_builds_match_run_256() {
+    let cases: [(&str, &str, &[&str]); 8] = [
+        (
+            "native-and-embedded",
+            "(defn sq [x] (* x x))\n(println (map sq [1 2 3]))\n",
+            &[],
+        ),
+        (
+            "main-runs-once",
+            "(defn -main [s] (+ s 1))\n(println (-main 1))\n(defn tail [] :t)\n",
+            &[],
+        ),
+        ("argv", "(println *command-line-args*)\n", &["a", "b"]),
+        (
+            "caught-native-error",
+            "(defn f [v] (nth v 5))\n\
+             (println (try (f [1]) (catch IndexOutOfBoundsException e :caught)))\n",
+            &[],
+        ),
+        (
+            "uncaught-native-error",
+            "(defn f [v] (nth v 5))\n(println :before)\n(f [1])\n",
+            &[],
+        ),
+        ("uncaught-embedded-error", "(println 1)\n(nth [] 5)\n", &[]),
+        ("trailing-print", "(print \"no newline\")\n", &[]),
+        (
+            "deep-self-recursion",
+            "(defn f [n] (if (= n 0) 0 (+ 1 (f (- n 1)))))\n\
+             (println (try (f 10000000) (catch StackOverflowError e :so)))\n",
+            &[],
+        ),
+    ];
+    for (name, source, args) in cases {
+        let path = temp_source(name, source);
+        let mut run = bin();
+        run.arg("run").arg(&path).args(args);
+        let want = run.output().expect("spawn clojure-rs run");
+        let (build_code, build_err, out, err, code) = build_and_run_with(name, &path, args);
+        assert_eq!(build_code, 0, "{name}: build: {}", lossy(&build_err));
+        assert_eq!(lossy(&out), lossy(&want.stdout), "{name}: stdout");
+        assert_eq!(lossy(&err), lossy(&want.stderr), "{name}: stderr");
+        assert_eq!(Some(code), want.status.code(), "{name}: exit");
+        std::fs::remove_dir_all(path.parent().expect("dir")).expect("cleanup");
+    }
+}
+
+/// `--report` prints the coverage line; the binary needs no source
+/// at runtime (spec 1.3 #4/#5).
+#[test]
+fn mixed_build_reports_and_runs_without_source_256() {
+    let path = temp_source(
+        "report",
+        "(defn sq [x] (* x x))\n(defn bad [x] (str x))\n(println (sq 3) (bad 4))\n",
+    );
+    let dir = tmp("report-out");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let prog = dir.join(format!("prog{}", exe_suffix()));
+    let archive = ensure_archive();
+    let built = bin()
+        .args([
+            OsStr::new("build"),
+            OsStr::new("--report"),
+            path.as_os_str(),
+            OsStr::new("-o"),
+            prog.as_os_str(),
+            OsStr::new("--runtime-archive"),
+            archive.as_os_str(),
+        ])
+        .output()
+        .expect("spawn clojure-rs build");
+    assert_eq!(built.status.code(), Some(0), "{}", lossy(&built.stderr));
+    assert_eq!(
+        lossy(&built.stderr),
+        "aot: native 1/2 defns, embedded 2 top-level forms\n"
+    );
+    std::fs::remove_dir_all(path.parent().expect("dir")).expect("remove source");
+    let ran = Command::new(&prog).output().expect("run binary");
+    assert_eq!(lossy(&ran.stdout), "9 4\n");
+    assert_eq!(ran.status.code(), Some(0));
+    // A pure program reports full native coverage.
+    let pure = temp_source("pure", "(defn sq [x] (* x x))\n(print (sq 3))\n");
+    let built = bin()
+        .args([
+            OsStr::new("build"),
+            OsStr::new("--report"),
+            pure.as_os_str(),
+            OsStr::new("-o"),
+            prog.as_os_str(),
+            OsStr::new("--runtime-archive"),
+            archive.as_os_str(),
+        ])
+        .output()
+        .expect("spawn clojure-rs build");
+    assert_eq!(
+        lossy(&built.stderr),
+        "aot: native 1/1 defns, embedded 0 top-level forms\n"
+    );
+    std::fs::remove_dir_all(pure.parent().expect("dir")).expect("cleanup");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
 }

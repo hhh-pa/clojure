@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 
-use clj_eval::{Prim, SubsetExpr, SubsetFn, SubsetProgram};
+use clj_eval::{MixedProgram, Prim, SubsetExpr, SubsetFn, SubsetProgram};
 use cljrt::prim_symbol;
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
@@ -903,6 +903,150 @@ pub fn to_module_jit<'ctx>(
         lower.lower_defn(index, def);
     }
     lower.lower_main(&program.main, program.main_slots, program.main_fn);
+    verify_module(&lower.module)?;
+    Ok(lower.module)
+}
+
+/// The uniform entry of native `index` in a mixed module.
+#[must_use]
+pub fn trampoline_symbol(index: usize) -> String {
+    format!("cljtramp_{index}")
+}
+
+impl Lower<'_> {
+    /// Emit native `index`'s trampoline: `(ptr args, i64 argc) ->
+    /// ptr` loads `arity` boxes from `args` (the runtime checked
+    /// the count) and tail-calls the lowered fn, which consumes
+    /// them (the `clj-rt` `Trampoline` contract).
+    fn lower_trampoline(&mut self, index: usize, arity: usize) {
+        let ty = self
+            .ptr
+            .fn_type(&[self.ptr.into(), self.i64t.into()], false);
+        let func = self
+            .module
+            .add_function(&trampoline_symbol(index), ty, None);
+        let entry = self.ctx.append_basic_block(func, "entry");
+        self.builder.position_at_end(entry);
+        let args = func.get_nth_param(0).expect("args").into_pointer_value();
+        let mut loaded: Vec<BasicMetadataValueEnum> = Vec::with_capacity(arity);
+        let builder = &self.builder;
+        for i in 0..arity {
+            let index = [self.i64t.const_int(i as u64, false)];
+            // SAFETY: the generated GEP stays in bounds — `i < arity`,
+            // and the runtime passes exactly `arity` boxes.
+            let slot = unsafe { builder.build_gep(self.ptr, args, &index, "argp") }.expect("gep");
+            let arg = self
+                .builder
+                .build_load(self.ptr, slot, "arg")
+                .expect("load arg");
+            loaded.push(arg.into());
+        }
+        let ret = self.call_ptr(self.fns[index], &loaded);
+        self.builder.build_return(Some(&ret)).expect("return");
+    }
+
+    /// The mixed `main`: register every native, then hand the
+    /// process to `rt_run_program` (its return is the exit code).
+    fn lower_mixed_main(&mut self, program: &MixedProgram) {
+        let i32t = self.i32t;
+        let ptr = self.ptr;
+        let i64t = self.i64t;
+        let voidt = self.ctx.void_type();
+        let register = self.module.add_function(
+            "rt_register_native",
+            voidt.fn_type(
+                &[
+                    i64t.into(),
+                    ptr.into(),
+                    i64t.into(),
+                    i64t.into(),
+                    ptr.into(),
+                ],
+                false,
+            ),
+            None,
+        );
+        let run = self.module.add_function(
+            "rt_run_program",
+            i32t.fn_type(
+                &[
+                    ptr.into(),
+                    i64t.into(),
+                    ptr.into(),
+                    i64t.into(),
+                    ptr.into(),
+                    i32t.into(),
+                ],
+                false,
+            ),
+            None,
+        );
+        let ty = i32t.fn_type(&[i32t.into(), ptr.into()], false);
+        let func = self.module.add_function("main", ty, None);
+        let entry = self.ctx.append_basic_block(func, "entry");
+        self.builder.position_at_end(entry);
+        for (index, def) in program.fns.iter().enumerate() {
+            let (name, name_len) = self.const_str(&def.name);
+            let tramp = self
+                .module
+                .get_function(&trampoline_symbol(index))
+                .expect("trampoline")
+                .as_global_value()
+                .as_pointer_value();
+            self.call_void(
+                register,
+                &[
+                    i64t.const_int(index as u64, false).into(),
+                    name.into(),
+                    i64t.const_int(name_len, false).into(),
+                    i64t.const_int(def.arity as u64, false).into(),
+                    tramp.into(),
+                ],
+            );
+        }
+        let (source, source_len) = self.const_str(&program.source);
+        let (path, path_len) = self.path_const();
+        let argc = func.get_nth_param(0).expect("argc");
+        let argv = func.get_nth_param(1).expect("argv");
+        let code = self
+            .builder
+            .build_call(
+                run,
+                &[
+                    source.into(),
+                    i64t.const_int(source_len, false).into(),
+                    path.into(),
+                    i64t.const_int(path_len, false).into(),
+                    argv.into(),
+                    argc.into(),
+                ],
+                "code",
+            )
+            .expect("call")
+            .try_as_basic_value()
+            .expect_basic("exit code");
+        self.builder.build_return(Some(&code)).expect("return");
+    }
+}
+
+/// Lower a mixed program (issue #256): the natives in JIT return
+/// mode (a failure returns null to the runtime wrapper, which
+/// rethrows it into the interpreter, instead of exiting), one
+/// trampoline each, and a `main` that registers them and runs the
+/// embedded source. Verified before return, like [`to_module`].
+pub fn to_module_mixed<'ctx>(
+    ctx: &'ctx Context,
+    program: &MixedProgram,
+    source_path: &str,
+) -> Result<Module<'ctx>, String> {
+    let mut lower = Lower::new_jit(ctx, source_path);
+    for (index, def) in program.fns.iter().enumerate() {
+        lower.lower_defn(index, def);
+    }
+    for (index, def) in program.fns.iter().enumerate() {
+        lower.lower_trampoline(index, def.arity);
+    }
+    lower.lower_mixed_main(program);
     verify_module(&lower.module)?;
     Ok(lower.module)
 }

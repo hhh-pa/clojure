@@ -22,14 +22,14 @@
 //! plain `rt_*` symbols in the static archive.
 
 use std::ffi::{CStr, c_char};
-use std::ptr;
 
 use clj_eval::{NativeError, Prim};
 use clj_value::{Value, Vector};
 
+use crate::mixed::Trampoline;
 use crate::runtime::{
-    argv_worker, clone_worker, count_worker, error_line, give, is_int_flag, keyword_worker,
-    nth_worker, prim_worker, print_worker, str_worker, unbox_int, vec_push_worker,
+    argv_worker, clone_worker, count_worker, fail, give, is_int_flag, keyword_worker, nth_worker,
+    prim_worker, print_worker, str_worker, unbox_int, vec_push_worker,
 };
 
 /// The `extern "C"` symbol per [`Prim`], indexed by discriminant
@@ -186,12 +186,22 @@ pub unsafe extern "C" fn rt_vec_push(vec: *mut Value, elem: *mut Value) -> *mut 
 /// valid NUL-terminated C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_argv(argv: *const *const c_char, argc: i32) -> *mut Value {
+    argv_worker(&unsafe { argv_entries(argv, argc) })
+}
+
+/// C argv minus the program name.
+///
+/// # Safety
+///
+/// `argv` must be valid for `argc` entries (`argc >= 0`), each a
+/// valid NUL-terminated C string outliving `'a`.
+unsafe fn argv_entries<'a>(argv: *const *const c_char, argc: i32) -> Vec<&'a CStr> {
     let mut entries = Vec::new();
     // Safety: the caller guarantees validity (see module docs).
     for i in 1..argc {
         entries.push(unsafe { CStr::from_ptr(*argv.offset(i as isize)) });
     }
-    argv_worker(&entries)
+    entries
 }
 
 /// Clone the borrowed box into a fresh owned box.
@@ -256,8 +266,7 @@ pub unsafe extern "C" fn rt_arity_error(
 ) -> *mut Value {
     let err = NativeError::arity(&unsafe { text(display, display_len) }, got);
     let path = unsafe { text(path, path_len) };
-    eprintln!("{}", error_line(&path, line, col, &err));
-    ptr::null_mut()
+    fail(&path, line, col, &err)
 }
 
 /// The shared primitive body: consume the boxes, call the shared
@@ -455,3 +464,48 @@ macro_rules! def_i64 {
 def_i64!(rt_i64_add, checked_add, "+");
 def_i64!(rt_i64_sub, checked_sub, "-");
 def_i64!(rt_i64_mul, checked_mul, "*");
+
+/// Register native `index` of a mixed program (issue #256): its
+/// `defn` name and arity plus the uniform trampoline the masked
+/// source's `(clj.aot/n index)` interns.
+///
+/// # Safety
+///
+/// The name slice must be valid for its length; `entry` must obey
+/// the [`Trampoline`] contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_register_native(
+    index: usize,
+    name: *const u8,
+    name_len: usize,
+    arity: usize,
+    entry: Trampoline,
+) {
+    crate::mixed::register(index, unsafe { text(name, name_len) }, arity, entry);
+}
+
+/// Run a mixed program's embedded source as `run` runs `path`,
+/// with `*command-line-args*` from argv (program name dropped).
+/// Returns the process exit code (0, or 1 after the diagnostic).
+///
+/// # Safety
+///
+/// Both slices must be valid for their lengths; `argv` must be
+/// valid for `argc` entries, each a NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_run_program(
+    source: *const u8,
+    source_len: usize,
+    path: *const u8,
+    path_len: usize,
+    argv: *const *const c_char,
+    argc: i32,
+) -> i32 {
+    let source = unsafe { text(source, source_len) };
+    let path = unsafe { text(path, path_len) };
+    let args: Vec<String> = unsafe { argv_entries(argv, argc) }
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    crate::mixed::run_program(&path, &source, &args)
+}
