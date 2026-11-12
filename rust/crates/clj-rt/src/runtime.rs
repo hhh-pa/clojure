@@ -112,6 +112,16 @@ thread_local! {
     static ACTIVE: Cell<*mut Evaluator> = const { Cell::new(ptr::null_mut()) };
 }
 
+/// Run `f` on the active evaluator (native code always runs inside
+/// an [`ActiveScope`]; outside one this is an internal error).
+pub(crate) fn with_active<R>(f: impl FnOnce(&mut Evaluator) -> R) -> R {
+    let active = ACTIVE.with(Cell::get);
+    assert!(!active.is_null(), "native code runs inside an ActiveScope");
+    // SAFETY: as in `call_prim` — the scope's `&mut Evaluator` is
+    // not used until the scope drops; this reborrow ends with `f`.
+    f(unsafe { &mut *active })
+}
+
 /// Publishes the interpreter's evaluator to the prim shims for the
 /// extent of one native call, restoring the enclosing one after
 /// (nested native calls through callbacks stack correctly).

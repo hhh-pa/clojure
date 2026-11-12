@@ -7491,6 +7491,15 @@ impl LocaleHandle {
     }
 }
 
+/// The static field a folded constant came from (see
+/// `native_abi::static_field_origin`).
+pub(crate) fn static_field_origin(v: &Value) -> Option<(&'static str, &'static str)> {
+    match as_locale(v) {
+        Some(l) if l.tag == "en_US" => Some(("java.util.Locale", "US")),
+        _ => None,
+    }
+}
+
 /// Downcast a locale value to its handle, if any.
 fn as_locale(v: &Value) -> Option<&LocaleHandle> {
     match v {

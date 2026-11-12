@@ -73,7 +73,7 @@ impl std::error::Error for SourceError {}
 /// An uncaught top-level signal (an escaping `recur` is
 /// impossible — every loop/fn frame catches its own — and
 /// surfaces as an internal error, never a panic).
-fn uncaught(s: Signal) -> SourceError {
+pub(crate) fn uncaught(s: Signal) -> SourceError {
     match s {
         Signal::Throw(t) => SourceError::Uncaught(t),
         Signal::Recur(_) => SourceError::Internal("recur escaped its loop or fn".to_owned()),
@@ -142,7 +142,7 @@ pub(crate) fn split_top_do(form: &Value) -> Option<Vec<&Value>> {
 /// non-numbers — characters included, which miss like on the JVM).
 /// `Int` truncates; `Double` narrows exactly like Java (`as`
 /// saturates and maps `NaN` to 0, same as `(int)`).
-fn case_int_value(v: &Value) -> Option<i32> {
+pub(crate) fn case_int_value(v: &Value) -> Option<i32> {
     match v {
         Value::Int(i) => Some(*i as i32),
         Value::Double(d) => Some(*d as i32),
@@ -151,7 +151,7 @@ fn case_int_value(v: &Value) -> Option<i32> {
 }
 
 /// `case*` dispatch-key masking (a zero mask skips the shift).
-fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
+pub(crate) fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
     if mask == 0 {
         key
     } else {
@@ -167,7 +167,7 @@ fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
 pub struct Evaluator {
     pub registry: SharedRegistry,
     bindings: Bindings,
-    source: Arc<str>,
+    pub(crate) source: Arc<str>,
     /// `clojure.core/*ns*`'s var id once [`current_ns_name`] found it
     /// (0 = not yet; var ids start at 1).
     star_ns_id: std::sync::atomic::AtomicU64,
@@ -1835,7 +1835,7 @@ impl Evaluator {
 
     /// Bare `UnsupportedOperationException` (the JVM `hasheq` /
     /// `hashCode` overrides on unbounded seqs).
-    fn unsupported_hash(&mut self) -> Signal {
+    pub(crate) fn unsupported_hash(&mut self) -> Signal {
         self.throw(NativeError::new(
             ThrowClass::UnsupportedOperationException,
             String::new(),
@@ -3112,7 +3112,7 @@ impl Evaluator {
     /// The `&`-pattern `gseq`: seq values (S6D: `pmap`'s `rets`)
     /// coerce through the canonical `seq` (which forces), while
     /// concrete collections keep `seq_val`'s eager lists.
-    fn destructure_gseq(&mut self, value: &Value) -> Result<Value, Signal> {
+    pub(crate) fn destructure_gseq(&mut self, value: &Value) -> Result<Value, Signal> {
         match value {
             Value::Extension(_) => crate::lazy::seq_value(self, value),
             _ => self.seq_val(value),
@@ -3799,7 +3799,7 @@ pub(crate) fn rest_list(args: &[Value]) -> Value {
 /// `nil` is `nil`; anything else delegates to `nth` (lazy
 /// seqs force and walk, subvectors index, the rest is
 /// `nth not supported`) (§E12).
-fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Signal> {
+pub(crate) fn nth_or_nil(coll: &Value, i: usize, eval: &mut Evaluator) -> Result<Value, Signal> {
     match coll {
         Value::Nil => Ok(Value::Nil),
         Value::Vector(v) => Ok(v.get(i).unwrap_or(Value::Nil)),

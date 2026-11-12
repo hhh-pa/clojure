@@ -13,7 +13,9 @@ workspace = true
 
 [dependencies]
 clj-eval = { path = "../clj-eval" }
+clj-reader = { path = "../clj-reader" }
 clj-rt = { path = "../clj-rt" }
+clj-value = { path = "../clj-value" }
 # Pinned LLVM major for the whole workspace (spec 2.3): inkwell 0.10.0
 # supports up to LLVM 22, so the pin is 22, not 23. The `llvm22-1`
 # feature only compiles against LLVM 22 (llvm-sys build script

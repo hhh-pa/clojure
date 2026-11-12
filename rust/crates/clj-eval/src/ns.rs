@@ -1657,6 +1657,25 @@ fn run_loaded(
     })
 }
 
+/// `load-file` of a natively compiled program (issue #259): the same
+/// load frame, source naming, and error mapping as
+/// [`load_text_as_file`], with `body` (the compiled top-level
+/// thunks) in place of reading and evaluating text.
+pub fn load_native(
+    eval: &mut Evaluator,
+    path: &str,
+    body: impl FnOnce(&mut Evaluator) -> Result<Value, Signal>,
+) -> Result<Value, NativeError> {
+    let abs = absolutize(path);
+    let out = in_load_frame(eval, Value::Str(Arc::from(abs.as_str())), false, |eval| {
+        let prev = std::mem::replace(&mut eval.source, Arc::from(abs.as_str()));
+        let out = body(eval);
+        eval.source = prev;
+        out
+    });
+    out.map_err(|s| source_to_native(eval, &abs, crate::eval::uncaught(s)))
+}
+
 /// [`run_loaded`]'s frame around any load body (the lazy library
 /// load shares it).
 fn in_load_frame<R>(

@@ -164,7 +164,9 @@ name = "clj-aot"
 version = "1.13.0-alpha11"
 dependencies = [
  "clj-eval",
+ "clj-reader",
  "clj-rt",
+ "clj-value",
  "inkwell",
 ]
 

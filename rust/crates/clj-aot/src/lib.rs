@@ -26,6 +26,7 @@ pub mod driver;
 pub mod jit;
 pub mod link;
 pub mod lower;
+pub mod native;
 pub mod target;
 
 use std::path::{Path, PathBuf};
@@ -149,15 +150,45 @@ pub fn build_str(
         Err(e) if mode == BuildMode::Strict => {
             return Err(CompileError::Plan(e.diagnostic(source_path)));
         }
-        Err(_) => {
-            let program = plan_mixed(source);
-            let module =
-                lower::to_module_mixed(&ctx, &program, source_path).map_err(CompileError::Emit)?;
-            (module, program.report())
-        }
+        Err(_) => match native_module(&ctx, source, source_path) {
+            Ok((module, defns)) => (
+                module,
+                format!("aot: native {defns}/{defns} defns, embedded 0 top-level forms"),
+            ),
+            Err(reason) => {
+                let program = plan_mixed(source);
+                let module = lower::to_module_mixed(&ctx, &program, source_path)
+                    .map_err(CompileError::Emit)?;
+                (module, format!("{} (native: {reason})", program.report()))
+            }
+        },
     };
     finish(&module, out, emit, link)?;
     Ok(report)
+}
+
+/// The full native compiler (issue #259): front end, then lowering
+/// of every unit. Returns the module and the top-level `defn` count,
+/// or why the program cannot be compiled natively (yet).
+fn native_module<'ctx>(
+    ctx: &'ctx Context,
+    source: &str,
+    source_path: &str,
+) -> Result<(inkwell::module::Module<'ctx>, usize), String> {
+    let mut eval = clj_eval::boot();
+    let front = clj_eval::aot_front::front_end(&mut eval, source, source_path)
+        .map_err(|e| format!("front end: {e}"))?;
+    let defns = front
+        .units
+        .iter()
+        .filter(|u| matches!(&u.expr, clj_eval::expr::Expr::Def { init: Some(_), .. }))
+        .count();
+    // The build evaluator is torn down by leaking, like `run` does.
+    std::mem::forget(eval);
+    let module = native::Lowerer::new(ctx)
+        .lower_program(&front, source_path)
+        .map_err(|native::Unsupported(r)| r)?;
+    Ok((module, defns))
 }
 
 /// Compile `source` (named `source_path` in spans) to the `out`
