@@ -71,6 +71,10 @@ Acceptance criteria:
    example a macro whose expansion depends on runtime-computed values)
    keeps the #256 embedded path for that one form, counted in
    `--report`. The target on the snippets is 0.
+5. **Modes.** The default build tries the pure subset, then this
+   native compiler, then the #256 mixed path. `build --strict` keeps
+   its frozen S8A contract: it requires the pure 19-prim subset and
+   never runs the native compiler (its help text says so).
 
 ### 2.2 Value ABI
 

@@ -71,8 +71,9 @@ enum Command {
         /// Link against this runtime archive instead of the autodetected one.
         #[arg(long)]
         runtime_archive: Option<PathBuf>,
-        /// Fail on the first form outside the pure AOT subset
-        /// instead of embedding it (the pre-#256 behavior).
+        /// Require the pure 19-prim AOT subset: skip the native
+        /// compiler and fail on the first form outside the subset (the
+        /// default build compiles every form natively, #259).
         #[arg(long)]
         strict: bool,
         /// Print the native-vs-embedded coverage line to stderr.
