@@ -166,6 +166,10 @@ pub fn link_command(
                 "ws2_32.lib".to_owned(),
                 "bcrypt.lib".to_owned(),
                 "ntdll.lib".to_owned(),
+                // std's futex `Mutex`/`Condvar` (`WaitOnAddress`,
+                // `WakeByAddress*`), reached once the archive's core-op
+                // tables pull in code that locks.
+                "synchronization.lib".to_owned(),
                 // Static CRT trio (CI builds `+crt-static`, see
                 // setup-llvm): `memcpy`/`exit`/`mainCRTStartup`
                 // live in `libcmt`, the C++ EH + `__chkstk` in
@@ -367,6 +371,7 @@ mod tests {
                     "ws2_32.lib".to_owned(),
                     "bcrypt.lib".to_owned(),
                     "ntdll.lib".to_owned(),
+                    "synchronization.lib".to_owned(),
                     "libcmt.lib".to_owned(),
                     "libvcruntime.lib".to_owned(),
                     "libucrt.lib".to_owned(),

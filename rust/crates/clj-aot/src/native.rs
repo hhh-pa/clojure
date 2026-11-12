@@ -2706,9 +2706,8 @@ impl<'ctx> Lowerer<'ctx> {
 fn fast_op(fast: clj_eval::ext::FastArith, n: usize) -> Option<clj_eval::ext::FastArith> {
     use clj_eval::ext::FastArith;
     match (fast, n) {
-        (FastArith::None, _) => None,
         (FastArith::Inc | FastArith::Dec, 1) => Some(fast),
-        (FastArith::Inc | FastArith::Dec, _) => None,
+        (FastArith::None | FastArith::Inc | FastArith::Dec, _) => None,
         (other, 2) => Some(other),
         _ => None,
     }
