@@ -27,7 +27,7 @@ use std::ffi::{CStr, c_char};
 use clj_eval::native_abi;
 use clj_value::{Keyword, Symbol, Value};
 
-use crate::native::{self, ArityDesc, Code, FnDesc, settle};
+use crate::native::{self, ArityDesc, Code, FnDesc, items_of, settle, str_of, sym_of};
 use crate::runtime::with_active;
 
 /// `len` contiguous `T`s at `ptr`: the `{ptr, len}` header generated
@@ -100,17 +100,11 @@ fn meta_of(k: u64) -> Option<clj_value::Map> {
 }
 
 fn str_const(k: u64) -> String {
-    match native::constant(k as usize) {
-        Value::Str(s) => s.to_string(),
-        _ => String::new(),
-    }
+    str_of(native::constant(k as usize))
 }
 
 fn sym_const(k: u64) -> Symbol {
-    match native::constant(k as usize) {
-        Value::Symbol(s) => s.clone(),
-        _ => Symbol::new(None, "_"),
-    }
+    sym_of(native::constant(k as usize))
 }
 
 fn var_pairs(ks: &CSlice<u64>, values: &CSlice<Value>) -> Vec<(clj_value::Var, Value)> {
@@ -182,28 +176,10 @@ pub extern "C" fn rt_n_main(
 
 // ---- constant builders -------------------------------------------------
 
-/// `out = nil`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rt_n_nil(out: &mut Value) {
-    *out = Value::Nil;
-}
-
-/// `out = n`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rt_n_int(out: &mut Value, n: i64) {
-    *out = Value::Int(n);
-}
-
 /// `out = d`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_double(out: &mut Value, d: f64) {
     *out = Value::Double(d);
-}
-
-/// `out = b`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rt_n_bool(out: &mut Value, b: u8) {
-    *out = Value::Bool(b != 0);
 }
 
 /// `out = "…"`.
@@ -247,19 +223,9 @@ pub extern "C" fn rt_n_class(out: &mut Value, name: &CSlice<u8>) {
 
 /// `out =` the constant printed as `src` (reader fallback).
 #[unsafe(no_mangle)]
-pub extern "C" fn rt_n_read(out: &mut Value, src: &CSlice<u8>) -> i32 {
-    let step = native_abi::read_constant(&src.text()).map_err(|msg| {
-        with_active(|eval| {
-            native_abi::native_throw(
-                eval,
-                clj_eval::NativeError::new(
-                    clj_value::ThrowClass::Error,
-                    format!("internal: bad constant: {msg}"),
-                ),
-            )
-        })
-    });
-    finish(out, step)
+pub extern "C" fn rt_n_read(out: &mut Value, src: &CSlice<u8>) {
+    // The build checked every such constant reads back to itself.
+    *out = native_abi::read_constant(&src.text()).expect("pooled constants read back");
 }
 
 // ---- values ------------------------------------------------------------
@@ -327,14 +293,10 @@ pub extern "C" fn rt_n_native_mv(out: &mut Value, k: u64, args: &mut CSlice<Valu
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_core_mv(out: &mut Value, k: u64, args: &mut CSlice<Value>) -> i32 {
     let moved = take_args(args);
-    let step = with_active(|eval| match native::core_entry(eval, k as usize) {
-        Some(entry) => native_abi::call_core(eval, entry, moved),
-        None => {
-            let callee = native::root(eval, k as usize);
-            native_abi::call_value_owned(eval, &callee, moved)
-        }
-    });
-    finish(out, step)
+    finish(
+        out,
+        with_active(|eval| native::call_core_var(eval, k as usize, moved)),
+    )
 }
 
 /// A covered-case core intrinsic (`native_abi::intrinsic` op) over
@@ -346,14 +308,11 @@ pub extern "C" fn rt_n_intr(out: &mut Value, op: u32, k: u64, args: &CSlice<Valu
         *out = v;
         return 0;
     }
-    let step = with_active(|eval| match native::core_entry(eval, k as usize) {
-        Some(entry) => native_abi::call_core(eval, entry, args.iter().cloned().collect()),
-        None => {
-            let callee = native::root(eval, k as usize);
-            native_abi::call_value(eval, &callee, args)
-        }
-    });
-    finish(out, step)
+    let args = args.iter().cloned().collect();
+    finish(
+        out,
+        with_active(|eval| native::call_core_var(eval, k as usize, args)),
+    )
 }
 
 /// Enter a direct call of compiled `defn` `desc` through var `k`: 1
@@ -471,18 +430,10 @@ pub extern "C" fn rt_n_try(
     handlers: &CSlice<Value>,
     fin: Option<&Value>,
 ) -> i32 {
-    let classes: Vec<String> = match native::constant(classes_k as usize) {
-        Value::Vector(v) => v
-            .iter()
-            .map(|c| match c {
-                Value::Str(s) => s.to_string(),
-                _ => String::new(),
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
+    let classes = items_of(native::constant(classes_k as usize));
     let catches: Vec<(String, Value)> = classes
-        .into_iter()
+        .iter()
+        .map(str_of)
         .zip(handlers.get().iter().cloned())
         .collect();
     finish(
@@ -518,16 +469,10 @@ pub extern "C" fn rt_n_set_var(out: &mut Value, k: u64, v: &Value) -> i32 {
 /// `(declare …)` of the symbols in constant vector `syms_k`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_declare(out: &mut Value, syms_k: u64, line: u32, col: u32) {
-    let syms: Vec<Symbol> = match native::constant(syms_k as usize) {
-        Value::Vector(v) => v
-            .iter()
-            .filter_map(|s| match s {
-                Value::Symbol(s) => Some(s.clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
+    let syms: Vec<Symbol> = items_of(native::constant(syms_k as usize))
+        .iter()
+        .map(sym_of)
+        .collect();
     *out = with_active(|eval| native_abi::declare(eval, &syms, line, col));
 }
 
@@ -542,26 +487,18 @@ pub extern "C" fn rt_n_ns(out: &mut Value, ns_k: u64) -> i32 {
 /// test equivs `*realized`).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_case(sel: &mut i64, realized: &mut Value, v: &Value, case_k: u64) -> i32 {
-    match native::case_select(native::constant(case_k as usize), v) {
-        Ok((s, r)) => {
+    native::status(
+        native::case_select(native::constant(case_k as usize), v).map(|(s, r)| {
             *sel = s;
             *realized = r;
-            0
-        }
-        Err(signal) => native::fail(signal),
-    }
+        }),
+    )
 }
 
 /// `*out = (= a b)` as 0/1.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_equiv(out: &mut u8, a: &Value, b: &Value) -> i32 {
-    match with_active(|eval| native_abi::equiv(eval, a, b)) {
-        Ok(eq) => {
-            *out = u8::from(eq);
-            0
-        }
-        Err(signal) => native::fail(signal),
-    }
+    native::status(with_active(|eval| native_abi::equiv(eval, a, b)).map(|eq| *out = u8::from(eq)))
 }
 
 /// `out = (nth coll i nil)` (positional destructuring).
@@ -602,15 +539,15 @@ pub extern "C" fn rt_n_destructure(
     defaults: &CSlice<Value>,
 ) -> i32 {
     let enc = native::constant(k as usize);
-    match with_active(|eval| native_abi::destructure_encoded(eval, enc, v, defaults.get())) {
-        Ok(vals) => {
-            for (slot, val) in out.get_mut().iter_mut().zip(vals) {
-                *slot = val;
-            }
-            0
-        }
-        Err(signal) => native::fail(signal),
-    }
+    native::status(
+        with_active(|eval| native_abi::destructure_encoded(eval, enc, v, defaults.get())).map(
+            |vals| {
+                for (slot, val) in out.get_mut().iter_mut().zip(vals) {
+                    *slot = val;
+                }
+            },
+        ),
+    )
 }
 
 /// `out =` a fresh `letfn` cell (a volatile holding nil).
@@ -630,10 +567,9 @@ pub extern "C" fn rt_n_cell_set(cell: &Value, v: &Value) {
 /// `out =` the cell's value.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_cell_get(out: &mut Value, cell: &Value) {
-    *out = match cell {
-        Value::Volatile(c) => c.lock().clone(),
-        other => other.clone(),
-    };
+    if let Value::Volatile(c) = cell {
+        *out = c.lock().clone();
+    }
 }
 
 // ---- extent forms (bodies arrive as compiled zero-arg fns) -------------
@@ -756,10 +692,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_declare_fn,
         rt_n_set_const,
         rt_n_main,
-        rt_n_nil,
-        rt_n_int,
         rt_n_double,
-        rt_n_bool,
         rt_n_str,
         rt_n_kw,
         rt_n_sym,

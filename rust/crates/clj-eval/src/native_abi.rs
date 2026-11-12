@@ -111,12 +111,6 @@ pub fn caught(thrown: Throwable) -> Value {
     Value::Throwable(Arc::new(thrown))
 }
 
-/// Whether a throw matches a `catch` class name.
-#[must_use]
-pub fn catch_matches(thrown: &Throwable, class: &str) -> bool {
-    thrown.class.matches(class)
-}
-
 /// A fresh throwable of `class` (the analyzer's `NewThrowable`).
 pub fn new_throwable(eval: &mut Evaluator, class: ThrowClass, message: &str) -> Value {
     Value::Throwable(Arc::new(Throwable {
@@ -144,23 +138,26 @@ pub fn try_call(
             None => Ok(()),
         }
     };
-    let thrown = match eval.call(body, &[]) {
+    let signal = match eval.call(body, &[]) {
         Ok(value) => {
             run_fin(eval)?;
             return Ok(value);
         }
-        Err(Signal::Throw(t)) => t,
-        Err(other) => return Err(other),
+        Err(signal) => signal,
     };
-    for (class, handler) in catches {
-        if thrown.class.matches(class) {
-            let result = eval.call(handler, &[caught(thrown.clone())]);
-            run_fin(eval)?;
-            return result;
+    // Catches match throws only; anything else unwinds through the
+    // finally like an unmatched throw.
+    if let Signal::Throw(thrown) = &signal {
+        for (class, handler) in catches {
+            if thrown.class.matches(class) {
+                let result = eval.call(handler, &[caught(thrown.clone())]);
+                run_fin(eval)?;
+                return result;
+            }
         }
     }
     run_fin(eval)?;
-    Err(Signal::Throw(thrown))
+    Err(signal)
 }
 
 /// `(binding [v x …] body)` over evaluated values.
@@ -591,29 +588,14 @@ pub fn class_name_of(value: &Value) -> Option<String> {
 
 /// The registry's root epoch (bumps on every var root change).
 #[must_use]
-pub fn root_epoch(eval: &Evaluator) -> u64 {
-    eval.registry.epoch()
+pub fn root_epoch(eval: &Evaluator) -> (u64, u64) {
+    (eval.registry.epoch(), eval.bindings.version())
 }
 
-/// Whether any thread binding is live (then var reads must consult
-/// the binding stack).
-#[must_use]
-pub fn has_thread_bindings(eval: &Evaluator) -> bool {
-    !eval.bindings.is_empty()
-}
-
-/// Call `callee` (a cached var root) with `args`: a native runs its
-/// entry directly, anything else takes the general call.
-pub fn call_value(eval: &mut Evaluator, callee: &Value, args: &[Value]) -> Step {
-    if let Some(native) = crate::ext::as_native(callee) {
-        return (native.func)(eval, args).map_err(|e| eval.throw(e));
-    }
-    eval.call(callee, args)
-}
-
-/// [`call_value`] taking the arguments by value: a native with an
-/// owned-args entry gets them moved in (no per-arg clone/drop, and
-/// head-releasing loopers can free as they walk).
+/// Call `callee` (a cached var root) with `args` by value: a native
+/// runs its entry directly (an owned-args entry gets them moved in —
+/// no per-arg clone/drop, and head-releasing loopers can free as they
+/// walk); anything else takes the general call.
 pub fn call_value_owned(
     eval: &mut Evaluator,
     callee: &Value,

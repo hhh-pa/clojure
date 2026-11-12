@@ -81,9 +81,18 @@ Acceptance criteria:
   `Int`/`Double` payloads at 8. A unit test pins the offsets and tags,
   and the AOT compiler embeds them.
 - Generated code holds Values **by value** in 32-byte, 8-aligned stack
-  slots (no per-value `Box`). Helpers take `*const Value` inputs and
-  write `*mut Value` outputs. Ownership: a slot owns its Value, and
+  slots (no per-value `Box`). Ownership: a slot owns its Value, and
   every slot is dropped on every exit path.
+- **Helper ABI (`rt_n_*`, `clj-rt/src/nabi.rs`).** Every helper is a
+  *safe* `extern "C" fn`. Single slots arrive as references
+  (`&Value` in, `&mut Value` out, `Option<&Value>` nullable), which are
+  ABI-identical to the pointers generated code passes. Arrays (slot
+  runs, texts, index tables, arity descriptors, argv) arrive as
+  `&CSlice<T>` — a `#[repr(C)] {ptr, len}` header with private fields
+  that only generated code builds (constant globals for static data,
+  entry-block headers for slot runs). The two `CSlice` accessors and
+  the argv `CStr` read are the whole `unsafe` boundary (geiger +20,
+  justified in the baseline).
 - **Inline fast paths** need no helper: truthiness (`tag != 0 &&
   !(tag == 1 && byte1 == 0)`), clone/drop of POD tags (Nil, Bool, Int,
   Double, Char), int/double construction, and int fast paths for the
@@ -105,9 +114,18 @@ Acceptance criteria:
 - **Named fns and `letfn`.** Self and mutual references use a
   patchable captured cell, mirroring `Slots::Patchable`.
 - **Calls.**
-  - A `DirectNative` with `FastArith` is inlined (§2.2).
-  - Another `DirectNative` calls its native through `rt_call_native`
-    (no var lookup).
+  - A `DirectNative` with `FastArith` is inlined (§2.2), and the
+    covered cases of `nth`/`get`/`count`/`contains?`/`=`/`not=` and the
+    int predicates/bit ops run as intrinsics.
+  - Another `DirectNative` calls its native entry, resolved once per
+    var (`rt_n_core_mv`).
+  - Inlining, intrinsics and the resolved entries assume the program
+    cannot rebind a core var. A program that mentions a rebinding
+    form — `with-redefs`, `alter-var-root`, `with-redefs-fn`, `intern`,
+    `ns-unmap`, `eval`, a `def` into `clojure.core`, or a var-resolving
+    fn (`resolve`, `ns-resolve`, `find-var`, `requiring-resolve`,
+    `ns-interns`, `ns-publics`, `ns-map`) — compiles every such call
+    through the var's current root instead (`rt_n_native_mv`).
   - A call through a var holding a compiled `defn` of this program
     goes direct native→native, guarded by a cheap check that the var
     root is still that fn (the guard keeps `def`/`with-redefs`/
@@ -124,7 +142,7 @@ Acceptance criteria:
 |---|---|
 | `Literal` / `Quote` | constant pool slot (built once at startup by constructor helpers, no reader) → clone |
 | `VecLit` / `MapLit` / `SetLit` | helper builders over native slots |
-| `Global` / `VarRef` | var handle slot (interned by qualified name at startup) → deref helper (root fast path when no thread bindings) |
+| `Global` / `VarRef` | var handle slot (interned by qualified name at startup) → deref helper with a per-thread value cache keyed by (registry epoch, binding version) — the interpreter's own validity rule |
 | `Local` | native slot (frame-local, captured array, or arg) |
 | `Def` / `Declare` / `DefMacro` / `Ns` | helpers that perform the same registry effect as the interpreter |
 | `If` / `Do` / `Let` / `Loop` / `Recur` | native control flow; destructuring `Pattern`s through helpers (`nth`/`get`/`seq`/rest) |
@@ -152,10 +170,26 @@ Acceptance criteria:
 - `clj-eval` unit tests for every `native_abi` helper (safe Rust over
   `&mut Evaluator`).
 - `clj-aot` IR snapshot tests per Expr kind.
-- Build+run BDD tests comparing against `run` (stdout, stderr, exit)
-  for every Expr kind and the edge cases in AC2.
+- BDD replay (`rust/tests/native_corpus.rs`): every program in
+  `docs/spec/i259-native-compiler/corpus/` runs through `jit` (the full
+  native compiler, in-process) and must match `run` byte for byte —
+  stdout, stderr and exit code; `err_*` programs abort with exit 1.
+  The programs cover every Expr kind and the AC2 edge cases, plus
+  core-var rebinding through `resolve`, var redefinition, and
+  non-finite double constants.
 - The local all-snippet sweep (`aotsweep.py`) and the CI sweep's
   `clojure-rs-aot` leg.
+
+### Status (this branch)
+
+- AC1, AC2, AC4 and AC5 hold: every snippet builds fully natively, all
+  1754 cases pass, and the gates are green.
+- AC3 is not met yet. Locally (macOS instructions, one case per
+  script) the AOT/run geomean is 0.945 and 359/394 scripts are faster,
+  but 17 scripts are > 1.10× `run` (worst: string scanning and DP
+  loops, up to 2.7×). The remaining work is the slow tail: unboxed
+  scalar locals, cheaper collection helpers, and #260's helper
+  inlining.
 
 ### CI impact
 

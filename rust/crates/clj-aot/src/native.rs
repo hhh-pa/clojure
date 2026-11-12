@@ -50,9 +50,7 @@ pub struct Unsupported(pub String);
 /// A constant-pool entry.
 #[derive(Clone, Debug, PartialEq)]
 enum Const {
-    Nil,
-    Bool(bool),
-    Int(i64),
+    // (`nil`, booleans, and ints are written inline, never pooled.)
     Double(f64),
     Str(String),
     Keyword(Option<String>, String),
@@ -83,8 +81,6 @@ enum LocalRef<'ctx> {
     Captured(usize),
     /// Captured `letfn` cell `i` of this closure.
     CapturedCell(usize),
-    /// Not visible here (never referenced by this function's body).
-    Absent,
 }
 
 /// A `recur` target: its loop header and the patterns rebound from
@@ -100,7 +96,7 @@ struct FnCtx<'ctx> {
     entry: BasicBlock<'ctx>,
     fail: BasicBlock<'ctx>,
     slots: Vec<PointerValue<'ctx>>,
-    env: Vec<LocalRef<'ctx>>,
+    env: Vec<Option<LocalRef<'ctx>>>,
     recur: Vec<RecurTarget<'ctx>>,
     captured: PointerValue<'ctx>,
 }
@@ -267,9 +263,9 @@ impl<'ctx> Lowerer<'ctx> {
         let params: Vec<BasicMetadataTypeEnum> = args
             .iter()
             .map(|a| match a {
-                BasicMetadataValueEnum::PointerValue(_) => self.ptr.into(),
                 BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
                 BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
+                // Pointers (slots, headers, code); no other kind is passed.
                 _ => self.ptr.into(),
             })
             .collect();
@@ -401,7 +397,7 @@ impl<'ctx> Lowerer<'ctx> {
 
     // ---- function scaffolding ------------------------------------------
 
-    fn begin_fn(&mut self, name: &str, env: Vec<LocalRef<'ctx>>) -> FnCtx<'ctx> {
+    fn begin_fn(&mut self, name: &str, env: Vec<Option<LocalRef<'ctx>>>) -> FnCtx<'ctx> {
         let func = self
             .module
             .add_function(name, self.code_ty, Some(Linkage::Private));
@@ -411,7 +407,7 @@ impl<'ctx> Lowerer<'ctx> {
     fn begin_fn_into(
         &mut self,
         func: FunctionValue<'ctx>,
-        env: Vec<LocalRef<'ctx>>,
+        env: Vec<Option<LocalRef<'ctx>>>,
     ) -> FnCtx<'ctx> {
         let entry = self.ctx.append_basic_block(func, "entry");
         let start = self.ctx.append_basic_block(func, "start");
@@ -802,12 +798,15 @@ impl<'ctx> Lowerer<'ctx> {
             arity_free(arity, base, &mut free);
         }
         let captured: Vec<usize> = free.into_iter().collect();
-        let mut env = vec![LocalRef::Absent; base];
+        // Locals not captured stay `None` (never referenced here).
+        let mut env = vec![None; base];
         for (pos, idx) in captured.iter().enumerate() {
-            env[*idx] = match outer.env.get(*idx) {
-                Some(LocalRef::Cell(_) | LocalRef::CapturedCell(_)) => LocalRef::CapturedCell(pos),
+            env[*idx] = Some(match outer.env.get(*idx) {
+                Some(Some(LocalRef::Cell(_) | LocalRef::CapturedCell(_))) => {
+                    LocalRef::CapturedCell(pos)
+                }
                 _ => LocalRef::Captured(pos),
-            };
+            });
         }
         let reserved = self
             .reserved
@@ -849,7 +848,7 @@ impl<'ctx> Lowerer<'ctx> {
         &mut self,
         func: FunctionValue<'ctx>,
         arity: &Arity,
-        env: Vec<LocalRef<'ctx>>,
+        env: Vec<Option<LocalRef<'ctx>>>,
     ) -> Result<FunctionValue<'ctx>, Unsupported> {
         let mut f = self.begin_fn_into(func, env);
         let args = f.func.get_nth_param(1).expect("args").into_pointer_value();
@@ -894,7 +893,7 @@ impl<'ctx> Lowerer<'ctx> {
             Pattern::Symbol(_) => {
                 let s = self.slot(f);
                 self.clone_v(f.func, s, src);
-                f.env.push(LocalRef::Slot(s));
+                f.env.push(Some(LocalRef::Slot(s)));
                 Ok(vec![s])
             }
             Pattern::Vec(v) => {
@@ -935,7 +934,7 @@ impl<'ctx> Lowerer<'ctx> {
                 if v.as_sym.is_some() {
                     let s = self.slot(f);
                     self.clone_v(f.func, s, src);
-                    f.env.push(LocalRef::Slot(s));
+                    f.env.push(Some(LocalRef::Slot(s)));
                     out.push(s);
                 }
                 Ok(out)
@@ -961,7 +960,7 @@ impl<'ctx> Lowerer<'ctx> {
                     .expect("st");
                 self.check(f, st);
                 for s in &outs {
-                    f.env.push(LocalRef::Slot(*s));
+                    f.env.push(Some(LocalRef::Slot(*s)));
                 }
                 Ok(outs)
             }
@@ -1025,32 +1024,22 @@ impl<'ctx> Lowerer<'ctx> {
         idx: usize,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
-        match f.env.get(idx).copied().unwrap_or(LocalRef::Absent) {
-            LocalRef::Slot(p) => {
-                self.clone_v(f.func, dest, p);
-            }
-            LocalRef::Cell(p) => {
-                self.call("rt_n_cell_get", None, &[dest.into(), p.into()]);
-            }
-            LocalRef::Captured(i) => {
-                let p = self.elem(f.captured, i);
-                self.clone_v(f.func, dest, p);
-            }
-            LocalRef::CapturedCell(i) => {
-                let p = self.elem(f.captured, i);
-                self.call("rt_n_cell_get", None, &[dest.into(), p.into()]);
-            }
-            LocalRef::Absent => return Err(Unsupported(format!("unresolved local {idx}"))),
+        // The analyzer resolves every local it emits (captures included).
+        let local = f.env[idx].expect("analyzed local is visible");
+        let p = self.local_slot(f, idx).expect("analyzed local is visible");
+        if matches!(local, LocalRef::Cell(_) | LocalRef::CapturedCell(_)) {
+            self.call("rt_n_cell_get", None, &[dest.into(), p.into()]);
+        } else {
+            self.clone_v(f.func, dest, p);
         }
         Ok(())
     }
 
     /// The raw slot holding local `idx` (a cell local yields the cell).
     fn local_slot(&self, f: &FnCtx<'ctx>, idx: usize) -> Option<PointerValue<'ctx>> {
-        match f.env.get(idx).copied()? {
+        match f.env.get(idx).copied().flatten()? {
             LocalRef::Slot(p) | LocalRef::Cell(p) => Some(p),
             LocalRef::Captured(i) | LocalRef::CapturedCell(i) => Some(self.elem(f.captured, i)),
-            LocalRef::Absent => None,
         }
     }
 
@@ -1330,7 +1319,7 @@ impl<'ctx> Lowerer<'ctx> {
                 let cell = name.as_ref().map(|_| {
                     let c = self.slot(f);
                     self.call("rt_n_cell_new", None, &[c.into()]);
-                    f.env.push(LocalRef::Cell(c));
+                    f.env.push(Some(LocalRef::Cell(c)));
                     c
                 });
                 let t = self.slot(f);
@@ -2092,9 +2081,8 @@ impl<'ctx> Lowerer<'ctx> {
             }
             out
         };
-        let Some(target) = f.recur.pop() else {
-            return Err(Unsupported("recur without target".to_owned()));
-        };
+        // The analyzer only emits `recur` in tail position of a target.
+        let target = f.recur.pop().expect("recur has a target");
         let depth = f.env.len();
         // Rebinding pushes env entries per pattern position: rebuild
         // the env so later patterns see earlier ones like a fresh bind.
@@ -2153,7 +2141,7 @@ impl<'ctx> Lowerer<'ctx> {
         for _ in fns {
             let c = self.slot(f);
             self.call("rt_n_cell_new", None, &[c.into()]);
-            f.env.push(LocalRef::Cell(c));
+            f.env.push(Some(LocalRef::Cell(c)));
             cells.push(c);
         }
         let base = f.env.len();
@@ -2205,9 +2193,7 @@ impl<'ctx> Lowerer<'ctx> {
         let (harr, hs) = self.slot_array(f, catches.len());
         let mut classes = Vec::new();
         for (c, h) in catches.iter().zip(&hs) {
-            if c.slot != f.env.len() {
-                return Err(Unsupported("catch slot mismatch".to_owned()));
-            }
+            assert_eq!(c.slot, f.env.len(), "a catch binds the next local slot");
             self.body_closure(f, 1, &c.body, *h)?;
             classes.push(Value::Str(std::sync::Arc::from(c.class.as_str())));
         }
@@ -2478,23 +2464,6 @@ impl<'ctx> Lowerer<'ctx> {
         let consts = self.consts.clone();
         for (k, c) in consts.iter().enumerate() {
             match c {
-                Const::Nil => {
-                    self.call("rt_n_nil", None, &[t.into()]);
-                }
-                Const::Bool(b) => {
-                    self.call(
-                        "rt_n_bool",
-                        None,
-                        &[t.into(), self.i8t.const_int(u64::from(*b), false).into()],
-                    );
-                }
-                Const::Int(n) => {
-                    self.call(
-                        "rt_n_int",
-                        None,
-                        &[t.into(), self.i64t.const_int(*n as u64, true).into()],
-                    );
-                }
                 Const::Double(d) => {
                     let fv = self.ctx.f64_type().const_float(*d);
                     self.call("rt_n_double", None, &[t.into(), fv.into()]);
@@ -2531,10 +2500,7 @@ impl<'ctx> Lowerer<'ctx> {
                 }
                 Const::Read(text) => {
                     let p = self.str_ptr(text);
-                    let st = self
-                        .call("rt_n_read", Some(self.i32t), &[t.into(), p.into()])
-                        .expect("st");
-                    self.check(&f, st);
+                    self.call("rt_n_read", None, &[t.into(), p.into()]);
                 }
             }
             self.call("rt_n_set_const", None, &[self.u64c(k as u64), t.into()]);
@@ -2649,10 +2615,7 @@ fn fast_op(fast: clj_eval::ext::FastArith, n: usize) -> Option<clj_eval::ext::Fa
 /// fallback).
 fn scalar_const(v: &Value) -> Option<Const> {
     Some(match v {
-        Value::Nil => Const::Nil,
-        Value::Bool(b) => Const::Bool(*b),
-        Value::Int(n) => Const::Int(*n),
-        Value::Double(d) if d.is_finite() => Const::Double(*d),
+        Value::Double(d) => Const::Double(*d),
         Value::Str(s) => Const::Str(s.to_string()),
         Value::Keyword(k) => Const::Keyword(k.namespace().map(str::to_owned), k.name().to_owned()),
         Value::Symbol(s) if s.meta().is_none() => {
@@ -2684,9 +2647,6 @@ fn arity_free(arity: &Arity, base: usize, out: &mut BTreeSet<usize>) {
         {
             out.insert(*i);
         }
-        if let Expr::CaseStar { .. } = e {
-            // children walked below like any other
-        }
         for_each_child(e, &mut |c| walk(c, base, out));
     }
     let probe = Expr::Fn(FunExpr {
@@ -2701,12 +2661,21 @@ fn arity_free(arity: &Arity, base: usize, out: &mut BTreeSet<usize>) {
 fn mentions_rebinding(e: &Expr) -> bool {
     // (`alter-meta!` is benign here: `defn` itself uses it for
     // `:arglists`.)
-    const REBIND: [&str; 5] = [
+    // (The var-resolving fns hand out any var — `alter-var-root`
+    // included — without naming it statically.)
+    const REBIND: [&str; 12] = [
         "alter-var-root",
         "with-redefs-fn",
         "intern",
         "ns-unmap",
         "eval",
+        "resolve",
+        "ns-resolve",
+        "find-var",
+        "requiring-resolve",
+        "ns-interns",
+        "ns-publics",
+        "ns-map",
     ];
     let core_rebind = |v: &clj_value::Var| {
         v.sym.namespace() == Some("clojure.core") && REBIND.contains(&v.sym.name())

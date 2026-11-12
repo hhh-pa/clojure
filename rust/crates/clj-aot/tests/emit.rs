@@ -558,3 +558,28 @@ fn native_emit_ir_lowers_units_constants_and_main_259() {
         assert!(text.contains(needle), "missing {needle}:\n{text}");
     }
 }
+
+#[test]
+fn native_unreadable_constant_falls_back_to_mixed_259() {
+    // A macro expanding to a live object (an atom) leaves a constant
+    // with no readable form: the native compiler declines and the
+    // build takes the mixed path, naming why.
+    let ir = tmp("unreadable.ll");
+    let report = clj_aot::build_str(
+        "(defmacro live [] (atom 1))\n(defn f [] @(live))\n(println (f))\n",
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("mixed build");
+    std::fs::remove_file(&ir).expect("cleanup");
+    assert!(
+        report.contains("(native: constant without a readable form: "),
+        "{report}"
+    );
+}

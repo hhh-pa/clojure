@@ -96,15 +96,47 @@ fn building<R>(f: impl FnOnce(&mut Building) -> R) -> R {
 
 fn tables() -> &'static Tables {
     let generation = GENERATION.load(std::sync::atomic::Ordering::Acquire);
-    if let Some((g, t)) = CACHED.get()
-        && g == generation
-    {
-        return t;
+    if let Some((g, t)) = CACHED.get() {
+        if g == generation {
+            return t;
+        }
     }
     let current = TABLES.lock().expect("clj-rt native tables lock");
     let (g, t) = current.expect("native program tables frozen before use");
     CACHED.set(Some((g, t)));
     t
+}
+
+/// A string constant's text (empty for anything else).
+pub(crate) fn str_of(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// A symbol constant (`_` for anything else).
+pub(crate) fn sym_of(v: &Value) -> clj_value::Symbol {
+    match v {
+        Value::Symbol(s) => s.clone(),
+        _ => clj_value::Symbol::new(None, "_"),
+    }
+}
+
+/// The items of a constant vector (empty for anything else).
+pub(crate) fn items_of(v: &Value) -> Vec<Value> {
+    match v {
+        Value::Vector(items) => items.iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A shim status: 0 on success, else 1 with the signal pending.
+pub(crate) fn status(result: Result<(), Signal>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(signal) => fail(signal),
+    }
 }
 
 /// Store a failing step's signal; returns the shim status (1).
@@ -206,18 +238,19 @@ pub(crate) fn var(k: usize) -> &'static Var {
         .get_or_init(|| with_active(|eval| native_abi::intern_var(eval, &slot.ns, &slot.name)))
 }
 
+/// A var-cache validity key: (registry epoch, binding version).
+type CacheKey = (u64, u64);
+
 thread_local! {
-    /// Per-var root cache `(epoch, root)`: valid while no thread
-    /// binding is live and the registry epoch is unchanged — the
-    /// interpreter's own direct-call validity rule.
-    static ROOTS: RefCell<Vec<Option<(u64, Value)>>> = const { RefCell::new(Vec::new()) };
+    /// Per-var value cache `(key, value)`: valid while the registry
+    /// epoch and the binding version are unchanged (equal versions
+    /// mean equal bindings) — the interpreter's own direct-call
+    /// validity rule.
+    static ROOTS: RefCell<Vec<Option<(CacheKey, Value)>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The current value of var `k` (cached root fast path).
 pub(crate) fn root(eval: &mut Evaluator, k: usize) -> Value {
-    if native_abi::has_thread_bindings(eval) {
-        return native_abi::deref(eval, var(k));
-    }
     let epoch = native_abi::root_epoch(eval);
     let hit = ROOTS.with(|r| match r.borrow().get(k) {
         Some(Some((e, v))) if *e == epoch => Some(v.clone()),
@@ -281,6 +314,18 @@ pub(crate) fn core_entry(eval: &mut Evaluator, k: usize) -> Option<&'static nati
         .as_ref()
 }
 
+/// Call var `k` with moved args: its resolved native entry, or (when
+/// the root is not a native) the root through the general call.
+pub(crate) fn call_core_var(eval: &mut Evaluator, k: usize, args: clj_eval::SmallArgs) -> Step {
+    match core_entry(eval, k) {
+        Some(entry) => native_abi::call_core(eval, entry, args),
+        None => {
+            let callee = root(eval, k);
+            native_abi::call_value_owned(eval, &callee, args)
+        }
+    }
+}
+
 /// Whether var `k`'s current root is the latest closure of compiled
 /// fn `desc` (no clone: reads the root cache).
 pub(crate) fn root_is_fn(eval: &mut Evaluator, k: usize, desc: usize) -> bool {
@@ -288,21 +333,17 @@ pub(crate) fn root_is_fn(eval: &mut Evaluator, k: usize, desc: usize) -> bool {
     if want == 0 {
         return false;
     }
-    if !native_abi::has_thread_bindings(eval) {
-        let epoch = native_abi::root_epoch(eval);
-        let hit = ROOTS.with(|r| match r.borrow().get(k) {
-            Some(Some((e, Value::Extension(x)))) if *e == epoch => {
-                Some(Arc::as_ptr(x).cast::<()>() as usize == want)
-            }
-            Some(Some((e, _))) if *e == epoch => Some(false),
-            _ => None,
-        });
-        if let Some(hit) = hit {
-            return hit;
-        }
-    }
-    let root = root(eval, k);
-    matches!(&root, Value::Extension(e) if Arc::as_ptr(e).cast::<()>() as usize == want)
+    let epoch = native_abi::root_epoch(eval);
+    let hit = ROOTS.with(|r| match r.borrow().get(k) {
+        Some(Some((e, v))) if *e == epoch => Some(is_closure_at(v, want)),
+        _ => None,
+    });
+    hit.unwrap_or_else(|| is_closure_at(&root(eval, k), want))
+}
+
+/// Whether `v` is the closure at address `want`.
+fn is_closure_at(v: &Value, want: usize) -> bool {
+    matches!(v, Value::Extension(e) if Arc::as_ptr(e).cast::<()>() as usize == want)
 }
 
 /// Select the arity for `args` and run its code on this evaluator.
@@ -524,5 +565,119 @@ fn ints_at(items: &[Value], i: usize) -> Vec<i32> {
             .map(|x| int_at(std::slice::from_ref(&x), 0) as i32)
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::ActiveScope;
+
+    #[test]
+    fn constant_readers_fall_back_on_malformed_constants() {
+        assert_eq!(str_of(&Value::Str(Arc::from("s"))), "s");
+        assert_eq!(str_of(&Value::Nil), "");
+        assert_eq!(sym_of(&Value::Int(1)), clj_value::Symbol::new(None, "_"));
+        assert!(items_of(&Value::Nil).is_empty());
+    }
+
+    fn vector(items: Vec<Value>) -> Value {
+        Value::Vector(clj_value::Vector::from_vec(items))
+    }
+
+    #[test]
+    fn decoders_tolerate_malformed_descriptors() {
+        let mut eval = clj_eval::boot();
+        let _scope = ActiveScope::enter(&mut eval);
+        // Not a vector: nothing to do.
+        assert!(matches!(run_ns(&Value::Nil), Ok(Value::Nil)));
+        assert!(matches!(
+            case_select(&Value::Nil, &Value::Nil),
+            Ok((-1, Value::Nil))
+        ));
+        assert!(matches!(
+            run_defmacro(&Value::Nil, Value::Nil),
+            Ok(Value::Nil)
+        ));
+        // Malformed parts decode to their neutral defaults.
+        let ns = vector(vec![
+            Value::Str(Arc::from("user.decoded")),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(9),
+            vector(vec![Value::Nil]),
+        ]);
+        assert!(run_ns(&ns).is_ok());
+        let case = vector(vec![
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Nil,
+        ]);
+        assert!(matches!(case_select(&case, &Value::Int(1)), Ok((-1, _))));
+        let mac = vector(vec![
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+        ]);
+        assert!(run_defmacro(&mac, Value::Nil).is_ok());
+        assert_eq!(ints_at(&[vector(vec![Value::Nil])], 0), [0]);
+        // A nameless ns and a macro with an attribute map.
+        let _ = run_ns(&vector(vec![Value::Nil]));
+        let attr = Value::Map(clj_value::Map::from_kvs_last_wins(Vec::new()));
+        let mac = vector(vec![
+            Value::Symbol(clj_value::Symbol::new(None, "decoded-macro")),
+            Value::Str(Arc::from("doc")),
+            attr,
+            vector(vec![]),
+            Value::Int(1),
+            Value::Int(2),
+        ]);
+        assert!(run_defmacro(&mac, Value::Nil).is_ok());
+    }
+
+    #[test]
+    fn a_missing_pending_throw_is_an_internal_error() {
+        let mut eval = clj_eval::boot();
+        let _scope = ActiveScope::enter(&mut eval);
+        assert!(matches!(take_pending(), Signal::Throw(_)));
+    }
+
+    #[test]
+    fn statuses_mark_failures_pending() {
+        let mut eval = clj_eval::boot();
+        let _scope = ActiveScope::enter(&mut eval);
+        assert_eq!(status(Ok(())), 0);
+        let signal = take_pending();
+        assert_eq!(status(Err(signal)), 1);
+        assert!(matches!(take_pending(), Signal::Throw(_)));
+    }
+
+    #[test]
+    fn unknown_fns_are_never_the_root() {
+        let mut eval = clj_eval::boot();
+        assert!(!root_is_fn(&mut eval, 0, usize::MAX));
+    }
+
+    // (The only test touching the global program tables.)
+    #[test]
+    fn core_var_calls_take_the_native_entry_or_the_root() {
+        let mut eval = clj_eval::boot();
+        eval.eval_source("(def plain (fn [x] (* 2 x)))")
+            .expect("def");
+        // Declaring past the end fills the gap; declaring inside it
+        // overwrites the placeholder.
+        declare_var(1, "user".to_owned(), "plain".to_owned());
+        declare_var(0, "clojure.core".to_owned(), "inc".to_owned());
+        freeze();
+        let _scope = ActiveScope::enter(&mut eval);
+        with_active(|eval| {
+            let one: clj_eval::SmallArgs = [Value::Int(1)].into_iter().collect();
+            assert!(matches!(call_core_var(eval, 0, one), Ok(Value::Int(2))));
+            let three: clj_eval::SmallArgs = [Value::Int(3)].into_iter().collect();
+            assert!(matches!(call_core_var(eval, 1, three), Ok(Value::Int(6))));
+        });
     }
 }
