@@ -183,6 +183,7 @@ dependencies = [
  "clj-reader",
  "clj-value",
  "loom",
+ "mimalloc",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -244,7 +245,6 @@ dependencies = [
  "clj-eval",
  "clj-repl",
  "clj-value",
- "mimalloc",
  "rustix",
 ]
 
