@@ -28,7 +28,7 @@ use clj_eval::script::{run_diagnostic, run_script};
 use clj_eval::{Evaluator, MIXED_INTERN_NS, NativeError, boot, load_text_as_file};
 use clj_value::{ThrowClass, Value};
 
-use crate::runtime::give;
+use crate::runtime::{ActiveScope, give};
 
 /// A native `defn`'s uniform entry: the generated trampoline loads
 /// `argc` owned boxes from `args`, calls the lowered fn (which
@@ -94,13 +94,20 @@ impl Drop for StashScope {
 /// Call a native with interpreter arguments: arity-checked with
 /// the interpreter's own text, boxes handed over, failures
 /// rethrown from the stash.
-fn invoke(native: &Native, display: &str, args: &[Value]) -> Result<Value, NativeError> {
+fn invoke(
+    eval: &mut Evaluator,
+    native: &Native,
+    display: &str,
+    args: &[Value],
+) -> Result<Value, NativeError> {
     if args.len() != native.arity {
         return Err(NativeError::arity(display, args.len()));
     }
     let mut boxes: Vec<*mut Value> = args.iter().cloned().map(give).collect();
     let ret = {
         let _scope = StashScope::enter();
+        // The prim shims run on this evaluator (no second boot, #258).
+        let _active = ActiveScope::enter(eval);
         (native.entry)(boxes.as_mut_ptr(), boxes.len())
     };
     if ret.is_null() {
@@ -137,7 +144,8 @@ fn intern_native(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     let ns = eval.current_ns_name();
     let display = format!("{ns}/{}", native.name);
     let name = native.name.clone();
-    let func = Arc::new(move |_: &mut Evaluator, args: &[Value]| invoke(&native, &display, args));
+    let func =
+        Arc::new(move |eval: &mut Evaluator, args: &[Value]| invoke(eval, &native, &display, args));
     Ok(eval.install_native(&ns, &name, func))
 }
 

@@ -34,3 +34,7 @@ workspace = true
 
 [dev-dependencies]
 loom = "0.7"
+
+# The global allocator off Linux (see `lib.rs`).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+mimalloc = { version = "0.1.52", default-features = false }

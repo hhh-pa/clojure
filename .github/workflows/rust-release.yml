@@ -127,7 +127,14 @@ jobs:
           "$bin" --help | grep -q 'Usage:'
           mkdir -p dist
           asset="dist/clojure-rs-$target.tar.gz"
-          tar -czf "$asset" -C target/release "$(basename "$bin")" "$(basename "$archive")"
+          # Linux: the hot-text section order rides next to the
+          # archive so `build` links AOT binaries like `run` (#258).
+          extra=()
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cp hot-text.ld target/release/hot-text.ld
+            extra=(hot-text.ld)
+          fi
+          tar -czf "$asset" -C target/release "$(basename "$bin")" "$(basename "$archive")" "${extra[@]}"
           # Packaging smoke (S7D): the shipped artifact itself must
           # evaluate — extract to a scratch dir and run eval there.
           smoke=$(mktemp -d)

@@ -23,10 +23,11 @@
 //! (That single-lock argument is the whole model: there is no lock
 //! ordering to check, so a loom model would be vacuous.)
 
+use std::cell::Cell;
 use std::ffi::CStr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use clj_eval::coll::{nth_str, str_utf16_len};
 use clj_eval::core::nth_index;
@@ -72,8 +73,13 @@ impl Runtime {
     /// (evaluating the qualified symbol and taking its native).
     fn boot() -> Self {
         let mut eval = boot();
-        let prims = PRIM_NAMES.map(|name| Self::resolve(&mut eval, name));
+        let prims = Self::resolve_all(&mut eval);
         Self { eval, prims }
+    }
+
+    /// Every [`PRIM_NAMES`] native, resolved through `eval`.
+    fn resolve_all(eval: &mut Evaluator) -> [Arc<NativeImpl>; 19] {
+        PRIM_NAMES.map(|name| Self::resolve(eval, name))
     }
 
     /// Resolve one `clojure.core` native through the booted
@@ -91,13 +97,58 @@ impl Runtime {
     }
 }
 
-/// The process-global runtime, booted on first helper call.
+/// The process-global runtime, booted on first helper call — only
+/// by pure-subset binaries: mixed programs run natives inside an
+/// [`ActiveScope`] on the program's own evaluator (issue #258).
 static RUNTIME: LazyLock<Mutex<Runtime>> = LazyLock::new(|| Mutex::new(Runtime::boot()));
+
+/// The prim natives resolved from the first active evaluator (the
+/// natives are the same `clojure.core` fns in every evaluator).
+static SHARED_PRIMS: OnceLock<[Arc<NativeImpl>; 19]> = OnceLock::new();
+
+thread_local! {
+    /// The evaluator the current native call runs on (null outside
+    /// any native call made from interpreted code).
+    static ACTIVE: Cell<*mut Evaluator> = const { Cell::new(ptr::null_mut()) };
+}
+
+/// Publishes the interpreter's evaluator to the prim shims for the
+/// extent of one native call, restoring the enclosing one after
+/// (nested native calls through callbacks stack correctly).
+pub(crate) struct ActiveScope {
+    prev: *mut Evaluator,
+}
+
+impl ActiveScope {
+    /// Enter: the caller must not touch `eval` until the scope drops.
+    pub(crate) fn enter(eval: &mut Evaluator) -> Self {
+        let ptr: *mut Evaluator = eval;
+        Self {
+            prev: ACTIVE.with(|a| a.replace(ptr)),
+        }
+    }
+}
+
+impl Drop for ActiveScope {
+    fn drop(&mut self) {
+        ACTIVE.with(|a| a.set(self.prev));
+    }
+}
 
 /// Call primitive `index` (a [`Prim`](clj_eval::Prim) discriminant) on owned
 /// `args`: the SAME native the interpreter would call, with the
 /// SAME [`NativeError`] on failure.
 pub(crate) fn call_prim(index: usize, args: Vec<Value>) -> Result<Value, NativeError> {
+    let active = ACTIVE.with(Cell::get);
+    if !active.is_null() {
+        // SAFETY: `ACTIVE` is non-null only inside an `ActiveScope`,
+        // which holds the `&mut Evaluator` the interpreter handed to
+        // the native call (it is not used again until the scope
+        // ends); this reborrow ends before the shim returns.
+        let eval = unsafe { &mut *active };
+        let func = Arc::clone(&SHARED_PRIMS.get_or_init(|| Runtime::resolve_all(eval))[index]);
+        return catch_panic(AssertUnwindSafe(|| func(eval, &args)));
+    }
     let mut rt = RUNTIME.lock().expect("clj-rt evaluator lock");
     let func = Arc::clone(&rt.prims[index]);
     catch_panic(AssertUnwindSafe(|| func(&mut rt.eval, &args)))
@@ -324,13 +375,33 @@ pub(crate) fn clone_worker(value: &Value) -> *mut Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        PRIM_NAMES, RUNTIME, argv_worker, call_prim, catch_panic, clone_worker, count_str_fast,
-        count_worker, error_line, is_int_flag, keyword_worker, nth_str_fast, nth_worker,
-        prim_worker, print_join, print_worker, str_worker, unbox_int, vec_push_worker,
+        ACTIVE, ActiveScope, PRIM_NAMES, RUNTIME, argv_worker, call_prim, catch_panic,
+        clone_worker, count_str_fast, count_worker, error_line, is_int_flag, keyword_worker,
+        nth_str_fast, nth_worker, prim_worker, print_join, print_worker, str_worker, unbox_int,
+        vec_push_worker,
     };
     use clj_eval::{NativeError, Prim};
     use clj_value::{ThrowClass, Value, print_to_string};
     use std::panic::AssertUnwindSafe;
+
+    #[test]
+    fn active_scope_runs_prims_on_the_callers_evaluator_258() {
+        let mut outer = clj_eval::boot();
+        let mut inner = clj_eval::boot();
+        let outer_ptr: *mut clj_eval::Evaluator = &mut outer;
+        {
+            let _a = ActiveScope::enter(&mut outer);
+            let sum = call_prim(Prim::Add as usize, vec![Value::Int(1), Value::Int(2)]);
+            assert_eq!(sum.ok(), Some(Value::Int(3)));
+            {
+                let _b = ActiveScope::enter(&mut inner);
+                let cmp = call_prim(Prim::Lt as usize, vec![Value::Int(1), Value::Int(2)]);
+                assert_eq!(cmp.ok(), Some(Value::Bool(true)));
+            }
+            assert_eq!(ACTIVE.with(std::cell::Cell::get), outer_ptr);
+        }
+        assert!(ACTIVE.with(std::cell::Cell::get).is_null());
+    }
 
     /// Take a worker return back (frees the box).
     ///

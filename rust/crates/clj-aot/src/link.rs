@@ -99,6 +99,25 @@ pub struct LinkCommand {
     pub args: Vec<String>,
 }
 
+/// The layout flags `clojure-rs` itself links with on Linux
+/// (`build.rs`), so AOT binaries run the shared runtime the same
+/// way `run` does (#258): `-no-pie`, plus the hot-text section
+/// order when `hot-text.ld` ships next to the runtime archive.
+/// Empty elsewhere (`linux` is the host check, a parameter so both
+/// shapes stay testable on every host).
+#[must_use]
+pub fn layout_args(archive: &Path, linux: bool) -> Vec<String> {
+    if !linux {
+        return Vec::new();
+    }
+    let mut args = vec!["-no-pie".to_owned()];
+    let script = archive.with_file_name("hot-text.ld");
+    if script.is_file() {
+        args.push(format!("-Wl,-T,{}", script.display()));
+    }
+    args
+}
+
 /// Build the link command (`cc` on Unix, `link` on Windows; the
 /// override names the linker program for tests). The Windows arm
 /// carries the system libs a Rust staticlib needs: `rustc` links
@@ -243,6 +262,22 @@ mod tests {
 
     fn tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("clj-aot-link-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn layout_args_follow_linux_and_hot_text() {
+        let dir = std::env::temp_dir().join(format!("clj-aot-layout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let archive = dir.join("libcljrt.a");
+        assert!(super::layout_args(&archive, false).is_empty());
+        assert_eq!(super::layout_args(&archive, true), ["-no-pie"]);
+        std::fs::write(dir.join("hot-text.ld"), "SECTIONS {}").expect("script");
+        let script = dir.join("hot-text.ld");
+        assert_eq!(
+            super::layout_args(&archive, true),
+            ["-no-pie".to_owned(), format!("-Wl,-T,{}", script.display())]
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

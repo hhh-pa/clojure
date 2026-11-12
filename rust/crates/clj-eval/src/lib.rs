@@ -11,6 +11,21 @@
 //! `docs/spec/t1174/evaluator-contract.md` shape rules; [`Evaluator`]
 //! runs them. Single namespace (`user`), no prelude yet (S5).
 
+/// mimalloc (#226) off Linux, for every artifact that links the
+/// interpreter — the `clojure-rs` binary and the `clj-rt` runtime
+/// archive AOT binaries link alike (#258: the archive used the
+/// platform allocator, so AOT binaries paid more per allocation
+/// than `run`): the interpreter allocates many small,
+/// short-lived blocks (reader lists, analyzed forms, seq steps), where
+/// it is markedly cheaper than the platform allocators. Linux keeps
+/// glibc's allocator for peak RSS: under the default `madvise`
+/// transparent-huge-page mode mimalloc's arenas take huge pages (a
+/// trivial run peaked at 19 MB instead of 9), and even without them a
+/// trivial run peaks 0.7 MB higher and data-heavy runs 20-30% higher.
+#[cfg(not(target_os = "linux"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod aot_subset;
 pub mod arrays;
 #[path = "async.rs"]
