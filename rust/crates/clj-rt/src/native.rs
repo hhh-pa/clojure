@@ -275,9 +275,26 @@ pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> V
     let desc = tables().fns[k].clone();
     let display = Arc::clone(&desc.display);
     let captured: Arc<[Value]> = captured.into();
-    let func = Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
-        call_compiled(eval, &desc, &captured, args).map_err(native_abi::signal_to_native)
-    });
+    // The common shape — one fixed arity — calls its code straight away
+    // (no arity search); anything else, wrong counts included, takes
+    // the general dispatch.
+    let single = match &*desc.arities {
+        [a] if !a.variadic => Some((a.fixed, a.code)),
+        _ => None,
+    };
+    let func: Arc<clj_eval::ext::NativeImpl> = match single {
+        Some((fixed, code)) => Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
+            if args.len() == fixed {
+                call_code(eval, code, &captured, args)
+            } else {
+                call_compiled(eval, &desc, &captured, args)
+            }
+            .map_err(native_abi::signal_to_native)
+        }),
+        None => Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
+            call_compiled(eval, &desc, &captured, args).map_err(native_abi::signal_to_native)
+        }),
+    };
     let ext: Arc<dyn clj_value::ExtensionValue> = Arc::new(NativeFn {
         id: eval.next_id(),
         display,
@@ -361,20 +378,22 @@ fn call_compiled(eval: &mut Evaluator, desc: &FnDesc, captured: &[Value], args: 
             None => return Err(native_abi::arity_error(eval, &desc.display, args.len())),
         },
     };
+    if !arity.variadic {
+        return call_code(eval, arity.code, captured, args);
+    }
+    let mut packed = args[..arity.fixed].to_vec();
+    packed.push(native_abi::rest_args(&args[arity.fixed..]));
+    call_code(eval, arity.code, captured, &packed)
+}
+
+/// Run compiled `code` on `argv` (already shaped for its arity) under
+/// the call-depth guard, with `eval` active for the shims.
+fn call_code(eval: &mut Evaluator, code: Code, captured: &[Value], argv: &[Value]) -> Step {
     native_abi::guarded(eval, |eval| {
-        let packed: Vec<Value>;
-        let argv: &[Value] = if arity.variadic {
-            let mut v = args[..arity.fixed].to_vec();
-            v.push(native_abi::rest_args(&args[arity.fixed..]));
-            packed = v;
-            &packed
-        } else {
-            args
-        };
         let mut ret = Value::Nil;
         let status = {
             let _active = ActiveScope::enter(eval);
-            (arity.code)(&mut ret, argv.as_ptr(), argv.len(), captured.as_ptr())
+            code(&mut ret, argv.as_ptr(), argv.len(), captured.as_ptr())
         };
         if status == 0 {
             Ok(ret)
