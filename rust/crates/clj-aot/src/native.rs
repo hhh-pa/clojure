@@ -277,7 +277,6 @@ impl<'ctx> Lowerer<'ctx> {
             .iter()
             .map(|a| match a {
                 BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
-                BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
                 // Pointers (slots, headers, code); no other kind is passed.
                 _ => self.ptr.into(),
             })
