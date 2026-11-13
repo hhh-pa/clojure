@@ -23,7 +23,7 @@
 //! indexes the frame chain, so a fn created at frame length `base`
 //! captures exactly the `Local(i < base)` its arities mention.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use clj_eval::aot_front::{FrontEnd, for_each_child};
 use clj_eval::expr::{Arity, CaseTest, Expr, FunExpr, NsClause, Pattern};
@@ -54,8 +54,8 @@ pub struct Unsupported(pub String);
 /// A constant-pool entry.
 #[derive(Clone, Debug, PartialEq)]
 enum Const {
-    // (`nil`, booleans, and ints are written inline, never pooled.)
-    Double(f64),
+    // (`nil`, booleans, ints, doubles, and chars are written inline,
+    // never pooled.)
     Str(String),
     Keyword(Option<String>, String),
     Symbol(Option<String>, String),
@@ -107,9 +107,11 @@ struct FnCtx<'ctx> {
     env: Vec<Option<LocalRef<'ctx>>>,
     recur: Vec<RecurTarget<'ctx>>,
     captured: PointerValue<'ctx>,
-    /// Locals whose single remaining use (in the `recur` args being
-    /// lowered) may take the value by move.
-    moves: Vec<usize>,
+    /// `Expr::Local` occurrences `(node address, local)` in the `recur`
+    /// args being lowered that are their local's last use, so may move.
+    /// Such a local is never borrowed or aliased at an earlier
+    /// occurrence (the move would invalidate the reference).
+    moves: Vec<(usize, usize)>,
 }
 
 /// The program-level lowering session.
@@ -275,7 +277,6 @@ impl<'ctx> Lowerer<'ctx> {
             .iter()
             .map(|a| match a {
                 BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
-                BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
                 // Pointers (slots, headers, code); no other kind is passed.
                 _ => self.ptr.into(),
             })
@@ -890,17 +891,27 @@ impl<'ctx> Lowerer<'ctx> {
         let mut f = self.begin_fn_into(func, env);
         let args = f.func.get_nth_param(1).expect("args").into_pointer_value();
         let pats: Vec<&Pattern> = arity.fixed.iter().chain(arity.rest.iter()).collect();
-        // Params: each arg cloned into its own slot, then bound.
-        let mut arg_slots = Vec::with_capacity(pats.len());
-        for i in 0..pats.len() {
-            let s = self.slot(&mut f);
-            let src = self.elem(args, i);
-            self.clone_v(f.func, s, src);
-            arg_slots.push(s);
-        }
+        // Params read the caller's argument array in place (the caller
+        // owns it for the call; compiled code never drops or moves a
+        // param). An arity that `recur`s rebinds its params, so it takes
+        // owned copies first.
+        let owned = self_recurs(&arity.body);
         let mut targets = Vec::with_capacity(pats.len());
-        for (pat, s) in pats.iter().zip(&arg_slots) {
-            let slots = self.bind_pattern(&mut f, pat, *s)?;
+        for (i, pat) in pats.iter().enumerate() {
+            let arg = self.elem(args, i);
+            let src = if owned {
+                let s = self.slot(&mut f);
+                self.clone_v(f.func, s, arg);
+                s
+            } else {
+                arg
+            };
+            let slots = if matches!(pat, Pattern::Symbol(_)) {
+                f.env.push(Some(LocalRef::Slot(src)));
+                vec![src]
+            } else {
+                self.bind_pattern(&mut f, pat, src)?
+            };
             targets.push(((*pat).clone(), slots));
         }
         let header = self.ctx.append_basic_block(f.func, "body");
@@ -1120,21 +1131,7 @@ impl<'ctx> Lowerer<'ctx> {
             }
             Expr::If { test, then, els } => self.lower_if(f, test, then, els, dest),
             Expr::Do(body) => self.lower_body(f, body, dest),
-            Expr::Let { bindings, body } => {
-                let depth = f.env.len();
-                let mut bound = Vec::new();
-                for (pat, init) in bindings {
-                    let t = self.slot(f);
-                    self.lower(f, init, t)?;
-                    bound.extend(self.bind_pattern(f, pat, t)?);
-                    self.drop_v(f.func, t);
-                }
-                self.lower_body(f, body, dest)?;
-                f.env.truncate(depth);
-                // Release let-bound values at scope end (RSS parity).
-                self.drop_slots(f.func, &bound);
-                Ok(())
-            }
+            Expr::Let { bindings, body } => self.lower_let(f, bindings, body, dest),
             Expr::Loop { bindings, body } => self.lower_loop(f, bindings, body, dest),
             Expr::Recur(args) => self.lower_recur(f, args),
             Expr::Fn(fun) => {
@@ -1446,6 +1443,37 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
+    /// A `let`: each init lowered into its slot; a symbol binding
+    /// takes over the init's slot (no copy), while a destructuring
+    /// pattern binds out of it. Bound values release at scope end.
+    fn lower_let(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let depth = f.env.len();
+        let mut bound = Vec::new();
+        for (pat, init) in bindings {
+            let t = self.slot(f);
+            self.lower(f, init, t)?;
+            if matches!(pat, Pattern::Symbol(_)) {
+                // The init's slot becomes the local's (no copy).
+                f.env.push(Some(LocalRef::Slot(t)));
+                bound.push(t);
+            } else {
+                bound.extend(self.bind_pattern(f, pat, t)?);
+                self.drop_v(f.func, t);
+            }
+        }
+        self.lower_body(f, body, dest)?;
+        f.env.truncate(depth);
+        // Release let-bound values at scope end (RSS parity).
+        self.drop_slots(f.func, &bound);
+        Ok(())
+    }
+
     /// A body compiled as a zero-arg fn named `display`, wrapped by
     /// the runtime (`kind`: 0 `lazy-seq`, 1 `delay`).
     fn wrap_body(
@@ -1511,7 +1539,23 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> Result<(), Unsupported> {
         let (var, k, code) = self.direct_target(head, args.len()).expect("checked");
         let vk = self.var_of(&var);
-        let arr = self.lower_args(f, args)?;
+        // Plain locals ride in the argument array as bitwise aliases (the
+        // callee only reads its args); they are cleared, never dropped,
+        // right after the call. Computed args are owned there.
+        let (arr, elems) = self.slot_array(f, args.len());
+        let mut aliases = Vec::new();
+        for (a, e) in args.iter().zip(&elems) {
+            let local = match a {
+                Expr::Local(i) => self.borrowable(f, *i),
+                _ => None,
+            };
+            if let Some(p) = local {
+                self.copy_bits(*e, p);
+                aliases.push(*e);
+            } else {
+                self.lower(f, a, *e)?;
+            }
+        }
         let ok = self
             .call(
                 "rt_n_enter_fn",
@@ -1547,6 +1591,7 @@ impl<'ctx> Lowerer<'ctx> {
             .expect_basic("st")
             .into_int_value();
         self.call("rt_n_leave", None, &[]);
+        self.clear_aliases(&aliases);
         self.check(f, st);
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(slow_b);
@@ -1560,10 +1605,28 @@ impl<'ctx> Lowerer<'ctx> {
                 &[dest.into(), h.into(), aref.into()],
             )
             .expect("st");
+        self.clear_aliases(&aliases);
         self.check(f, st);
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
         Ok(())
+    }
+
+    /// `dest = src`'s bits without a refcount change (an alias the
+    /// caller clears with [`clear_aliases`](Self::clear_aliases)).
+    fn copy_bits(&self, dest: PointerValue<'ctx>, src: PointerValue<'ctx>) {
+        let v = self
+            .builder
+            .build_load(self.slot_ty, src, "alias")
+            .expect("load");
+        self.builder.build_store(dest, v).expect("store");
+    }
+
+    /// Reset alias slots to nil without dropping (they never owned).
+    fn clear_aliases(&self, aliases: &[PointerValue<'ctx>]) {
+        for a in aliases {
+            self.write_tag(*a, 0);
+        }
     }
 
     /// A direct-native call: inline `FastArith` int ops (falling back
@@ -1583,53 +1646,84 @@ impl<'ctx> Lowerer<'ctx> {
         let fast = fast_op(call.fast, n);
         let core_name = (call.var.sym.namespace() == Some("clojure.core"))
             .then(|| call.var.sym.name().to_owned());
-        let moving = fast.is_none()
-            && call
-                .args
-                .iter()
-                .any(|a| matches!(a, Expr::Local(i) if f.moves.contains(i)));
+        let moving = fast.is_none() && call.args.iter().any(|a| is_move(f, a));
         if moving {
             return self.lower_direct_moving(f, call, k, core_name.as_deref(), dest);
         }
         let (refs, temps) = self.arg_refs(f, &call.args, dest)?;
         let slow = self.ctx.append_basic_block(f.func, "native_slow");
         let done = self.ctx.append_basic_block(f.func, "native_done");
-        let inline = match (fast, core_name.as_deref()) {
-            (None, Some(name)) => self.lower_intrinsic(f, name, &refs, dest, slow, done),
+        self.emit_direct_inline(f, fast, core_name.as_deref(), &refs, dest, slow, done);
+        self.emit_direct_slow(f, &refs, k, n, core_name.as_deref(), dest, slow, done);
+        self.drop_slots(f.func, &temps);
+        Ok(())
+    }
+
+    /// The fast path of a direct-native call: an intrinsic or `FastArith`
+    /// inline that falls through to `done`, else a branch to `slow`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_direct_inline(
+        &mut self,
+        f: &FnCtx<'ctx>,
+        fast: Option<clj_eval::ext::FastArith>,
+        core_name: Option<&str>,
+        refs: &[PointerValue<'ctx>],
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let inline = match (fast, core_name) {
+            (None, Some(name)) => self.lower_intrinsic(f, name, refs, dest, slow, done),
             _ => false,
         };
         match (inline, fast) {
-            (false, Some(op)) => self.lower_fast_arith(f, op, &refs, dest, slow, done),
+            (false, Some(op)) => self.lower_fast_arith(f, op, refs, dest, slow, done),
             (false, None) => {
                 self.builder.build_unconditional_branch(slow).expect("br");
             }
             (true, _) => {}
         }
-        // Slow path: the VM's inline op over the borrowed args, else
-        // the native (args cloned only there).
+    }
+
+    /// The slow path of a direct-native call: the VM's inline op over the
+    /// borrowed args, else the native (args cloned only there). 1-3 args
+    /// go as direct operands; more through a slice.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_direct_slow(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        refs: &[PointerValue<'ctx>],
+        k: u64,
+        n: usize,
+        core_name: Option<&str>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
         self.builder.position_at_end(slow);
         let op = core_name
-            .as_deref()
             .and_then(|name| native_abi::inline_op(name, n))
             .unwrap_or(u32::MAX);
-        let aref = self.refs_slice(f, &refs);
-        let st = self
-            .call(
-                "rt_n_core_ref",
-                Some(self.i32t),
-                &[
-                    dest.into(),
-                    self.i32t.const_int(u64::from(op), false).into(),
-                    self.u64c(k),
-                    aref.into(),
-                ],
-            )
-            .expect("st");
+        let mut call_args: Vec<BasicMetadataValueEnum> = vec![
+            dest.into(),
+            self.i32t.const_int(u64::from(op), false).into(),
+            self.u64c(k),
+        ];
+        let shim = match refs.len() {
+            1 => "rt_n_op1",
+            2 => "rt_n_op2",
+            3 => "rt_n_op3",
+            _ => "rt_n_core_ref",
+        };
+        if (1..=3).contains(&refs.len()) {
+            call_args.extend(refs.iter().map(|r| BasicMetadataValueEnum::from(*r)));
+        } else {
+            call_args.push(self.refs_slice(f, refs).into());
+        }
+        let st = self.call(shim, Some(self.i32t), &call_args).expect("st");
         self.check(f, st);
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
-        self.drop_slots(f.func, &temps);
-        Ok(())
     }
 
     /// A core call taking a local at its last use (inside `recur` args)
@@ -1648,7 +1742,7 @@ impl<'ctx> Lowerer<'ctx> {
         let (arr, elems) = self.slot_array(f, n);
         for (a, e) in call.args.iter().zip(&elems) {
             let moved = match a {
-                Expr::Local(i) if f.moves.contains(i) => self.borrowable(f, *i),
+                Expr::Local(i) if is_move(f, a) => self.slot_of(f, *i),
                 _ => None,
             };
             if let Some(src) = moved {
@@ -1735,6 +1829,17 @@ impl<'ctx> Lowerer<'ctx> {
     /// The slot holding local `idx`'s value, when it can be borrowed
     /// (`letfn` cells hold a cell, not the value).
     fn borrowable(&self, f: &FnCtx<'ctx>, idx: usize) -> Option<PointerValue<'ctx>> {
+        // A local some occurrence in the current `recur` args moves is
+        // copied instead: a reference taken earlier would see the
+        // moved-out slot.
+        if f.moves.iter().any(|m| m.1 == idx) {
+            return None;
+        }
+        self.slot_of(f, idx)
+    }
+
+    /// The slot holding local `idx`'s value (not a `letfn` cell).
+    fn slot_of(&self, f: &FnCtx<'ctx>, idx: usize) -> Option<PointerValue<'ctx>> {
         match f.env.get(idx).copied().flatten()? {
             LocalRef::Slot(p) => Some(p),
             LocalRef::Captured(i) => Some(self.elem(f.captured, i)),
@@ -2131,6 +2236,18 @@ impl<'ctx> Lowerer<'ctx> {
             Value::Bool(b) => {
                 let bit = self.ctx.bool_type().const_int(u64::from(*b), false);
                 self.write_bool(func, dest, bit);
+            }
+            Value::Double(d) => {
+                let fv = self.ctx.f64_type().const_float(*d);
+                self.write_double(func, dest, fv);
+            }
+            Value::Char(c) => {
+                self.drop_v(func, dest);
+                self.write_tag(dest, TAG_CHAR);
+                let cp = self.i32t.const_int(u64::from(u32::from(*c)), false);
+                self.builder
+                    .build_store(self.byte_at(dest, 4), cp)
+                    .expect("store");
             }
             Value::Var(var) => {
                 let k = self.var_of(var);
@@ -2651,10 +2768,6 @@ impl<'ctx> Lowerer<'ctx> {
         let consts = self.consts.clone();
         for (k, c) in consts.iter().enumerate() {
             match c {
-                Const::Double(d) => {
-                    let fv = self.ctx.f64_type().const_float(*d);
-                    self.call("rt_n_double", None, &[t.into(), fv.into()]);
-                }
                 Const::Str(s) => {
                     let p = self.str_ptr(s);
                     self.call("rt_n_str", None, &[t.into(), p.into()]);
@@ -2801,7 +2914,6 @@ fn fast_op(fast: clj_eval::ext::FastArith, n: usize) -> Option<clj_eval::ext::Fa
 /// fallback).
 fn scalar_const(v: &Value) -> Option<Const> {
     Some(match v {
-        Value::Double(d) => Const::Double(*d),
         Value::Str(s) => Const::Str(s.to_string()),
         Value::Keyword(k) => Const::Keyword(k.namespace().map(str::to_owned), k.name().to_owned()),
         Value::Symbol(s) if s.meta().is_none() => {
@@ -2824,35 +2936,83 @@ fn host_const(v: &Value) -> Option<Const> {
     }
 }
 
-/// The locals a `recur` to a loop at env depth `base` may take by move:
-/// scoped inside the loop (`>= base`), held in a plain slot, and used
-/// exactly once across all the `recur` args (nested fns included, so
-/// a capture counts as a use). They are dead once `recur` rebinds. An
-/// occurrence inside a nested `loop` runs once per inner iteration, so
-/// it counts as many.
-fn movable_locals(f: &FnCtx<'_>, args: &[Expr], base: Option<usize>) -> Vec<usize> {
-    fn count(e: &Expr, weight: usize, uses: &mut BTreeMap<usize, usize>) {
-        if let Expr::Local(i) = e {
-            *uses.entry(*i).or_default() += weight;
+/// Whether an arity body `recur`s to the arity itself (a `recur` outside
+/// any nested `loop` or `fn`, which have their own targets).
+fn self_recurs(body: &[Expr]) -> bool {
+    fn walk(e: &Expr) -> bool {
+        match e {
+            Expr::Recur(_) => true,
+            Expr::Loop { bindings, .. } => bindings.iter().any(|(_, init)| walk(init)),
+            Expr::Fn(_) => false,
+            _ => {
+                let mut found = false;
+                for_each_child(e, &mut |c| found = found || walk(c));
+                found
+            }
         }
-        let inner = if matches!(e, Expr::Loop { .. }) {
-            2
-        } else {
-            weight
-        };
-        for_each_child(e, &mut |c| count(c, inner, uses));
+    }
+    body.iter().any(walk)
+}
+
+/// Whether `e` is an occurrence the current `recur` args move.
+fn is_move(f: &FnCtx<'_>, e: &Expr) -> bool {
+    f.moves.iter().any(|m| m.0 == expr_addr(e))
+}
+
+/// A node's address (identifies one occurrence).
+fn expr_addr(e: &Expr) -> usize {
+    std::ptr::from_ref(e) as usize
+}
+
+/// The `Expr::Local` occurrences in a `recur` to a loop at env depth
+/// `base` that may take their value by move: the local is scoped inside
+/// the loop (`>= base`, dead once `recur` rebinds) and held in a plain
+/// slot, and nothing reads it after this occurrence on its evaluation
+/// path. Found walking the args backward in evaluation order: an `if`
+/// analyzes each branch from the same "read later" set, then its test;
+/// occurrences inside a nested `loop` (repeated) or `fn` (captured)
+/// only count as reads.
+fn movable_locals(f: &FnCtx<'_>, args: &[Expr], base: Option<usize>) -> Vec<(usize, usize)> {
+    fn reads(e: &Expr, later: &mut BTreeSet<usize>) {
+        if let Expr::Local(i) = e {
+            later.insert(*i);
+        }
+        for_each_child(e, &mut |c| reads(c, later));
+    }
+    fn walk(e: &Expr, later: &mut BTreeSet<usize>, out: &mut Vec<(usize, usize)>) {
+        match e {
+            Expr::Local(i) => {
+                if later.insert(*i) {
+                    out.push((expr_addr(e), *i));
+                }
+            }
+            Expr::If { test, then, els } => {
+                let mut other = later.clone();
+                walk(els, &mut other, out);
+                walk(then, later, out);
+                later.extend(other);
+                walk(test, later, out);
+            }
+            Expr::Loop { .. } | Expr::Fn(_) => reads(e, later),
+            _ => {
+                let mut kids = Vec::new();
+                for_each_child(e, &mut |c| kids.push(c));
+                for c in kids.into_iter().rev() {
+                    walk(c, later, out);
+                }
+            }
+        }
     }
     let Some(base) = base else {
         return Vec::new();
     };
-    let mut uses = BTreeMap::new();
-    for a in args {
-        count(a, 1, &mut uses);
+    let mut later = BTreeSet::new();
+    let mut out = Vec::new();
+    for a in args.iter().rev() {
+        walk(a, &mut later, &mut out);
     }
-    uses.into_iter()
-        .filter(|&(i, n)| n == 1 && i >= base)
-        .filter(|&(i, _)| matches!(f.env.get(i), Some(Some(LocalRef::Slot(_)))))
-        .map(|(i, _)| i)
+    out.into_iter()
+        .filter(|&(_, i)| i >= base && matches!(f.env.get(i), Some(Some(LocalRef::Slot(_)))))
         .collect()
 }
 

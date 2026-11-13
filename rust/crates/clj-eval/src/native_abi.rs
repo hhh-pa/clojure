@@ -664,29 +664,83 @@ pub fn call_core(
 /// id for [`apply_inline`]), if it has one.
 #[must_use]
 pub fn inline_op(name: &str, arity: usize) -> Option<u32> {
-    use crate::vm_ops::{APPLY1, APPLY2, APPLY3};
+    use crate::vm_ops::{APPLY1, APPLY2, APPLY3, APPLYN};
     let pos = match arity {
         1 => APPLY1.iter().position(|r| r.0 == name),
         2 => APPLY2.iter().position(|r| r.0 == name),
         3 => APPLY3.iter().position(|r| r.0 == name),
         _ => None,
     };
-    pos.map(|i| i as u32)
+    let nary = || {
+        APPLYN
+            .iter()
+            .position(|r| r.0 == name)
+            .filter(|_| arity >= 3)
+            .map(|i| i as u32 | NARY_OP)
+    };
+    pos.map(|i| i as u32).or_else(nary)
 }
+
+/// [`inline_op`]'s mark for a 3+-argument fold or comparison chain.
+const NARY_OP: u32 = 1 << 30;
 
 /// Apply inline op `id` ([`inline_op`] at `args.len()`) to borrowed
 /// args — the same inline answers the VM gives. `None`: the case is not
 /// covered (or `id` names no op), so the caller runs the native.
 #[must_use]
 pub fn apply_inline(id: u32, args: &[&Value]) -> Option<Value> {
-    use crate::vm_ops::{APPLY1, APPLY2, APPLY3};
-    let i = id as usize;
+    use crate::vm_ops::APPLYN;
     match args {
-        [a] => APPLY1.get(i)?.1(a),
-        [a, b] => APPLY2.get(i)?.1(a, b),
-        [a, b, c] => APPLY3.get(i)?.1(a, b, c),
+        [a] => apply1(id, a),
+        [a, b] => apply2(id, a, b),
+        [a, b, c] => apply3(id, a, b, c),
+        _ if id != u32::MAX && id & NARY_OP != 0 => {
+            let (_, op, chain) = APPLYN.get((id & !NARY_OP) as usize)?;
+            nary(*op, *chain, args)
+        }
         _ => None,
     }
+}
+
+/// [`apply_inline`] for one arg.
+#[must_use]
+pub fn apply1(id: u32, a: &Value) -> Option<Value> {
+    crate::vm_ops::APPLY1.get(id as usize)?.1(a)
+}
+
+/// [`apply_inline`] for two args.
+#[must_use]
+pub fn apply2(id: u32, a: &Value, b: &Value) -> Option<Value> {
+    crate::vm_ops::APPLY2.get(id as usize)?.1(a, b)
+}
+
+/// [`apply_inline`] for three args (a ternary op, or a 3-arg fold or
+/// chain).
+#[must_use]
+pub fn apply3(id: u32, a: &Value, b: &Value, c: &Value) -> Option<Value> {
+    use crate::vm_ops::{APPLY3, APPLYN};
+    if id != u32::MAX && id & NARY_OP != 0 {
+        let (_, op, chain) = APPLYN.get((id & !NARY_OP) as usize)?;
+        return nary(*op, *chain, &[a, b, c]);
+    }
+    APPLY3.get(id as usize)?.1(a, b, c)
+}
+
+/// A fold of binary `op` over `args`, or (`chain`) a comparison chain
+/// stopping at the first false pair (like `clojure.core/<`).
+fn nary(op: crate::vm_ops::Apply2, chain: bool, args: &[&Value]) -> Option<Value> {
+    let (first, rest) = args.split_first()?;
+    if chain {
+        let mut prev = *first;
+        for x in rest {
+            if !op(prev, x)?.is_truthy() {
+                return Some(Value::Bool(false));
+            }
+            prev = x;
+        }
+        return Some(Value::Bool(true));
+    }
+    rest.iter().try_fold((*first).clone(), |acc, x| op(&acc, x))
 }
 
 // ---- extent forms over compiled body fns --------------------------------

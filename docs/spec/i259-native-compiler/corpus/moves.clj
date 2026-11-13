@@ -67,3 +67,28 @@
   ;; fn-level recur rebinding a destructured param (not a plain symbol).
   (if (pos? n) (recur [b (+ a b)] (dec n)) a))
 (println (walk-pairs [0 1] 10))
+(defn branchy [n]
+  ;; `acc` once per branch of an `if` in the recur args: moves on either
+  ;; path; `i` in the test and a branch counts twice.
+  (loop [i 0 acc []]
+    (if (< i n)
+      (recur (inc i) (if (even? i) (conj acc i) (conj acc i (- i))))
+      acc)))
+(println (branchy 5))
+(defn test-and-branch [n]
+  (loop [i 0 acc []]
+    (if (< i n) (recur (inc i) (if (empty? acc) (conj acc i) (conj acc (count acc)))) acc)))
+(println (test-and-branch 4))
+(defn read-then-move [n]
+  ;; `acc` is read in the test, then moved in whichever branch runs.
+  (loop [i 0 acc []]
+    (if (< i n)
+      (recur (inc i) (if (>= (inc (count acc)) n) (conj acc :last) (conj acc i i)))
+      acc)))
+(println (read-then-move 5))
+(defn read-after-move [n]
+  ;; The move would be first in evaluation order but `acc` is read
+  ;; later in the same args: no move there.
+  (loop [i 0 acc []]
+    (if (< i n) (recur (inc i) (conj (conj acc i) (count acc))) acc)))
+(println (read-after-move 3))
