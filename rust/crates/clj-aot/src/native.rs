@@ -1132,27 +1132,7 @@ impl<'ctx> Lowerer<'ctx> {
             }
             Expr::If { test, then, els } => self.lower_if(f, test, then, els, dest),
             Expr::Do(body) => self.lower_body(f, body, dest),
-            Expr::Let { bindings, body } => {
-                let depth = f.env.len();
-                let mut bound = Vec::new();
-                for (pat, init) in bindings {
-                    let t = self.slot(f);
-                    self.lower(f, init, t)?;
-                    if matches!(pat, Pattern::Symbol(_)) {
-                        // The init's slot becomes the local's (no copy).
-                        f.env.push(Some(LocalRef::Slot(t)));
-                        bound.push(t);
-                    } else {
-                        bound.extend(self.bind_pattern(f, pat, t)?);
-                        self.drop_v(f.func, t);
-                    }
-                }
-                self.lower_body(f, body, dest)?;
-                f.env.truncate(depth);
-                // Release let-bound values at scope end (RSS parity).
-                self.drop_slots(f.func, &bound);
-                Ok(())
-            }
+            Expr::Let { bindings, body } => self.lower_let(f, bindings, body, dest),
             Expr::Loop { bindings, body } => self.lower_loop(f, bindings, body, dest),
             Expr::Recur(args) => self.lower_recur(f, args),
             Expr::Fn(fun) => {
@@ -1464,6 +1444,37 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
+    /// A `let`: each init lowered into its slot; a symbol binding
+    /// takes over the init's slot (no copy), while a destructuring
+    /// pattern binds out of it. Bound values release at scope end.
+    fn lower_let(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let depth = f.env.len();
+        let mut bound = Vec::new();
+        for (pat, init) in bindings {
+            let t = self.slot(f);
+            self.lower(f, init, t)?;
+            if matches!(pat, Pattern::Symbol(_)) {
+                // The init's slot becomes the local's (no copy).
+                f.env.push(Some(LocalRef::Slot(t)));
+                bound.push(t);
+            } else {
+                bound.extend(self.bind_pattern(f, pat, t)?);
+                self.drop_v(f.func, t);
+            }
+        }
+        self.lower_body(f, body, dest)?;
+        f.env.truncate(depth);
+        // Release let-bound values at scope end (RSS parity).
+        self.drop_slots(f.func, &bound);
+        Ok(())
+    }
+
     /// A body compiled as a zero-arg fn named `display`, wrapped by
     /// the runtime (`kind`: 0 `lazy-seq`, 1 `delay`).
     fn wrap_body(
@@ -1643,22 +1654,55 @@ impl<'ctx> Lowerer<'ctx> {
         let (refs, temps) = self.arg_refs(f, &call.args, dest)?;
         let slow = self.ctx.append_basic_block(f.func, "native_slow");
         let done = self.ctx.append_basic_block(f.func, "native_done");
-        let inline = match (fast, core_name.as_deref()) {
-            (None, Some(name)) => self.lower_intrinsic(f, name, &refs, dest, slow, done),
+        self.emit_direct_inline(f, fast, core_name.as_deref(), &refs, dest, slow, done);
+        self.emit_direct_slow(f, &refs, k, n, core_name.as_deref(), dest, slow, done);
+        self.drop_slots(f.func, &temps);
+        Ok(())
+    }
+
+    /// The fast path of a direct-native call: an intrinsic or `FastArith`
+    /// inline that falls through to `done`, else a branch to `slow`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_direct_inline(
+        &mut self,
+        f: &FnCtx<'ctx>,
+        fast: Option<clj_eval::ext::FastArith>,
+        core_name: Option<&str>,
+        refs: &[PointerValue<'ctx>],
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let inline = match (fast, core_name) {
+            (None, Some(name)) => self.lower_intrinsic(f, name, refs, dest, slow, done),
             _ => false,
         };
         match (inline, fast) {
-            (false, Some(op)) => self.lower_fast_arith(f, op, &refs, dest, slow, done),
+            (false, Some(op)) => self.lower_fast_arith(f, op, refs, dest, slow, done),
             (false, None) => {
                 self.builder.build_unconditional_branch(slow).expect("br");
             }
             (true, _) => {}
         }
-        // Slow path: the VM's inline op over the borrowed args, else
-        // the native (args cloned only there).
+    }
+
+    /// The slow path of a direct-native call: the VM's inline op over the
+    /// borrowed args, else the native (args cloned only there). 1-3 args
+    /// go as direct operands; more through a slice.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_direct_slow(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        refs: &[PointerValue<'ctx>],
+        k: u64,
+        n: usize,
+        core_name: Option<&str>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
         self.builder.position_at_end(slow);
         let op = core_name
-            .as_deref()
             .and_then(|name| native_abi::inline_op(name, n))
             .unwrap_or(u32::MAX);
         let mut call_args: Vec<BasicMetadataValueEnum> = vec![
@@ -1666,7 +1710,6 @@ impl<'ctx> Lowerer<'ctx> {
             self.i32t.const_int(u64::from(op), false).into(),
             self.u64c(k),
         ];
-        // 1-3 args go as direct operands; more through a slice.
         let shim = match refs.len() {
             1 => "rt_n_op1",
             2 => "rt_n_op2",
@@ -1676,14 +1719,12 @@ impl<'ctx> Lowerer<'ctx> {
         if (1..=3).contains(&refs.len()) {
             call_args.extend(refs.iter().map(|r| BasicMetadataValueEnum::from(*r)));
         } else {
-            call_args.push(self.refs_slice(f, &refs).into());
+            call_args.push(self.refs_slice(f, refs).into());
         }
         let st = self.call(shim, Some(self.i32t), &call_args).expect("st");
         self.check(f, st);
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
-        self.drop_slots(f.func, &temps);
-        Ok(())
     }
 
     /// A core call taking a local at its last use (inside `recur` args)
