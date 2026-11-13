@@ -43,6 +43,10 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValue, FunctionValue, IntValu
 /// "No index" for optional table indices (matches `clj-rt`).
 const NONE: u64 = u64::MAX;
 
+/// `Value` tags the inline paths test (pinned by `value_layout_abi`).
+const TAG_INT: u64 = 2;
+const TAG_CHAR: u64 = 9;
+
 /// Why a program cannot (yet) be lowered natively.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unsupported(pub String);
@@ -488,7 +492,11 @@ impl<'ctx> Lowerer<'ctx> {
             ],
             false,
         );
-        let field = if off == 1 { 1 } else { 4 };
+        let field = match off {
+            1 => 1,
+            4 => 3,
+            _ => 4,
+        };
         self.builder
             .build_struct_gep(view, slot, field, "b")
             .expect("gep")
@@ -599,6 +607,15 @@ impl<'ctx> Lowerer<'ctx> {
             }
         }
         self.builder.build_unconditional_branch(done).expect("br");
+    }
+
+    /// A `Char` slot's code point (`u32` at offset 4), as an `i32`.
+    fn char_payload(&self, slot: PointerValue<'ctx>) -> IntValue<'ctx> {
+        let p = self.byte_at(slot, 4);
+        self.builder
+            .build_load(self.i32t, p, "c")
+            .expect("load")
+            .into_int_value()
     }
 
     fn int_payload(&self, slot: PointerValue<'ctx>) -> IntValue<'ctx> {
@@ -1901,12 +1918,24 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// Branch to `fast` when every slot holds an `Int`, else `slow`.
     fn when_ints(&self, f: &FnCtx<'ctx>, slots: &[PointerValue<'ctx>], slow: BasicBlock<'ctx>) {
-        let two = self.i8t.const_int(2, false);
+        self.when_tag(f, slots, TAG_INT, slow);
+    }
+
+    /// Continue in a fresh block when every slot has tag `tag`, else
+    /// branch to `slow`.
+    fn when_tag(
+        &self,
+        f: &FnCtx<'ctx>,
+        slots: &[PointerValue<'ctx>],
+        tag: u64,
+        slow: BasicBlock<'ctx>,
+    ) {
+        let want = self.i8t.const_int(tag, false);
         let mut all = self.ctx.bool_type().const_int(1, false);
         for s in slots {
             let is = self
                 .builder
-                .build_int_compare(IntPredicate::EQ, self.tag(*s), two, "is_int")
+                .build_int_compare(IntPredicate::EQ, self.tag(*s), want, "is_tag")
                 .expect("cmp");
             all = self.builder.build_and(all, is, "ints").expect("and");
         }
@@ -1954,9 +1983,26 @@ impl<'ctx> Lowerer<'ctx> {
                     .expect("cmp");
                 self.write_bool(f.func, dest, r);
                 self.builder.build_unconditional_branch(done).expect("br");
+                // Chars compare by code point; anything else takes `slow`.
                 self.builder.position_at_end(other);
-                self.builder.build_unconditional_branch(slow).expect("br");
-                return true;
+                self.when_tag(f, a, TAG_CHAR, slow);
+                let (x, y) = (self.char_payload(a[0]), self.char_payload(a[1]));
+                let r = self
+                    .builder
+                    .build_int_compare(pred, x, y, "ceq")
+                    .expect("cmp");
+                self.write_bool(f.func, dest, r);
+            }
+            ("int" | "long", 1) => {
+                // A char's code point (always in range); anything else
+                // takes `slow`.
+                self.when_tag(f, a, TAG_CHAR, slow);
+                let c = self.char_payload(a[0]);
+                let n = self
+                    .builder
+                    .build_int_z_extend(c, self.i64t, "cp")
+                    .expect("zext");
+                self.write_int(f.func, dest, n);
             }
             ("==", 2) => {
                 self.when_ints(f, a, slow);
