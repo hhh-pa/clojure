@@ -23,7 +23,7 @@
 //! indexes the frame chain, so a fn created at frame length `base`
 //! captures exactly the `Local(i < base)` its arities mention.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use clj_eval::aot_front::{FrontEnd, for_each_child};
 use clj_eval::expr::{Arity, CaseTest, Expr, FunExpr, NsClause, Pattern};
@@ -92,6 +92,10 @@ enum LocalRef<'ctx> {
 struct RecurTarget<'ctx> {
     header: BasicBlock<'ctx>,
     patterns: Vec<(Pattern, Vec<PointerValue<'ctx>>)>,
+    /// A `loop`'s env depth: its locals (and the body's) are dead once
+    /// `recur` rebinds, so their last uses may move. `None` for a fn
+    /// arity (its params live in the caller's argument array).
+    base: Option<usize>,
 }
 
 /// Per-function lowering state.
@@ -103,6 +107,9 @@ struct FnCtx<'ctx> {
     env: Vec<Option<LocalRef<'ctx>>>,
     recur: Vec<RecurTarget<'ctx>>,
     captured: PointerValue<'ctx>,
+    /// Locals whose single remaining use (in the `recur` args being
+    /// lowered) may take the value by move.
+    moves: Vec<usize>,
 }
 
 /// The program-level lowering session.
@@ -429,6 +436,7 @@ impl<'ctx> Lowerer<'ctx> {
             env,
             recur: Vec::new(),
             captured,
+            moves: Vec::new(),
         }
     }
 
@@ -691,6 +699,18 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("store");
     }
 
+    /// Move `src`'s value into `dest` (dropping `dest`'s), leaving `src`
+    /// nil without dropping it: ownership transfers.
+    fn move_v(&self, func: FunctionValue<'ctx>, dest: PointerValue<'ctx>, src: PointerValue<'ctx>) {
+        self.drop_v(func, dest);
+        let v = self
+            .builder
+            .build_load(self.slot_ty, src, "mv")
+            .expect("load");
+        self.builder.build_store(dest, v).expect("store");
+        self.write_tag(src, 0);
+    }
+
     fn write_nil(&self, func: FunctionValue<'ctx>, dest: PointerValue<'ctx>) {
         self.drop_v(func, dest);
         self.write_tag(dest, 0);
@@ -889,6 +909,7 @@ impl<'ctx> Lowerer<'ctx> {
         f.recur.push(RecurTarget {
             header,
             patterns: targets,
+            base: None,
         });
         let result = self.slot(&mut f);
         self.lower_body(&mut f, &arity.body, result)?;
@@ -992,6 +1013,11 @@ impl<'ctx> Lowerer<'ctx> {
         src: PointerValue<'ctx>,
         slots: &[PointerValue<'ctx>],
     ) -> Result<(), Unsupported> {
+        // A plain symbol takes the (dead after `recur`) temp by move.
+        if let (Pattern::Symbol(_), [dst]) = (pat, slots) {
+            self.move_v(f.func, *dst, src);
+            return Ok(());
+        }
         let depth = f.env.len();
         let fresh = self.bind_pattern(f, pat, src)?;
         f.env.truncate(depth);
@@ -1554,12 +1580,20 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let k = self.var_of(&call.var);
         let n = call.args.len();
-        let (refs, temps) = self.arg_refs(f, &call.args, dest)?;
         let fast = fast_op(call.fast, n);
-        let slow = self.ctx.append_basic_block(f.func, "native_slow");
-        let done = self.ctx.append_basic_block(f.func, "native_done");
         let core_name = (call.var.sym.namespace() == Some("clojure.core"))
             .then(|| call.var.sym.name().to_owned());
+        let moving = fast.is_none()
+            && call
+                .args
+                .iter()
+                .any(|a| matches!(a, Expr::Local(i) if f.moves.contains(i)));
+        if moving {
+            return self.lower_direct_moving(f, call, k, core_name.as_deref(), dest);
+        }
+        let (refs, temps) = self.arg_refs(f, &call.args, dest)?;
+        let slow = self.ctx.append_basic_block(f.func, "native_slow");
+        let done = self.ctx.append_basic_block(f.func, "native_done");
         let inline = match (fast, core_name.as_deref()) {
             (None, Some(name)) => self.lower_intrinsic(f, name, &refs, dest, slow, done),
             _ => false,
@@ -1595,6 +1629,52 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
         self.drop_slots(f.func, &temps);
+        Ok(())
+    }
+
+    /// A core call taking a local at its last use (inside `recur` args)
+    /// by move: the args are owned (the moved local's slot is left nil),
+    /// so a native with an owned-args entry gets a uniquely held
+    /// collection and updates it in place, like the VM's last-use moves.
+    fn lower_direct_moving(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        k: u64,
+        core_name: Option<&str>,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let n = call.args.len();
+        let (arr, elems) = self.slot_array(f, n);
+        for (a, e) in call.args.iter().zip(&elems) {
+            let moved = match a {
+                Expr::Local(i) if f.moves.contains(i) => self.borrowable(f, *i),
+                _ => None,
+            };
+            if let Some(src) = moved {
+                self.move_v(f.func, *e, src);
+            } else {
+                self.lower(f, a, *e)?;
+            }
+        }
+        let op = core_name
+            .and_then(|name| native_abi::inline_op(name, n))
+            .unwrap_or(u32::MAX);
+        let aref = self.slots_ref(f, arr, n);
+        let st = self
+            .call(
+                "rt_n_core_own",
+                Some(self.i32t),
+                &[
+                    dest.into(),
+                    self.i32t.const_int(u64::from(op), false).into(),
+                    self.u64c(k),
+                    aref.into(),
+                ],
+            )
+            .expect("st");
+        self.check(f, st);
+        self.drop_slots(f.func, &elems);
         Ok(())
     }
 
@@ -2167,6 +2247,7 @@ impl<'ctx> Lowerer<'ctx> {
         f.recur.push(RecurTarget {
             header,
             patterns: targets,
+            base: Some(depth),
         });
         let result = self.lower_body(f, body, dest);
         f.recur.pop();
@@ -2175,15 +2256,18 @@ impl<'ctx> Lowerer<'ctx> {
     }
 
     fn lower_recur(&mut self, f: &mut FnCtx<'ctx>, args: &[Expr]) -> Result<(), Unsupported> {
-        let fresh: Vec<PointerValue> = {
-            let mut out = Vec::with_capacity(args.len());
-            for a in args {
+        let base = f.recur.last().and_then(|t| t.base);
+        let movable = movable_locals(f, args, base);
+        let saved = std::mem::replace(&mut f.moves, movable);
+        let fresh: Result<Vec<PointerValue>, Unsupported> = args
+            .iter()
+            .map(|a| {
                 let t = self.slot(f);
-                self.lower(f, a, t)?;
-                out.push(t);
-            }
-            out
-        };
+                self.lower(f, a, t).map(|()| t)
+            })
+            .collect();
+        f.moves = saved;
+        let fresh = fresh?;
         // The analyzer only emits `recur` in tail position of a target.
         let target = f.recur.pop().expect("recur has a target");
         let depth = f.env.len();
@@ -2738,6 +2822,38 @@ fn host_const(v: &Value) -> Option<Const> {
         other => native_abi::static_field_origin(other)
             .map(|(class, field)| Const::StaticField(class.to_owned(), field.to_owned())),
     }
+}
+
+/// The locals a `recur` to a loop at env depth `base` may take by move:
+/// scoped inside the loop (`>= base`), held in a plain slot, and used
+/// exactly once across all the `recur` args (nested fns included, so
+/// a capture counts as a use). They are dead once `recur` rebinds. An
+/// occurrence inside a nested `loop` runs once per inner iteration, so
+/// it counts as many.
+fn movable_locals(f: &FnCtx<'_>, args: &[Expr], base: Option<usize>) -> Vec<usize> {
+    fn count(e: &Expr, weight: usize, uses: &mut BTreeMap<usize, usize>) {
+        if let Expr::Local(i) = e {
+            *uses.entry(*i).or_default() += weight;
+        }
+        let inner = if matches!(e, Expr::Loop { .. }) {
+            2
+        } else {
+            weight
+        };
+        for_each_child(e, &mut |c| count(c, inner, uses));
+    }
+    let Some(base) = base else {
+        return Vec::new();
+    };
+    let mut uses = BTreeMap::new();
+    for a in args {
+        count(a, 1, &mut uses);
+    }
+    uses.into_iter()
+        .filter(|&(i, n)| n == 1 && i >= base)
+        .filter(|&(i, _)| matches!(f.env.get(i), Some(Some(LocalRef::Slot(_)))))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// The free locals (`< base`) an arity mentions, nested fns included

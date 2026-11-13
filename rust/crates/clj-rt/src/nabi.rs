@@ -307,6 +307,29 @@ pub extern "C" fn rt_n_core_ref(out: &mut Value, op: u32, k: u64, args: &CSlice<
     )
 }
 
+/// [`rt_n_core_ref`] over owned args (a local taken at its last use,
+/// #259): the inline op over them when it covers the case, else var
+/// `k`'s native with the args moved in (each slot left nil), so an
+/// owned-args native updates a uniquely held collection in place.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_core_own(out: &mut Value, op: u32, k: u64, args: &mut CSlice<Value>) -> i32 {
+    let inline = match args.get() {
+        [a] => native_abi::apply_inline(op, &[a]),
+        [a, b] => native_abi::apply_inline(op, &[a, b]),
+        [a, b, c] => native_abi::apply_inline(op, &[a, b, c]),
+        _ => None,
+    };
+    if let Some(v) = inline {
+        *out = v;
+        return 0;
+    }
+    let moved = take_args(args);
+    finish(
+        out,
+        with_active(|eval| native::call_core_var(eval, k as usize, moved)),
+    )
+}
+
 /// Enter a direct call of compiled `defn` `desc` through var `k`: 1
 /// when the var still holds that fn and the call depth/stack allow
 /// (the caller then calls the code and [`rt_n_leave`]), else 0 (take
@@ -700,6 +723,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_invoke,
         rt_n_native_mv,
         rt_n_core_ref,
+        rt_n_core_own,
         rt_n_enter_fn,
         rt_n_leave,
         rt_n_def_begin,
