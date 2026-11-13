@@ -2400,10 +2400,7 @@ fn native_assoc_bang(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
         }
         return Err(cce_err(&args[0], "clojure.lang.ITransientAssociative"));
     };
-    // Read the class before locking (`jvm_class_of` locks
-    // transients itself — locking twice deadlocks).
-    let from = jvm_class_of(&args[0]);
-    {
+    let is_set = {
         let mut guard = t.lock();
         match &mut *guard {
             TransientKind::Vector(tv) => {
@@ -2412,6 +2409,7 @@ fn native_assoc_bang(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
                     let v = chunk.get(1).unwrap_or(&Value::Nil);
                     assoc_bang_one(tv, &chunk[0], v)?;
                 }
+                false
             }
             TransientKind::Map(tm) => {
                 tm.assoc(args[1].clone(), args[2].clone())
@@ -2420,14 +2418,20 @@ fn native_assoc_bang(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
                     let v = chunk.get(1).cloned().unwrap_or(Value::Nil);
                     tm.assoc(chunk[0].clone(), v).map_err(transient_err)?;
                 }
+                false
             }
-            TransientKind::Set(_) => {
-                return Err(NativeError::new(
-                    ThrowClass::ClassCastException,
-                    cce_message(&from, "clojure.lang.ITransientAssociative"),
-                ));
-            }
+            TransientKind::Set(_) => true,
         }
+    };
+    if is_set {
+        // The class is read after unlocking (`jvm_class_of` locks
+        // transients itself — locking twice deadlocks), and only on
+        // this error path (naming the class allocates).
+        let from = jvm_class_of(&args[0]);
+        return Err(NativeError::new(
+            ThrowClass::ClassCastException,
+            cce_message(&from, "clojure.lang.ITransientAssociative"),
+        ));
     }
     Ok(Value::Transient(t.clone()))
 }
