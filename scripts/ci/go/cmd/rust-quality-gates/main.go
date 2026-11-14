@@ -642,29 +642,9 @@ func rawLLVMCovExport(env []string, workspace, covtarget, llvmCov, llvmProfdata 
 		}
 		return "", nil, "", err
 	}
-	var objs []string
-	for _, sub := range []string{"debug", "release"} {
-		deps := filepath.Join(covtarget, sub, "deps")
-		info, err := os.Stat(deps)
-		if err != nil || !info.IsDir() {
-			continue
-		}
-		entries, err := os.ReadDir(deps)
-		if err != nil {
-			return "", nil, "", err
-		}
-		for _, e := range entries {
-			if strings.Contains(e.Name(), ".") {
-				continue
-			}
-			p := filepath.Join(deps, e.Name())
-			if info, err := os.Stat(p); err == nil && !info.IsDir() && executil.IsExecutable(p) {
-				objs = append(objs, p)
-			}
-		}
-	}
-	if len(objs) == 0 {
-		return "", nil, "", errors.New("no test objects under " + covtarget)
+	objs, err := lcov.TestObjects(covtarget)
+	if err != nil {
+		return "", nil, "", err
 	}
 	cmd := []string{llvmCov, "export", "-instr-profile=" + profdata, "--format=lcov"}
 	for _, obj := range objs {

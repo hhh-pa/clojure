@@ -98,7 +98,9 @@ RUN mkdir -p /tmp/warm/rust/src/bin/clojure-rs \
         mkdir -p "$d/src"; \
         printf '' > "$d/src/lib.rs"; \
         basename "$d" >> /tmp/warm-crates.txt; \
+        sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$d/Cargo.toml" >> /tmp/warm-crates.txt; \
     done \
+    && sort -u -o /tmp/warm-crates.txt /tmp/warm-crates.txt \
     && cd /tmp/warm/rust && cargo fetch \
     && cargo test --workspace --no-run \
     && NIGHTLY=$(grep -E '^\s*UDEPSNightly = ' /tmp/warm/pins.go | cut -d'"' -f2) \
@@ -109,7 +111,7 @@ RUN mkdir -p /tmp/warm/rust/src/bin/clojure-rs \
         STATUS=$?; \
         if [ $STATUS -ne 0 ] \
             && { grep -q "could not compile" "$UDEPS_LOG" \
-                || [ -z "$(ls -A "$NIGHTLY_TARGET/debug/.fingerprint" 2>/dev/null)" ]; }; then \
+                || [ -z "$(ls -A "$NIGHTLY_TARGET/debug/.fingerprint" 2>/dev/null)$(ls -A "$NIGHTLY_TARGET/debug/build" 2>/dev/null)" ]; }; then \
             echo "udeps warm: nightly build FAILED:"; cat "$UDEPS_LOG"; exit 1; \
         fi; \
         echo "udeps warm: nightly tree prebuilt (udeps exit $STATUS; unused-deps verdict deferred to runtime)"; } \
@@ -120,17 +122,19 @@ RUN mkdir -p /tmp/warm/rust/src/bin/clojure-rs \
 # reuses the stub rlibs for member libs instead of rebuilding from
 # /work (seen: clj_aot::probe_ir unresolved under coverage). Keep the
 # registry-dependency artifacts (the actual warmup) and build-script
-# outputs (source-independent). Both spellings: bins use dashes,
-# rlibs/fingerprints use underscores.
+# outputs (source-independent). Scrub both Cargo <1.100 (.fingerprint/
+# deps) and >=1.100 (build/<pkg>) layouts, in both dashed and
+# underscored forms.
 RUN for t in /opt/target/debug /opt/target/nightly/debug; do \
-        while IFS= read -r c; do \
+        for c in $(cat /tmp/warm-crates.txt) clojure-rs; do \
             u=$(printf '%s' "$c" | tr '-' '_'); \
-            rm -rf "$t/.fingerprint/$c-"* "$t/deps/$c-"* "$t/deps/lib$c-"* \
-                   "$t/.fingerprint/$u-"* "$t/deps/$u-"* "$t/deps/lib$u-"*; \
-        done < /tmp/warm-crates.txt; \
-        rm -rf "$t/.fingerprint/clojure-rs-"* "$t/deps/clojure-rs-"* "$t/deps/libclojure-rs-"* \
-               "$t/.fingerprint/clojure_rs-"* "$t/deps/clojure_rs-"* "$t/deps/libclojure_rs-"*; \
+            rm -rf "$t/build/$c" "$t/build/$u" \
+                   "$t/.fingerprint/$c-"* "$t/deps/$c-"* "$t/deps/lib$c-"* \
+                   "$t/.fingerprint/$u-"* "$t/deps/$u-"* "$t/deps/lib$u-"* \
+                   "$t/incremental/$c-"* "$t/incremental/$u-"*; \
+        done; \
     done \
-    && ls /opt/target/debug/.fingerprint | wc -l
+    && rm -f /tmp/warm-crates.txt \
+    && { [ -d /opt/target/debug/.fingerprint ] && ls /opt/target/debug/.fingerprint || ls /opt/target/debug/build; } | wc -l
 
 WORKDIR /work

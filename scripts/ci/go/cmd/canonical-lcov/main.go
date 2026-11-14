@@ -21,7 +21,7 @@
 // several tests read the user config layer and fail or mis-cover
 // otherwise. Unix-only in practice: like its Python predecessor, object
 // discovery skips dotted names, so Windows `.exe` test objects are not
-// found. Stdlib only.
+// found. Module packages + stdlib only.
 package main
 
 import (
@@ -35,6 +35,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/hhh-pa/clojure/scripts/ci/go/internal/lcov"
 )
 
 var excluded = []string{
@@ -119,27 +121,9 @@ func main() {
 	mergeCmd.Dir = rust
 	run(mergeCmd)
 
-	var objs []string
-	for _, sub := range []string{"debug", "release"} {
-		deps := filepath.Join(covtarget, sub, "deps")
-		depEntries, err := os.ReadDir(deps)
-		if err != nil {
-			continue
-		}
-		for _, entry := range depEntries {
-			if strings.Contains(entry.Name(), ".") {
-				continue
-			}
-			full := filepath.Join(deps, entry.Name())
-			info, err := os.Stat(full)
-			if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
-				continue
-			}
-			objs = append(objs, full)
-		}
-	}
-	if len(objs) == 0 {
-		fmt.Fprintf(os.Stderr, "no test objects under %s\n", covtarget)
+	objs, err := lcov.TestObjects(covtarget)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	fmt.Printf("exporting %d objects...\n", len(objs))

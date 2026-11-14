@@ -146,57 +146,57 @@ runs:
           mv "$dir/bin/llvm-config.exe" "$dir/bin/llvm-config-real.exe"
         fi
         cat > /tmp/llvm-config-wrapper.go << 'EOF'
-package main
+        package main
 
-import (
-	"bytes"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-)
+        import (
+        	"bytes"
+        	"fmt"
+        	"os"
+        	"os/exec"
+        	"path/filepath"
+        	"strings"
+        )
 
-func main() {
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	real := filepath.Join(filepath.Dir(exe), "llvm-config-real.exe")
-	cmd := exec.Command(real, os.Args[1:]...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			os.Exit(ee.ExitCode())
-		}
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	rewrite := false
-	for _, a := range os.Args[1:] {
-		if a == "--system-libs" || a == "--libnames" {
-			rewrite = true
-			break
-		}
-	}
-	s := out.String()
-	if rewrite {
-		fields := strings.Fields(s)
-		for i, f := range fields {
-			if strings.HasSuffix(strings.ToLower(f), ".lib") {
-				if idx := strings.LastIndexAny(f, "/\\"); idx >= 0 {
-					fields[i] = f[idx+1:]
-				}
-			}
-		}
-		s = strings.Join(fields, " ") + "\n"
-	}
-	os.Stdout.WriteString(s)
-}
-EOF
+        func main() {
+        	exe, err := os.Executable()
+        	if err != nil {
+        		fmt.Fprintln(os.Stderr, err)
+        		os.Exit(1)
+        	}
+        	real := filepath.Join(filepath.Dir(exe), "llvm-config-real.exe")
+        	cmd := exec.Command(real, os.Args[1:]...)
+        	var out bytes.Buffer
+        	cmd.Stdout = &out
+        	cmd.Stderr = os.Stderr
+        	if err := cmd.Run(); err != nil {
+        		if ee, ok := err.(*exec.ExitError); ok {
+        			os.Exit(ee.ExitCode())
+        		}
+        		fmt.Fprintln(os.Stderr, err)
+        		os.Exit(1)
+        	}
+        	rewrite := false
+        	for _, a := range os.Args[1:] {
+        		if a == "--system-libs" || a == "--libnames" {
+        			rewrite = true
+        			break
+        		}
+        	}
+        	s := out.String()
+        	if rewrite {
+        		fields := strings.Fields(s)
+        		for i, f := range fields {
+        			if strings.HasSuffix(strings.ToLower(f), ".lib") {
+        				if idx := strings.LastIndexAny(f, "/\\"); idx >= 0 {
+        					fields[i] = f[idx+1:]
+        				}
+        			}
+        		}
+        		s = strings.Join(fields, " ") + "\n"
+        	}
+        	os.Stdout.WriteString(s)
+        }
+        EOF
         CGO_ENABLED=0 go build -o "$dir/bin/llvm-config.exe" /tmp/llvm-config-wrapper.go
         rm -f /tmp/llvm-config-wrapper.go
         "$dir/bin/llvm-config.exe" --version | grep -q '^23\.1\.'

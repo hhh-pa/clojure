@@ -43,15 +43,31 @@ fn tmp(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("clj-rs-corpus-{}-{name}", std::process::id()))
 }
 
-/// The workspace target dir (this test binary lives in
-/// `<target>/<profile>/deps/` whatever `CARGO_TARGET_DIR` is).
+/// The active Cargo profile dir (e.g. `<target>/debug`), supporting
+/// both legacy `<target>/<profile>/deps/<bin>` and Cargo >=1.100
+/// `<target>/<profile>/build/<pkg>/<hash>/out/<bin>`.
 fn target_dir() -> PathBuf {
     let exe = std::env::current_exe().expect("current exe");
-    exe.parent()
-        .expect("deps")
-        .parent()
-        .expect("profile")
-        .to_path_buf()
+    let bin_dir = exe.parent().expect("test binary parent");
+    if bin_dir.file_name() == Some(std::ffi::OsStr::new("deps")) {
+        return bin_dir.parent().expect("profile").to_path_buf();
+    }
+    if let Some(profile) = bin_dir
+        .file_name()
+        .filter(|n| *n == "out")
+        .and_then(|_| bin_dir.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .filter(|p| p.file_name() == Some(std::ffi::OsStr::new("build")))
+        .and_then(|b| b.parent())
+    {
+        return profile.to_path_buf();
+    }
+    bin_dir
+        .ancestors()
+        .find(|p| p.join(".cargo-lock").is_file())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| bin_dir.parent().expect("profile").to_path_buf())
 }
 
 /// Ensure the static `clj-rt` archive exists (twin of the
