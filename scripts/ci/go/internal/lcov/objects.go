@@ -59,7 +59,7 @@ func collectNewLayout(buildDir string, seen map[string]bool, objs *[]string) {
 			if !h.IsDir() {
 				continue
 			}
-			collectFlatDir(filepath.Join(pkgDir, h.Name(), "out"), seen, &objs)
+			collectFlatDir(filepath.Join(pkgDir, h.Name(), "out"), seen, objs)
 		}
 	}
 }
