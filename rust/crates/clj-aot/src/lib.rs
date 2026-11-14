@@ -29,6 +29,11 @@ pub mod lower;
 pub mod native;
 pub mod target;
 
+mod helper_bc {
+    #![allow(dead_code)]
+    include!(concat!(env!("OUT_DIR"), "/helper_bc.rs"));
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -125,9 +130,27 @@ pub enum BuildMode {
     Strict,
 }
 
+/// One-line helper-mode summary included in `build --report` (#260).
+#[must_use]
+pub fn helpers_summary() -> String {
+    helper_report(
+        helper_bc::HELPER_BC.is_some(),
+        helper_bc::RUSTC_LLVM_VERSION,
+        helper_bc::BACKEND_LLVM_MAJOR,
+    )
+}
+
+fn helper_report(bitcode: bool, rustc_version: &str, backend_major: u32) -> String {
+    if bitcode {
+        format!("helpers: bitcode-lto (rustc LLVM {rustc_version})")
+    } else {
+        format!("helpers: out-of-line (rustc LLVM {rustc_version}, backend LLVM {backend_major})")
+    }
+}
+
 /// Compile `source` (named `source_path` in spans) to the `out`
 /// binary, falling back per `mode`. Returns the one-line coverage
-/// report (`aot: native N/M defns, embedded K top-level forms`).
+/// report (`aot: native N/M defns, embedded K top-level forms, helpers: ...`).
 pub fn build_str(
     source: &str,
     source_path: &str,
@@ -137,6 +160,7 @@ pub fn build_str(
     mode: BuildMode,
 ) -> Result<String, CompileError> {
     let ctx = Context::create();
+    let helpers = helpers_summary();
     let (module, report) = match plan_source(source) {
         Ok(program) => {
             let n = program.fns.len();
@@ -144,7 +168,7 @@ pub fn build_str(
                 lower::to_module(&ctx, &program, source_path).map_err(CompileError::Emit)?;
             (
                 module,
-                format!("aot: native {n}/{n} defns, embedded 0 top-level forms"),
+                format!("aot: native {n}/{n} defns, embedded 0 top-level forms, {helpers}"),
             )
         }
         Err(e) if mode == BuildMode::Strict => {
@@ -153,13 +177,16 @@ pub fn build_str(
         Err(_) => match native_module(&ctx, source, source_path) {
             Ok((module, defns)) => (
                 module,
-                format!("aot: native {defns}/{defns} defns, embedded 0 top-level forms"),
+                format!("aot: native {defns}/{defns} defns, embedded 0 top-level forms, {helpers}"),
             ),
             Err(fail) => {
                 let program = plan_mixed(source);
                 let module = lower::to_module_mixed(&ctx, &program, source_path)
                     .map_err(CompileError::Emit)?;
-                (module, format!("{} (native: {fail})", program.report()))
+                (
+                    module,
+                    format!("{} (native: {fail}), {helpers}", program.report()),
+                )
             }
         },
     };
@@ -194,6 +221,15 @@ pub(crate) fn native_module<'ctx>(
     source: &str,
     source_path: &str,
 ) -> Result<(inkwell::module::Module<'ctx>, usize), NativeFail> {
+    native_module_with_helpers(ctx, source, source_path, helper_bc::HELPER_BC)
+}
+
+pub(crate) fn native_module_with_helpers<'ctx>(
+    ctx: &'ctx Context,
+    source: &str,
+    source_path: &str,
+    helpers: Option<&[u8]>,
+) -> Result<(inkwell::module::Module<'ctx>, usize), NativeFail> {
     let mut eval = clj_eval::boot();
     let front = clj_eval::aot_front::front_end(&mut eval, source, source_path)
         .map_err(|e| NativeFail::Program(clj_eval::script::run_diagnostic(source_path, &e)))?;
@@ -204,12 +240,19 @@ pub(crate) fn native_module<'ctx>(
         .count();
     // The build evaluator is torn down by leaking, like `run` does.
     std::mem::forget(eval);
-    let module = native::Lowerer::new(ctx)
+    let module = native::Lowerer::with_bitcode(ctx, helpers.is_some())
         .lower_program(&front, source_path)
         .map_err(|native::Unsupported(r)| NativeFail::Unsupported(r))?;
-    // Native modules are optimized (inlining, mem2reg over scalars,
-    // CFG simplification of the inline value paths).
     let machine = target::host_machine().map_err(NativeFail::Unsupported)?;
+    let triple = inkwell::targets::TargetMachine::get_default_triple();
+    let layout = machine.get_target_data().get_data_layout();
+    module.set_triple(&triple);
+    module.set_data_layout(&layout);
+    if let Some(bc) = helpers {
+        link_helpers(ctx, &module, bc, &triple, &layout).map_err(NativeFail::Unsupported)?;
+    }
+    // Native modules are optimized (inlining, mem2reg over scalars,
+    // CFG simplification of the inline value paths + linked helpers).
     module
         .run_passes(
             "default<O2>",
@@ -218,6 +261,67 @@ pub(crate) fn native_module<'ctx>(
         )
         .map_err(|e| NativeFail::Unsupported(e.to_string()))?;
     Ok((module, defns))
+}
+
+fn helper_exports_to_internalize<'ctx>(helper: &inkwell::module::Module<'ctx>) -> Vec<String> {
+    let mut names = Vec::new();
+    for func in helper.get_functions() {
+        let gv = func.as_global_value();
+        if gv.is_declaration() {
+            continue;
+        }
+        func.remove_string_attribute(inkwell::attributes::AttributeLoc::Function, "target-cpu");
+        func.remove_string_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            "target-features",
+        );
+        let already_local = matches!(
+            func.get_linkage(),
+            inkwell::module::Linkage::Internal | inkwell::module::Linkage::Private
+        );
+        if gv.get_comdat().is_none() && !already_local {
+            names.push(func.get_name().to_string_lossy().into_owned());
+        }
+    }
+    names
+}
+
+fn mark_internal_inline<'ctx>(
+    ctx: &'ctx Context,
+    module: &inkwell::module::Module<'ctx>,
+    names: &[String],
+) {
+    let inline_kind = inkwell::attributes::Attribute::get_named_enum_kind_id("inlinehint");
+    let inline_attr = (inline_kind != 0).then(|| ctx.create_enum_attribute(inline_kind, 0));
+    for name in names {
+        let Some(func) = module.get_function(name) else {
+            continue;
+        };
+        func.set_linkage(inkwell::module::Linkage::Internal);
+        if name.starts_with("rt_bc_")
+            && let Some(attr) = inline_attr
+        {
+            func.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+        }
+    }
+}
+
+fn link_helpers<'ctx>(
+    ctx: &'ctx Context,
+    module: &inkwell::module::Module<'ctx>,
+    bc: &[u8],
+    triple: &inkwell::targets::TargetTriple,
+    layout: &inkwell::data_layout::DataLayout,
+) -> Result<(), String> {
+    let buf = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(bc, "clj_bc");
+    let helper =
+        inkwell::module::Module::parse_bitcode_from_buffer(&buf, ctx).map_err(|e| e.to_string())?;
+    helper.set_triple(triple);
+    helper.set_data_layout(layout);
+    let to_internalize = helper_exports_to_internalize(&helper);
+    module.link_in_module(helper).map_err(|e| e.to_string())?;
+    mark_internal_inline(ctx, module, &to_internalize);
+    module.verify().map_err(|e| e.to_string())
 }
 
 /// Compile `source` (named `source_path` in spans) to the `out`
@@ -284,7 +388,13 @@ mod tests {
     use std::collections::HashSet;
     use std::thread;
 
-    use super::temp_obj_path;
+    use inkwell::context::Context;
+    use inkwell::targets::TargetMachine;
+
+    use super::{
+        helper_bc, helper_report, helpers_summary, link_helpers, mark_internal_inline,
+        native_module_with_helpers, target, temp_obj_path,
+    };
 
     #[test]
     fn temp_obj_paths_are_unique_across_threads() {
@@ -296,5 +406,52 @@ mod tests {
         });
         let uniq: HashSet<_> = paths.iter().collect();
         assert_eq!(paths.len(), uniq.len(), "duplicate temp paths: {paths:?}");
+    }
+
+    #[test]
+    fn helper_report_and_fallback_path() {
+        assert_eq!(
+            helper_report(true, "23.1.1", 23),
+            "helpers: bitcode-lto (rustc LLVM 23.1.1)"
+        );
+        assert_eq!(
+            helper_report(false, "22.1.0", 23),
+            "helpers: out-of-line (rustc LLVM 22.1.0, backend LLVM 23)"
+        );
+        let summary = helpers_summary();
+        assert!(summary.contains("rustc LLVM "));
+
+        let src = "(def a \"hello\")\n(defn f [v x] (if (= a \"hello\") (conj v x) (count v)))\n(println (f [1] :k))\n";
+        let ctx = Context::create();
+        let (out_mod, _) =
+            native_module_with_helpers(&ctx, src, "t.clj", None).expect("out-of-line");
+        let out_ir = out_mod.print_to_string().to_string();
+        assert!(!out_ir.contains("@rt_bc_"), "{out_ir}");
+        assert!(out_ir.contains("@rt_n_deref"), "{out_ir}");
+
+        let bc = helper_bc::HELPER_BC.expect("helper bitcode on pinned LLVM 23");
+        assert_eq!(
+            helper_bc::RUSTC_LLVM_MAJOR,
+            Some(helper_bc::BACKEND_LLVM_MAJOR)
+        );
+        let (lto_mod, _) =
+            native_module_with_helpers(&ctx, src, "t.clj", Some(bc)).expect("bitcode-lto");
+        let lto_ir = lto_mod.print_to_string().to_string();
+        assert!(lto_ir.contains("@rt_n_fast_vars"), "{lto_ir}");
+        assert!(!lto_ir.contains("declare i8 @rt_bc_"), "{lto_ir}");
+        // Small bitcode ops inline completely into the caller and strip away.
+        assert!(!lto_ir.contains("@rt_bc_is_pod"), "{lto_ir}");
+        assert!(!lto_ir.contains("@rt_bc_1_count"), "{lto_ir}");
+        assert!(!lto_ir.contains("@rt_bc_2_eq"), "{lto_ir}");
+        // Shared multi-site clone/deref helpers are internalized cleanly.
+        assert!(!lto_ir.contains("define i8 @rt_bc_"), "{lto_ir}");
+
+        let bad_ctx = Context::create();
+        let bad_mod = bad_ctx.create_module("empty");
+        mark_internal_inline(&bad_ctx, &bad_mod, &["missing_helper".to_owned()]);
+        let machine = target::host_machine().expect("machine");
+        let triple = TargetMachine::get_default_triple();
+        let layout = machine.get_target_data().get_data_layout();
+        assert!(link_helpers(&bad_ctx, &bad_mod, b"bad-bc", &triple, &layout).is_err());
     }
 }

@@ -1,19 +1,19 @@
 name: setup-llvm
 description: >
-  Install the pinned LLVM 22 toolchain for this runner (apt.llvm.org
-  on Linux, Homebrew llvm@22 on macOS, official MSVC tarball on
-  Windows), export LLVM_SYS_221_PREFIX plus PATH
-  for the inkwell (clj-aot) build, and assert the LLVM 22.1 major so
+  Install the pinned LLVM 23 toolchain for this runner (apt.llvm.org
+  on Linux, Homebrew llvm@23 on macOS, official MSVC tarball on
+  Windows), export LLVM_SYS_231_PREFIX plus PATH
+  for the inkwell (clj-aot) build, and assert the LLVM 23.1 major so
   local, CI, and gate-image toolchains cannot drift (spec 2.3).
 inputs:
   version:
     description: Pinned LLVM major (apt.llvm.org + brew llvm@N form).
     required: false
-    default: "22"
+    default: "23"
   patch:
     description: Pinned exact LLVM version (Windows tarball asset).
     required: false
-    default: "22.1.8"
+    default: "23.1.5"
 runs:
   using: composite
   steps:
@@ -77,7 +77,7 @@ runs:
         wget -q https://apt.llvm.org/llvm.sh
         chmod +x llvm.sh
         sudo ./llvm.sh "${{ inputs.version }}"
-        # llvm-22-dev brings llvm-config, CMake files, headers, and
+        # llvm-23-dev brings llvm-config, CMake files, headers, and
         # static archives; the lib*-dev companions satisfy whatever
         # llvm-config --libs/--system-libs reports for static linking
         # (notably libPolly, which ships separately).
@@ -86,18 +86,18 @@ runs:
           libffi-dev libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev
         dir="/usr/lib/llvm-${{ inputs.version }}"
         test -x "$dir/bin/llvm-config"
-        "$dir/bin/llvm-config" --version | grep -q '^22\.1\.'
+        "$dir/bin/llvm-config" --version | grep -q '^23\.1\.'
         echo "$dir/bin" >> "$GITHUB_PATH"
-        echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
+        echo "LLVM_SYS_231_PREFIX=$dir" >> "$GITHUB_ENV"
     - if: runner.os == 'macOS'
       shell: bash
       run: |
         set -euo pipefail
         HOMEBREW_NO_AUTO_UPDATE=1 brew install "llvm@${{ inputs.version }}"
         dir="$(brew --prefix "llvm@${{ inputs.version }}")"
-        "$dir/bin/llvm-config" --version | grep -q '^22\.1\.'
+        "$dir/bin/llvm-config" --version | grep -q '^23\.1\.'
         echo "$dir/bin" >> "$GITHUB_PATH"
-        echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
+        echo "LLVM_SYS_231_PREFIX=$dir" >> "$GITHUB_ENV"
     - if: runner.os == 'Windows'
       shell: bash
       env:
@@ -136,9 +136,9 @@ runs:
         fi
         echo "--- key tools:"; ls "$dir/bin" | grep -iE '^(llvm-config|clang|lld)' || true
         test -x "$dir/bin/llvm-config.exe"
-        "$dir/bin/llvm-config.exe" --version | grep -q '^22\.1\.'
+        "$dir/bin/llvm-config.exe" --version | grep -q '^23\.1\.'
         echo "$dir/bin" >> "$GITHUB_PATH"
-        echo "LLVM_SYS_221_PREFIX=$dir" >> "$GITHUB_ENV"
+        echo "LLVM_SYS_231_PREFIX=$dir" >> "$GITHUB_ENV"
         # Static linking needs xml2s.lib, which the tarball omits:
         # vcpkg's static libxml2 provides it (tolerating its sibling
         # static names by copying to the expected file name). An

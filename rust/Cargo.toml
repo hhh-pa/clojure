@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/clj-aot",
+    "crates/clj-bc",
     "crates/clj-core",
     "crates/clj-eval",
     "crates/clj-reader",

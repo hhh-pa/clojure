@@ -25,7 +25,7 @@
 use std::ffi::{CStr, c_char};
 
 use clj_eval::native_abi;
-use clj_value::{Keyword, Symbol, Value};
+use clj_value::{FastVars, Keyword, Symbol, Value};
 
 use crate::native::{self, ArityDesc, Code, FnDesc, items_of, settle, str_of, sym_of};
 use crate::runtime::with_active;
@@ -248,6 +248,12 @@ pub extern "C" fn rt_n_deref(out: &mut Value, k: u64) {
     *out = with_active(|eval| native::root(eval, k as usize));
 }
 
+/// Process-wide lock-free fast-var table (initialized at `freeze`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_fast_vars() -> &'static FastVars {
+    native::fast_vars()
+}
+
 /// `out = #'var k`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_varref(out: &mut Value, k: u64) {
@@ -358,6 +364,10 @@ pub extern "C" fn rt_n_op3(
 /// owned-args native updates a uniquely held collection in place.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_core_own(out: &mut Value, op: u32, k: u64, args: &mut CSlice<Value>) -> i32 {
+    if let Some(v) = native_abi::apply_own(op, args.get_mut()) {
+        *out = v;
+        return 0;
+    }
     let inline = match args.get() {
         [a] => native_abi::apply_inline(op, &[a]),
         [a, b] => native_abi::apply_inline(op, &[a, b]),
@@ -740,6 +750,25 @@ pub extern "C" fn rt_n_assert_fail(msg: Option<&Value>, form_k: u64) -> i32 {
     }))
 }
 
+/// Fused `(assoc! t1 k (conj (nth t2 k) x))` in place: returns 1 on
+/// hit, 0 for fallback (leaving inputs intact on 0).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_assoc_conj(
+    t1: &Value,
+    t2: &Value,
+    k: &Value,
+    x: &mut Value,
+    take_x: u8,
+) -> u8 {
+    u8::from(native_abi::assoc_conj(t1, t2, k, x, take_x != 0))
+}
+
+/// Effect-only `(conj! coll x)`: returns 1 on hit, 0 for fallback.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_conj_bang_fx(a: &Value, b: &Value) -> u8 {
+    u8::from(native_abi::conj_bang_fx(a, b))
+}
+
 /// Every `rt_n_*` shim by symbol name (the in-process JIT maps a
 /// native module's declarations to these).
 #[must_use]
@@ -763,6 +792,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_drop,
         rt_n_const,
         rt_n_deref,
+        rt_n_fast_vars,
         rt_n_varref,
         rt_n_invoke,
         rt_n_native_mv,
@@ -806,5 +836,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_wrap_fn,
         rt_n_defmacro,
         rt_n_assert_fail,
+        rt_n_assoc_conj,
+        rt_n_conj_bang_fx,
     ]
 }

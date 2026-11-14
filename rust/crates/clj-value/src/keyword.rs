@@ -117,6 +117,7 @@ impl Keyword {
     /// exactly when every construction interns (all of them route
     /// through [`new`](Keyword::new), so equal keywords share one
     /// [`KeywordData`]).
+    #[inline]
     #[must_use]
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -127,6 +128,7 @@ impl Keyword {
 // carry metadata, so these equal the derived ones; they are explicit
 // so a future field cannot silently join the identity).
 impl PartialEq for Keyword {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         // Interned arcs (see [`new`](Keyword::new)): pointer
         // equality decides first, so map-key scans and `=` over

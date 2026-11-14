@@ -17,9 +17,12 @@
 //! the body through [`Evaluator::call`].
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use clj_reader::Span;
-use clj_value::{Keyword, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map};
+use clj_value::{
+    BindCounts, Keyword, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
+};
 
 use crate::error::{NativeError, Signal};
 use crate::eval::Evaluator;
@@ -599,6 +602,25 @@ pub fn root_epoch(eval: &Evaluator) -> (u64, u64) {
     (eval.registry.epoch(), eval.bindings.version())
 }
 
+/// The registry's standalone root-generation counter (even outside
+/// mutations).
+#[must_use]
+pub fn registry_epoch(eval: &Evaluator) -> u64 {
+    eval.registry.epoch()
+}
+
+/// Share the evaluator's atomic root-generation counter.
+#[must_use]
+pub fn registry_epoch_handle(eval: &Evaluator) -> Arc<AtomicU64> {
+    eval.registry.epoch_handle()
+}
+
+/// Share the process-wide per-var binding refcount table.
+#[must_use]
+pub fn bind_counts() -> Arc<BindCounts> {
+    crate::env::bind_counts()
+}
+
 /// Call `callee` (a cached var root) with `args` by value: a native
 /// runs its entry directly (an owned-args entry gets them moved in —
 /// no per-arg clone/drop, and head-releasing loopers can free as they
@@ -847,6 +869,80 @@ pub fn assert_failed(eval: &mut Evaluator, message: Option<Value>, form: &str) -
     eval.assert_failed(message, form)
 }
 
+/// Fused `(assoc! t1 k (conj (nth t2 k) x))` in place when `t1` and
+/// `t2` alias the same live transient vector and `k` is in bounds.
+pub fn assoc_conj(t1: &Value, t2: &Value, k: &Value, x: &mut Value, take_x: bool) -> bool {
+    let (Value::Transient(a), Value::Transient(b), Value::Int(n)) = (t1, t2, k) else {
+        return false;
+    };
+    if !a.same_cell(b) {
+        return false;
+    }
+    let Ok(i) = usize::try_from(*n) else {
+        return false;
+    };
+    if take_x {
+        crate::vm_ops::assoc_conj_in_cell(a, i, x)
+    } else {
+        let mut xv = x.clone();
+        crate::vm_ops::assoc_conj_in_cell(a, i, &mut xv)
+    }
+}
+
+/// Effect-only `(conj! coll x)` in place on a live transient vector.
+pub fn conj_bang_fx(a: &Value, b: &Value) -> bool {
+    crate::vm_ops::ConjBang::apply_fx(a, b)
+}
+
+type OwnFn = fn(&mut [Value]) -> Option<Value>;
+
+const OWN_BIT: u32 = 0x4000_0000;
+
+const OWN_OPS: &[(&str, usize, OwnFn)] = &[
+    ("pop", 1, <crate::vm_ops::Pop as crate::vm_ops::Upd>::apply),
+    (
+        "conj",
+        2,
+        <crate::vm_ops::Conj as crate::vm_ops::Upd>::apply,
+    ),
+    (
+        "assoc",
+        3,
+        <crate::vm_ops::Assoc as crate::vm_ops::Upd>::apply,
+    ),
+    (
+        "next",
+        1,
+        <crate::vm_ops::Next as crate::vm_ops::Upd>::apply,
+    ),
+    (
+        "rest",
+        1,
+        <crate::vm_ops::Rest as crate::vm_ops::Upd>::apply,
+    ),
+];
+
+/// Opcode for [`apply_own`], matching core fns whose in-place `Upd`
+/// fast path consumes owned operands.
+#[must_use]
+pub fn own_op(name: &str, arity: usize) -> Option<u32> {
+    OWN_OPS
+        .iter()
+        .position(|(n, a, _)| *n == name && *a == arity)
+        .map(|i| OWN_BIT | (i as u32))
+}
+
+/// Apply an owned-operand fast op (`None`: fall back; `args` remain
+/// valid on `None`).
+pub fn apply_own(id: u32, args: &mut [Value]) -> Option<Value> {
+    if id == u32::MAX || (id & OWN_BIT) == 0 {
+        return None;
+    }
+    OWN_OPS
+        .get((id & !OWN_BIT) as usize)
+        .and_then(|(_, _, f)| f(args))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,5 +950,52 @@ mod tests {
     #[test]
     fn only_throws_carry_a_throwable() {
         assert!(thrown_of(&Signal::Recur(Vec::new())).is_none());
+    }
+
+    #[test]
+    fn assoc_conj_and_own_ops_handle_hits_and_misses() {
+        let tv = Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Vector(
+            clj_value::TransientVector::from_vector_owned(Vector::from_vec(vec![
+                Value::Vector(Vector::from_vec(vec![Value::Int(1)])),
+                Value::Int(42),
+            ])),
+        )));
+        let tv2 = Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Vector(
+            clj_value::TransientVector::new(),
+        )));
+        let mut x = Value::Int(9);
+        assert!(assoc_conj(&tv, &tv, &Value::Int(0), &mut x, true));
+        assert!(matches!(x, Value::Nil));
+        let mut x2 = Value::Int(8);
+        assert!(assoc_conj(&tv, &tv, &Value::Int(0), &mut x2, false));
+        assert_eq!(x2, Value::Int(8));
+        // Non-conjable element misses and restores `x`.
+        let mut x3 = Value::Int(7);
+        assert!(!assoc_conj(&tv, &tv, &Value::Int(1), &mut x3, true));
+        assert_eq!(x3, Value::Int(7));
+        // Mismatched transients / bad key / non-transient miss cleanly.
+        assert!(!assoc_conj(&tv, &tv2, &Value::Int(0), &mut x3, false));
+        assert!(!assoc_conj(&tv, &tv, &Value::Int(-1), &mut x3, false));
+        assert!(!assoc_conj(
+            &Value::Nil,
+            &tv,
+            &Value::Int(0),
+            &mut x3,
+            false
+        ));
+        assert!(conj_bang_fx(&tv, &Value::Int(99)));
+        assert!(!conj_bang_fx(&Value::Nil, &Value::Int(99)));
+
+        let pop_id = own_op("pop", 1).expect("pop op");
+        let mut pop_args = [Value::Vector(Vector::from_vec(vec![Value::Int(1)]))];
+        assert!(apply_own(pop_id, &mut pop_args).is_some());
+        let mut empty_pop = [Value::Vector(Vector::new_sync())];
+        assert!(apply_own(pop_id, &mut empty_pop).is_none());
+        assert!(own_op("unknown", 2).is_none());
+        let add_id = inline_op("+", 2).expect("+");
+        assert_eq!(
+            apply_inline(add_id, &[&Value::Int(2), &Value::Int(3)]),
+            Some(Value::Int(5))
+        );
     }
 }

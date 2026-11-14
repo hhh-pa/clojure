@@ -49,16 +49,16 @@ RUN git config --system --add safe.directory /work
 # apt.llvm.org, same major the setup-llvm action installs in the
 # other jobs. llvm.sh runs as root here (no sudo in the image) and
 # knows trixie explicitly.
-ARG LLVM_VERSION=22
-ENV LLVM_SYS_221_PREFIX=/usr/lib/llvm-22
+ARG LLVM_VERSION=23
+ENV LLVM_SYS_231_PREFIX=/usr/lib/llvm-23
 RUN wget -q https://apt.llvm.org/llvm.sh \
     && chmod +x llvm.sh \
     && ./llvm.sh "${LLVM_VERSION}" \
-    && apt-get install -y llvm-22-dev libpolly-22-dev libffi-dev libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev \
+    && apt-get install -y "llvm-${LLVM_VERSION}-dev" "libpolly-${LLVM_VERSION}-dev" libffi-dev libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev \
     && rm llvm.sh \
     && rm -rf /var/lib/apt/lists/* \
-    && /usr/lib/llvm-22/bin/llvm-config --version | grep -q '^22\.1\.'
-ENV PATH=/usr/lib/llvm-22/bin:$PATH
+    && /usr/lib/llvm-23/bin/llvm-config --version | grep -q '^23\.1\.'
+ENV PATH=/usr/lib/llvm-23/bin:$PATH
 
 # Provision every pinned gate tool. Prebuilt downloads that cannot execute
 # on this libc compile here once (see ensure_tool), so runtime provisioning

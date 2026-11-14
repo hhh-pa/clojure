@@ -22,11 +22,12 @@
 //! calls, the program entry) takes the pending signal again.
 
 use std::cell::RefCell;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use clj_eval::native_abi::{self, Step};
 use clj_eval::{Evaluator, NativeError, NativeFn, Signal};
-use clj_value::{Value, Var};
+use clj_value::{FastVars, Value, Var};
 
 use crate::runtime::{ActiveScope, with_active};
 
@@ -71,6 +72,7 @@ pub(crate) struct Tables {
     vars: Box<[VarSlot]>,
     consts: Box<[Value]>,
     fns: Box<[FnDesc]>,
+    fast_vars: FastVars,
 }
 
 /// The current program's frozen tables with their generation
@@ -207,21 +209,28 @@ pub(crate) fn set_const(k: usize, value: Value) {
 }
 
 /// Freeze the tables (after constant construction).
-pub(crate) fn freeze() {
+pub(crate) fn freeze(reg_epoch: Arc<AtomicU64>) {
     let b = building(std::mem::take);
     let fns: Vec<FnDesc> = b
         .fns
         .into_iter()
         .map(|d| d.expect("every declared fn index is filled"))
         .collect();
+    let fast_vars = FastVars::new(reg_epoch, native_abi::bind_counts(), b.vars.len());
     let tables: &'static Tables = Box::leak(Box::new(Tables {
         vars: b.vars.into_boxed_slice(),
         consts: b.consts.into_boxed_slice(),
         fns: fns.into_boxed_slice(),
+        fast_vars,
     }));
     let mut current = TABLES.lock().expect("clj-rt native tables lock");
     let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
     *current = Some((generation, tables));
+}
+
+/// Lock-free process-wide fast-var cache for the frozen program.
+pub(crate) fn fast_vars() -> &'static FastVars {
+    &tables().fast_vars
 }
 
 /// Constant `k`.
@@ -257,7 +266,13 @@ pub(crate) fn root(eval: &mut Evaluator, k: usize) -> Value {
     if let Some(v) = hit {
         return v;
     }
-    let v = native_abi::deref(eval, var(k));
+    let var_ref = var(k);
+    let e1 = native_abi::registry_epoch(eval);
+    let v = native_abi::deref(eval, var_ref);
+    let e2 = native_abi::registry_epoch(eval);
+    if e1 == e2 {
+        fast_vars().record(k, e1, var_ref.id, &v);
+    }
     ROOTS.with(|r| {
         let mut r = r.borrow_mut();
         if r.len() <= k {
@@ -420,7 +435,7 @@ pub(crate) fn run_main(path: &str, args: &[String], init: Code, tops: Vec<Code>)
             let tops = Arc::clone(&tops);
             clj_eval::load_native(eval, &file, move |eval| {
                 run_code(eval, init)?;
-                freeze();
+                freeze(native_abi::registry_epoch_handle(eval));
                 let mut last = Value::Nil;
                 for top in tops.iter() {
                     last = run_code(eval, *top)?;
@@ -688,13 +703,25 @@ mod tests {
         // overwrites the placeholder.
         declare_var(1, "user".to_owned(), "plain".to_owned());
         declare_var(0, "clojure.core".to_owned(), "inc".to_owned());
-        freeze();
+        freeze(native_abi::registry_epoch_handle(&eval));
         let _scope = ActiveScope::enter(&mut eval);
         with_active(|eval| {
             let one: clj_eval::SmallArgs = [Value::Int(1)].into_iter().collect();
             assert!(matches!(call_core_var(eval, 0, one), Ok(Value::Int(2))));
             let three: clj_eval::SmallArgs = [Value::Int(3)].into_iter().collect();
             assert!(matches!(call_core_var(eval, 1, three), Ok(Value::Int(6))));
+            ROOTS.with(|r| r.borrow_mut().clear());
+            let out = root(eval, 0);
+            assert!(fast_vars().get(0).is_some());
+            let out2 = root(eval, 0);
+            assert!(fast_vars().get(0) == Some(&out2));
+            assert!(out == out2);
+            let depth = eval.push_binding(var(1).clone(), Value::Int(99));
+            assert_eq!(root(eval, 1), Value::Int(99));
+            assert!(fast_vars().get(1).is_none());
+            eval.pop_bindings(depth);
+            let _plain = root(eval, 1);
+            assert!(fast_vars().get(1).is_some());
         });
     }
 }

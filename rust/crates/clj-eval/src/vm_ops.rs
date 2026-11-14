@@ -1239,6 +1239,31 @@ pub(crate) fn assoc_conj_code(
 
 /// The fused update's inline step (`false` leaves the transient as
 /// it was).
+/// Update slot `i` of a live transient vector by `conj`ing `*xv` in
+/// place; restores `*xv` if the slot or transient cannot be updated.
+#[inline]
+pub(crate) fn assoc_conj_in_cell(cell: &clj_value::Transient, i: usize, xv: &mut Value) -> bool {
+    let mut guard = cell.lock();
+    let clj_value::TransientKind::Vector(tv) = &mut *guard else {
+        return false;
+    };
+    let Some(item) = tv.take_at(i) else {
+        return false;
+    };
+    let val = std::mem::replace(xv, Value::Nil);
+    let mut args = [item, val];
+    let (updated, hit) = match Conj::apply(&mut args) {
+        Some(v) => (v, true),
+        None => (std::mem::replace(&mut args[0], Value::Nil), false),
+    };
+    // The slot was in bounds a moment ago, so the write-back holds.
+    let ok = tv.assoc(i, updated).is_ok() && hit;
+    if !ok {
+        *xv = std::mem::replace(&mut args[1], Value::Nil);
+    }
+    ok
+}
+
 #[inline]
 fn assoc_conj_hit(t: &Value, k: &Value, x: &PureSrc, f: &Frame<'_>) -> bool {
     let (Value::Transient(cell), Value::Int(n)) = (t, k) else {
@@ -1247,21 +1272,8 @@ fn assoc_conj_hit(t: &Value, k: &Value, x: &PureSrc, f: &Frame<'_>) -> bool {
     let Ok(i) = usize::try_from(*n) else {
         return false;
     };
-    let xv = x.value(f);
-    let mut guard = cell.lock();
-    let clj_value::TransientKind::Vector(tv) = &mut *guard else {
-        return false;
-    };
-    let Some(item) = tv.take_at(i) else {
-        return false;
-    };
-    let mut args = [item, xv];
-    let (updated, hit) = match Conj::apply(&mut args) {
-        Some(v) => (v, true),
-        None => (std::mem::replace(&mut args[0], Value::Nil), false),
-    };
-    // The slot was in bounds a moment ago, so the write-back holds.
-    tv.assoc(i, updated).is_ok() && hit
+    let mut xv = x.value(f);
+    assoc_conj_in_cell(cell, i, &mut xv)
 }
 
 /// `(conj coll x)`: vectors, lists, `nil`, and unsorted sets of
@@ -2018,6 +2030,14 @@ impl Op2 for ConjBang {
     fn apply(a: &Value, b: &Value) -> Option<Value> {
         Self::apply_mut(a, b)?;
         Some(a.clone())
+    }
+}
+
+impl ConjBang {
+    /// In-place mutation without cloning the transient wrapper.
+    #[inline(always)]
+    pub(crate) fn apply_fx(a: &Value, b: &Value) -> bool {
+        Self::apply_mut(a, b).is_some()
     }
 }
 

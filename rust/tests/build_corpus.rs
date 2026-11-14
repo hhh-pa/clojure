@@ -688,9 +688,12 @@ fn mixed_build_reports_and_runs_without_source_256() {
         .output()
         .expect("spawn clojure-rs build");
     assert_eq!(built.status.code(), Some(0), "{}", lossy(&built.stderr));
-    assert_eq!(
-        lossy(&built.stderr),
-        "aot: native 2/2 defns, embedded 0 top-level forms\n"
+    let report_out = lossy(&built.stderr);
+    assert!(
+        report_out.starts_with("aot: native 2/2 defns, embedded 0 top-level forms, helpers: ")
+            && report_out.contains("rustc LLVM ")
+            && report_out.ends_with('\n'),
+        "{report_out}"
     );
     std::fs::remove_dir_all(path.parent().expect("dir")).expect("remove source");
     let ran = Command::new(&prog).output().expect("run binary");
@@ -710,9 +713,12 @@ fn mixed_build_reports_and_runs_without_source_256() {
         ])
         .output()
         .expect("spawn clojure-rs build");
-    assert_eq!(
-        lossy(&built.stderr),
-        "aot: native 1/1 defns, embedded 0 top-level forms\n"
+    let pure_report = lossy(&built.stderr);
+    assert!(
+        pure_report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, helpers: ")
+            && pure_report.contains("rustc LLVM ")
+            && pure_report.ends_with('\n'),
+        "{pure_report}"
     );
     std::fs::remove_dir_all(pure.parent().expect("dir")).expect("cleanup");
     std::fs::remove_dir_all(&dir).expect("cleanup");

@@ -124,3 +124,20 @@ fn clone_borrows_and_drop_frees() {
     assert_eq!(render(original), "v");
     unsafe { rt_drop(inbox(Value::Int(1))) };
 }
+
+#[test]
+fn nabi_assoc_conj_fallbacks() {
+    let mut x = Value::Int(1);
+    assert_eq!(
+        cljrt::nabi::rt_n_assoc_conj(&Value::Nil, &Value::Nil, &Value::Int(0), &mut x, 0),
+        0
+    );
+    assert_eq!(
+        cljrt::nabi::rt_n_assoc_conj(&Value::Nil, &Value::Nil, &Value::Int(0), &mut x, 1),
+        0
+    );
+    assert_eq!(
+        cljrt::nabi::rt_n_conj_bang_fx(&Value::Nil, &Value::Int(1)),
+        0
+    );
+}

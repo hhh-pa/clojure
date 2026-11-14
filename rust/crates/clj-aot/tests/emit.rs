@@ -545,7 +545,13 @@ fn native_emit_ir_lowers_units_constants_and_main_259() {
         clj_aot::BuildMode::Mixed,
     )
     .expect("native build");
-    assert_eq!(report, "aot: native 2/2 defns, embedded 0 top-level forms");
+    assert_eq!(
+        report,
+        format!(
+            "aot: native 2/2 defns, embedded 0 top-level forms, {}",
+            clj_aot::helpers_summary()
+        )
+    );
     let text = std::fs::read_to_string(&ir).expect("ir");
     std::fs::remove_file(&ir).expect("cleanup");
     for needle in [
@@ -604,5 +610,63 @@ fn native_build_does_not_run_side_effecting_def_metadata_259() {
     std::fs::remove_file(&ir).expect("cleanup");
     // Had the metadata run at build time, the front end would have
     // failed and the build would have fallen back to mixed.
-    assert_eq!(report, "aot: native 1/1 defns, embedded 0 top-level forms");
+    assert_eq!(
+        report,
+        format!(
+            "aot: native 1/1 defns, embedded 0 top-level forms, {}",
+            clj_aot::helpers_summary()
+        )
+    );
+}
+
+#[test]
+fn native_emit_ir_covers_assoc_conj_fx_and_nested_moves_259() {
+    let ir = tmp("assoc-conj-fx.ll");
+    let src = "\
+(defn f [k x]
+  (let [t (transient [[1] [2]])]
+    (assoc! t 0 (conj (nth t 0) x))
+    (let [r (assoc! t k (conj (nth t k) [x 9]))]
+      (assoc! r 0 (pop [1]))
+      (assoc! r 0 (conj [] 1))
+      (assoc! r 0 (conj (get r 0) 1))
+      (assoc! r 0 (conj (nth [1] 0) 1))
+      (assoc! r 0 (conj (nth r 1) 1))
+      (assoc! r 0 (conj (nth r 0) (inc 1)))
+      ((fn [] [(assoc! r 0 (conj (nth r 0) 1)) x]))
+      ((fn [lt] (assoc! lt 0 (conj (nth lt 0) k))))
+      (let [y (vector k x)]
+        (assoc! r 0 (conj (nth r 0) y)))
+      (if (= k 999)
+        (letfn [(bad [] 0)]
+          (assoc! bad 0 (conj (nth bad 0) 1))
+          (assoc! r bad (conj (nth r bad) 1))))
+      (pop! (transient [1 2]))
+      (assoc! (transient [1 2]) 0 9)
+      (loop [i 0 u (transient [1])]
+        (if (= i 1)
+          (persistent! u)
+          (recur (inc i) (if (= i 0) (do (conj! u i) u) u)))))))
+(defn g [v]
+  (let [t (transient [[1]])
+        y (vector v)]
+    (assoc! t 0 (conj (nth t 0) y))))
+(println (f 1 7) (persistent! (g 3)))
+";
+    let report = clj_aot::build_str(
+        src,
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("native build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    assert!(report.starts_with("aot: native "), "{report}");
+    assert!(text.contains("@rt_n_assoc_conj("), "{text}");
 }

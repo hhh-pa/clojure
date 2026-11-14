@@ -21,6 +21,7 @@ mod datareaders;
 mod delay;
 mod executor;
 mod extension;
+mod fast_vars;
 mod future;
 pub mod hasheq;
 mod hierarchy;
@@ -55,6 +56,7 @@ pub use datareaders::{TagError, validate_inst, validate_uuid};
 pub use delay::{Delay, DelayState};
 pub use executor::{Executor, ExecutorJob};
 pub use extension::{ExtensionValue, ThrowClass, Throwable, Unbound, Var, cce_message};
+pub use fast_vars::{BindCounts, FastVarSlot, FastVars};
 pub use future::{Future, FutureOutcome, FutureState};
 pub use hasheq::{
     hash_code, hash_combine, hash_ordered, hash_unordered, hasheq, mix_coll_hash,
@@ -95,7 +97,7 @@ pub use transient::{
     TransientSet, TransientVector,
 };
 pub use value::{
-    FxBuildHasher, List, Map, MemberSet, Set, SortSpec, Value, Vector, bigdec_result,
+    FxBuildHasher, List, Map, MemberSet, Set, SortSpec, Value, ValueRef, Vector, bigdec_result,
     extension_supports_meta, extension_with_meta, intern_literal_strings, intern_string,
     intern_string_value, map_entry, new_map, new_set, reader_conditional, tagged_literal,
 };

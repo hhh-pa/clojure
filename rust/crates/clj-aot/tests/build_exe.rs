@@ -236,7 +236,13 @@ fn mixed_binary_interns_natives_and_runs_embedded_256() {
     // Without the runtime-only var the whole program goes native.
     let native = source.replace("(eval '(def zz 5))\n(print zz)\n", "");
     let (stdout, stderr, code, report) = build_mode_and_run("native", &native, &["x"]);
-    assert_eq!(report, "aot: native 3/3 defns, embedded 0 top-level forms");
+    assert_eq!(
+        report,
+        format!(
+            "aot: native 3/3 defns, embedded 0 top-level forms, {}",
+            clj_aot::helpers_summary()
+        )
+    );
     assert_eq!(
         (stdout.as_str(), stderr.as_str(), code),
         ("<6> (x)\n:cce", "", 0)
@@ -251,4 +257,30 @@ fn mixed_binary_native_failure_exits_like_run_256() {
     assert_eq!(code, 1);
     assert!(stderr.starts_with("f.clj:"), "{stderr}");
     assert!(stderr.contains("IndexOutOfBoundsException"), "{stderr}");
+}
+
+#[test]
+fn native_binary_runs_assoc_conj_and_fx_259() {
+    let source = "\
+(let [t (transient [[1] [2]])
+      k 1
+      x 9
+      r (assoc! t 0 (conj (nth t 0) x))]
+  (assoc! r k (conj (nth r k) [x]))
+  (pop! (transient [1 2]))
+  (assoc! (transient [1 2]) 0 9)
+  (println (persistent! r)))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("assoc-conj-fx", source, &[]);
+    assert_eq!(
+        report,
+        format!(
+            "aot: native 0/0 defns, embedded 0 top-level forms, {}",
+            clj_aot::helpers_summary()
+        )
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[[1 9] [2 [9]]]\n", "", 0)
+    );
 }
