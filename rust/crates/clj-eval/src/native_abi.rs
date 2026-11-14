@@ -736,6 +736,12 @@ pub fn apply2(id: u32, a: &Value, b: &Value) -> Option<Value> {
     crate::vm_ops::APPLY2.get(id as usize)?.1(a, b)
 }
 
+/// Cached O(1) ASCII check for strings (memoizes long strings after one scan).
+#[must_use]
+pub fn str_is_ascii(s: &Arc<str>) -> bool {
+    crate::coll::str_ascii(s)
+}
+
 /// [`apply_inline`] for three args (a ternary op, or a 3-arg fold or
 /// chain).
 #[must_use]

@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use clj_value::{FastVars, Transient, TransientKind, Value};
 
-pub use ops::{BcOp1, BcOp2, BcOp3, bc_fx_symbol, bc_op_symbol};
+pub use ops::{BcOp1, BcOp2, BcOp3, StrAsciiFn, bc_fx_symbol, bc_ns_op_symbol, bc_op_symbol};
 
 /// Output destination abstraction so bitcode entry points write
 /// directly into `&mut MaybeUninit<Value>` without drop glue while unit
@@ -177,7 +177,7 @@ macro_rules! bc_ops1 {
             /// Dedicated 1-arg `clojure.core` bitcode fast-path entrypoint.
             #[unsafe(no_mangle)]
             pub extern "C" fn $sym(out: &mut MaybeUninit<Value>, a: &Value) -> i8 {
-                i8::from(ops::apply1(out, $op, a))
+                i8::from(ops::apply1(out, $op, a, None))
             }
         )*
     };
@@ -194,7 +194,7 @@ macro_rules! bc_ops2 {
                 a: &Value,
                 b: &Value,
             ) -> i8 {
-                i8::from(ops::apply2(out, $op, a, b))
+                i8::from(ops::apply2(out, $op, a, b, None))
             }
         )*
     };
@@ -212,7 +212,7 @@ macro_rules! bc_ops3 {
                 b: &Value,
                 c: &Value,
             ) -> i8 {
-                i8::from(ops::apply3(out, $op, a, b, c))
+                i8::from(ops::apply3(out, $op, a, b, c, None))
             }
         )*
     };
@@ -236,11 +236,21 @@ bc_ops1! {
     rt_bc_1_int => BcOp1::IntCast,
     rt_bc_1_long => BcOp1::LongCast,
     rt_bc_1_double => BcOp1::DoubleCast,
-    rt_bc_1_count => BcOp1::Count,
     rt_bc_1_empty_p => BcOp1::EmptyP,
     rt_bc_1_peek => BcOp1::Peek,
     rt_bc_1_first => BcOp1::First,
     rt_bc_1_pop_bang => BcOp1::PopBang,
+}
+
+/// Dedicated 1-arg `count` bitcode entrypoint using the host ASCII probe for long strings.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_1_count(
+    out: &mut MaybeUninit<Value>,
+    a: &Value,
+    str_ascii: StrAsciiFn,
+) -> i8 {
+    i8::from(ops::apply1(out, BcOp1::Count, a, Some(str_ascii)))
 }
 
 #[cfg(not(test))]
@@ -266,14 +276,62 @@ bc_ops2! {
     rt_bc_2_ushr => BcOp2::Ushr,
     rt_bc_2_min => BcOp2::Min,
     rt_bc_2_max => BcOp2::Max,
+    rt_bc_2_contains => BcOp2::Contains,
+    rt_bc_2_str_starts_with => BcOp2::StrStartsWith,
+    rt_bc_2_str_ends_with => BcOp2::StrEndsWith,
+    rt_bc_2_str_includes => BcOp2::StrIncludes,
+}
+
+#[cfg(not(test))]
+macro_rules! bc_str_ops2 {
+    ($($sym:ident => $op:expr),* $(,)?) => {
+        $(
+            /// Dedicated 2-arg string-aware bitcode entrypoint using the host ASCII probe.
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $sym(
+                out: &mut MaybeUninit<Value>,
+                a: &Value,
+                b: &Value,
+                str_ascii: StrAsciiFn,
+            ) -> i8 {
+                i8::from(ops::apply2(out, $op, a, b, Some(str_ascii)))
+            }
+        )*
+    };
+}
+
+#[cfg(not(test))]
+bc_str_ops2! {
     rt_bc_2_nth => BcOp2::Nth,
     rt_bc_2_get => BcOp2::Get,
-    rt_bc_2_contains => BcOp2::Contains,
 }
 
 #[cfg(not(test))]
 bc_ops3! {
     rt_bc_3_assoc_bang => BcOp3::AssocBang,
+}
+
+#[cfg(not(test))]
+macro_rules! bc_str_ops3 {
+    ($($sym:ident => $op:expr),* $(,)?) => {
+        $(
+            /// Dedicated 3-arg string-aware bitcode entrypoint using the host ASCII probe.
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $sym(
+                out: &mut MaybeUninit<Value>,
+                a: &Value,
+                b: &Value,
+                c: &Value,
+                str_ascii: StrAsciiFn,
+            ) -> i8 {
+                i8::from(ops::apply3(out, $op, a, b, c, Some(str_ascii)))
+            }
+        )*
+    };
+}
+
+#[cfg(not(test))]
+bc_str_ops3! {
     rt_bc_3_nth => BcOp3::Nth3,
     rt_bc_3_get => BcOp3::Get3,
 }
@@ -328,19 +386,26 @@ mod tests {
     use num_rational::BigRational;
     use std::sync::atomic::AtomicU64;
 
+    extern "C" fn test_str_ascii(v: &Value) -> u8 {
+        match v {
+            Value::Str(s) if s.is_ascii() => 1,
+            _ => 0,
+        }
+    }
+
     fn run1(op: BcOp1, a: &Value) -> Option<Value> {
         let mut out = None;
-        apply1(&mut out, op, a).then(|| out.unwrap())
+        apply1(&mut out, op, a, Some(test_str_ascii)).then(|| out.unwrap())
     }
 
     fn run2(op: BcOp2, a: &Value, b: &Value) -> Option<Value> {
         let mut out = None;
-        apply2(&mut out, op, a, b).then(|| out.unwrap())
+        apply2(&mut out, op, a, b, Some(test_str_ascii)).then(|| out.unwrap())
     }
 
     fn run3(op: BcOp3, a: &Value, b: &Value, c: &Value) -> Option<Value> {
         let mut out = None;
-        apply3(&mut out, op, a, b, c).then(|| out.unwrap())
+        apply3(&mut out, op, a, b, c, Some(test_str_ascii)).then(|| out.unwrap())
     }
 
     fn str_val(s: &str) -> Value {
@@ -437,6 +502,22 @@ mod tests {
         for (name, _) in ops::OP3_SYMBOLS {
             assert!(bc_op_symbol(name, 3).is_some(), "{name}");
         }
+        for (name, _) in ops::STR2_SYMBOLS {
+            assert!(
+                bc_ns_op_symbol(Some("clojure.string"), name, 2).is_some(),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            bc_ns_op_symbol(Some("clojure.core"), "+", 2),
+            Some("rt_bc_2_add")
+        );
+        assert_eq!(bc_ns_op_symbol(Some("clojure.string"), "split", 2), None);
+        assert_eq!(
+            bc_ns_op_symbol(Some("clojure.string"), "starts-with?", 1),
+            None
+        );
+        assert_eq!(bc_ns_op_symbol(Some("user"), "+", 2), None);
     }
 
     #[test]
@@ -534,6 +615,8 @@ mod tests {
         assert_eq!(run1(BcOp1::Count, &s), Some(Value::Int(2)));
         assert_eq!(run1(BcOp1::Count, &inline_s), Some(Value::Int(128)));
         assert_eq!(run1(BcOp1::Count, &sup_s), None);
+        let mut no_cb_out = None;
+        assert!(!apply1(&mut no_cb_out, BcOp1::Count, &long_s, None));
         assert_eq!(run1(BcOp1::Count, &long_s), Some(Value::Int(200)));
         assert_eq!(run1(BcOp1::Count, &str_val(&"é".repeat(100))), None);
         assert_eq!(run1(BcOp1::Count, &tvec), Some(Value::Int(1)));
@@ -796,6 +879,41 @@ mod tests {
         );
         assert_eq!(run2(BcOp2::Contains, &v, &Value::Nil), None);
         assert_eq!(run2(BcOp2::Contains, &str_ok, &Value::Int(0)), None);
+
+        let s_hello = str_val("hello");
+        let s_abab = str_val("abab");
+        let sw = str_val("hel");
+        let ew = str_val("llo");
+        let inc_s = str_val("ell");
+        assert_eq!(
+            run2(BcOp2::StrStartsWith, &s_hello, &sw),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            run2(BcOp2::StrStartsWith, &s_hello, &ew),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            run2(BcOp2::StrEndsWith, &s_hello, &ew),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            run2(BcOp2::StrIncludes, &s_hello, &inc_s),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            run2(BcOp2::StrIncludes, &s_hello, &str_val("")),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            run2(BcOp2::StrIncludes, &s_hello, &str_val("hello!")),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            run2(BcOp2::StrIncludes, &s_abab, &str_val("ac")),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(run2(BcOp2::StrStartsWith, &Value::Nil, &sw), None);
 
         assert!(run3(BcOp3::AssocBang, &tval, &Value::Int(0), &Value::Int(99)).is_some());
         assert_eq!(run3(BcOp3::AssocBang, &tval, &Value::Int(0), &v), None);

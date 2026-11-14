@@ -66,6 +66,51 @@ fn ensure_archive() -> PathBuf {
     ARCHIVE.get_or_init(build_archive).clone()
 }
 
+struct DirLock(PathBuf);
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
+fn acquire_lock(lock_dir: &std::path::Path) -> DirLock {
+    let stale = std::time::Duration::from_secs(600);
+    let wait = std::time::Duration::from_millis(25);
+    loop {
+        match std::fs::create_dir(lock_dir) {
+            Ok(()) => return DirLock(lock_dir.to_path_buf()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let expired = std::fs::metadata(lock_dir)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > stale));
+                if expired {
+                    let _ = std::fs::remove_dir(lock_dir);
+                    continue;
+                }
+                std::thread::sleep(wait);
+            }
+            Err(err) => panic!("create lock {}: {err}", lock_dir.display()),
+        }
+    }
+}
+
+fn prune_old_published(pub_root: &std::path::Path) {
+    let max_age = std::time::Duration::from_secs(3600);
+    let Ok(entries) = std::fs::read_dir(pub_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let expired = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > max_age));
+        if expired {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 fn build_archive() -> PathBuf {
     let dir = target_dir();
     let name = if cfg!(windows) {
@@ -74,16 +119,28 @@ fn build_archive() -> PathBuf {
         "libcljrt.a"
     };
     let tops = dir.parent().expect("target root").join("cljrt-archive");
-    let archive = tops.join("debug").join(name);
-    if archive.is_file() {
-        return archive;
+    let run_key = std::env::var("NEXTEST_RUN_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| format!("pid-{}", std::process::id()));
+    let pub_root = tops.join("published");
+    let pub_dir = pub_root.join(&run_key);
+    let published = pub_dir.join(name);
+    if published.is_file() {
+        return published;
     }
+    std::fs::create_dir_all(&tops).expect("create cljrt-archive");
+    let _guard = acquire_lock(&tops.join(".archive-lock"));
+    if published.is_file() {
+        return published;
+    }
+    let archive = tops.join("debug").join(name);
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let mut cmd = Command::new("cargo");
     cmd.args(["build", "--locked", "-p", "clj-rt", "--manifest-path"])
         .arg(&manifest)
         .arg("--target-dir")
-        .arg(dir.parent().expect("target root").join("cljrt-archive"));
+        .arg(&tops);
     cmd.env_remove("RUSTC_WRAPPER")
         .env_remove("LLVM_PROFILE_FILE");
     for (key, _) in std::env::vars_os() {
@@ -94,7 +151,12 @@ fn build_archive() -> PathBuf {
     let built = cmd.status().expect("run cargo build");
     assert!(built.success(), "cargo build -p clj-rt failed");
     assert!(archive.is_file(), "missing {}", archive.display());
-    archive
+    std::fs::create_dir_all(&pub_dir).expect("create published dir");
+    let staged = pub_dir.join(format!(".tmp-{}-{name}", std::process::id()));
+    std::fs::copy(&archive, &staged).expect("stage runtime archive");
+    std::fs::rename(&staged, &published).expect("publish runtime archive");
+    prune_old_published(&pub_root);
+    published
 }
 
 fn exe_suffix() -> &'static str {

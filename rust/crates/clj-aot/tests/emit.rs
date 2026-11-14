@@ -651,7 +651,23 @@ fn native_emit_ir_covers_assoc_conj_fx_and_nested_moves_259() {
   (let [t (transient [[1]])
         y (vector v)]
     (assoc! t 0 (conj (nth t 0) y))))
-(println (f 1 7) (persistent! (g 3)))
+(require '[clojure.string :as str])
+(defn h [words w]
+  (loop [k 0 stack [] best -1]
+    (if (= k (count words))
+      best
+      (let [cur (nth words k)
+            stack (loop [st stack]
+                    (if (and (seq st)
+                             (not (str/starts-with? w (nth (peek st) 0))))
+                      (recur (pop st))
+                      st))
+            best (if (and (seq stack) (str/ends-with? cur \"a\")
+                          (str/includes? w cur))
+                   (max best k)
+                   best)]
+        (recur (inc k) (conj stack [cur k]) best)))))
+(println (f 1 7) (persistent! (g 3)) (h [\"ab\" \"abc\"] \"ab\"))
 ";
     let report = clj_aot::build_str(
         src,
@@ -669,4 +685,35 @@ fn native_emit_ir_covers_assoc_conj_fx_and_nested_moves_259() {
     std::fs::remove_file(&ir).expect("cleanup");
     assert!(report.starts_with("aot: native "), "{report}");
     assert!(text.contains("@rt_n_assoc_conj("), "{text}");
+    assert!(
+        text.contains("@rt_bc_2_str_starts_with") || text.contains("memcmp"),
+        "{text}"
+    );
+}
+
+#[test]
+fn native_emit_ir_marks_clojure_string_def_as_rebinding() {
+    let ir = tmp("native-str-rebind.ll");
+    let src = "\
+(in-ns 'clojure.string)
+(def starts-with? (fn [_ _] false))
+(in-ns 'user)
+(println (clojure.string/starts-with? \"ab\" \"a\"))
+";
+    let report = clj_aot::build_str(
+        src,
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("native build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    assert!(report.starts_with("aot: native "), "{report}");
+    assert!(text.contains("@rt_n_fast_vars"), "{text}");
 }

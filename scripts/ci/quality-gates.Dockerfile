@@ -1,6 +1,6 @@
 # Quality-gates image for the `quality gates` job (.github/workflows/rust.yml).
 #
-# Vendored from the arcanist repo and adapted: LLVM 22.1.8 layer for the
+# Vendored from the arcanist repo and adapted: LLVM 23.1.5 layer for the
 # clj-aot (inkwell) build, and a workspace-aware warm layer (this repo's
 # rust/ is a Cargo workspace, not a single package).
 #
@@ -47,15 +47,15 @@ RUN git config --system --add safe.directory /work
 
 # Pinned LLVM for clj-aot (inkwell needs the exact major) via
 # apt.llvm.org, same major the setup-llvm action installs in the
-# other jobs. llvm.sh runs as root here (no sudo in the image) and
-# knows trixie explicitly.
+# other jobs. Configure the apt source directly rather than running
+# llvm.sh, whose wget HEAD check on https://apt.llvm.org/trixie/ fails.
 ARG LLVM_VERSION=23
 ENV LLVM_SYS_231_PREFIX=/usr/lib/llvm-23
-RUN wget -q https://apt.llvm.org/llvm.sh \
-    && chmod +x llvm.sh \
-    && ./llvm.sh "${LLVM_VERSION}" \
+RUN mkdir -p /etc/apt/trusted.gpg.d /etc/apt/sources.list.d \
+    && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc \
+    && printf 'Types: deb\nArchitectures: amd64 arm64\nSigned-By: /etc/apt/trusted.gpg.d/apt.llvm.org.asc\nURIs: https://apt.llvm.org/trixie/\nSuites: llvm-toolchain-trixie-%s\nComponents: main\n' "${LLVM_VERSION}" > /etc/apt/sources.list.d/apt-llvm.sources \
+    && apt-get update \
     && apt-get install -y "llvm-${LLVM_VERSION}-dev" "libpolly-${LLVM_VERSION}-dev" libffi-dev libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev \
-    && rm llvm.sh \
     && rm -rf /var/lib/apt/lists/* \
     && /usr/lib/llvm-23/bin/llvm-config --version | grep -q '^23\.1\.'
 ENV PATH=/usr/lib/llvm-23/bin:$PATH

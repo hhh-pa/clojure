@@ -7,15 +7,17 @@
 
 //! Pure fast-path operations compiled into the `clj-bc` LLVM bitcode.
 
-use std::cell::Cell;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use clj_value::{TransientKind, Value, ValueRef};
 
 use crate::{OutSlot, clone_fast, is_transient_vec, transient_vec_len};
 
-/// Maximum string byte length scanned inline for `is_ascii` without TLS.
+/// Maximum string byte length scanned inline for `is_ascii`.
 const MAX_INLINE_STR_BYTES: usize = 128;
+
+/// Host runtime callback returning `1` when `&Value` is a long ASCII string.
+pub type StrAsciiFn = extern "C" fn(&Value) -> u8;
 
 /// Unary bitcode opcodes.
 #[repr(u32)]
@@ -72,6 +74,9 @@ pub enum BcOp2 {
     Nth = 21,
     Get = 22,
     Contains = 23,
+    StrStartsWith = 24,
+    StrEndsWith = 25,
+    StrIncludes = 26,
 }
 
 /// Ternary bitcode opcodes.
@@ -146,6 +151,12 @@ pub(crate) const OP3_SYMBOLS: &[(&str, &str)] = &[
     ("get", "rt_bc_3_get"),
 ];
 
+pub(crate) const STR2_SYMBOLS: &[(&str, &str)] = &[
+    ("starts-with?", "rt_bc_2_str_starts_with"),
+    ("ends-with?", "rt_bc_2_str_ends_with"),
+    ("includes?", "rt_bc_2_str_includes"),
+];
+
 /// Map `(clojure.core name, arity)` to its bitcode entrypoint symbol, if covered.
 #[must_use]
 pub fn bc_op_symbol(name: &str, arity: usize) -> Option<&'static str> {
@@ -156,6 +167,19 @@ pub fn bc_op_symbol(name: &str, arity: usize) -> Option<&'static str> {
         _ => return None,
     };
     table.iter().find(|(n, _)| *n == name).map(|(_, sym)| *sym)
+}
+
+/// Map `(namespace, name, arity)` to its bitcode entrypoint symbol, if covered.
+#[must_use]
+pub fn bc_ns_op_symbol(ns: Option<&str>, name: &str, arity: usize) -> Option<&'static str> {
+    match ns {
+        Some("clojure.core") | None => bc_op_symbol(name, arity),
+        Some("clojure.string") if arity == 2 => STR2_SYMBOLS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, sym)| *sym),
+        _ => None,
+    }
 }
 
 /// Effect-position (`do` discarded result) transient bitcode symbol, skipping
@@ -169,63 +193,12 @@ pub fn bc_fx_symbol(name: &str, arity: usize) -> Option<&'static str> {
     }
 }
 
-type AsciiSlot = Cell<Option<(Weak<str>, bool)>>;
-
-thread_local! {
-    static ASCII_STRS: [AsciiSlot; 4] = const {
-        [
-            Cell::new(None),
-            Cell::new(None),
-            Cell::new(None),
-            Cell::new(None),
-        ]
-    };
-}
-
-fn probe_ascii_slot(slots: &[AsciiSlot; 4], ptr: *const u8) -> Option<bool> {
-    for (i, slot) in slots.iter().enumerate() {
-        let Some(entry) = slot.take() else {
-            continue;
-        };
-        let hit = entry.0.as_ptr().cast::<u8>() == ptr;
-        let ascii = entry.1;
-        if hit {
-            if i > 0 {
-                let front = slots[0].take();
-                slots[0].set(Some(entry));
-                slot.set(front);
-            } else {
-                slots[0].set(Some(entry));
-            }
-            return Some(ascii);
-        }
-        slot.set(Some(entry));
-    }
-    None
-}
-
 #[inline]
-fn is_ascii_long(s: &Arc<str>) -> bool {
-    let ptr = Arc::as_ptr(s).cast::<u8>();
-    ASCII_STRS.with(|slots| {
-        if let Some(ascii) = probe_ascii_slot(slots, ptr) {
-            return ascii;
-        }
-        let ascii = s.is_ascii();
-        let mut cur = Some((Arc::downgrade(s), ascii));
-        for slot in slots {
-            cur = slot.replace(cur);
-        }
-        ascii
-    })
-}
-
-#[inline]
-fn is_ascii_cached(s: &Arc<str>) -> bool {
+fn is_ascii_cached(v: &Value, s: &Arc<str>, str_ascii: Option<StrAsciiFn>) -> bool {
     if s.len() <= MAX_INLINE_STR_BYTES {
         return s.is_ascii();
     }
-    is_ascii_long(s)
+    str_ascii.is_some_and(|f| f(v) != 0)
 }
 
 #[inline]
@@ -256,21 +229,26 @@ fn write_val_ref<O: OutSlot>(out: &mut O, vr: ValueRef<'_>) -> bool {
 }
 
 #[inline]
-fn coll_count(v: &Value) -> Option<usize> {
+fn coll_count(v: &Value, str_ascii: Option<StrAsciiFn>) -> Option<usize> {
     match v {
         Value::Nil => Some(0),
         Value::Vector(v) => Some(v.len()),
         Value::List(l) => Some(l.len()),
         Value::Map(m) => m.len_opt(),
         Value::Set(s) => Some(s.size()),
-        Value::Str(s) if is_ascii_cached(s) => Some(s.len()),
+        Value::Str(s) if is_ascii_cached(v, s, str_ascii) => Some(s.len()),
         Value::Transient(t) => transient_vec_len(t),
         _ => None,
     }
 }
 
 #[inline(always)]
-pub(crate) fn apply1<O: OutSlot>(out: &mut O, op: BcOp1, a: &Value) -> bool {
+pub(crate) fn apply1<O: OutSlot>(
+    out: &mut O,
+    op: BcOp1,
+    a: &Value,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
     match op {
         BcOp1::Inc | BcOp1::Dec | BcOp1::Neg => apply1_arith(out, op, a),
         BcOp1::ZeroP | BcOp1::PosP | BcOp1::NegP | BcOp1::EvenP | BcOp1::OddP => {
@@ -289,20 +267,25 @@ pub(crate) fn apply1<O: OutSlot>(out: &mut O, op: BcOp1, a: &Value) -> bool {
         BcOp1::SomeP => write_val(out, Value::Bool(!matches!(a, Value::Nil))),
         BcOp1::StringP => write_val(out, Value::Bool(matches!(a, Value::Str(_)))),
         BcOp1::Count | BcOp1::EmptyP | BcOp1::Peek | BcOp1::First | BcOp1::PopBang => {
-            apply1_coll(out, op, a)
+            apply1_coll(out, op, a, str_ascii)
         }
     }
 }
 
 #[inline(always)]
-fn apply1_coll<O: OutSlot>(out: &mut O, op: BcOp1, a: &Value) -> bool {
+fn apply1_coll<O: OutSlot>(
+    out: &mut O,
+    op: BcOp1,
+    a: &Value,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
     match op {
-        BcOp1::Count => coll_count(a)
+        BcOp1::Count => coll_count(a, str_ascii)
             .and_then(|n| i64::try_from(n).ok())
             .is_some_and(|n| write_val(out, Value::Int(n))),
         BcOp1::EmptyP => match a {
             Value::Str(s) => write_val(out, Value::Bool(s.is_empty())),
-            _ => coll_count(a).is_some_and(|n| write_val(out, Value::Bool(n == 0))),
+            _ => coll_count(a, str_ascii).is_some_and(|n| write_val(out, Value::Bool(n == 0))),
         },
         BcOp1::Peek => apply1_peek(out, a),
         BcOp1::First => apply1_first(out, a),
@@ -417,7 +400,13 @@ pub(crate) fn pop_bang_fast<O: OutSlot>(out: &mut O, a: &Value, keep_ret: bool) 
 }
 
 #[inline(always)]
-pub(crate) fn apply2<O: OutSlot>(out: &mut O, op: BcOp2, a: &Value, b: &Value) -> bool {
+pub(crate) fn apply2<O: OutSlot>(
+    out: &mut O,
+    op: BcOp2,
+    a: &Value,
+    b: &Value,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
     match op {
         BcOp2::Add | BcOp2::Sub | BcOp2::Mul | BcOp2::Min | BcOp2::Max => {
             apply2_arith(out, op, a, b)
@@ -433,10 +422,41 @@ pub(crate) fn apply2<O: OutSlot>(out: &mut O, op: BcOp2, a: &Value, b: &Value) -
         | BcOp2::Shl
         | BcOp2::Shr
         | BcOp2::Ushr => apply2_int_ops(out, op, a, b),
-        BcOp2::Nth => nth_fast(out, a, b, None),
-        BcOp2::Get => get_fast(out, a, b, None),
+        BcOp2::Nth => nth_fast(out, a, b, None, str_ascii),
+        BcOp2::Get => get_fast(out, a, b, None, str_ascii),
         BcOp2::Contains => contains_fast(out, a, b),
+        BcOp2::StrStartsWith | BcOp2::StrEndsWith | BcOp2::StrIncludes => {
+            apply2_str_pred(out, op, a, b)
+        }
     }
+}
+
+#[inline]
+fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    let Some((&first, rest)) = needle.split_first() else {
+        return true;
+    };
+    let Some(limit) = haystack.len().checked_sub(needle.len()) else {
+        return false;
+    };
+    (0..=limit).any(|i| {
+        haystack.get(i).copied() == Some(first)
+            && haystack.get(i + 1..i + needle.len()) == Some(rest)
+    })
+}
+
+#[inline(always)]
+fn apply2_str_pred<O: OutSlot>(out: &mut O, op: BcOp2, a: &Value, b: &Value) -> bool {
+    let (Value::Str(s), Value::Str(p)) = (a, b) else {
+        return false;
+    };
+    let hit = match op {
+        BcOp2::StrStartsWith => s.as_bytes().starts_with(p.as_bytes()),
+        BcOp2::StrEndsWith => s.as_bytes().ends_with(p.as_bytes()),
+        _ => bytes_contains(s.as_bytes(), p.as_bytes()),
+    };
+    out.write_value(Value::Bool(hit));
+    true
 }
 
 #[inline(always)]
@@ -574,15 +594,26 @@ fn index_i32(v: &Value) -> Option<usize> {
 }
 
 #[inline]
-fn nth_str_fast(s: &Arc<str>, idx: usize) -> Option<Option<char>> {
-    if is_ascii_cached(s) {
+fn nth_str_fast(
+    v: &Value,
+    s: &Arc<str>,
+    idx: usize,
+    str_ascii: Option<StrAsciiFn>,
+) -> Option<Option<char>> {
+    if is_ascii_cached(v, s, str_ascii) {
         return Some(s.as_bytes().get(idx).copied().map(char::from));
     }
     None
 }
 
 #[inline]
-fn nth_fast<O: OutSlot>(out: &mut O, coll: &Value, idx: &Value, nf: Option<&Value>) -> bool {
+fn nth_fast<O: OutSlot>(
+    out: &mut O,
+    coll: &Value,
+    idx: &Value,
+    nf: Option<&Value>,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
     let Value::Int(n) = idx else {
         return false;
     };
@@ -595,7 +626,7 @@ fn nth_fast<O: OutSlot>(out: &mut O, coll: &Value, idx: &Value, nf: Option<&Valu
             Some(vr) => write_val_ref(out, vr),
             None => nf.is_some_and(|d| clone_fast(out, d)),
         },
-        Value::Str(s) => nth_str_slot(out, s, ok, nf),
+        Value::Str(s) => nth_str_slot(out, coll, s, ok, nf, str_ascii),
         Value::Transient(t) => nth_transient(out, t, ok, nf),
         _ => false,
     }
@@ -604,12 +635,14 @@ fn nth_fast<O: OutSlot>(out: &mut O, coll: &Value, idx: &Value, nf: Option<&Valu
 #[inline]
 fn nth_str_slot<O: OutSlot>(
     out: &mut O,
+    coll: &Value,
     s: &Arc<str>,
     ok: Option<usize>,
     nf: Option<&Value>,
+    str_ascii: Option<StrAsciiFn>,
 ) -> bool {
     match ok {
-        Some(i) => match nth_str_fast(s, i) {
+        Some(i) => match nth_str_fast(coll, s, i, str_ascii) {
             Some(Some(c)) => write_val(out, Value::Char(c)),
             Some(None) => nf.is_some_and(|d| clone_fast(out, d)),
             None => false,
@@ -648,12 +681,19 @@ fn write_not_found<O: OutSlot>(out: &mut O, nf: Option<&Value>) -> bool {
 }
 
 #[inline]
-fn get_str_fast<O: OutSlot>(out: &mut O, s: &Arc<str>, key: &Value, nf: Option<&Value>) -> bool {
+fn get_str_fast<O: OutSlot>(
+    out: &mut O,
+    coll: &Value,
+    s: &Arc<str>,
+    key: &Value,
+    nf: Option<&Value>,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
     let Value::Int(n) = key else {
         return false;
     };
     match usize::try_from(*n).ok() {
-        Some(i) => match nth_str_fast(s, i) {
+        Some(i) => match nth_str_fast(coll, s, i, str_ascii) {
             Some(Some(c)) => write_val(out, Value::Char(c)),
             Some(None) => write_not_found(out, nf),
             None => false,
@@ -663,7 +703,13 @@ fn get_str_fast<O: OutSlot>(out: &mut O, s: &Arc<str>, key: &Value, nf: Option<&
 }
 
 #[inline]
-fn get_fast<O: OutSlot>(out: &mut O, coll: &Value, key: &Value, nf: Option<&Value>) -> bool {
+fn get_fast<O: OutSlot>(
+    out: &mut O,
+    coll: &Value,
+    key: &Value,
+    nf: Option<&Value>,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
     match coll {
         Value::Nil => write_not_found(out, nf),
         Value::Vector(v) => match index_i32(key) {
@@ -678,7 +724,7 @@ fn get_fast<O: OutSlot>(out: &mut O, coll: &Value, key: &Value, nf: Option<&Valu
             Some(None) => write_not_found(out, nf),
             None => false,
         },
-        Value::Str(s) => get_str_fast(out, s, key, nf),
+        Value::Str(s) => get_str_fast(out, coll, s, key, nf, str_ascii),
         _ => false,
     }
 }
@@ -701,10 +747,17 @@ fn contains_fast<O: OutSlot>(out: &mut O, coll: &Value, key: &Value) -> bool {
 }
 
 #[inline(always)]
-pub(crate) fn apply3<O: OutSlot>(out: &mut O, op: BcOp3, a: &Value, b: &Value, c: &Value) -> bool {
+pub(crate) fn apply3<O: OutSlot>(
+    out: &mut O,
+    op: BcOp3,
+    a: &Value,
+    b: &Value,
+    c: &Value,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
     match op {
-        BcOp3::Nth3 => nth_fast(out, a, b, Some(c)),
-        BcOp3::Get3 => get_fast(out, a, b, Some(c)),
+        BcOp3::Nth3 => nth_fast(out, a, b, Some(c), str_ascii),
+        BcOp3::Get3 => get_fast(out, a, b, Some(c), str_ascii),
         BcOp3::AssocBang => assoc_bang_fast(out, a, b, c, true),
     }
 }

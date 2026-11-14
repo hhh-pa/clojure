@@ -140,4 +140,15 @@ fn nabi_assoc_conj_fallbacks() {
         cljrt::nabi::rt_n_conj_bang_fx(&Value::Nil, &Value::Int(1)),
         0
     );
+    let ascii = Value::Str("a".repeat(200).into());
+    let non_ascii = Value::Str("é".repeat(200).into());
+    assert_eq!(cljrt::nabi::rt_n_str_ascii(&ascii), 1);
+    assert_eq!(cljrt::nabi::rt_n_str_ascii(&ascii), 1);
+    assert_eq!(cljrt::nabi::rt_n_str_ascii(&non_ascii), 0);
+    assert_eq!(cljrt::nabi::rt_n_str_ascii(&Value::Nil), 0);
+    assert!(
+        cljrt::nabi::native_symbols()
+            .iter()
+            .any(|(name, _)| *name == "rt_n_str_ascii")
+    );
 }

@@ -772,6 +772,15 @@ pub extern "C" fn rt_n_conj_bang_fx(a: &Value, b: &Value) -> u8 {
 /// Every `rt_n_*` shim by symbol name (the in-process JIT maps a
 /// native module's declarations to these).
 #[must_use]
+/// Fast C-ABI ASCII predicate for long strings called from `clj-bc` (`1` = ASCII).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_str_ascii(v: &Value) -> u8 {
+    match v {
+        Value::Str(s) if native_abi::str_is_ascii(s) => 1,
+        _ => 0,
+    }
+}
+
 pub fn native_symbols() -> Vec<(&'static str, usize)> {
     macro_rules! syms {
         ($($f:ident),* $(,)?) => { vec![$((stringify!($f), $f as *const () as usize)),*] };
@@ -838,5 +847,6 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_assert_fail,
         rt_n_assoc_conj,
         rt_n_conj_bang_fx,
+        rt_n_str_ascii,
     ]
 }

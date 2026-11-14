@@ -79,13 +79,12 @@ fn should_strip_env(key: &str) -> bool {
             | "CARGO_TARGET_DIR"
     ) || key.starts_with("CARGO_LLVM_COV")
         || (key.starts_with("CARGO_TARGET_") && key.ends_with("_RUSTFLAGS"))
+        || (key.starts_with("CARGO_BUILD_") && key.ends_with("_DIR"))
 }
 
 fn compile_helper_bc(manifest_dir: &Path, out_dir: &Path, target: &str) -> PathBuf {
     let bc_manifest = manifest_dir.join("../clj-bc/Cargo.toml");
     let bc_target = out_dir.join("bc-target");
-    let deps_dir = bc_target.join(target).join("release").join("deps");
-    clean_stale_bc(&deps_dir);
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut cmd = Command::new(&cargo);
@@ -98,65 +97,113 @@ fn compile_helper_bc(manifest_dir: &Path, out_dir: &Path, target: &str) -> PathB
     }
     // Compile with `target-cpu=generic` so helper IR never carries host-specific CPU
     // features (e.g. `apple-m1`) that would block LLVM inlining into `"generic"` modules.
-    cmd.env(
-        "CARGO_ENCODED_RUSTFLAGS",
-        "-C\x1fpanic=abort\x1f-C\x1ftarget-cpu=generic",
-    )
-    .current_dir(manifest_dir)
-    .args(["rustc", "--offline", "--locked", "--release"])
-    .arg("--manifest-path")
-    .arg(&bc_manifest)
-    .arg("--target")
-    .arg(target)
-    .arg("--target-dir")
-    .arg(&bc_target)
-    .args(["--", "--emit=llvm-bc", "-C", "codegen-units=1"]);
-
-    let status = cmd
-        .status()
+    let output = cmd
+        .env(
+            "CARGO_ENCODED_RUSTFLAGS",
+            "-C\x1fpanic=abort\x1f-C\x1ftarget-cpu=generic",
+        )
+        .current_dir(manifest_dir)
+        .args([
+            "rustc",
+            "--offline",
+            "--locked",
+            "--release",
+            "--message-format=json",
+        ])
+        .arg("--manifest-path")
+        .arg(&bc_manifest)
+        .arg("--target")
+        .arg(target)
+        .arg("--target-dir")
+        .arg(&bc_target)
+        .args(["--", "--emit=llvm-bc", "-C", "codegen-units=1"])
+        .output()
         .expect("failed to invoke cargo rustc for clj-bc");
-    assert!(status.success(), "cargo rustc for clj-bc failed: {status}");
-    find_bc(&deps_dir)
+    assert!(
+        output.status.success(),
+        "cargo rustc for clj-bc failed ({}):\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    find_bc_from_json(&stdout)
 }
 
-fn clean_stale_bc(deps_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(deps_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if let Some(s) = name.to_str()
-            && s.starts_with("clj_bc-")
-            && s.ends_with(".bc")
-        {
-            let _ = std::fs::remove_file(entry.path());
+/// Locate the emitted `clj_bc-<hash>.bc` alongside the `clj_bc` artifact's `.rmeta`.
+///
+/// Cargo <1.100 writes both in `<target-dir>/<triple>/release/deps/` while Cargo >=1.100
+/// places them in `<target-dir>/<triple>/release/build/clj-bc/<hash>/out/`; reading the
+/// compiler-artifact JSON avoids hardcoding either layout.
+fn find_bc_from_json(stdout: &str) -> PathBuf {
+    for line in stdout.lines() {
+        if !line.contains("\"compiler-artifact\"") || !line.contains("\"clj_bc\"") {
+            continue;
+        }
+        for raw in json_filenames(line) {
+            if let Some(bc) = bc_from_artifact_path(Path::new(&raw)) {
+                return bc;
+            }
         }
     }
+    panic!("missing clj_bc llvm-bc artifact in cargo json output:\n{stdout}");
 }
 
-fn find_bc(deps_dir: &Path) -> PathBuf {
-    let entries = std::fs::read_dir(deps_dir)
-        .unwrap_or_else(|e| panic!("missing clj-bc deps dir {}: {e}", deps_dir.display()));
-    let mut matches: Vec<PathBuf> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let s = name.to_str()?;
-            if s.starts_with("clj_bc-") && s.ends_with(".bc") {
-                Some(entry.path())
-            } else {
-                None
+fn bc_from_artifact_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let hash = name.strip_prefix("libclj_bc-")?.strip_suffix(".rmeta")?;
+    let bc = path.with_file_name(format!("clj_bc-{hash}.bc"));
+    bc.is_file().then_some(bc)
+}
+
+fn json_filenames(line: &str) -> Vec<String> {
+    let Some(start) = line.find("\"filenames\":[") else {
+        return Vec::new();
+    };
+    let mut chars = line[start + "\"filenames\":[".len()..].chars();
+    let mut out = Vec::new();
+    while let Some(c) = chars.next() {
+        match c {
+            ']' => break,
+            '"' => out.push(unescape_json_str(&mut chars)),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn unescape_json_str(chars: &mut std::str::Chars<'_>) -> String {
+    let mut s = String::new();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            break;
+        }
+        if c != '\\' {
+            s.push(c);
+            continue;
+        }
+        let Some(esc) = chars.next() else {
+            break;
+        };
+        match esc {
+            '"' | '\\' | '/' => s.push(esc),
+            'n' => s.push('\n'),
+            'r' => s.push('\r'),
+            't' => s.push('\t'),
+            'u' => {
+                let hex: String = chars.by_ref().take(4).collect();
+                if let Ok(code) = u32::from_str_radix(&hex, 16)
+                    && let Some(ch) = char::from_u32(code)
+                {
+                    s.push(ch);
+                }
             }
-        })
-        .collect();
-    assert_eq!(
-        matches.len(),
-        1,
-        "expected exactly one clj_bc-*.bc in {}, found {:?}",
-        deps_dir.display(),
-        matches
-    );
-    matches.pop().expect("len == 1")
+            other => {
+                s.push('\\');
+                s.push(other);
+            }
+        }
+    }
+    s
 }
 
 fn write_helper_rs(

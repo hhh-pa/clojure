@@ -67,7 +67,7 @@ runs:
       uses: actions/cache@v5
       with:
         path: .llvm-cache/llvm-${{ inputs.patch }}
-        key: setup-llvm-win-bin-${{ inputs.patch }}-${{ runner.os }}-${{ runner.arch }}
+        key: setup-llvm-win-bin-${{ inputs.patch }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/actions/setup-llvm/action.yml') }}
     - if: runner.os == 'Linux'
       shell: bash
       run: |
@@ -136,34 +136,108 @@ runs:
         fi
         echo "--- key tools:"; ls "$dir/bin" | grep -iE '^(llvm-config|clang|lld)' || true
         test -x "$dir/bin/llvm-config.exe"
+        # LLVM 23.1.5's Windows llvm-config --system-libs prints a build-host
+        # absolute path (S:/llvm/.../zstd_static.lib), which llvm-sys passes
+        # to rustc as `static=S:/...` and fails library renaming. Wrap
+        # llvm-config.exe once (idempotent for cached trees) to normalize
+        # directory-prefixed *.lib entries in --system-libs / --libnames to
+        # bare filenames resolved via RUSTFLAGS -L.
+        if [ ! -x "$dir/bin/llvm-config-real.exe" ]; then
+          mv "$dir/bin/llvm-config.exe" "$dir/bin/llvm-config-real.exe"
+        fi
+        cat > /tmp/llvm-config-wrapper.go << 'EOF'
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	real := filepath.Join(filepath.Dir(exe), "llvm-config-real.exe")
+	cmd := exec.Command(real, os.Args[1:]...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			os.Exit(ee.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	rewrite := false
+	for _, a := range os.Args[1:] {
+		if a == "--system-libs" || a == "--libnames" {
+			rewrite = true
+			break
+		}
+	}
+	s := out.String()
+	if rewrite {
+		fields := strings.Fields(s)
+		for i, f := range fields {
+			if strings.HasSuffix(strings.ToLower(f), ".lib") {
+				if idx := strings.LastIndexAny(f, "/\\"); idx >= 0 {
+					fields[i] = f[idx+1:]
+				}
+			}
+		}
+		s = strings.Join(fields, " ") + "\n"
+	}
+	os.Stdout.WriteString(s)
+}
+EOF
+        CGO_ENABLED=0 go build -o "$dir/bin/llvm-config.exe" /tmp/llvm-config-wrapper.go
+        rm -f /tmp/llvm-config-wrapper.go
         "$dir/bin/llvm-config.exe" --version | grep -q '^23\.1\.'
+        echo "--- llvm-config --system-libs --link-static:"; "$dir/bin/llvm-config.exe" --system-libs --link-static
         echo "$dir/bin" >> "$GITHUB_PATH"
         echo "LLVM_SYS_231_PREFIX=$dir" >> "$GITHUB_ENV"
-        # Static linking needs xml2s.lib, which the tarball omits:
-        # vcpkg's static libxml2 provides it (tolerating its sibling
-        # static names by copying to the expected file name). An
-        # exact cache hit restores the built tree, so the ~7 min
-        # from-source build is skipped; anything else runs vcpkg,
-        # which reuses whatever restored archives match by ABI hash
-        # and rebuilds the rest (slow but correct).
+        # Static linking needs xml2s.lib, zs.lib, and zstd_static.lib, which
+        # the tarball omits: vcpkg's static triplets provide them (tolerating
+        # sibling static names by copying to the expected filenames). An exact
+        # cache hit restores the built tree, so the ~7 min from-source build is
+        # skipped; anything else runs vcpkg, which reuses whatever restored
+        # archives match by ABI hash and rebuilds the rest (slow but correct).
         VCPKG="${VCPKG_INSTALLATION_ROOT:-C:/vcpkg}"
         xmldir="$VCPKG/installed/x64-windows-static/lib"
-        if [ "${{ steps.vcpkg-cache.outputs.cache-hit }}" = 'true' ] && [ -n "$(ls "$xmldir" 2>/dev/null | grep -iE 'xml2' || true)" ]; then
+        if [ "${{ steps.vcpkg-cache.outputs.cache-hit }}" = 'true' ] \
+          && [ -n "$(ls "$xmldir" 2>/dev/null | grep -iE 'xml2' || true)" ] \
+          && [ -n "$(ls "$xmldir" 2>/dev/null | grep -iE 'zlib|zs\.lib' || true)" ] \
+          && [ -n "$(ls "$xmldir" 2>/dev/null | grep -iE 'zstd' || true)" ]; then
           echo 'setup-llvm: reusing cached vcpkg installed tree'
         else
-          "$VCPKG/vcpkg.exe" install libxml2:x64-windows-static --clean-after-build
+          "$VCPKG/vcpkg.exe" install libxml2:x64-windows-static zlib:x64-windows-static zstd:x64-windows-static --clean-after-build
         fi
-        echo "--- xml libs:"; ls "$xmldir" | grep -i xml || true
-        if [ ! -f "$xmldir/xml2s.lib" ]; then
-          for cand in libxml2s.lib libxml2.lib xml2.lib; do
+        echo "--- vcpkg libs:"; ls "$xmldir" || true
+        alias_lib() {
+          local target="$1"; shift
+          if [ -f "$xmldir/$target" ]; then
+            return 0
+          fi
+          for cand in "$@"; do
             if [ -f "$xmldir/$cand" ]; then
-              cp "$xmldir/$cand" "$xmldir/xml2s.lib"
-              echo "setup-llvm: using $cand as xml2s.lib"
-              break
+              cp "$xmldir/$cand" "$xmldir/$target"
+              echo "setup-llvm: using $cand as $target"
+              return 0
             fi
           done
-        fi
-        test -f "$xmldir/xml2s.lib"
+          echo "setup-llvm: missing $target (tried: $*)" >&2
+          return 1
+        }
+        alias_lib xml2s.lib libxml2s.lib libxml2.lib xml2.lib
+        alias_lib zs.lib zlibstatic.lib libzlibstatic.lib zlib.lib libz.lib z.lib
+        alias_lib zstd_static.lib libzstd_static.lib zstd-static.lib zstd.lib
         # rustc checks `static=` native libs at rlib time using only -L
         # paths, and llvm-sys marks Windows system libs static; their
         # home is the spaceful SDK dir RUSTFLAGS cannot spell (space

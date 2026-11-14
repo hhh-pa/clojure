@@ -169,7 +169,7 @@ fn call_main(
 /// compiled natively (the caller reports it).
 pub fn run_native_str(source: &str, source_path: &str, args: &[String]) -> Result<i32, JitError> {
     let ctx = Context::create();
-    // Skip bitcode helpers in MCJIT: RuntimeDyldMachO cannot relocate Mach-O TLV (`ASCII_STRS`) or external std symbols.
+    // Skip bitcode helpers in MCJIT: RuntimeDyldMachO cannot relocate bitcode external symbols.
     let (module, _) = crate::native_module_with_helpers(&ctx, source, source_path, None).map_err(
         |e| match e {
             // The program's own compile error, exactly as `run` reports it.
@@ -311,7 +311,9 @@ mod tests {
     #[test]
     fn native_jit_runs_two_arg_moving_recur_259() {
         let code = super::run_native_str(
-            "(defn f [a b] (loop [x a i b] (if (zero? i) x (recur (min x i) (dec i))))) (print (f 5 2))",
+            "(defn f [a b] (loop [x a i b] (if (zero? i) x (recur (min x i) (dec i))))) \
+             (print (f 5 2)) \
+             (let [m (assoc nil :a 1)] (print (dissoc m :a)))",
             "f.clj",
             &[],
         )

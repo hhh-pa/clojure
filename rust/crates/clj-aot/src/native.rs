@@ -1796,6 +1796,11 @@ impl<'ctx> Lowerer<'ctx> {
         if moving {
             return self.lower_direct_moving(f, call, k, core_name.as_deref(), dest);
         }
+        let bc_sym = bc_override.or_else(|| {
+            (fast.is_none() && self.use_bitcode)
+                .then(|| clj_bc::bc_ns_op_symbol(call.var.sym.namespace(), call.var.sym.name(), n))
+                .flatten()
+        });
         let (refs, temps) = self.arg_refs(f, &call.args, dest)?;
         let slow = self.ctx.append_basic_block(f.func, "native_slow");
         let done = self.ctx.append_basic_block(f.func, "native_done");
@@ -1803,7 +1808,7 @@ impl<'ctx> Lowerer<'ctx> {
             f,
             fast,
             core_name.as_deref(),
-            bc_override,
+            bc_sym,
             &refs,
             dest,
             slow,
@@ -1869,6 +1874,13 @@ impl<'ctx> Lowerer<'ctx> {
         self.drop_v(func, dest);
         let mut call_args: Vec<BasicMetadataValueEnum> = vec![dest.into()];
         call_args.extend(refs.iter().map(|r| BasicMetadataValueEnum::from(*r)));
+        if matches!(
+            shim,
+            "rt_bc_1_count" | "rt_bc_2_nth" | "rt_bc_2_get" | "rt_bc_3_nth" | "rt_bc_3_get"
+        ) {
+            let probe = self.helper("rt_n_str_ascii", Some(self.i8t.into()), &[self.ptr.into()]);
+            call_args.push(probe.as_global_value().as_pointer_value().into());
+        }
         let ok = self.call(shim, Some(self.i8t), &call_args).expect("ok");
         let hit = self
             .builder
@@ -2550,6 +2562,7 @@ impl<'ctx> Lowerer<'ctx> {
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
         let depth = f.env.len();
+        let mut bound = Vec::new();
         let mut targets = Vec::new();
         for (pat, init) in bindings {
             let t = self.slot(f);
@@ -2563,6 +2576,7 @@ impl<'ctx> Lowerer<'ctx> {
                 self.drop_v(f.func, t);
                 s
             };
+            bound.extend_from_slice(&slots);
             targets.push((pat.clone(), slots));
         }
         let header = self.ctx.append_basic_block(f.func, "loop");
@@ -2575,6 +2589,9 @@ impl<'ctx> Lowerer<'ctx> {
         let result = self.lower_body(f, body, dest);
         f.recur.pop();
         f.env.truncate(depth);
+        if result.is_ok() {
+            self.drop_slots(f.func, &bound);
+        }
         result
     }
 
@@ -3508,6 +3525,7 @@ fn walk_letfn_moves(
             }
         }
     }
+    later.retain(|&i| i < depth);
 }
 
 fn walk_children_moves(
@@ -3560,7 +3578,10 @@ fn walk_bindings_rev(
             }
         }
         let n = native_abi::pattern_local_count(pat);
-        slots.truncate(slots.len() - n);
+        let new_len = slots.len() - n;
+        slots.truncate(new_len);
+        // Shadowed/inner locals at indices >= new_len are out of scope in `init`.
+        later.retain(|&i| i < new_len);
         walk_moves(init, slots, min_slot, later, out);
     }
 }
@@ -3580,11 +3601,13 @@ fn walk_let_moves(
     later: &mut BTreeSet<usize>,
     out: &mut Vec<(usize, usize)>,
 ) {
+    let base = slots.len();
     push_binding_slots(bindings, slots);
     for b in body.iter().rev() {
         walk_moves(b, slots, min_slot, later, out);
     }
     walk_bindings_rev(bindings, slots, min_slot, later, out);
+    later.retain(|&i| i < base);
 }
 
 fn walk_loop_moves(
@@ -3598,11 +3621,13 @@ fn walk_loop_moves(
     let loop_base = slots.len();
     push_binding_slots(bindings, slots);
     let mut body_later = later.clone();
+    body_later.retain(|&i| i < loop_base);
     for b in body.iter().rev() {
         walk_moves(b, slots, loop_base, &mut body_later, out);
     }
     later.extend(body_later);
     walk_bindings_rev(bindings, slots, outer_min, later, out);
+    later.retain(|&i| i < loop_base);
 }
 
 fn walk_extent_moves(
@@ -3612,6 +3637,7 @@ fn walk_extent_moves(
     later: &mut BTreeSet<usize>,
     out: &mut Vec<(usize, usize)>,
 ) -> bool {
+    let depth = slots.len();
     match e {
         Expr::Fn(_)
         | Expr::BoundFn { .. }
@@ -3624,10 +3650,12 @@ fn walk_extent_moves(
         | Expr::Time { .. }
         | Expr::WithOutStr { .. } => {
             reads(e, later);
+            later.retain(|&i| i < depth);
             true
         }
         Expr::Binding { pairs, body } | Expr::WithRedefs { pairs, body } => {
             body.iter().for_each(|b| reads(b, later));
+            later.retain(|&i| i < depth);
             pairs
                 .iter()
                 .rev()
@@ -3638,6 +3666,7 @@ fn walk_extent_moves(
         | Expr::Locking { lockee: arg, body }
         | Expr::WithInStr { s: arg, body, .. } => {
             body.iter().for_each(|b| reads(b, later));
+            later.retain(|&i| i < depth);
             walk_moves(arg, slots, min_slot, later, out);
             true
         }
@@ -3691,7 +3720,7 @@ fn mentions_rebinding(e: &Expr) -> bool {
         Expr::WithRedefs { .. } => true,
         Expr::Global(v) | Expr::VarRef(v) => core_rebind(v),
         Expr::DirectNative(c) => core_rebind(&c.var),
-        Expr::Def { sym, .. } => sym.namespace() == Some("clojure.core"),
+        Expr::Def { sym, .. } => matches!(sym.namespace(), Some("clojure.core" | "clojure.string")),
         _ => false,
     };
     let mut found = hit;
