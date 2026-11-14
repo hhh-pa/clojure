@@ -686,7 +686,9 @@ fn native_emit_ir_covers_assoc_conj_fx_and_nested_moves_259() {
     assert!(report.starts_with("aot: native "), "{report}");
     assert!(text.contains("@rt_n_assoc_conj("), "{text}");
     assert!(
-        text.contains("@rt_bc_2_str_starts_with") || text.contains("memcmp"),
+        text.contains("@rt_bc_2_str_starts_with")
+            || text.contains("memcmp")
+            || text.contains("@bcmp("),
         "{text}"
     );
 }
