@@ -28,7 +28,7 @@ const TOTAL_BIND_SLOTS: usize = EXACT_BIND_SLOTS + OVERFLOW_BIND_SLOTS;
 /// Process-wide atomic refcounts of active thread bindings per `var_id`.
 #[derive(Debug)]
 pub struct BindCounts {
-    slots: Box<[AtomicUsize]>,
+    slots: Box<[AtomicUsize; TOTAL_BIND_SLOTS]>,
 }
 
 impl Default for BindCounts {
@@ -41,11 +41,9 @@ impl BindCounts {
     /// Allocate a zeroed binding-refcount table.
     #[must_use]
     pub fn new() -> Self {
-        let slots = (0..TOTAL_BIND_SLOTS)
-            .map(|_| AtomicUsize::new(0))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        Self { slots }
+        Self {
+            slots: Box::new([const { AtomicUsize::new(0) }; TOTAL_BIND_SLOTS]),
+        }
     }
 
     #[inline]

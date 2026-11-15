@@ -453,6 +453,7 @@ mod tests {
         assert!(!lto_ir.contains("@rt_bc_2_eq"), "{lto_ir}");
         // Shared multi-site clone/deref helpers are internalized cleanly.
         assert!(!lto_ir.contains("define i8 @rt_bc_"), "{lto_ir}");
+        assert!(!lto_ir.contains("panicking"), "{lto_ir}");
 
         let bad_ctx = Context::create();
         let bad_mod = bad_ctx.create_module("empty");

@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 use clj_value::{
     BindCounts, ClassVal, FxBuildHasher, Keyword, Map, SymKey, Symbol, Unbound, Value, Var, new_map,
@@ -1637,21 +1637,86 @@ impl SharedRegistry {
 }
 
 /// Process-wide per-var active binding refcounts across all
-/// [`Bindings`] stacks: 0 on a var lets lock-free
-/// [`clj_value::FastVars`] caches skip TLS and locks completely.
-static BIND_COUNTS: LazyLock<Arc<BindCounts>> = LazyLock::new(|| Arc::new(BindCounts::new()));
+/// [`Bindings`] stacks: initialized lazily only when requested via
+/// [`bind_counts`], so interpreter runs avoid the 40 KB table unless
+/// lock-free [`clj_value::FastVars`] caches are active.
+static BIND_COUNTS: OnceLock<Arc<BindCounts>> = OnceLock::new();
+static PRE_BINDS: Mutex<Vec<(u64, usize)>> = Mutex::new(Vec::new());
 
-/// Shared atomic handle to [`BIND_COUNTS`].
+fn apply_bind_count(bc: &BindCounts, var_id: u64, n: usize, add: bool) {
+    if add {
+        bc.add(var_id, n);
+    } else {
+        bc.sub(var_id, n);
+    }
+}
+
+fn update_pending_bind(pending: &mut Vec<(u64, usize)>, var_id: u64, n: usize, add: bool) {
+    if add {
+        match pending.iter_mut().find(|(id, _)| *id == var_id) {
+            Some((_, count)) => *count += n,
+            None => pending.push((var_id, n)),
+        }
+        return;
+    }
+    let pos = pending
+        .iter()
+        .position(|&(id, _)| id == var_id)
+        .expect("live binding has pending refcount");
+    pending[pos].1 -= n;
+    if pending[pos].1 == 0 {
+        pending.swap_remove(pos);
+    }
+}
+
+fn track_bind_locked(
+    counts: &OnceLock<Arc<BindCounts>>,
+    pending: &mut Vec<(u64, usize)>,
+    var_id: u64,
+    n: usize,
+    add: bool,
+) {
+    if let Some(bc) = counts.get() {
+        apply_bind_count(bc, var_id, n, add);
+        return;
+    }
+    update_pending_bind(pending, var_id, n, add);
+}
+
+fn track_bind(var_id: u64, n: usize, add: bool) {
+    if let Some(bc) = BIND_COUNTS.get() {
+        apply_bind_count(bc, var_id, n, add);
+        return;
+    }
+    let mut pending = clj_value::unpoison(PRE_BINDS.lock());
+    track_bind_locked(&BIND_COUNTS, &mut pending, var_id, n, add);
+}
+
+/// Shared atomic handle to [`BIND_COUNTS`], allocating and seeding it
+/// from any active pre-init bindings on first use.
 #[must_use]
 pub fn bind_counts() -> Arc<BindCounts> {
-    Arc::clone(&BIND_COUNTS)
+    if let Some(bc) = BIND_COUNTS.get() {
+        return Arc::clone(bc);
+    }
+    let mut pending = clj_value::unpoison(PRE_BINDS.lock());
+    let bc = BIND_COUNTS.get_or_init(|| {
+        let bc = Arc::new(BindCounts::new());
+        for &(var_id, n) in pending.iter() {
+            bc.add(var_id, n);
+        }
+        pending.clear();
+        pending.shrink_to_fit();
+        bc
+    });
+    Arc::clone(bc)
 }
 
 /// The thread-binding stack: one frame per `binding` /
 /// `push-thread-bindings` / `with-bindings*` / `bound-fn`
 /// invocation. Entries shadow by recency across frames; `set!`
 /// writes the topmost entry for its var.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Bindings {
     frames: Vec<Vec<(Var, Value)>>,
     /// Bound-var refcounts: var id → live entry count (across all
@@ -1664,30 +1729,17 @@ pub struct Bindings {
     /// stacks — equal versions mean equal bindings, so the VM's
     /// per-site caches validate against it.
     version: u64,
-    bind_counts: Arc<BindCounts>,
-}
-
-impl Default for Bindings {
-    fn default() -> Self {
-        Self {
-            frames: Vec::new(),
-            counts: FxHashMap::default(),
-            version: 0,
-            bind_counts: bind_counts(),
-        }
-    }
 }
 
 impl Clone for Bindings {
     fn clone(&self) -> Self {
         for (&id, &n) in &self.counts {
-            self.bind_counts.add(id, n);
+            track_bind(id, n, true);
         }
         Self {
             frames: self.frames.clone(),
             counts: self.counts.clone(),
             version: self.version,
-            bind_counts: Arc::clone(&self.bind_counts),
         }
     }
 }
@@ -1695,7 +1747,7 @@ impl Clone for Bindings {
 impl Drop for Bindings {
     fn drop(&mut self) {
         for (&id, &n) in &self.counts {
-            self.bind_counts.sub(id, n);
+            track_bind(id, n, false);
         }
     }
 }
@@ -1744,7 +1796,7 @@ impl Bindings {
     /// Push one frame (possibly empty, like the JVM).
     pub fn push_frame(&mut self, entries: Vec<(Var, Value)>) {
         for (var, _) in &entries {
-            self.bind_counts.add(var.id, 1);
+            track_bind(var.id, 1, true);
             *self.counts.entry(var.id).or_default() += 1;
         }
         self.frames.push(entries);
@@ -1757,7 +1809,7 @@ impl Bindings {
         let frame = self.frames.pop()?;
         unbind_counts(&mut self.counts, &frame);
         for (var, _) in &frame {
-            self.bind_counts.sub(var.id, 1);
+            track_bind(var.id, 1, false);
         }
         self.bump();
         Some(frame)
@@ -1770,16 +1822,11 @@ impl Bindings {
             return;
         }
         self.bump();
-        let Self {
-            frames,
-            counts,
-            bind_counts,
-            ..
-        } = self;
+        let Self { frames, counts, .. } = self;
         for frame in frames.drain(depth..) {
             unbind_counts(counts, &frame);
             for (var, _) in &frame {
-                bind_counts.sub(var.id, 1);
+                track_bind(var.id, 1, false);
             }
         }
     }
@@ -2396,20 +2443,36 @@ mod tests {
         b.pop_frame();
         assert!(b.is_empty());
 
-        // Clone / truncate / drop tracks bind_counts cleanly (isolated
-        // table so parallel tests never interfere).
+        // Pending bindings accumulate before `bind_counts()` is first
+        // called, seed into the global table, and track atomically afterward.
         let empty_clone = b.clone();
         drop(empty_clone);
-        let isolated = Arc::new(BindCounts::new());
-        b.bind_counts = Arc::clone(&isolated);
         b.push_frame(vec![(var(2), Value::Int(2))]);
-        assert!(isolated.is_bound(2));
+        let pre_clone = b.clone();
+        b.pop_frame();
+        let bc = bind_counts();
+        assert!(bc.is_bound(2));
+        drop(pre_clone);
+        assert!(!bc.is_bound(2));
+
+        let same_bc = bind_counts();
+        assert!(Arc::ptr_eq(&bc, &same_bc));
+        b.push_frame(vec![(var(3), Value::Int(3))]);
+        assert!(bc.is_bound(3));
         let non_empty_clone = b.clone();
         b.truncate(0);
-        assert!(isolated.is_bound(2));
+        assert!(bc.is_bound(3));
         drop(non_empty_clone);
-        assert!(!isolated.is_bound(2));
-        let _keep_alive = bind_counts();
+        assert!(!bc.is_bound(3));
+
+        // Cover post-lock OnceLock initialization race fallback directly.
+        let seeded = OnceLock::new();
+        let _ = seeded.set(Arc::new(BindCounts::new()));
+        let mut dummy_pending = Vec::new();
+        super::track_bind_locked(&seeded, &mut dummy_pending, 4, 1, true);
+        assert!(seeded.get().unwrap().is_bound(4));
+        super::track_bind_locked(&seeded, &mut dummy_pending, 4, 1, false);
+        assert!(!seeded.get().unwrap().is_bound(4));
     }
 
     #[test]

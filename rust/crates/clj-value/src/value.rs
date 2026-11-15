@@ -798,7 +798,6 @@ impl List {
     }
 
     /// Whether the list is empty.
-    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.inner.len() == 0
@@ -1183,7 +1182,6 @@ impl Vector {
     }
 
     /// Whether the vector is empty.
-    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -1325,7 +1323,6 @@ impl Map {
     /// of the pair for small maps, the NEW key otherwise). Literals
     /// take their class from `canBePAM` (`RT.map`/`mapUniqueKeys`).
     /// The hash trie (hash arm only — shaped maps hold `None`).
-    #[inline]
     fn trie(&self) -> &RpdsMap {
         self.0.inner.as_deref().expect("hash map holds a trie")
     }
@@ -1670,7 +1667,6 @@ impl Map {
     }
 
     /// Whether this is a sorted map (FT6 `sorted-map` family).
-    #[inline]
     #[must_use]
     pub fn is_sorted(&self) -> bool {
         self.0.sort.is_some()
@@ -1767,7 +1763,6 @@ impl Map {
     }
 
     /// Look up a key.
-    #[inline]
     #[must_use]
     pub fn get(&self, k: &Value) -> Option<&Value> {
         match &self.0.small {
@@ -1793,7 +1788,6 @@ impl Map {
     }
 
     /// Whether a key is present.
-    #[inline]
     #[must_use]
     pub fn contains_key(&self, k: &Value) -> bool {
         match &self.0.small {
@@ -1803,7 +1797,6 @@ impl Map {
     }
 
     /// The entry count.
-    #[inline]
     #[must_use]
     pub fn size(&self) -> usize {
         match &self.0.small {
@@ -1813,7 +1806,6 @@ impl Map {
     }
 
     /// Whether the map is empty.
-    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.size() == 0
@@ -1939,7 +1931,6 @@ impl Set {
     }
 
     /// Whether a value is present.
-    #[inline]
     #[must_use]
     pub fn contains(&self, v: &Value) -> bool {
         if self.0.members.len() <= 4 {
@@ -1950,7 +1941,6 @@ impl Set {
 
     /// The stored member equal to `v`, if present (`get` on a set
     /// returns the member, not the key).
-    #[inline]
     #[must_use]
     pub fn get(&self, v: &Value) -> Option<&Value> {
         if !self.0.inner.contains(v) {
@@ -1992,7 +1982,6 @@ impl Set {
     }
 
     /// Whether the set is empty.
-    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.inner.size() == 0
@@ -2005,7 +1994,6 @@ impl Set {
     }
 
     /// Whether this is a sorted set (FT6 `sorted-set` family).
-    #[inline]
     #[must_use]
     pub fn is_sorted(&self) -> bool {
         self.0.sort.is_some()

@@ -115,8 +115,8 @@ impl Reader {
             // (its only `Err` is the auto-keyword resolver
             // consult). The error maps on a live line, keeping
             // every line covered.
-            let opt = interpret_token(&token, &self.opts, hook)
-                .expect("arg token never triggers :: resolver");
+            let ok = interpret_token(&token, &self.opts, hook).ok();
+            let opt = ok.expect("arg token never triggers :: resolver");
             return match opt {
                 Some(v) => Ok(Some(v)),
                 None => Err(ReaderError::InvalidToken { span, token }),

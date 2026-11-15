@@ -166,7 +166,6 @@ impl<T: Clone> PVec<T> {
     }
 
     /// Whether the vector is empty.
-    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
