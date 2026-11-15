@@ -283,7 +283,8 @@ fn fun_children<'a>(fun: &'a FunExpr, f: &mut dyn FnMut(&'a Expr)) {
     }
 }
 
-fn pattern_children<'a>(pat: &'a Pattern, f: &mut dyn FnMut(&'a Expr)) {
+/// Visit every `:or` default expression nested anywhere in `pat`.
+pub fn pattern_children<'a>(pat: &'a Pattern, f: &mut dyn FnMut(&'a Expr)) {
     match pat {
         Pattern::Symbol(_) => {}
         Pattern::Vec(v) => {

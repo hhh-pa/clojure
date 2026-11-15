@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use clj_eval::aot_front::{FrontEnd, for_each_child};
+use clj_eval::aot_front::{FrontEnd, for_each_child, pattern_children};
 use clj_eval::expr::{Arity, CaseTest, Expr, FunExpr, NsClause, Pattern};
 use clj_eval::native_abi;
 use clj_value::{Map, Symbol, Value, Vector};
@@ -1906,7 +1906,7 @@ impl<'ctx> Lowerer<'ctx> {
     ) {
         self.builder.position_at_end(slow);
         let op = core_name
-            .and_then(|name| native_abi::own_op(name, n).or_else(|| native_abi::inline_op(name, n)))
+            .and_then(|name| native_abi::inline_op(name, n))
             .unwrap_or(u32::MAX);
         let mut call_args: Vec<BasicMetadataValueEnum> = vec![
             dest.into(),
@@ -3568,11 +3568,9 @@ fn walk_bindings_rev(
     out: &mut Vec<(usize, usize)>,
 ) {
     for (pat, init) in bindings.iter().rev() {
-        if let Pattern::Map(m) = pat {
-            for (_, def_e) in m.or.iter().rev() {
-                walk_moves(def_e, slots, min_slot, later, out);
-            }
-        }
+        pattern_children(pat, &mut |def_e| {
+            reads(def_e, later);
+        });
         let n = native_abi::pattern_local_count(pat);
         let new_len = slots.len() - n;
         slots.truncate(new_len);

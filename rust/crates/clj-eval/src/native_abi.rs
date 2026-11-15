@@ -706,6 +706,10 @@ pub fn inline_op(name: &str, arity: usize) -> Option<u32> {
 /// [`inline_op`]'s mark for a 3+-argument fold or comparison chain.
 const NARY_OP: u32 = 1 << 30;
 
+/// Bit mask covering disjoint op-namespace tag bits so [`NARY_OP`] and
+/// [`OWN_BIT`] can never alias inside shared `u32` dispatch helpers.
+const TAG_MASK: u32 = NARY_OP | OWN_BIT;
+
 /// Apply inline op `id` ([`inline_op`] at `args.len()`) to borrowed
 /// args — the same inline answers the VM gives. `None`: the case is not
 /// covered (or `id` names no op), so the caller runs the native.
@@ -716,7 +720,7 @@ pub fn apply_inline(id: u32, args: &[&Value]) -> Option<Value> {
         [a] => apply1(id, a),
         [a, b] => apply2(id, a, b),
         [a, b, c] => apply3(id, a, b, c),
-        _ if id != u32::MAX && id & NARY_OP != 0 => {
+        _ if id != u32::MAX && (id & TAG_MASK) == NARY_OP => {
             let (_, op, chain) = APPLYN.get((id & !NARY_OP) as usize)?;
             nary(*op, *chain, args)
         }
@@ -747,7 +751,7 @@ pub fn str_is_ascii(s: &Arc<str>) -> bool {
 #[must_use]
 pub fn apply3(id: u32, a: &Value, b: &Value, c: &Value) -> Option<Value> {
     use crate::vm_ops::{APPLY3, APPLYN};
-    if id != u32::MAX && id & NARY_OP != 0 {
+    if id != u32::MAX && (id & TAG_MASK) == NARY_OP {
         let (_, op, chain) = APPLYN.get((id & !NARY_OP) as usize)?;
         return nary(*op, *chain, &[a, b, c]);
     }
@@ -902,7 +906,7 @@ pub fn conj_bang_fx(a: &Value, b: &Value) -> bool {
 
 type OwnFn = fn(&mut [Value]) -> Option<Value>;
 
-const OWN_BIT: u32 = 0x4000_0000;
+const OWN_BIT: u32 = 1 << 31;
 
 const OWN_OPS: &[(&str, usize, OwnFn)] = &[
     ("pop", 1, <crate::vm_ops::Pop as crate::vm_ops::Upd>::apply),
@@ -1003,5 +1007,23 @@ mod tests {
             apply_inline(add_id, &[&Value::Int(2), &Value::Int(3)]),
             Some(Value::Int(5))
         );
+        let assoc_id = own_op("assoc", 3).expect("assoc op");
+        assert_eq!(
+            apply_inline(assoc_id, &[&Value::Int(2), &Value::Int(3), &Value::Int(4)]),
+            None
+        );
+        assert_eq!(
+            apply3(assoc_id, &Value::Int(2), &Value::Int(3), &Value::Int(4)),
+            None
+        );
+        let mul3_id = inline_op("*", 3).expect("*/3");
+        let mut mul_args = [
+            Value::Vector(Vector::from_vec(vec![Value::Int(1)])),
+            Value::Int(0),
+            Value::Int(9),
+        ];
+        assert_eq!(apply_own(mul3_id, &mut mul_args), None);
+        let mut assoc_miss = [Value::Int(2), Value::Int(3), Value::Int(4)];
+        assert_eq!(apply_own(assoc_id, &mut assoc_miss), None);
     }
 }

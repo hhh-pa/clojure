@@ -394,3 +394,32 @@ fn native_binary_runs_nested_loop_move_and_string_preds() {
         ("[1 3] :npe true\n", "", 0)
     );
 }
+
+#[test]
+fn native_binary_preserves_nested_or_defaults_and_assoc_miss_parity() {
+    let source = "\
+(defn nested-vec-or []
+  (loop [n 1 acc nil]
+    (if (zero? n)
+      acc
+      (let [x [10 20]
+            [_ {:keys [b] :or {b x}}] [x {}]]
+        (recur 0 b)))))
+(defn nested-map-or []
+  (loop [n 1 acc nil]
+    (if (zero? n)
+      acc
+      (let [x [30 40]
+            {a :a {:keys [b] :or {b x}} :k} {:a x :k {}}]
+        (recur 0 [a b])))))
+(println (nested-vec-or)
+         (nested-map-or)
+         (try (assoc 2 3 4) (catch Exception _ :err))
+         (try (* {} :k (count [1 2])) (catch Exception _ :err)))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("nested-or-assoc-miss", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[10 20] [[30 40] [30 40]] :err :err\n", "", 0)
+    );
+}
