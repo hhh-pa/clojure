@@ -22,8 +22,8 @@ use std::sync::Arc;
 use clj_value::{
     CHAR_ESCAPES, CHAR_NAMES, ConsValue, CycleValue, ExtensionValue, HostKind, HostVal,
     IterateValue, KeySeqValue, Keyword, Map, MultiFn, PrintOpts, RangeValue, RealizedSeq,
-    RepeatValue, SplitVecValue, SubVectorValue, Symbol, ThrowClass, ValSeqValue, Value, Var,
-    lift_ns, new_map, pr_to_string,
+    RepeatValue, SplitVecValue, SubVectorValue, Symbol, ThrowClass, ValSeqValue, Value, lift_ns,
+    new_map, pr_to_string,
 };
 
 use crate::core::{Reduced, cce_err, is_lazy_seq_str, print_opts, str_of_one};
@@ -473,21 +473,10 @@ fn no_method_dup(dispatch_val: &Value) -> NativeError {
     )
 }
 
-/// Bind a `clojure.core` var to `value` (one frame; silently skips
-/// missing vars — bare evaluators).
-pub(crate) fn bind_core_var(eval: &mut Evaluator, name: &str, value: Value) {
-    let sym = Symbol::new(Some("clojure.core"), name);
-    if let Some(id) = eval.registry.lookup_in("clojure.core", &sym) {
-        eval.push_binding(Var { id, sym }, value);
-    }
-}
-
-/// Bind the `readably` override (`print` binds false, `pr` honors
-/// the ambient binding). Answers the depth to pop to.
 pub(crate) fn maybe_bind_print_readably(eval: &mut Evaluator, readably: Option<bool>) -> usize {
     let depth = eval.bindings_depth();
     if let Some(r) = readably {
-        bind_core_var(eval, "*print-readably*", Value::Bool(r));
+        crate::ns::push_core_binding(eval, "*print-readably*", Value::Bool(r));
     }
     depth
 }
@@ -547,7 +536,7 @@ fn level_child(
     }
     let depth = eval.bindings_depth();
     let next = i64::try_from(limit - 1).unwrap_or(i64::MAX);
-    bind_core_var(eval, "*print-level*", Value::Int(next));
+    crate::ns::push_core_binding(eval, "*print-level*", Value::Int(next));
     Ok(Some(depth))
 }
 
@@ -1706,7 +1695,7 @@ mod tests {
         // error.
         let mut eval = crate::boot();
         eval.print_defaults_only = true;
-        bind_core_var(&mut eval, "*print-dup*", Value::Bool(true));
+        crate::ns::push_core_binding(&mut eval, "*print-dup*", Value::Bool(true));
         let w = booted_writer(&mut eval);
         pr_on(&mut eval, &Value::Int(5), &w).unwrap();
         assert_eq!(writer_contents(&w).as_deref(), Some("5"));

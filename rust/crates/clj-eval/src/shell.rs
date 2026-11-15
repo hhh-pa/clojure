@@ -52,6 +52,14 @@ fn cannot_run(prog: &str, e: std::io::Error) -> NativeError {
     )
 }
 
+/// Map an `io::Result` for command launch/completion into [`cannot_run`].
+fn step_cmd<T>(prog: &str, res: std::io::Result<T>) -> Result<T, NativeError> {
+    match res {
+        Ok(val) => Ok(val),
+        Err(e) => Err(cannot_run(prog, e)),
+    }
+}
+
 /// The command vector as owned strings (non-empty — upstream
 /// throws on an empty command as well).
 fn cmd_parts(cmd: &Value) -> Result<Vec<String>, NativeError> {
@@ -182,19 +190,19 @@ fn run_command(
     if let Some(dir) = dir {
         child.current_dir(dir);
     }
-    let mut spawned = child.spawn().map_err(|e| cannot_run(prog, e))?;
+    let mut spawned = step_cmd(prog, child.spawn())?;
     match input {
         Some(input) => {
             let mut stdin = spawned.stdin.take().expect("piped stdin");
-            std::thread::scope(|scope| {
+            let out = std::thread::scope(|scope| {
                 scope.spawn(move || {
                     let _ = stdin.write_all(input);
                 });
                 spawned.wait_with_output()
-            })
-            .map_err(|e| cannot_run(prog, e))
+            });
+            step_cmd(prog, out)
         }
-        None => spawned.wait_with_output().map_err(|e| cannot_run(prog, e)),
+        None => step_cmd(prog, spawned.wait_with_output()),
     }
 }
 

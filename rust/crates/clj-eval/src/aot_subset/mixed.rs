@@ -554,4 +554,12 @@ mod tests {
         let plan = plan_mixed(src);
         assert_eq!(plan.fns.len(), 2, "{:?}", plan.source);
     }
+
+    #[test]
+    fn multiline_defn_preserves_line_breaks_when_extracted() {
+        let src = "(defn long-fn-name [x]\n  (+ x 1))\n(long-fn-name 2)\n";
+        let plan = plan_mixed(src);
+        assert_eq!(plan.fns.len(), 1);
+        assert!(plan.source.contains('\n'));
+    }
 }

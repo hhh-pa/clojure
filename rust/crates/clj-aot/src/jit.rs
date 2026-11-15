@@ -169,11 +169,14 @@ fn call_main(
 /// compiled natively (the caller reports it).
 pub fn run_native_str(source: &str, source_path: &str, args: &[String]) -> Result<i32, JitError> {
     let ctx = Context::create();
-    let (module, _) = crate::native_module(&ctx, source, source_path).map_err(|e| match e {
-        // The program's own compile error, exactly as `run` reports it.
-        crate::NativeFail::Program(diag) => JitError::Plan(diag),
-        other => JitError::Jit(other.to_string()),
-    })?;
+    // Skip bitcode helpers in MCJIT: RuntimeDyldMachO cannot relocate bitcode external symbols.
+    let (module, _) = crate::native_module_with_helpers(&ctx, source, source_path, None).map_err(
+        |e| match e {
+            // The program's own compile error, exactly as `run` reports it.
+            crate::NativeFail::Program(diag) => JitError::Plan(diag),
+            other => JitError::Jit(other.to_string()),
+        },
+    )?;
     let engine = module.create_jit_execution_engine(OptimizationLevel::None);
     let ee = jit_err(engine, "engine")?;
     for (name, addr) in cljrt::nabi::native_symbols() {
@@ -212,7 +215,7 @@ mod tests {
 
     #[test]
     fn s1_spike_creates_execution_engine_over_empty_module() {
-        // Gap-121 spike S1 (recon §2): MCJIT ships on the LLVM 22
+        // Gap-121 spike S1 (recon §2): MCJIT ships on the LLVM 23
         // pin, so EE creation is expected to pass — a failure
         // here (not a code bug) triggers fallback B.
         let ctx = Context::create();
@@ -303,5 +306,19 @@ mod tests {
             err.to_string(),
             "f.clj:1:1: unsupported form in AOT subset: def (only defn defines in the AOT subset)"
         );
+    }
+
+    #[test]
+    fn native_jit_runs_two_arg_moving_recur_259() {
+        let code = super::run_native_str(
+            "(defn f [a b] (loop [x a i b] (if (zero? i) x (recur (min x i) (dec i))))) \
+             (print (f 5 2)) \
+             (let [m (assoc nil :a 1)] (print (dissoc m :a)))",
+            "f.clj",
+            &[],
+        )
+        .expect("native jit runs");
+        assert_eq!(code, 0);
+        assert_eq!(cljrt::nabi::rt_n_fast_vars().get(usize::MAX), None);
     }
 }

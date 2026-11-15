@@ -340,9 +340,7 @@ impl Reader {
                     return Err(ReaderError::NsMapNs { span: self.span() });
                 }
             } else {
-                if let Some(c) = next {
-                    self.stream.unread(c);
-                }
+                self.stream.unread(next.expect("checked whitespace"));
                 return Err(ReaderError::NsMapNs { span: self.span() });
             }
         } else if next != Some('{') {
@@ -1188,5 +1186,11 @@ mod tests {
         let form = reader.read_form(false, &mut hooks).unwrap().unwrap();
         assert_tagged(form.clone(), "foo", &Value::Int(1));
         assert!(reader.take_fired().is_empty());
+    }
+
+    #[test]
+    fn ns_map_eof_after_namespace_returns_ns_map_ns_error() {
+        let err = read_str("#: ", &ReaderOpts::default(), &mut NoHooks).unwrap_err();
+        assert!(matches!(err, ReaderError::NsMapNs { .. }), "got {err:?}");
     }
 }

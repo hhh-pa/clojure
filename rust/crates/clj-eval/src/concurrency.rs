@@ -688,6 +688,22 @@ fn spawn_failed() -> NativeError {
     )
 }
 
+/// Map a thread/executor spawn outcome onto [`spawn_failed`].
+pub(crate) fn check_spawn<T>(res: std::io::Result<T>) -> Result<T, NativeError> {
+    match res {
+        Ok(val) => Ok(val),
+        Err(_) => Err(spawn_failed()),
+    }
+}
+
+/// Spawn a named worker thread or map OS refusal via [`check_spawn`].
+pub(crate) fn spawn_named<F>(name: String, f: F) -> Result<JoinHandle<()>, NativeError>
+where
+    F: FnOnce() + Send + 'static,
+{
+    check_spawn(thread::Builder::new().name(name).spawn(f))
+}
+
 /// `future-call`: convey the calling thread's bindings onto a forked
 /// evaluator and run the zero-arg fn — on the installed solo
 /// executor when set (read per call, like the JVM's `.submit`
@@ -720,10 +736,7 @@ fn future_on_thread(eval: &mut Evaluator, f: &Value) -> Result<Value, NativeErro
     let child = eval.fork_for_thread(eval.clone_bindings());
     let f = f.clone();
     let name = format!("clj-future-{}", future.id());
-    let handle = std::thread::Builder::new()
-        .name(name)
-        .spawn(move || run_future_body(child, f, cell))
-        .map_err(|_| spawn_failed())?;
+    let handle = spawn_named(name, move || run_future_body(child, f, cell))?;
     eval.push_future_thread(handle);
     Ok(Value::Future(future))
 }
@@ -928,37 +941,25 @@ impl AgentSystem {
     /// `set!` — a rejection installs nothing).
     pub fn set_send_executor(&self, executor: Value) -> Result<(), NativeError> {
         let field = Self::check_field(&executor)?;
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send_executor = field;
+        clj_value::unpoison(self.inner.lock()).send_executor = field;
         Ok(())
     }
 
     /// The installed `send` pool field.
     pub fn send_executor(&self) -> PoolField {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send_executor
-            .clone()
+        clj_value::unpoison(self.inner.lock()).send_executor.clone()
     }
 
     /// Install the `send-off` pool field (same contract).
     pub fn set_send_off_executor(&self, executor: Value) -> Result<(), NativeError> {
         let field = Self::check_field(&executor)?;
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send_off_executor = field;
+        clj_value::unpoison(self.inner.lock()).send_off_executor = field;
         Ok(())
     }
 
     /// The installed `send-off` pool field.
     pub fn send_off_executor(&self) -> PoolField {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        clj_value::unpoison(self.inner.lock())
             .send_off_executor
             .clone()
     }
@@ -982,10 +983,7 @@ impl AgentSystem {
     /// Whether `shutdown-agents` has latched (post-shutdown sends
     /// drop; post-shutdown futures reject).
     pub(crate) fn is_shutdown(&self) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .shutdown
+        clj_value::unpoison(self.inner.lock()).shutdown
     }
 
     /// The pools for a send, creating them on first use. `None`
@@ -1056,9 +1054,7 @@ impl AgentSystem {
         };
         if let Some(pools) = pools {
             let handles = pools.begin_shutdown();
-            self.inner
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+            clj_value::unpoison(self.inner.lock())
                 .parked
                 .extend(handles);
         }
@@ -1165,11 +1161,7 @@ impl AgentPools {
                 .spawn(move || send_worker(&worker_pools, &worker_rx));
             Self::install_worker(&pools, &mut handles, spawned)?;
         }
-        pools
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send_handles = handles;
+        clj_value::unpoison(pools.inner.lock()).send_handles = handles;
         Ok(pools)
     }
 
@@ -1189,11 +1181,7 @@ impl AgentPools {
                 Ok(())
             }
             Err(_) => {
-                pools
-                    .inner
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .send_tx = None;
+                clj_value::unpoison(pools.inner.lock()).send_tx = None;
                 for handle in handles.drain(..) {
                     let _ = handle.join();
                 }
@@ -1205,11 +1193,7 @@ impl AgentPools {
     /// Whether shutdown dropped the `send` queue (dispatches and
     /// completions run inline from here on).
     fn is_shutdown(&self) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send_tx
-            .is_none()
+        clj_value::unpoison(self.inner.lock()).send_tx.is_none()
     }
 
     /// Stop the pools and join every thread (the `send` workers drain
@@ -1341,12 +1325,7 @@ fn pools_dispatch(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) {
     if head.pool == AgentPool::Send {
         // One under-lock read: `None` means shut down (the old
         // pre-check raced the queue drop; both rejected alike).
-        let tx = pools
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send_tx
-            .clone();
+        let tx = clj_value::unpoison(pools.inner.lock()).send_tx.clone();
         match tx {
             // The receiver outlives every sender clone (workers exit
             // only once all senders drop), so this send cannot fail.
@@ -1407,9 +1386,10 @@ fn dispatch_sendoff(pools: &Arc<AgentPools>, agent: &Agent, head: QueuedAction) 
     let (head_tx, head_rx) = mpsc::channel::<QueuedAction>();
     let name = format!("clojure-agent-send-off-pool-{seq}");
     let spawned = thread::Builder::new().name(name).spawn(move || {
-        if let Ok(head) = head_rx.recv() {
-            pump_agent(&child_pools, &child_agent, head);
-        }
+        let head = head_rx
+            .recv()
+            .expect("complete_sendoff sends head to spawned worker");
+        pump_agent(&child_pools, &child_agent, head);
     });
     complete_sendoff(inner, head_tx, agent, head, spawned);
 }
@@ -1514,7 +1494,8 @@ struct EvalAction {
 
 impl AgentAction for EvalAction {
     fn run(&mut self, state: &Value) -> Result<Value, Throwable> {
-        let bound = bind_agent(&mut self.child, &Value::Agent(self.agent.clone()));
+        let depth = self.child.bindings_depth();
+        crate::ns::push_core_binding(&mut self.child, "*agent*", Value::Agent(self.agent.clone()));
         // Arm the nested-send outbox for the fn AND the watches (the
         // JVM's `nested` buffer spans both): failures below discard
         // it, success leaves it for release after the watches.
@@ -1523,9 +1504,7 @@ impl AgentAction for EvalAction {
         f_args.push(state.clone());
         f_args.extend(self.args.iter().cloned());
         let out = child_call(&mut self.child, &self.f, &f_args);
-        if bound {
-            self.child.pop_frame();
-        }
+        self.child.pop_bindings(depth);
         let candidate = match out {
             Ok(v) => v,
             Err(e) => {
@@ -1558,7 +1537,8 @@ impl AgentAction for EvalAction {
     ) -> Result<(), Throwable> {
         // `*agent*` stays bound over the watches (like the fn call —
         // the JVM's conveyor is still installed there).
-        let bound = bind_agent(&mut self.child, agent);
+        let depth = self.child.bindings_depth();
+        crate::ns::push_core_binding(&mut self.child, "*agent*", agent.clone());
         let mut out = Ok(());
         for (k, f) in watches.iter() {
             if matches!(f, Value::Nil) {
@@ -1570,16 +1550,15 @@ impl AgentAction for EvalAction {
                 break;
             }
         }
-        if bound {
-            self.child.pop_frame();
-        }
+        self.child.pop_bindings(depth);
         out
     }
 
     fn handle_error(&mut self, handler: &Value, agent: &Value, error: &Throwable) {
         // `*agent*` stays bound over the handler too (only the
         // validator runs bare).
-        let bound = bind_agent(&mut self.child, agent);
+        let depth = self.child.bindings_depth();
+        crate::ns::push_core_binding(&mut self.child, "*agent*", agent.clone());
         let args = [
             agent.clone(),
             Value::Throwable(std::sync::Arc::new(error.clone())),
@@ -1587,9 +1566,7 @@ impl AgentAction for EvalAction {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.child.call(handler, &args)
         }));
-        if bound {
-            self.child.pop_frame();
-        }
+        self.child.pop_bindings(depth);
     }
 }
 
@@ -1668,18 +1645,6 @@ fn agent_var(eval: &Evaluator) -> Option<Var> {
 /// Whether `*agent*` is bound (await refuses inside actions).
 fn agent_is_bound(eval: &Evaluator) -> bool {
     agent_var(eval).is_some_and(|v| eval.deref_var_unforced(v.id, &v.sym).is_truthy())
-}
-
-/// Bind `*agent*` around an action fn (skipped when the lineage has
-/// no such var); returns whether a frame was pushed.
-fn bind_agent(child: &mut Evaluator, agent: &Value) -> bool {
-    match agent_var(child) {
-        Some(v) => {
-            child.push_frame(vec![(v, agent.clone())]);
-            true
-        }
-        None => false,
-    }
 }
 
 /// The `send` family's nil-agent NPE (`send-via`'s `dispatch` call).
@@ -1938,9 +1903,7 @@ fn native_send_via(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
 fn native_executor(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let _ = eval;
     check_arity("clojure.core/executor", args, &[0])?;
-    Executor::new()
-        .map(Value::Executor)
-        .map_err(|_| spawn_failed())
+    check_spawn(Executor::new()).map(Value::Executor)
 }
 
 /// Refuse `await`/`await-for` inside an agent action (the JVM's
@@ -2471,10 +2434,7 @@ impl StripedMonitors {
     fn try_once(&self, key: u64) -> Option<LockingGuard<'_>> {
         let me = thread::current().id();
         let idx = key as usize % MONITOR_STRIPES;
-        let mut state = self.shards[idx]
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut state = clj_value::unpoison(self.shards[idx].state.lock());
         if state.owner.is_none_or(|owner| owner == me) {
             state.owner = Some(me);
             state.count += 1;
@@ -2499,10 +2459,7 @@ impl StripedMonitors {
     }
 
     fn release(&self, shard: usize) {
-        let mut state = self.shards[shard]
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut state = clj_value::unpoison(self.shards[shard].state.lock());
         state.count -= 1;
         if state.count == 0 {
             state.owner = None;
@@ -2701,10 +2658,7 @@ impl TapSystem {
         let spawned = thread::Builder::new()
             .name(TAP_LOOP_NAME.to_owned())
             .spawn(move || {
-                let rx = sys
-                    .inner
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                let rx = clj_value::unpoison(sys.inner.lock())
                     .rx
                     .take()
                     .expect("the single dispatcher takes the receiver");
@@ -2718,17 +2672,14 @@ impl TapSystem {
         // in tests, and this keeps every line on the executed path
         // with behavior identical to the match in all cases (the
         // handle still drops, detaching the daemon dispatcher).
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).started = spawned.is_ok();
-        spawned.map(|_| ()).map_err(|_| spawn_failed())
+        clj_value::unpoison(self.inner.lock()).started = spawned.is_ok();
+        let _ = check_spawn(spawned)?;
+        Ok(())
     }
 
     /// Snapshot the registry (the loop's per-item `@tapset`).
     fn snapshot(&self) -> Vec<Value> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .taps
-            .clone()
+        clj_value::unpoison(self.inner.lock()).taps.clone()
     }
 
     /// Conj a tap (starting the loop first, like the JVM's
@@ -2739,7 +2690,7 @@ impl TapSystem {
         f: Value,
     ) -> Result<Value, NativeError> {
         self.ensure_started(eval)?;
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = clj_value::unpoison(self.inner.lock());
         if !inner.taps.contains(&f) {
             inner.taps.push(f);
         }
@@ -2749,9 +2700,7 @@ impl TapSystem {
     /// Disj a tap (no loop start, like the JVM's `remove-tap`).
     /// Returns nil.
     pub(crate) fn remove_tap(&self, f: &Value) -> Value {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        clj_value::unpoison(self.inner.lock())
             .taps
             .retain(|t| t != f);
         Value::Nil
@@ -3161,12 +3110,6 @@ mod tests {
     }
 
     #[test]
-    fn bind_agent_without_var_is_idle() {
-        let mut eval = Evaluator::new_bare("user");
-        assert!(!bind_agent(&mut eval, &Value::Nil));
-    }
-
-    #[test]
     #[should_panic(expected = "deref of an unsettled future")]
     fn future_outcome_pending_panics() {
         let _ = future_outcome(&FutureState::Pending);
@@ -3283,7 +3226,8 @@ mod tests {
 
     #[test]
     fn spawn_failed_reports_native_thread_error() {
-        let err = spawn_failed();
+        assert_eq!(check_spawn(Ok(7)).expect("ok"), 7);
+        let err = check_spawn::<()>(Err(std::io::Error::other("boom"))).expect_err("err");
         assert_eq!(err.class, ThrowClass::RuntimeException);
         assert_eq!(err.message, "unable to create native thread");
     }
@@ -3311,14 +3255,7 @@ mod tests {
         assert_eq!(err.class, ThrowClass::RuntimeException);
         assert_eq!(err.message, "unable to create native thread");
         assert!(handles.is_empty());
-        assert!(
-            pools
-                .inner
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .send_tx
-                .is_none()
-        );
+        assert!(clj_value::unpoison(pools.inner.lock()).send_tx.is_none());
     }
 
     /// A rejection probe: records the handler invocation.

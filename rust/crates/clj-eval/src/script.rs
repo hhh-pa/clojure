@@ -212,4 +212,49 @@ mod tests {
         );
         assert!(run_script(&[], "x").contains("*command-line-args* nil"));
     }
+
+    #[test]
+    fn run_diagnostic_unwraps_compiler_cause_chain() {
+        let inner = clj_value::Throwable {
+            id: 1,
+            class: clj_value::ThrowClass::IllegalArgumentException,
+            message: Some(std::sync::Arc::from("bad arg")),
+            data: None,
+            cause: None,
+        };
+        let middle = clj_value::Throwable {
+            id: 2,
+            class: clj_value::ThrowClass::RuntimeException,
+            message: None,
+            data: None,
+            cause: Some(Box::new(inner)),
+        };
+        let outer = clj_value::Throwable {
+            id: 3,
+            class: clj_value::ThrowClass::CompilerException,
+            message: Some(std::sync::Arc::from(
+                "Syntax error macroexpanding at (script.clj:2:3).",
+            )),
+            data: None,
+            cause: Some(Box::new(middle)),
+        };
+        let err = SourceError::Uncaught(outer);
+        let msg = run_diagnostic("script.clj", &err);
+        assert_eq!(msg, "script.clj:2:3: Syntax error macroexpanding: bad arg");
+    }
+
+    #[test]
+    fn run_diagnostic_uncaught_runtime_blames_script_start() {
+        let t = clj_value::Throwable {
+            id: 1,
+            class: clj_value::ThrowClass::ArithmeticException,
+            message: Some(std::sync::Arc::from("Divide by zero")),
+            data: None,
+            cause: None,
+        };
+        assert_eq!(
+            run_diagnostic("script.clj", &SourceError::Uncaught(t)),
+            "script.clj:1:1: java.lang.ArithmeticException: Divide by zero"
+        );
+    }
 }

@@ -29,7 +29,8 @@ extern "C" fn inc_entry(args: *mut *mut Value, argc: usize) -> *mut Value {
 #[test]
 fn registered_native_runs_inside_the_run_frame() {
     let name = "inc1";
-    // SAFETY: valid slice and a contract-abiding entry.
+    // SAFETY: valid slice and a contract-abiding entry; registering twice covers table reuse.
+    unsafe { rt_register_native(0, name.as_ptr(), name.len(), 1, inc_entry) };
     unsafe { rt_register_native(0, name.as_ptr(), name.len(), 1, inc_entry) };
     let source = "(clj.aot/n 0)\n\
                   (assert (= 3 (inc1 2)))\n\

@@ -23,20 +23,36 @@ use inkwell::targets::{
 /// broken — the host triple always resolves after x86/aarch64
 /// init on every supported runner).
 pub fn host_machine() -> Result<TargetMachine, String> {
+    machine_for(&TargetMachine::get_default_triple())
+}
+
+fn machine_for(triple: &inkwell::targets::TargetTriple) -> Result<TargetMachine, String> {
     Target::initialize_x86(&InitializationConfig::default());
     Target::initialize_aarch64(&InitializationConfig::default());
-    let triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
-    target
+    let target = Target::from_triple(triple).map_err(|e| e.to_string())?;
+    Ok(target
         .create_target_machine(
-            &triple,
+            triple,
             "generic",
             "",
             OptimizationLevel::Default,
             RelocMode::PIC,
             CodeModel::Default,
         )
-        .ok_or_else(|| format!("no machine for {}", triple.as_str().to_string_lossy()))
+        .expect("initialized target creates host machine"))
+}
+
+/// Emit `module` into an object buffer (stamps default triple & layout).
+pub fn emit_object_buffer<'ctx>(
+    machine: &TargetMachine,
+    module: &Module<'ctx>,
+) -> inkwell::memory_buffer::MemoryBuffer<'ctx> {
+    module.set_triple(&TargetMachine::get_default_triple());
+    let layout = machine.get_target_data().get_data_layout();
+    module.set_data_layout(&layout);
+    machine
+        .write_to_memory_buffer(module, FileType::Object)
+        .expect("host machine emits object for verified module")
 }
 
 /// Emit `module` as a native object file (stamps the module triple
@@ -46,12 +62,7 @@ pub fn emit_object(
     module: &Module,
     obj_path: &Path,
 ) -> Result<(), String> {
-    module.set_triple(&TargetMachine::get_default_triple());
-    let layout = machine.get_target_data().get_data_layout();
-    module.set_data_layout(&layout);
-    let buffer = machine
-        .write_to_memory_buffer(module, FileType::Object)
-        .map_err(|e| e.to_string())?;
+    let buffer = emit_object_buffer(machine, module);
     std::fs::write(obj_path, buffer.as_slice()).map_err(|e| e.to_string())
 }
 
@@ -83,5 +94,11 @@ mod tests {
         let module = ctx.create_module("empty");
         let obj = tmp("no-such-dir").join("x.o");
         assert!(emit_object(&machine, &module, &obj).is_err());
+    }
+
+    #[test]
+    fn machine_for_reports_uninitialized_triple() {
+        let bad_triple = inkwell::targets::TargetTriple::create("riscv64-unknown-none");
+        assert!(super::machine_for(&bad_triple).is_err());
     }
 }

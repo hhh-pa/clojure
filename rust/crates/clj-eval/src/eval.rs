@@ -405,10 +405,7 @@ impl Evaluator {
     /// Record a spawned future thread (S6C's `shutdown-agents`
     /// drains and joins these).
     pub(crate) fn push_future_thread(&self, handle: std::thread::JoinHandle<()>) {
-        self.future_threads
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(handle);
+        clj_value::unpoison(self.future_threads.lock()).push(handle);
     }
 
     /// Whether `shutdown-agents` has latched (post-shutdown
@@ -478,12 +475,7 @@ impl Evaluator {
     pub fn join_drainers(&self) {
         self.agent_system.shutdown_for_exit();
         self.agent_system.join_parked();
-        let handles = std::mem::take(
-            &mut *self
-                .future_threads
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        );
+        let handles = std::mem::take(&mut *clj_value::unpoison(self.future_threads.lock()));
         crate::concurrency::join_all(handles);
     }
 
@@ -773,6 +765,13 @@ impl Evaluator {
                     return Err(SourceError::Reader(e));
                 }
             }
+        }
+    }
+
+    /// Return a drained `recur` argument buffer to `recur_pool` up to [`RECUR_POOL_MAX`].
+    fn recycle_recur_buf(&mut self, values: Vec<Value>) {
+        if self.recur_pool.len() < RECUR_POOL_MAX {
+            self.recur_pool.push(values);
         }
     }
 
@@ -2280,10 +2279,7 @@ impl Evaluator {
                     // falls back to the fresh-frame copy-on-`recur`.
                     let mut values = values;
                     if env.try_rebind(&outer, &mut values) {
-                        // Recycle the drained buffer (see `recur_pool`).
-                        if self.recur_pool.len() < RECUR_POOL_MAX {
-                            self.recur_pool.push(values);
-                        }
+                        self.recycle_recur_buf(values);
                     } else {
                         env = self.bind_values(&pats, values, &outer)?;
                     }
@@ -3105,10 +3101,7 @@ impl Evaluator {
                     // captured frames keep the fresh-frame promise.
                     let mut values = values;
                     if frame.try_rebind(&outer, &mut values) {
-                        // Recycle the drained buffer (see `recur_pool`).
-                        if self.recur_pool.len() < RECUR_POOL_MAX {
-                            self.recur_pool.push(values);
-                        }
+                        self.recycle_recur_buf(values);
                     } else {
                         frame = self.bind_values(&pats, values, &outer)?;
                     }
@@ -4274,5 +4267,195 @@ mod tests {
         assert_eq!(Evaluator::fast_int2(FastArith::None, 1, 2), None);
         assert_eq!(Evaluator::fast_int2(Inc, 1, 2), None);
         assert_eq!(Evaluator::fast_int2(Dec, 1, 2), None);
+    }
+
+    #[test]
+    fn recycle_recur_buf_drops_past_pool_cap() {
+        let mut eval = Evaluator::new_bare("user");
+        for _ in 0..=RECUR_POOL_MAX {
+            eval.recycle_recur_buf(Vec::new());
+        }
+        assert_eq!(eval.recur_pool.len(), RECUR_POOL_MAX);
+    }
+
+    #[test]
+    fn cov_edge_cases_across_eval_and_builtins() {
+        let mut eval = crate::ns::boot();
+        // async duplicate binding shadow
+        assert!(
+            eval.eval_source(
+                "(require 'clojure.core.async) (clojure.core.async/go (let [x 1 x 2] x))"
+            )
+            .is_ok()
+        );
+        // classemu: Character/MIN_VALUE, Double/parseDouble bad, Named/.getNamespace, BigDecimal setScale/subtract
+        assert!(eval.eval_source("Character/MIN_VALUE").is_ok());
+        assert!(eval.eval_source("(Double/parseDouble \"bad\")").is_err());
+        assert!(
+            eval.eval_source(
+                "[(let [f (fn [^clojure.lang.Named n] (.getNamespace n))] [(f :k) (f :a/k) (f 's) (f 'a/s)])
+                  (bean :k) (bean :a/k) (bean 's) (bean 'a/s)]"
+            )
+            .is_ok()
+        );
+        assert!(
+            eval.eval_source("(.setScale (bigdec 1.5) 0 (Object.))")
+                .is_err()
+        );
+        assert!(
+            eval.eval_source(
+                "(let [mc (java.math.MathContext. 2)]
+                   [(.subtract (bigdec \"2.5\") (bigdec \"1.2\") mc)
+                    (.add (bigdec \"2.5\") (bigdec \"1.2\") mc)
+                    (.multiply (bigdec \"2.5\") (bigdec \"1.2\") mc)])"
+            )
+            .is_ok()
+        );
+        // collmisc: pr-str on matched re-matcher
+        assert!(
+            eval.eval_source("(let [m (re-matcher #\"(\\d+)\" \"a42b\")] (re-find m) (pr-str m))")
+                .is_ok()
+        );
+        // ctor: MathContext bad string
+        assert!(
+            eval.eval_source("(java.math.MathContext. \"bad\")")
+                .is_err()
+        );
+        // emurand: SecureRandom.nextBytes & BigInteger(int, SecureRandom)
+        assert!(eval.eval_source("(let [sr (java.security.SecureRandom.) b (byte-array 4)] (.nextBytes sr b) [(java.math.BigInteger. 16 sr) b])").is_ok());
+        // fmt: half-way rounding tie & longer tail
+        assert!(
+            eval.eval_source(
+                "[(format \"%.1f\" 1.25) (format \"%.1f\" 1.251) (format \"%.1f\" 1.2501)]"
+            )
+            .is_ok()
+        );
+        // eval: seq_to_map on empty list + duplicate selection keys across entries/keys/extra_keys
+        assert_eq!(
+            eval.seq_to_map(&Value::List(List::new_sync())).unwrap(),
+            Value::Map(new_map())
+        );
+        assert!(
+            eval.eval_source(
+                "[(let [{a :x b :x} {:x 1}] [a b])
+                  (let [{:keys [x x]} {:x 1}] x)
+                  (let [{x :x :keys [& :x]} {:x 1}] x)]"
+            )
+            .is_ok()
+        );
+        let kx = Value::Keyword(Keyword::new(None, "x"));
+        let sel = super::selection(&MapPattern {
+            entries: vec![
+                (
+                    Pattern::Symbol("a".to_owned()),
+                    kx.clone(),
+                    kx.clone(),
+                    false,
+                ),
+                (
+                    Pattern::Symbol("b".to_owned()),
+                    kx.clone(),
+                    kx.clone(),
+                    false,
+                ),
+            ],
+            keys: vec![
+                crate::expr::KeyBinding {
+                    local: "x1".to_owned(),
+                    key: kx.clone(),
+                    required: false,
+                },
+                crate::expr::KeyBinding {
+                    local: "x2".to_owned(),
+                    key: Value::Keyword(Keyword::new(None, "y")),
+                    required: false,
+                },
+            ],
+            extra_keys: vec![kx.clone()],
+            as_sym: None,
+            or: Vec::new(),
+            select: None,
+            all: None,
+            excess: None,
+            missing: None,
+        });
+        assert_eq!(sel.len(), 2);
+        // eval: drain_data_readers error via firing discard reader
+        eval.eval_source(
+            "(alter-var-root #'*data-readers* (constantly {'t/boom (fn [_] (throw (ex-info \"dr\" {})))}))",
+        )
+        .unwrap();
+        assert!(matches!(
+            eval.eval_source("#_#t/boom 1").unwrap_err(),
+            SourceError::Uncaught(_)
+        ));
+        eval.eval_source("(alter-var-root #'*data-readers* (constantly {}))")
+            .unwrap();
+        // eval: snap_data_readers autoload failure with broken temp data_readers.clj
+        let tmp = std::env::temp_dir().join(format!("clj_bad_dr_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("data_readers.clj"), "{").unwrap();
+        let prev_lp = eval
+            .eval_source("*load-path*")
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap_or(Value::Nil);
+        eval.data_reader_scan_path = None;
+        let set_lp = format!(
+            "(alter-var-root #'*load-path* (constantly [{:?}]))",
+            tmp.to_string_lossy()
+        );
+        let _ = eval.eval_source(&set_lp);
+        assert!(eval.eval_source("1").is_err());
+        let restore_id = eval
+            .registry
+            .lookup(&Symbol::new(Some("clojure.core"), "*load-path*"))
+            .unwrap();
+        eval.registry
+            .with_state_mut(restore_id, |st| st.root = Some(prev_lp));
+        eval.data_reader_scan_path = None;
+        let _ = std::fs::remove_dir_all(&tmp);
+        // lazy: take_count errors on drop(lazy + IDrop)/partition/partition-all, sequence non-vec/reduced-non-vec, eduction throwing xf
+        assert!(eval.eval_source("(doall (drop :bad '(1 2 3)))").is_err());
+        assert!(eval.eval_source("(doall (drop :bad [1 2 3]))").is_err());
+        assert!(
+            eval.eval_source("(doall (partition :bad [1 2 3]))")
+                .is_err()
+        );
+        assert!(
+            eval.eval_source("(doall (partition-all :bad [1 2 3]))")
+                .is_err()
+        );
+        assert!(
+            eval.eval_source(
+                "[(doall (sequence (fn [rf] (fn ([] (rf)) ([acc] (rf acc)) ([_ _] 42))) [1]))
+                  (doall (sequence (fn [rf] (fn ([] (rf)) ([acc] (rf acc)) ([_ _] (reduced 42)))) [1]))]"
+            )
+            .is_ok()
+        );
+        assert!(
+            eval.eval_source("(doall (eduction (fn [_] (throw (ex-info \"xf\" {}))) [1]))")
+                .is_err()
+        );
+        // types: Object & interface symbols in gen-class :implements and proxy bases
+        eval.eval_source(
+            "(gen-class :name cov.ObjImpl :implements [Object])
+             (assert (= :closed (.close (proxy [Object java.io.Closeable Object] [] (close [] :closed)))))"
+        )
+        .unwrap();
+        // vm_scalar: miss bailout restoring scalar loop reg while skipping boxed reg
+        eval.set_eager_tier(true);
+        let scalar_res = eval
+            .eval_source(
+                "(loop [i 0 v [1 2]]
+                   (if (< i 2)
+                     (if (= i 1)
+                       (do (list i) (+ i (count v)))
+                       (recur (+ i 1) v))
+                     (count v)))",
+            )
+            .unwrap();
+        assert_eq!(scalar_res.last().unwrap(), &Value::Int(3));
     }
 }

@@ -2913,4 +2913,10 @@ mod tests {
         assert!(shown.contains("named-for-debug"), "{shown}");
         assert!(shown.contains("rec: Some(1)"), "{shown}");
     }
+
+    #[test]
+    fn patch_jump_ignores_non_jump_step() {
+        let mut steps = [super::Step::Recur(Box::default())];
+        super::patch_jump(&mut steps, 0);
+    }
 }

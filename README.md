@@ -17,7 +17,7 @@ workspace below is the sole implementation.
 - Binary: `clojure-rs` (`eval`, `run`, `repl`, `build`, `jit`).
 - Language: a documented Clojure subset, differentially verified
   against JVM Clojure (same input, same printed output).
-- Codegen: LLVM only, via inkwell 0.10.0 (`llvm22-1`, LLVM 22.1.8).
+- Codegen: LLVM only, via inkwell 0.11.0 (`llvm23-1`, LLVM 23.1.5).
 - License: EPL-1.0 (`epl-v10.html`).
 - Attribution: the Clojure language is designed by Rich Hickey;
   vendored upstream sources keep their `Copyright (c) Rich Hickey`
@@ -33,7 +33,7 @@ README](rust/README.md) (LLVM setup, build commands).
 ## Quick start
 
 Prerequisites: stable Rust ≥ 1.85 (MSRV). The default `aot` feature
-needs LLVM 22 — see [LLVM setup](rust/README.md#llvm-setup-the-aot-feature);
+needs LLVM 23 — see [LLVM setup](rust/README.md#llvm-setup-the-aot-feature);
 without LLVM, build the interpreter with `--no-default-features`.
 
 ```sh

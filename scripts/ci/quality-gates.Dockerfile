@@ -1,6 +1,6 @@
 # Quality-gates image for the `quality gates` job (.github/workflows/rust.yml).
 #
-# Vendored from the arcanist repo and adapted: LLVM 22.1.8 layer for the
+# Vendored from the arcanist repo and adapted: LLVM 23.1.5 layer for the
 # clj-aot (inkwell) build, and a workspace-aware warm layer (this repo's
 # rust/ is a Cargo workspace, not a single package).
 #
@@ -47,18 +47,18 @@ RUN git config --system --add safe.directory /work
 
 # Pinned LLVM for clj-aot (inkwell needs the exact major) via
 # apt.llvm.org, same major the setup-llvm action installs in the
-# other jobs. llvm.sh runs as root here (no sudo in the image) and
-# knows trixie explicitly.
-ARG LLVM_VERSION=22
-ENV LLVM_SYS_221_PREFIX=/usr/lib/llvm-22
-RUN wget -q https://apt.llvm.org/llvm.sh \
-    && chmod +x llvm.sh \
-    && ./llvm.sh "${LLVM_VERSION}" \
-    && apt-get install -y llvm-22-dev libpolly-22-dev libffi-dev libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev \
-    && rm llvm.sh \
+# other jobs. Configure the apt source directly rather than running
+# llvm.sh, whose wget HEAD check on https://apt.llvm.org/trixie/ fails.
+ARG LLVM_VERSION=23
+ENV LLVM_SYS_231_PREFIX=/usr/lib/llvm-23
+RUN mkdir -p /etc/apt/trusted.gpg.d /etc/apt/sources.list.d \
+    && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc \
+    && printf 'Types: deb\nArchitectures: amd64 arm64\nSigned-By: /etc/apt/trusted.gpg.d/apt.llvm.org.asc\nURIs: https://apt.llvm.org/trixie/\nSuites: llvm-toolchain-trixie-%s\nComponents: main\n' "${LLVM_VERSION}" > /etc/apt/sources.list.d/apt-llvm.sources \
+    && apt-get update \
+    && apt-get install -y "llvm-${LLVM_VERSION}-dev" "libpolly-${LLVM_VERSION}-dev" libffi-dev libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev \
     && rm -rf /var/lib/apt/lists/* \
-    && /usr/lib/llvm-22/bin/llvm-config --version | grep -q '^22\.1\.'
-ENV PATH=/usr/lib/llvm-22/bin:$PATH
+    && /usr/lib/llvm-23/bin/llvm-config --version | grep -q '^23\.1\.'
+ENV PATH=/usr/lib/llvm-23/bin:$PATH
 
 # Provision every pinned gate tool. Prebuilt downloads that cannot execute
 # on this libc compile here once (see ensure_tool), so runtime provisioning
@@ -98,7 +98,9 @@ RUN mkdir -p /tmp/warm/rust/src/bin/clojure-rs \
         mkdir -p "$d/src"; \
         printf '' > "$d/src/lib.rs"; \
         basename "$d" >> /tmp/warm-crates.txt; \
+        sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$d/Cargo.toml" >> /tmp/warm-crates.txt; \
     done \
+    && sort -u -o /tmp/warm-crates.txt /tmp/warm-crates.txt \
     && cd /tmp/warm/rust && cargo fetch \
     && cargo test --workspace --no-run \
     && NIGHTLY=$(grep -E '^\s*UDEPSNightly = ' /tmp/warm/pins.go | cut -d'"' -f2) \
@@ -109,7 +111,7 @@ RUN mkdir -p /tmp/warm/rust/src/bin/clojure-rs \
         STATUS=$?; \
         if [ $STATUS -ne 0 ] \
             && { grep -q "could not compile" "$UDEPS_LOG" \
-                || [ -z "$(ls -A "$NIGHTLY_TARGET/debug/.fingerprint" 2>/dev/null)" ]; }; then \
+                || [ -z "$(ls -A "$NIGHTLY_TARGET/debug/.fingerprint" 2>/dev/null)$(ls -A "$NIGHTLY_TARGET/debug/build" 2>/dev/null)" ]; }; then \
             echo "udeps warm: nightly build FAILED:"; cat "$UDEPS_LOG"; exit 1; \
         fi; \
         echo "udeps warm: nightly tree prebuilt (udeps exit $STATUS; unused-deps verdict deferred to runtime)"; } \
@@ -120,17 +122,19 @@ RUN mkdir -p /tmp/warm/rust/src/bin/clojure-rs \
 # reuses the stub rlibs for member libs instead of rebuilding from
 # /work (seen: clj_aot::probe_ir unresolved under coverage). Keep the
 # registry-dependency artifacts (the actual warmup) and build-script
-# outputs (source-independent). Both spellings: bins use dashes,
-# rlibs/fingerprints use underscores.
+# outputs (source-independent). Scrub both Cargo <1.100 (.fingerprint/
+# deps) and >=1.100 (build/<pkg>) layouts, in both dashed and
+# underscored forms.
 RUN for t in /opt/target/debug /opt/target/nightly/debug; do \
-        while IFS= read -r c; do \
+        for c in $(cat /tmp/warm-crates.txt) clojure-rs; do \
             u=$(printf '%s' "$c" | tr '-' '_'); \
-            rm -rf "$t/.fingerprint/$c-"* "$t/deps/$c-"* "$t/deps/lib$c-"* \
-                   "$t/.fingerprint/$u-"* "$t/deps/$u-"* "$t/deps/lib$u-"*; \
-        done < /tmp/warm-crates.txt; \
-        rm -rf "$t/.fingerprint/clojure-rs-"* "$t/deps/clojure-rs-"* "$t/deps/libclojure-rs-"* \
-               "$t/.fingerprint/clojure_rs-"* "$t/deps/clojure_rs-"* "$t/deps/libclojure_rs-"*; \
+            rm -rf "$t/build/$c" "$t/build/$u" \
+                   "$t/.fingerprint/$c-"* "$t/deps/$c-"* "$t/deps/lib$c-"* \
+                   "$t/.fingerprint/$u-"* "$t/deps/$u-"* "$t/deps/lib$u-"* \
+                   "$t/incremental/$c-"* "$t/incremental/$u-"*; \
+        done; \
     done \
-    && ls /opt/target/debug/.fingerprint | wc -l
+    && rm -f /tmp/warm-crates.txt \
+    && { [ -d /opt/target/debug/.fingerprint ] && ls /opt/target/debug/.fingerprint || ls /opt/target/debug/build; } | wc -l
 
 WORKDIR /work

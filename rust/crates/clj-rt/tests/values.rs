@@ -124,3 +124,35 @@ fn clone_borrows_and_drop_frees() {
     assert_eq!(render(original), "v");
     unsafe { rt_drop(inbox(Value::Int(1))) };
 }
+
+#[test]
+fn nabi_assoc_conj_fallbacks() {
+    let mut x = Value::Int(1);
+    assert_eq!(
+        cljrt::nabi::rt_n_assoc_conj(&Value::Nil, &Value::Nil, &Value::Int(0), &mut x, 0),
+        0
+    );
+    assert_eq!(
+        cljrt::nabi::rt_n_assoc_conj(&Value::Nil, &Value::Nil, &Value::Int(0), &mut x, 1),
+        0
+    );
+    assert_eq!(
+        cljrt::nabi::rt_n_conj_bang_fx(&Value::Nil, &Value::Int(1)),
+        0
+    );
+    let ascii = Value::Str("a".repeat(200).into());
+    let non_ascii = Value::Str("é".repeat(200).into());
+    assert_eq!(cljrt::nabi::rt_n_str_ascii(&ascii), 1);
+    assert_eq!(cljrt::nabi::rt_n_str_ascii(&ascii), 1);
+    assert_eq!(cljrt::nabi::rt_n_str_ascii(&non_ascii), 0);
+    assert_eq!(cljrt::nabi::rt_n_str_ascii(&Value::Nil), 0);
+    assert!(
+        cljrt::nabi::native_symbols()
+            .iter()
+            .any(|(name, _)| *name == "rt_n_str_ascii")
+    );
+    let mut cell_out = Value::Int(99);
+    cljrt::nabi::rt_n_cell_set(&Value::Nil, &Value::Int(1));
+    cljrt::nabi::rt_n_cell_get(&mut cell_out, &Value::Nil);
+    assert_eq!(cell_out, Value::Int(99));
+}

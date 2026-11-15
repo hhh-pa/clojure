@@ -394,11 +394,10 @@ fn print_tower(v: &Value, opts: &PrintOpts, out: &mut String) {
                 out.push('M');
             }
         }
-        _ => {
-            if let Value::Ratio(r) = v {
-                write!(out, "{}/{}", r.numer(), r.denom()).unwrap();
-            }
+        Value::Ratio(r) => {
+            write!(out, "{}/{}", r.numer(), r.denom()).unwrap();
         }
+        _ => unreachable!("tower gate"),
     }
 }
 
@@ -2445,5 +2444,41 @@ mod tests {
             proxy_map: None,
         })));
         assert_eq!(dup(&rec), "#user.RP[1]");
+    }
+
+    #[test]
+    fn dup_record_with_zero_fields_and_length_zero() {
+        let rdef = Arc::new(crate::HostDef {
+            name: Arc::from("user.REmpty"),
+            kind: crate::HostKind::Record,
+            fields: Vec::new(),
+            struct_keys: Vec::new(),
+            methods: std::collections::HashMap::new(),
+            interfaces: Vec::new(),
+            prefix: None,
+            impl_ns: None,
+            sigs: std::collections::HashMap::new(),
+            takes_this: true,
+        });
+        let rec = Value::HostType(Arc::new(crate::HostVal::Inst(crate::HostInst {
+            def: rdef,
+            content: crate::new_map()
+                .insert(Value::Keyword(Keyword::new(None, "extra")), Value::Int(7)),
+            meta: None,
+            proxy_map: None,
+        })));
+        assert_eq!(dup(&rec), "#user.REmpty[7]");
+
+        let mut opts = PrintOpts::pr();
+        opts.length = Some(0);
+        let vec_v = Value::Vector(crate::Vector::from_vec(vec![Value::Int(1)]));
+        assert_eq!(super::print(&vec_v, &opts), "[...]");
+    }
+
+    #[test]
+    #[should_panic(expected = "tower gate")]
+    fn print_tower_rejects_non_tower() {
+        let mut out = String::new();
+        super::print_tower(&Value::Nil, &PrintOpts::pr(), &mut out);
     }
 }

@@ -17,7 +17,7 @@ use clj_eval::SubsetProgram;
 use clj_eval::compiler::{CompileDriver, DriveError};
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::targets::{FileType, TargetMachine};
+use inkwell::targets::TargetMachine;
 
 use crate::{lower, target};
 
@@ -54,12 +54,7 @@ fn emit_object(
     module: &Module<'_>,
     obj_path: &Path,
 ) -> Result<(), DriveError> {
-    module.set_triple(&TargetMachine::get_default_triple());
-    let layout = machine.get_target_data().get_data_layout();
-    module.set_data_layout(&layout);
-    let buffer = machine
-        .write_to_memory_buffer(module, FileType::Object)
-        .map_err(|e| DriveError::Emit(e.to_string()))?;
+    let buffer = target::emit_object_buffer(machine, module);
     std::fs::write(obj_path, buffer.as_slice()).map_err(|e| DriveError::Io {
         path: obj_path.to_path_buf(),
         message: e.to_string(),

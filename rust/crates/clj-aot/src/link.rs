@@ -213,7 +213,13 @@ fn query_sdkroot() -> Option<String> {
 #[cfg(target_os = "macos")]
 fn apply_macos_sdkroot(child: &mut Command) {
     let env = std::env::var("SDKROOT").ok();
-    if let Some(sdk) = choose_sdkroot(env.as_deref(), query_sdkroot().as_deref()) {
+    apply_macos_sdkroot_with(child, env.as_deref(), query_sdkroot().as_deref());
+}
+
+/// Apply explicit or queried `SDKROOT` on the link child (macOS only).
+#[cfg(target_os = "macos")]
+fn apply_macos_sdkroot_with(child: &mut Command, env: Option<&str>, queried: Option<&str>) {
+    if let Some(sdk) = choose_sdkroot(env, queried) {
         child.env("SDKROOT", sdk);
     }
 }
@@ -397,6 +403,8 @@ mod tests {
         );
         assert_eq!(super::choose_sdkroot(None, None), None);
         assert!(super::query_sdkroot().is_some_and(|p| !p.is_empty()));
+        let mut cmd = std::process::Command::new("true");
+        super::apply_macos_sdkroot_with(&mut cmd, None, None);
     }
 
     #[test]

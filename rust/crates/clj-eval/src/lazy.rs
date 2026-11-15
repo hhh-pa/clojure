@@ -865,7 +865,7 @@ fn step_list_unit(l: &List) -> Result<StepUnit, Signal> {
             let tail = l
                 .drop_first()
                 .map(|t| Value::List(t.with_meta(None)))
-                .unwrap_or_else(|| Value::List(List::new_sync()));
+                .expect("non-empty list has a tail");
             Ok(StepUnit::One {
                 head: head.clone(),
                 tail,
@@ -4965,6 +4965,21 @@ mod tests {
     }
 
     #[test]
+    fn collect_direct_bails_on_signed_long_range_overflow() {
+        // `LongRange` keeps `Int` bounds strictly inside `i64`;
+        // a hand-built overflowing `LongRange` pins the `None`
+        // fallback of `checked_mul`/`checked_add`.
+        let r = RangeValue::new(
+            RangeNum::Int(i64::MAX),
+            None,
+            RangeNum::Int(1),
+            true,
+            Some(2),
+        );
+        assert!(super::collect_direct(&Value::Extension(Arc::new(r))).is_none());
+    }
+
+    #[test]
     fn chunked_pending_parts_forces_foreign_thunk_to_empty() {
         // Defensive: only `ChunkHead`/`Chain` thunks sit under a
         // `ChunkedCons` kind in production; anything else forces
@@ -5032,6 +5047,22 @@ mod tests {
         // such a seq reads as gone.
         let s = RealizedSeq::flagged(Seq::empty(), true, true, SeqKind::Chunked);
         assert!(super::chunked_realized_parts(&s).is_none());
+    }
+
+    #[test]
+    fn coll_last_skips_empty_chunk_before_tail() {
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let empty_chunk = Value::Extension(Arc::new(pending_seq(
+            SeqState::Chunk {
+                items: Arc::from(vec![Value::Int(1)]),
+                pos: 1,
+                tail: Value::List(List::from_vec(vec![Value::Int(9)])),
+            },
+            LazyKind::LazySeq,
+        )));
+        let res =
+            crate::coll::native_last_owned(&mut eval, [empty_chunk].into_iter().collect()).unwrap();
+        assert_eq!(res, Value::Int(9));
     }
 
     #[test]

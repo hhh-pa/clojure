@@ -634,15 +634,6 @@ impl SequeRx {
     }
 }
 
-/// A thread-spawn failure (mirrors the `future` constructor —
-/// the OS refused a new thread).
-fn spawn_failed() -> NativeError {
-    NativeError::new(
-        ThrowClass::RuntimeException,
-        "unable to create native thread".to_owned(),
-    )
-}
-
 /// `seque`: a queued seq (default capacity 100). Capacities route
 /// through the `(int x)` cast (oracles `sq-cap-str`,
 /// `sq-cap-float`); non-positive capacities throw bare
@@ -664,10 +655,7 @@ fn native_seque(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     let child = eval.fork_for_thread(eval.clone_bindings());
     let input = input.clone();
     let name = format!("clj-seque-{}", eval.next_id());
-    std::thread::Builder::new()
-        .name(name)
-        .spawn(move || seque_feeder(child, input, tx))
-        .map_err(|_| spawn_failed())?;
+    crate::concurrency::spawn_named(name, move || seque_feeder(child, input, tx))?;
     Ok(pending_value(Thunk::Seque {
         rx: SequeRx::new(rx),
     }))
@@ -1098,20 +1086,14 @@ impl MatcherHandle {
     /// `Matcher.start()`/`end()` (#205): the last match's
     /// offsets or `No match found`.
     pub(crate) fn last_span(&self) -> Result<(usize, usize), NativeError> {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        clj_value::unpoison(self.state.lock())
             .last_span
             .ok_or_else(no_match_found)
     }
 
     /// The last match groups, if any.
     fn last_groups(&self) -> Option<Vec<Option<String>>> {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .last
-            .clone()
+        clj_value::unpoison(self.state.lock()).last.clone()
     }
 
     /// `Matcher.replaceAll(String)`: replace every match over the
@@ -1268,15 +1250,6 @@ mod tests {
         assert!(as_chunk_buffer(&Value::Int(1)).is_none());
         assert!(as_iteration(&Value::Int(1)).is_none());
         assert!(as_matcher(&Value::Int(1)).is_none());
-    }
-
-    /// A thread-spawn failure (untriggerable under test — pinned
-    /// by direct call, like `concurrency.rs`).
-    #[test]
-    fn spawn_failed_reports_native_thread_error() {
-        let err = spawn_failed();
-        assert_eq!(err.class, ThrowClass::RuntimeException);
-        assert_eq!(err.message, "unable to create native thread");
     }
 
     /// The `SequeRx` debug shape (out-of-band only).

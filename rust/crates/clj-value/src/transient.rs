@@ -306,6 +306,21 @@ impl TransientVector {
         }
     }
 
+    /// Borrow or copy out the element at `idx` without building a
+    /// temporary [`Value`] (`None` when invalidated or past the end).
+    #[inline(always)]
+    #[must_use]
+    pub fn get_val_ref(&self, idx: usize) -> Option<crate::ValueRef<'_>> {
+        if !self.valid {
+            return None;
+        }
+        match &self.items {
+            TransientItems::Ints(x) => x.get(idx).copied().map(crate::ValueRef::Int),
+            TransientItems::Chars(x) => x.get(idx).copied().map(crate::ValueRef::Char),
+            TransientItems::Generic(x) => x.get(idx).map(crate::ValueRef::Ref),
+        }
+    }
+
     /// Move the item at `idx` out of a generic buffer, leaving `nil`
     /// until the caller writes it back with [`assoc`](Self::assoc)
     /// (`None` when invalidated, packed, or out of bounds). The VM's
@@ -373,6 +388,36 @@ impl TransientVector {
                 true
             }
             _ => self.conj(Value::Int(n)).is_ok(),
+        }
+    }
+
+    /// Overwrite an existing packed integer slot in bounds (`false` when
+    /// out of bounds, non-int buffer, or invalidated; zero allocation).
+    #[inline(always)]
+    pub fn assoc_int_in_bounds(&mut self, idx: usize, n: i64) -> bool {
+        if !self.valid {
+            return false;
+        }
+        if let TransientItems::Ints(x) = &mut self.items {
+            if let Some(slot) = x.get_mut(idx) {
+                *slot = n;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Pop the last item from a packed scalar buffer (`false` when
+    /// empty, generic, or invalidated; touches no `Value` drop glue).
+    #[inline(always)]
+    pub fn pop_scalar_opt(&mut self) -> bool {
+        if !self.valid {
+            return false;
+        }
+        match &mut self.items {
+            TransientItems::Ints(x) => x.pop().is_some(),
+            TransientItems::Chars(x) => x.pop().is_some(),
+            TransientItems::Generic(_) => false,
         }
     }
 
@@ -940,6 +985,7 @@ impl Transient {
     }
 
     /// Lock the buffer (single-threaded use; poison is unreachable).
+    #[inline]
     pub fn lock(&self) -> TransientGuard<'_> {
         self.cell.lock()
     }
@@ -1210,17 +1256,49 @@ mod tests {
 
         // Persistent shrink condition
         let mut t_shrink_ints = TransientVector::new();
-        if let super::TransientItems::Ints(ref mut v) = t_shrink_ints.items {
-            v.reserve(2000);
-            v.push(1);
-        }
-        let _ = t_shrink_ints.persistent().unwrap();
-
         let mut t_shrink_chars =
             TransientVector::from_vector(&crate::Vector::from_chars(vec!['x']));
-        if let super::TransientItems::Chars(ref mut v) = t_shrink_chars.items {
-            v.reserve(2000);
+        for items in [&mut t_shrink_ints.items, &mut t_shrink_chars.items] {
+            if let super::TransientItems::Ints(v) = items {
+                v.reserve(2000);
+                v.push(1);
+            }
+            if let super::TransientItems::Chars(v) = items {
+                v.reserve(2000);
+            }
         }
+        let _ = t_shrink_ints.persistent().unwrap();
         let _ = t_shrink_chars.persistent().unwrap();
+
+        // Panic-free bitcode helpers: get_val_ref, assoc_int_in_bounds, pop_scalar_opt
+        let mut tbi = TransientVector::new();
+        assert!(tbi.conj_int_opt(10));
+        assert!(matches!(tbi.get_val_ref(0), Some(crate::ValueRef::Int(10))));
+        assert!(tbi.get_val_ref(1).is_none());
+        assert!(tbi.assoc_int_in_bounds(0, 99));
+        assert!(!tbi.assoc_int_in_bounds(1, 99));
+        assert!(matches!(tbi.get_val_ref(0), Some(crate::ValueRef::Int(99))));
+        assert!(tbi.pop_scalar_opt());
+        assert!(!tbi.pop_scalar_opt());
+
+        let mut tbc = TransientVector::from_vector(&crate::Vector::from_chars(vec!['z']));
+        assert!(matches!(
+            tbc.get_val_ref(0),
+            Some(crate::ValueRef::Char('z'))
+        ));
+        assert!(!tbc.assoc_int_in_bounds(0, 1));
+        assert!(tbc.pop_scalar_opt());
+
+        let mut tbg =
+            TransientVector::from_vector(&crate::Vector::from_vec(vec![Value::Bool(true)]));
+        assert!(matches!(
+            tbg.get_val_ref(0),
+            Some(crate::ValueRef::Ref(Value::Bool(true)))
+        ));
+        assert!(!tbg.pop_scalar_opt());
+        let _ = tbg.persistent().unwrap();
+        assert!(tbg.get_val_ref(0).is_none());
+        assert!(!tbg.assoc_int_in_bounds(0, 1));
+        assert!(!tbg.pop_scalar_opt());
     }
 }

@@ -117,21 +117,24 @@ fn lock_readers() -> MutexGuard<'static, Vec<u64>> {
 }
 
 /// Remove one reader entry (the opener's own — a duplicate start
-/// point from another transaction survives).
-fn remove_reader(start: u64) {
-    let mut readers = lock_readers();
+fn pop_reader_entry(readers: &mut Vec<u64>, start: u64) {
     if let Some(i) = readers.iter().position(|s| *s == start) {
         readers.swap_remove(i);
     }
+}
+
+/// Remove one occurrence of `start` (an overlapping reader's start
+/// point from another transaction survives).
+fn remove_reader(start: u64) {
+    let mut readers = lock_readers();
+    pop_reader_entry(&mut readers, start);
 }
 
 /// The OTHER active readers' start points (one occurrence of the
 /// committer's own start excluded — it is leaving).
 fn other_readers(start: u64) -> Vec<u64> {
     let mut readers = lock_readers().clone();
-    if let Some(i) = readers.iter().position(|s| *s == start) {
-        readers.swap_remove(i);
-    }
+    pop_reader_entry(&mut readers, start);
     readers
 }
 
@@ -195,13 +198,15 @@ pub(crate) fn eval_sync(eval: &mut Evaluator, body: TxBody<'_>) -> Result<Value,
 /// The join path: one nesting level deeper, same transaction (one
 /// commit, one watch round, one outbox — §1b).
 fn sync_join(eval: &mut Evaluator, body: TxBody<'_>) -> Result<Value, Signal> {
-    if let Some(tx) = eval.tx.as_mut() {
-        tx.depth += 1;
-    }
+    eval.tx
+        .as_mut()
+        .expect("sync_join requires active tx")
+        .depth += 1;
     let out = body(eval);
-    if let Some(tx) = eval.tx.as_mut() {
-        tx.depth -= 1;
-    }
+    eval.tx
+        .as_mut()
+        .expect("sync_join requires active tx")
+        .depth -= 1;
     out
 }
 
@@ -1474,5 +1479,15 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         drop(held);
         assert_eq!(worker.join().unwrap(), 0);
+    }
+
+    #[test]
+    fn pop_reader_entry_removes_first_match_or_is_idle() {
+        let mut readers = vec![3, 7, 3];
+        pop_reader_entry(&mut readers, 9);
+        assert_eq!(readers, vec![3, 7, 3]);
+        pop_reader_entry(&mut readers, 3);
+        assert_eq!(readers.len(), 2);
+        assert!(readers.contains(&7));
     }
 }

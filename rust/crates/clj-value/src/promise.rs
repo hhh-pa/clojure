@@ -89,7 +89,7 @@ impl Promise {
     /// Lock the cell (short critical sections only — poison is
     /// unreachable).
     fn lock(&self) -> MutexGuard<'_, PromiseState> {
-        self.cell.state.lock().unwrap_or_else(|e| e.into_inner())
+        crate::unpoison(self.cell.state.lock())
     }
 
     /// Deliver `value` if still pending (first wins; a delivered
@@ -119,11 +119,7 @@ impl Promise {
             if let PromiseState::Delivered(v) = state.clone() {
                 return v;
             }
-            state = self
-                .cell
-                .ready
-                .wait(state)
-                .unwrap_or_else(|e| e.into_inner());
+            state = crate::unpoison(self.cell.ready.wait(state));
         }
     }
 
@@ -149,11 +145,7 @@ impl Promise {
             // (a racing delivery still wins) and the deadline
             // re-check exits true timeouts — one fewer branch, and
             // no untestable spurious-wakeup leg.
-            let (next, _) = self
-                .cell
-                .ready
-                .wait_timeout(state, remaining)
-                .unwrap_or_else(|e| e.into_inner());
+            let (next, _) = crate::unpoison(self.cell.ready.wait_timeout(state, remaining));
             state = next;
         }
     }

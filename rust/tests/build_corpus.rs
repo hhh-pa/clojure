@@ -43,15 +43,31 @@ fn tmp(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("clj-rs-corpus-{}-{name}", std::process::id()))
 }
 
-/// The workspace target dir (this test binary lives in
-/// `<target>/<profile>/deps/` whatever `CARGO_TARGET_DIR` is).
+/// The active Cargo profile dir (e.g. `<target>/debug`), supporting
+/// both legacy `<target>/<profile>/deps/<bin>` and Cargo >=1.100
+/// `<target>/<profile>/build/<pkg>/<hash>/out/<bin>`.
 fn target_dir() -> PathBuf {
     let exe = std::env::current_exe().expect("current exe");
-    exe.parent()
-        .expect("deps")
-        .parent()
-        .expect("profile")
-        .to_path_buf()
+    let bin_dir = exe.parent().expect("test binary parent");
+    if bin_dir.file_name() == Some(std::ffi::OsStr::new("deps")) {
+        return bin_dir.parent().expect("profile").to_path_buf();
+    }
+    if let Some(profile) = bin_dir
+        .file_name()
+        .filter(|n| *n == "out")
+        .and_then(|_| bin_dir.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .filter(|p| p.file_name() == Some(std::ffi::OsStr::new("build")))
+        .and_then(|b| b.parent())
+    {
+        return profile.to_path_buf();
+    }
+    bin_dir
+        .ancestors()
+        .find(|p| p.join(".cargo-lock").is_file())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| bin_dir.parent().expect("profile").to_path_buf())
 }
 
 /// Ensure the static `clj-rt` archive exists (twin of the
@@ -66,6 +82,51 @@ fn ensure_archive() -> PathBuf {
     ARCHIVE.get_or_init(build_archive).clone()
 }
 
+struct DirLock(PathBuf);
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
+fn acquire_lock(lock_dir: &std::path::Path) -> DirLock {
+    let stale = std::time::Duration::from_secs(600);
+    let wait = std::time::Duration::from_millis(25);
+    loop {
+        match std::fs::create_dir(lock_dir) {
+            Ok(()) => return DirLock(lock_dir.to_path_buf()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let expired = std::fs::metadata(lock_dir)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > stale));
+                if expired {
+                    let _ = std::fs::remove_dir(lock_dir);
+                    continue;
+                }
+                std::thread::sleep(wait);
+            }
+            Err(err) => panic!("create lock {}: {err}", lock_dir.display()),
+        }
+    }
+}
+
+fn prune_old_published(pub_root: &std::path::Path) {
+    let max_age = std::time::Duration::from_secs(3600);
+    let Ok(entries) = std::fs::read_dir(pub_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let expired = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > max_age));
+        if expired {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 fn build_archive() -> PathBuf {
     let dir = target_dir();
     let name = if cfg!(windows) {
@@ -74,16 +135,28 @@ fn build_archive() -> PathBuf {
         "libcljrt.a"
     };
     let tops = dir.parent().expect("target root").join("cljrt-archive");
-    let archive = tops.join("debug").join(name);
-    if archive.is_file() {
-        return archive;
+    let run_key = std::env::var("NEXTEST_RUN_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| format!("pid-{}", std::process::id()));
+    let pub_root = tops.join("published");
+    let pub_dir = pub_root.join(&run_key);
+    let published = pub_dir.join(name);
+    if published.is_file() {
+        return published;
     }
+    std::fs::create_dir_all(&tops).expect("create cljrt-archive");
+    let _guard = acquire_lock(&tops.join(".archive-lock"));
+    if published.is_file() {
+        return published;
+    }
+    let archive = tops.join("debug").join(name);
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let mut cmd = Command::new("cargo");
     cmd.args(["build", "--locked", "-p", "clj-rt", "--manifest-path"])
         .arg(&manifest)
         .arg("--target-dir")
-        .arg(dir.parent().expect("target root").join("cljrt-archive"));
+        .arg(&tops);
     cmd.env_remove("RUSTC_WRAPPER")
         .env_remove("LLVM_PROFILE_FILE");
     for (key, _) in std::env::vars_os() {
@@ -94,7 +167,12 @@ fn build_archive() -> PathBuf {
     let built = cmd.status().expect("run cargo build");
     assert!(built.success(), "cargo build -p clj-rt failed");
     assert!(archive.is_file(), "missing {}", archive.display());
-    archive
+    std::fs::create_dir_all(&pub_dir).expect("create published dir");
+    let staged = pub_dir.join(format!(".tmp-{}-{name}", std::process::id()));
+    std::fs::copy(&archive, &staged).expect("stage runtime archive");
+    std::fs::rename(&staged, &published).expect("publish runtime archive");
+    prune_old_published(&pub_root);
+    published
 }
 
 fn exe_suffix() -> &'static str {
@@ -688,9 +766,12 @@ fn mixed_build_reports_and_runs_without_source_256() {
         .output()
         .expect("spawn clojure-rs build");
     assert_eq!(built.status.code(), Some(0), "{}", lossy(&built.stderr));
-    assert_eq!(
-        lossy(&built.stderr),
-        "aot: native 2/2 defns, embedded 0 top-level forms\n"
+    let report_out = lossy(&built.stderr);
+    assert!(
+        report_out.starts_with("aot: native 2/2 defns, embedded 0 top-level forms, helpers: ")
+            && report_out.contains("rustc LLVM ")
+            && report_out.ends_with('\n'),
+        "{report_out}"
     );
     std::fs::remove_dir_all(path.parent().expect("dir")).expect("remove source");
     let ran = Command::new(&prog).output().expect("run binary");
@@ -710,9 +791,12 @@ fn mixed_build_reports_and_runs_without_source_256() {
         ])
         .output()
         .expect("spawn clojure-rs build");
-    assert_eq!(
-        lossy(&built.stderr),
-        "aot: native 1/1 defns, embedded 0 top-level forms\n"
+    let pure_report = lossy(&built.stderr);
+    assert!(
+        pure_report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, helpers: ")
+            && pure_report.contains("rustc LLVM ")
+            && pure_report.ends_with('\n'),
+        "{pure_report}"
     );
     std::fs::remove_dir_all(pure.parent().expect("dir")).expect("cleanup");
     std::fs::remove_dir_all(&dir).expect("cleanup");

@@ -1676,11 +1676,10 @@ thread_local! {
 
 #[inline(always)]
 fn set_ascii_slot(slot: usize, ptr: usize, len: usize, is_ascii: bool) {
-    if slot < ASCII_CACHE_SLOTS {
-        let mut slots = ASCII_SLOTS.get();
-        slots[slot] = (ptr, len, is_ascii);
-        ASCII_SLOTS.set(slots);
-    }
+    debug_assert!(slot < ASCII_CACHE_SLOTS);
+    let mut slots = ASCII_SLOTS.get();
+    slots[slot] = (ptr, len, is_ascii);
+    ASCII_SLOTS.set(slots);
 }
 
 /// Answer `f` over the memoized scan for a string, if it is one of
@@ -1777,14 +1776,24 @@ fn str_scan(s: &Arc<str>) -> Option<StrScan> {
 }
 
 /// Whether `s` is all ASCII (so `nth` is a byte read), through the
+#[inline(always)]
+fn ascii_slot_lookup(ptr: usize, len: usize) -> Option<bool> {
+    ASCII_SLOTS
+        .get()
+        .into_iter()
+        .find(|&(p, l, _)| p == ptr && l == len)
+        .map(|(_, _, is_ascii)| is_ascii)
+}
+
 /// scan memo for big strings: O(1) after the first ask, so a loop
 /// entered once per item never rescans a long text.
 pub(crate) fn str_ascii(s: &Arc<str>) -> bool {
     if s.len() <= STR_SCAN_SMALL_MAX {
         return s.is_ascii();
     }
-    if let Some(ascii) = with_scan_hit(s, |scan| matches!(scan, StrScan::Ascii)) {
-        return ascii;
+    let ptr = Arc::as_ptr(s) as *const () as usize;
+    if let Some(is_ascii) = ascii_slot_lookup(ptr, s.len()) {
+        return is_ascii;
     }
     matches!(str_scan(s), Some(StrScan::Ascii))
 }
@@ -1829,16 +1838,11 @@ fn slot_scan_char(
 pub(crate) fn fast_str_char_at(s: &Arc<str>, idx: usize) -> Option<char> {
     let ptr = Arc::as_ptr(s) as *const () as usize;
     let len = s.len();
-    let slots = ASCII_SLOTS.get();
-    for &(p, l, is_ascii) in &slots {
-        if p == ptr && l == len {
-            if is_ascii {
-                return s.as_bytes().get(idx).map(|b| *b as char);
-            }
-            break;
+    if let Some(is_ascii) = ascii_slot_lookup(ptr, len) {
+        if is_ascii {
+            return s.as_bytes().get(idx).map(|b| *b as char);
         }
-    }
-    if len <= STR_SCAN_SMALL_MAX && s.is_ascii() {
+    } else if len <= STR_SCAN_SMALL_MAX && s.is_ascii() {
         set_ascii_slot(0, ptr, len, true);
         return s.as_bytes().get(idx).map(|b| *b as char);
     }
@@ -3451,5 +3455,30 @@ mod tests {
         });
         assert_eq!(fast_str_char_at(&s, 5), Some('é'));
         assert_eq!(fast_str_char_at(&s, 250), None);
+        assert!(!str_ascii(&s));
+        assert!(!str_ascii(&s));
+        assert_eq!(fast_str_char_at(&s, 10), Some('é'));
+        let long_ascii: Arc<str> = Arc::from("a".repeat(200));
+        assert!(str_ascii(&long_ascii));
+        assert!(str_ascii(&long_ascii));
+    }
+
+    #[test]
+    fn last_walks_empty_and_nonempty_chunks() {
+        let mut eval = crate::boot();
+        assert_eq!(
+            eval.eval_source("(last (chunk-cons (chunk (chunk-buffer 4)) '(1 2)))")
+                .unwrap()
+                .last(),
+            Some(&Value::Int(2))
+        );
+        assert_eq!(
+            eval.eval_source(
+                "(last (chunk-cons (chunk (doto (chunk-buffer 4) (chunk-append 10) (chunk-append 20))) nil))"
+            )
+            .unwrap()
+            .last(),
+            Some(&Value::Int(20))
+        );
     }
 }

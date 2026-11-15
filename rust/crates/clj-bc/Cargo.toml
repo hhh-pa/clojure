@@ -1,0 +1,18 @@
+[package]
+name = "clj-bc"
+version = "1.13.0-alpha11"
+edition = "2024"
+# MSRV matches clj-value so LTO-free / MSRV workspace legs stay consistent.
+rust-version = "1.85"
+description = "LLVM bitcode hot-path runtime helpers for clj-aot LTO inlining"
+license = "EPL-1.0"
+
+[lints]
+workspace = true
+
+[dependencies]
+clj-value = { path = "../clj-value" }
+
+[dev-dependencies]
+num-bigint = "0.4"
+num-rational = "0.4"

@@ -454,6 +454,16 @@ mod tests {
     };
 
     #[test]
+    fn unbooted_session_skips_missing_star_handles() {
+        let input = std::io::Cursor::new(b"1\n2\nnope\n");
+        let mut out = Vec::new();
+        let mut session = Session::new(clj_eval::Evaluator::new("<repl>"), input, &mut out);
+        assert_eq!(session.run(), 0);
+        let rendered = String::from_utf8(out).expect("utf8");
+        assert!(rendered.contains("1\n2\n"), "got {rendered}");
+    }
+
+    #[test]
     fn each_incomplete_variant_continues() {
         for message in [
             "EOF while reading, starting at line 1",

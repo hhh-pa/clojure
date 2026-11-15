@@ -2224,3 +2224,16 @@ fn exit_expr(v: &ExitVal) -> std::option::IntoIter<&IExpr> {
     }
     .into_iter()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Co, Ins};
+
+    #[test]
+    fn ins_retarget_updates_matching_dest_only() {
+        let mut ins = Ins::Co(Co::Count(1, 0));
+        assert!(!ins.retarget(2, 3));
+        assert!(ins.retarget(1, 3));
+        assert!(!Ins::Miss.retarget(1, 3));
+    }
+}

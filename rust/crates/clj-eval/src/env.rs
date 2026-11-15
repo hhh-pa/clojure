@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 use clj_value::{
-    ClassVal, FxBuildHasher, Keyword, Map, SymKey, Symbol, Unbound, Value, Var, new_map,
+    BindCounts, ClassVal, FxBuildHasher, Keyword, Map, SymKey, Symbol, Unbound, Value, Var, new_map,
 };
 
 use crate::core_lazy::{LazyGroup, LazyIndex};
@@ -766,9 +766,9 @@ impl NamespaceRegistry {
         if *next_id != before {
             by_id.insert(id, Arc::clone(&ns.handle.name));
         }
-        if let Some(st) = ns.state_mut(id) {
-            st.root = Some(root);
-        }
+        ns.state_mut(id)
+            .expect("freshly interned var has state")
+            .root = Some(root);
         id
     }
 
@@ -1114,6 +1114,18 @@ impl Default for SharedRegistry {
     }
 }
 
+/// RAII guard bracketing a locked root/namespace mutation: enters at
+/// an odd epoch and advances to the next even generation on drop so
+/// lock-free [`clj_value::FastVars`] caches fall back while mutations
+/// run.
+struct EpochGuard<'a>(&'a AtomicU64);
+
+impl Drop for EpochGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 impl SharedRegistry {
     /// A fresh lineage: an empty registry with evaluator counters
     /// seeded exactly like [`Evaluator::new_bare`](crate::eval::Evaluator::new_bare).
@@ -1128,17 +1140,23 @@ impl SharedRegistry {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The current root generation (lock-free).
+    /// The current root generation (lock-free; odd while a locked
+    /// root/namespace mutation is active).
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
     }
 
-    /// Bump the root generation (every `with_*` writer calls this —
-    /// any `VarState` mutation may have changed a root, so every
-    /// evaluator's cache generation ends).
-    fn bump_epoch(&self) {
+    /// Share the atomic root-generation counter with lock-free
+    /// program caches.
+    #[must_use]
+    pub fn epoch_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.epoch)
+    }
+
+    fn begin_mutation(&self) -> EpochGuard<'_> {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        EpochGuard(&self.epoch)
     }
 
     /// The next throwable/closure/native identity.
@@ -1351,9 +1369,9 @@ impl SharedRegistry {
     /// Intern a var and install its root under one lock (native
     /// installs: one lock and one generation bump instead of two).
     pub fn intern_with_root(&self, sym: &Symbol, root: Value) -> u64 {
-        let id = self.lock().registry.intern_with_root(sym, root);
-        self.bump_epoch();
-        id
+        let mut inner = self.lock();
+        let _epoch = self.begin_mutation();
+        inner.registry.intern_with_root(sym, root)
     }
 
     /// Pre-size a namespace's var tables (see
@@ -1570,26 +1588,20 @@ impl SharedRegistry {
     /// lock is held throughout). Bumps the root generation (the
     /// closure may have changed the root).
     pub fn with_state_mut<R>(&self, id: u64, f: impl FnOnce(&mut VarState) -> R) -> Option<R> {
-        let out = {
-            let mut inner = self.lock();
-            let state = inner.registry.state_mut(id)?;
-            f(state)
-        };
-        self.bump_epoch();
-        Some(out)
+        let mut inner = self.lock();
+        let _epoch = self.begin_mutation();
+        let state = inner.registry.state_mut(id)?;
+        Some(f(state))
     }
 
     /// Run `f` over a live namespace (`None` when missing). Same
     /// closure discipline as [`with_state_mut`](Self::with_state_mut).
     /// Bumps the root generation (the closure sees `&mut` states).
     pub fn with_ns_mut<R>(&self, name: &str, f: impl FnOnce(&mut Namespace) -> R) -> Option<R> {
-        let out = {
-            let mut inner = self.lock();
-            let ns = inner.registry.get_mut(name)?;
-            f(ns)
-        };
-        self.bump_epoch();
-        Some(out)
+        let mut inner = self.lock();
+        let _epoch = self.begin_mutation();
+        let ns = inner.registry.get_mut(name)?;
+        Some(f(ns))
     }
 
     /// Run `f` over a live or removed namespace (`None` when
@@ -1601,13 +1613,10 @@ impl SharedRegistry {
         name: &str,
         f: impl FnOnce(&mut Namespace) -> R,
     ) -> Option<R> {
-        let out = {
-            let mut inner = self.lock();
-            let ns = inner.registry.ns_live_or_removed_mut(name)?;
-            f(ns)
-        };
-        self.bump_epoch();
-        Some(out)
+        let mut inner = self.lock();
+        let _epoch = self.begin_mutation();
+        let ns = inner.registry.ns_live_or_removed_mut(name)?;
+        Some(f(ns))
     }
 
     /// Run `f` over a handle-pinned namespace (`None` when neither
@@ -1620,21 +1629,94 @@ impl SharedRegistry {
         id: u64,
         f: impl FnOnce(&mut Namespace) -> R,
     ) -> Option<R> {
-        let out = {
-            let mut inner = self.lock();
-            let ns = inner.registry.ns_for_handle_mut(name, id)?;
-            f(ns)
-        };
-        self.bump_epoch();
-        Some(out)
+        let mut inner = self.lock();
+        let _epoch = self.begin_mutation();
+        let ns = inner.registry.ns_for_handle_mut(name, id)?;
+        Some(f(ns))
     }
+}
+
+/// Process-wide per-var active binding refcounts across all
+/// [`Bindings`] stacks: initialized lazily only when requested via
+/// [`bind_counts`], so interpreter runs avoid the 40 KB table unless
+/// lock-free [`clj_value::FastVars`] caches are active.
+static BIND_COUNTS: OnceLock<Arc<BindCounts>> = OnceLock::new();
+static PRE_BINDS: Mutex<Vec<(u64, usize)>> = Mutex::new(Vec::new());
+
+fn apply_bind_count(bc: &BindCounts, var_id: u64, n: usize, add: bool) {
+    if add {
+        bc.add(var_id, n);
+    } else {
+        bc.sub(var_id, n);
+    }
+}
+
+fn update_pending_bind(pending: &mut Vec<(u64, usize)>, var_id: u64, n: usize, add: bool) {
+    if add {
+        match pending.iter_mut().find(|(id, _)| *id == var_id) {
+            Some((_, count)) => *count += n,
+            None => pending.push((var_id, n)),
+        }
+        return;
+    }
+    let pos = pending
+        .iter()
+        .position(|&(id, _)| id == var_id)
+        .expect("live binding has pending refcount");
+    pending[pos].1 -= n;
+    if pending[pos].1 == 0 {
+        pending.swap_remove(pos);
+    }
+}
+
+fn track_bind_locked(
+    counts: &OnceLock<Arc<BindCounts>>,
+    pending: &mut Vec<(u64, usize)>,
+    var_id: u64,
+    n: usize,
+    add: bool,
+) {
+    if let Some(bc) = counts.get() {
+        apply_bind_count(bc, var_id, n, add);
+        return;
+    }
+    update_pending_bind(pending, var_id, n, add);
+}
+
+fn track_bind(var_id: u64, n: usize, add: bool) {
+    if let Some(bc) = BIND_COUNTS.get() {
+        apply_bind_count(bc, var_id, n, add);
+        return;
+    }
+    let mut pending = clj_value::unpoison(PRE_BINDS.lock());
+    track_bind_locked(&BIND_COUNTS, &mut pending, var_id, n, add);
+}
+
+/// Shared atomic handle to [`BIND_COUNTS`], allocating and seeding it
+/// from any active pre-init bindings on first use.
+#[must_use]
+pub fn bind_counts() -> Arc<BindCounts> {
+    if let Some(bc) = BIND_COUNTS.get() {
+        return Arc::clone(bc);
+    }
+    let mut pending = clj_value::unpoison(PRE_BINDS.lock());
+    let bc = BIND_COUNTS.get_or_init(|| {
+        let bc = Arc::new(BindCounts::new());
+        for &(var_id, n) in pending.iter() {
+            bc.add(var_id, n);
+        }
+        pending.clear();
+        pending.shrink_to_fit();
+        bc
+    });
+    Arc::clone(bc)
 }
 
 /// The thread-binding stack: one frame per `binding` /
 /// `push-thread-bindings` / `with-bindings*` / `bound-fn`
 /// invocation. Entries shadow by recency across frames; `set!`
 /// writes the topmost entry for its var.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct Bindings {
     frames: Vec<Vec<(Var, Value)>>,
     /// Bound-var refcounts: var id → live entry count (across all
@@ -1647,6 +1729,27 @@ pub struct Bindings {
     /// stacks — equal versions mean equal bindings, so the VM's
     /// per-site caches validate against it.
     version: u64,
+}
+
+impl Clone for Bindings {
+    fn clone(&self) -> Self {
+        for (&id, &n) in &self.counts {
+            track_bind(id, n, true);
+        }
+        Self {
+            frames: self.frames.clone(),
+            counts: self.counts.clone(),
+            version: self.version,
+        }
+    }
+}
+
+impl Drop for Bindings {
+    fn drop(&mut self) {
+        for (&id, &n) in &self.counts {
+            track_bind(id, n, false);
+        }
+    }
 }
 
 /// The [`Bindings::version`] source.
@@ -1693,6 +1796,7 @@ impl Bindings {
     /// Push one frame (possibly empty, like the JVM).
     pub fn push_frame(&mut self, entries: Vec<(Var, Value)>) {
         for (var, _) in &entries {
+            track_bind(var.id, 1, true);
             *self.counts.entry(var.id).or_default() += 1;
         }
         self.frames.push(entries);
@@ -1704,6 +1808,9 @@ impl Bindings {
     pub fn pop_frame(&mut self) -> Option<Vec<(Var, Value)>> {
         let frame = self.frames.pop()?;
         unbind_counts(&mut self.counts, &frame);
+        for (var, _) in &frame {
+            track_bind(var.id, 1, false);
+        }
         self.bump();
         Some(frame)
     }
@@ -1718,6 +1825,9 @@ impl Bindings {
         let Self { frames, counts, .. } = self;
         for frame in frames.drain(depth..) {
             unbind_counts(counts, &frame);
+            for (var, _) in &frame {
+                track_bind(var.id, 1, false);
+            }
         }
     }
 
@@ -2026,10 +2136,8 @@ impl Env {
             // Poison is unreachable (nothing panics while holding a
             // frame lock); recover like `SharedRegistry::lock` so a
             // poisoned lock keeps the write instead of dropping it.
-            let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(slot) = guard.get_mut(idx - frame.base) {
-                *slot = value;
-            }
+            let mut guard = clj_value::unpoison(slots.lock());
+            guard[idx - frame.base] = value;
         } else {
             debug_assert!(false, "set on an immutable frame");
         }
@@ -2334,5 +2442,47 @@ mod tests {
         assert!(b.is_empty());
         b.pop_frame();
         assert!(b.is_empty());
+
+        // Pending bindings accumulate before `bind_counts()` is first
+        // called, seed into the global table, and track atomically afterward.
+        let empty_clone = b.clone();
+        drop(empty_clone);
+        b.push_frame(vec![(var(2), Value::Int(2))]);
+        let pre_clone = b.clone();
+        b.pop_frame();
+        let bc = bind_counts();
+        assert!(bc.is_bound(2));
+        drop(pre_clone);
+        assert!(!bc.is_bound(2));
+
+        let same_bc = bind_counts();
+        assert!(Arc::ptr_eq(&bc, &same_bc));
+        b.push_frame(vec![(var(3), Value::Int(3))]);
+        assert!(bc.is_bound(3));
+        let non_empty_clone = b.clone();
+        b.truncate(0);
+        assert!(bc.is_bound(3));
+        drop(non_empty_clone);
+        assert!(!bc.is_bound(3));
+
+        // Cover post-lock OnceLock initialization race fallback directly.
+        let seeded = OnceLock::new();
+        let _ = seeded.set(Arc::new(BindCounts::new()));
+        let mut dummy_pending = Vec::new();
+        super::track_bind_locked(&seeded, &mut dummy_pending, 4, 1, true);
+        assert!(seeded.get().unwrap().is_bound(4));
+        super::track_bind_locked(&seeded, &mut dummy_pending, 4, 1, false);
+        assert!(!seeded.get().unwrap().is_bound(4));
+    }
+
+    #[test]
+    fn reserve_vars_and_intern_def_target_tolerate_missing_ns() {
+        let mut reg = NamespaceRegistry::new();
+        reg.ensure_ns("user");
+        reg.reserve_vars("no.such.ns", 4);
+        reg.reserve_vars("user", 4);
+        let id = reg.intern_def_target(&sym(Some("brand.new.ns"), "v"));
+        assert!(reg.ns_id("brand.new.ns").is_some());
+        assert_eq!(reg.lookup(&sym(Some("brand.new.ns"), "v")), Some(id));
     }
 }

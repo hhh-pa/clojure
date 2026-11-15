@@ -2187,10 +2187,7 @@ fn static_row(name: &str) -> Option<&'static StaticRow> {
 fn static_supers(row: &'static StaticRow) -> Arc<HashSet<&'static str>> {
     static SUPERS: std::sync::OnceLock<Mutex<StaticCache<Arc<HashSet<&'static str>>>>> =
         std::sync::OnceLock::new();
-    let mut cache = SUPERS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut cache = clj_value::unpoison(SUPERS.get_or_init(Default::default).lock());
     let set = cache.entry(row.name).or_insert_with(|| {
         let mut out: HashSet<&'static str> = HashSet::new();
         let mut stack: Vec<&'static str> = row.bases.to_vec();
@@ -2352,10 +2349,7 @@ fn static_class(name: &str) -> Option<Arc<ClassVal>> {
     static CLASSES: std::sync::OnceLock<Mutex<StaticCache<Arc<ClassVal>>>> =
         std::sync::OnceLock::new();
     let r = static_row(name)?;
-    let mut cache = CLASSES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut cache = clj_value::unpoison(CLASSES.get_or_init(Default::default).lock());
     let class = cache.entry(r.name).or_insert_with(|| {
         Arc::new(ClassVal::new(
             Arc::from(r.name),
@@ -2808,6 +2802,20 @@ fn bases_class_arg(v: &Value, eval: &Evaluator) -> Result<Option<Arc<ClassVal>>,
     }
 }
 
+/// Resolve class/interface descriptors for `names` in order (dangling names skip).
+fn resolve_classes<'a>(
+    eval: &Evaluator,
+    names: impl IntoIterator<Item = &'a Arc<str>>,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for name in names {
+        if let Some(c) = class_for_name(eval, name) {
+            out.push(Value::Class(c));
+        }
+    }
+    out
+}
+
 /// `bases`: the ordered direct supertypes as a seq, nil for empty
 /// ancestry (dangling names skip — the redefinition leniency).
 fn native_bases(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2818,13 +2826,10 @@ fn native_bases(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     if class.bases().is_empty() {
         return Ok(Value::Nil);
     }
-    let mut items = Vec::new();
-    for base in class.bases() {
-        if let Some(c) = class_for_name(eval, base) {
-            items.push(Value::Class(c));
-        }
-    }
-    Ok(Value::List(List::from_vec(items)))
+    Ok(Value::List(List::from_vec(resolve_classes(
+        eval,
+        class.bases(),
+    ))))
 }
 
 /// `supers`: the transitive supertypes as a set, nil for empty
@@ -2839,10 +2844,8 @@ fn native_supers(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
         return Ok(Value::Nil);
     }
     let mut set = new_set();
-    for name in &names {
-        if let Some(c) = class_for_name(eval, name) {
-            set = set.insert(Value::Class(c));
-        }
+    for c in resolve_classes(eval, &names) {
+        set = set.insert(c);
     }
     Ok(Value::Set(set))
 }
@@ -5303,13 +5306,7 @@ fn interfaces_vector(eval: &Evaluator, c: &Arc<ClassVal>) -> Value {
     } else {
         &c.bases()[1..]
     };
-    let mut items = Vec::new();
-    for base in rest {
-        if let Some(ic) = class_for_name(eval, base) {
-            items.push(Value::Class(ic));
-        }
-    }
-    Value::Vector(Vector::from_vec(items))
+    Value::Vector(Vector::from_vec(resolve_classes(eval, rest)))
 }
 
 /// The class keys of `bean` (`:class` itself is pushed by the caller).
@@ -8065,5 +8062,24 @@ mod tests {
         sb.dyn_hash(&mut h1);
         sb.dyn_hash(&mut h2);
         assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn ancestry_helpers_skip_dangling_class_names() {
+        let eval = Evaluator::new_bare("user");
+        let bases: Vec<Arc<str>> = vec![
+            Arc::from("java.lang.Object"),
+            Arc::from("no.such.DanglingBase"),
+        ];
+        assert!(!super::closure_contains(
+            &eval,
+            &bases,
+            "java.lang.Runnable"
+        ));
+        let set = super::closure_set(&eval, &bases);
+        assert!(set.contains("java.lang.Object"));
+        assert!(set.contains("no.such.DanglingBase"));
+        let resolved = super::resolve_classes(&eval, &bases);
+        assert_eq!(resolved.len(), 1);
     }
 }

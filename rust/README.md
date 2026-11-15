@@ -8,45 +8,45 @@ was removed in PR #11; this workspace is now the sole implementation
 ## Prerequisites
 
 - Stable Rust, MSRV 1.85 (`rustup toolchain install stable`).
-- LLVM 22 for the default `aot` feature. Without LLVM, build with
+- LLVM 23 for the default `aot` feature. Without LLVM, build with
   `cargo build --no-default-features` (interpreter crates only).
 
 ## LLVM setup (the `aot` feature)
 
-inkwell pins one LLVM major: 22 (feature `llvm22-1`). Point llvm-sys
-at it with `LLVM_SYS_221_PREFIX`:
+inkwell pins one LLVM major: 23 (feature `llvm23-1`). Point llvm-sys
+at it with `LLVM_SYS_231_PREFIX`:
 
-- macOS with Homebrew: `brew install llvm@22`, then
-  `export LLVM_SYS_221_PREFIX=$(brew --prefix llvm@22)`.
-- macOS without Homebrew: pour the `llvm@22` bottle by hand. Pick
+- macOS with Homebrew: `brew install llvm@23`, then
+  `export LLVM_SYS_231_PREFIX=$(brew --prefix llvm@23)`.
+- macOS without Homebrew: pour the `llvm` bottle (LLVM 23) by hand. Pick
   the bottle for your macOS version from
-  `https://formulae.brew.sh/api/formula/llvm@22.json` (`arm64_tahoe`
+  `https://formulae.brew.sh/api/formula/llvm.json` (`arm64_tahoe`
   / `arm64_sequoia` / newer), download the blob with an anonymous
   `ghcr.io` pull token, and extract it:
   ```sh
-  TOKEN=$(curl -s 'https://ghcr.io/token?scope=repository:homebrew/core/llvm/22:pull' \
+  TOKEN=$(curl -s 'https://ghcr.io/token?scope=repository:homebrew/core/llvm:pull' \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
-  curl -sL -H "Authorization: Bearer $TOKEN" -o llvm22-bottle.tar.gz '<blob url>'
-  mkdir -p ~/.local/brew && tar -xzf llvm22-bottle.tar.gz -C ~/.local/brew
+  curl -sL -H "Authorization: Bearer $TOKEN" -o llvm23-bottle.tar.gz '<blob url>'
+  mkdir -p ~/.local/brew && tar -xzf llvm23-bottle.tar.gz -C ~/.local/brew
   ```
   Then build a prefix farm (llvm-sys looks for `bin/llvm-config`
   under the prefix; the farm also lets `-lzstd` resolve — build
   zstd from source or pour its bottle the same way):
   ```sh
-  farm=~/.local/llvm-22-local src=~/.local/brew/llvm@22/22.1.8
+  farm=~/.local/llvm-23-local src=~/.local/brew/llvm/23.1.5
   mkdir -p "$farm/bin"
   for f in "$src"/bin/*; do ln -sf "$f" "$farm/bin/"; done
   ln -sfn "$src/lib" "$farm/lib"   # if needed for -L flags
-  export LLVM_SYS_221_PREFIX="$farm"
+  export LLVM_SYS_231_PREFIX="$farm"
   export RUSTFLAGS="-L <dir holding libzstd.a>"
   ```
 - Linux: `wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh &&
-  sudo ./llvm.sh 22 && sudo apt-get install -y llvm-22-dev`,
-  then `export LLVM_SYS_221_PREFIX=/usr/lib/llvm-22`.
-- Windows: download `clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz`
+  sudo ./llvm.sh 23 && sudo apt-get install -y llvm-23-dev`,
+  then `export LLVM_SYS_231_PREFIX=/usr/lib/llvm-23`.
+- Windows: download `clang+llvm-23.1.5-x86_64-pc-windows-msvc.tar.xz`
   from the LLVM project releases (the choco package omits
   llvm-config.exe, which llvm-sys requires), extract it, and set
-  `LLVM_SYS_221_PREFIX` to the extracted dir (plus its `bin` on
+  `LLVM_SYS_231_PREFIX` to the extracted dir (plus its `bin` on
   `PATH` so test binaries find `LLVM-C.dll` at runtime).
 
 ## Build and test

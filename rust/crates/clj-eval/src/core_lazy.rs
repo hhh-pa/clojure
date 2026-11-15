@@ -829,4 +829,30 @@ mod tests {
         let empty = LazyIndex::new(&[]);
         assert!(!empty.test(0));
     }
+
+    #[test]
+    fn bare_planner_and_eval_group_tolerate_missing_core_vars() {
+        let mut eval = crate::eval::Evaluator::new_bare("clojure.string");
+        let text = "(defn split [s re] s)";
+        let forms = split_top_forms(text);
+        let plan = super::plan(
+            &mut eval,
+            text,
+            &forms,
+            "clojure.string",
+            &std::sync::Arc::from("s.clj"),
+        );
+        assert!(plan.meta_groups.is_empty());
+
+        let group = super::LazyGroup {
+            ns: std::sync::Arc::from("user"),
+            source: std::sync::Arc::from("g.clj"),
+            forms: vec![super::LazyForm {
+                text: "nil",
+                line: 1,
+            }],
+            ids: Vec::new(),
+        };
+        super::eval_group(&mut eval, &group);
+    }
 }

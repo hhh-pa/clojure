@@ -1219,5 +1219,13 @@ mod tests {
             ThrowClass::GeneralSecurityException.jvm_name(),
             "java.security.GeneralSecurityException"
         );
+        assert!(
+            ThrowClass::NoSuchElementException.matches("java.lang.RuntimeException")
+                && ThrowClass::URISyntaxException.matches("java.lang.Exception")
+                && ThrowClass::GeneralSecurityException.matches("java.lang.Exception")
+                && ThrowClass::NoSuchAlgorithmException
+                    .matches("java.security.GeneralSecurityException")
+                && ThrowClass::PatternSyntaxException.matches("java.lang.IllegalArgumentException")
+        );
     }
 }

@@ -811,7 +811,7 @@ mod tests {
     /// A swapped fd 0, restored on drop (panic-safe).
     #[cfg(unix)]
     struct StdinSwap {
-        saved: Option<rustix::fd::OwnedFd>,
+        saved: rustix::fd::OwnedFd,
     }
 
     #[cfg(unix)]
@@ -820,16 +820,14 @@ mod tests {
         fn install(feed: rustix::fd::OwnedFd) -> Self {
             let saved = rustix::io::dup(rustix::stdio::stdin()).expect("save stdin");
             rustix::stdio::dup2_stdin(&feed).expect("swap stdin");
-            Self { saved: Some(saved) }
+            Self { saved }
         }
     }
 
     #[cfg(unix)]
     impl Drop for StdinSwap {
         fn drop(&mut self) {
-            if let Some(saved) = self.saved.take() {
-                let _ = rustix::stdio::dup2_stdin(&saved);
-            }
+            let _ = rustix::stdio::dup2_stdin(&self.saved);
         }
     }
 
@@ -886,6 +884,9 @@ mod tests {
         let scan = EvalScanner::new("\"abc").run();
         assert!(scan.has_code);
         assert!(scan.edn_violation.is_none());
+        let trailing_escape = EvalScanner::new("\"abc\\").run();
+        assert!(trailing_escape.has_code);
+        assert!(trailing_escape.edn_violation.is_none());
     }
 
     #[test]
@@ -899,7 +900,7 @@ mod tests {
 
     #[test]
     fn quote_chars_flag_edn() {
-        let scan = EvalScanner::new("'a").run();
+        let scan = EvalScanner::new("'a 'b").run();
         assert!(scan.has_code);
         let v = scan.edn_violation.expect("quote flags edn");
         assert_eq!((v.line, v.col), (1, 1));

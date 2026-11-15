@@ -35,8 +35,8 @@ use crate::lazy::{
     realize_deep,
 };
 use crate::ns::{
-    NativeFnPtr, check_arity, core_var, core_var_handle, deref_core, intern_routed, npe,
-    signal_to_native, throw_class_for, var_value,
+    NativeFnPtr, check_arity, core_var, deref_core, intern_routed, npe, signal_to_native,
+    throw_class_for, var_value,
 };
 use crate::reader::{LiveReadHooks, map_reader_error, seed_read_gates, sync_reader_ns};
 
@@ -2379,8 +2379,8 @@ fn read_data_reader_map(
     opts.suppress_read = seed.suppress_read;
     opts.resolver_bound = seed.resolver_bound;
     // Upstream binds `*file*` to the mapping URL for the read.
-    let depth = core_var(eval, "*file*")
-        .map(|id| eval.push_binding(core_var_handle(id, "*file*"), Value::Str(Arc::from(path))));
+    let depth = eval.bindings_depth();
+    crate::ns::push_core_binding(eval, "*file*", Value::Str(Arc::from(path)));
     let mut reader = Reader::new(text, &opts);
     let outcome = {
         let mut hooks = LiveReadHooks::new(eval);
@@ -2398,9 +2398,7 @@ fn read_data_reader_map(
             Err(e) => Err(map_reader_error(eval, &e, false)),
         }
     })();
-    if let Some(depth) = depth {
-        eval.pop_bindings(depth);
-    }
+    eval.pop_bindings(depth);
     out
 }
 
@@ -2982,7 +2980,7 @@ fn pr_print_str(
     }
     let sw = crate::io::string_writer(eval);
     let depth = eval.bindings_depth();
-    crate::printsys::bind_core_var(eval, "*out*", sw.clone());
+    crate::ns::push_core_binding(eval, "*out*", sw.clone());
     crate::printsys::maybe_bind_print_readably(eval, readably);
     let result = pr_str_args(eval, &vals);
     eval.pop_bindings(depth);

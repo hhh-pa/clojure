@@ -29,7 +29,7 @@ Please [open a GitHub issue](https://github.com/hhh-pa/clojure/issues)
   and prefer reproducing against the latest release first, since
   `master` moves fast.
 - Your platform (`uname -a` / Windows version), Rust version
-  (`rustc --version`), and whether the `aot` feature / LLVM 22 was
+  (`rustc --version`), and whether the `aot` feature / LLVM 23 was
   enabled.
 - For behavior questions, the JVM Clojure output for the same input,
   if you have it — the port is differentially verified against it.
@@ -56,7 +56,7 @@ cargo test --workspace --locked
 
 Notes for contributors:
 
-- MSRV is stable Rust ≥ 1.85. The default `aot` feature needs LLVM 22
+- MSRV is stable Rust ≥ 1.85. The default `aot` feature needs LLVM 23
   — see [LLVM setup](rust/README.md#llvm-setup-the-aot-feature). Code
   must also build with `--no-default-features` (interpreter-only).
 - Add or update tests with every behavior change. CI enforces 100%

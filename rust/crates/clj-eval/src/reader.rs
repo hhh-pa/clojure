@@ -17,7 +17,7 @@
 
 #[cfg(test)]
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Stdin};
+use std::io::{BufRead, BufReader, Read};
 use std::sync::{Arc, Mutex};
 
 use clj_reader::{
@@ -55,7 +55,7 @@ impl std::fmt::Debug for StreamReader {
 /// and EOF is detected per-read).
 struct StreamState {
     parser: Reader,
-    stdin: Option<BufReader<Stdin>>,
+    stdin: Option<BufReader<Box<dyn Read + Send>>>,
     /// Latched by `.close` (gap-120 slice 3: `with-open` over
     /// `clojure.java.io` readers); reads past it report the JDK
     /// "Stream closed" text.
@@ -157,7 +157,10 @@ pub(crate) fn stdin_reader(eval: &mut Evaluator) -> Value {
         id: eval.next_id(),
         state: Arc::new(Mutex::new(StreamState {
             parser: Reader::new("", &ReaderOpts::default()),
-            stdin: Some(BufReader::with_capacity(64 * 1024, std::io::stdin())),
+            stdin: Some(BufReader::with_capacity(
+                64 * 1024,
+                Box::new(std::io::stdin()),
+            )),
             closed: false,
             #[cfg(test)]
             script_lines: VecDeque::new(),
@@ -827,7 +830,25 @@ fn parse_read_tail(
 
 /// Syntax-quote and `::` resolve against the synced current
 /// namespace (read-time, like the JVM), mirroring
-/// `native_read_string`.
+/// Populate reader namespace resolution maps (`aliases`, `refers`, and
+/// optionally `class_map`) from `cur`, if registered.
+pub(crate) fn apply_reader_maps(
+    eval: &Evaluator,
+    cur: &str,
+    opts: &mut ReaderOpts,
+    with_classes: bool,
+) {
+    if let Some(maps) = eval.registry.reader_maps(cur) {
+        opts.aliases = maps.aliases;
+        opts.refers = maps.refers;
+        if with_classes {
+            opts.class_map = maps.class_map;
+        }
+    }
+}
+
+/// Sync `opts` against the evaluator's active current namespace for
+/// `read`.
 pub(crate) fn sync_reader_ns(eval: &Evaluator, opts: &mut ReaderOpts) {
     let cur = eval.current_ns_name();
     opts.current_ns = cur.clone();
@@ -837,11 +858,7 @@ pub(crate) fn sync_reader_ns(eval: &Evaluator, opts: &mut ReaderOpts) {
     // #120: imports feed syntax-quote's class map, so `` `String ``
     // and `` `String/m `` qualify to the imported class (oracle
     // `rsq-imported`, `rsq-qual-imported`).
-    if let Some(maps) = eval.registry.reader_maps(&cur) {
-        opts.aliases = maps.aliases;
-        opts.refers = maps.refers;
-        opts.class_map = maps.class_map;
-    }
+    apply_reader_maps(eval, &cur, opts, true);
 }
 
 /// Extract one read's drain inputs (fired log + span) from a
@@ -1577,5 +1594,43 @@ mod tests {
         let mut hb = DefaultHasher::new();
         b.dyn_hash(&mut hb);
         assert_ne!(ha.finish(), hb.finish());
+    }
+
+    #[test]
+    fn apply_reader_maps_tolerates_missing_ns() {
+        let eval = scratch();
+        let mut opts = ReaderOpts::default();
+        apply_reader_maps(&eval, "missing.ns", &mut opts, true);
+        assert!(opts.aliases.is_empty());
+        apply_reader_maps(&eval, "user", &mut opts, false);
+        apply_reader_maps(&eval, "user", &mut opts, true);
+    }
+
+    #[test]
+    fn more_input_and_feed_chunk_cover_stdin_and_snapshots() {
+        let mut state = StreamState {
+            parser: Reader::new("", &ReaderOpts::default()),
+            stdin: Some(BufReader::new(Box::new(std::io::Cursor::new(
+                b"42\n".to_vec(),
+            )))),
+            closed: false,
+            script_lines: VecDeque::new(),
+        };
+        assert!(more_input(&mut state).unwrap());
+        feed_chunk(&mut state, None, "1");
+        feed_chunk(
+            &mut state,
+            Some(Reader::new("", &ReaderOpts::default())),
+            "2",
+        );
+
+        struct BoomRead;
+        impl std::io::Read for BoomRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("boom"))
+            }
+        }
+        state.stdin = Some(BufReader::new(Box::new(BoomRead)));
+        assert!(more_input(&mut state).is_err());
     }
 }

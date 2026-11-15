@@ -159,6 +159,7 @@ impl<T: Clone> PVec<T> {
     }
 
     /// The item count.
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
@@ -202,7 +203,13 @@ impl<T: Clone> PVec<T> {
         if i >= off {
             return self.tail.get(i - off);
         }
-        self.leaf(i).get(i & MASK)
+        let mut node = self.root.as_deref()?;
+        let mut level = self.shift;
+        while level > 0 {
+            node = node.kids.get((i >> level) & MASK)?;
+            level -= BITS;
+        }
+        node.items.get(i & MASK)
     }
 
     /// The items from `i` to the end of the leaf (or tail) holding

@@ -280,6 +280,32 @@ impl std::fmt::Debug for Vector {
     }
 }
 
+/// Borrowed or copy-out element reference returned by vector lookup
+/// without constructing (and dropping) an owned temporary [`Value`].
+#[derive(Clone, Copy)]
+pub enum ValueRef<'a> {
+    /// Packed integer element.
+    Int(i64),
+    /// Packed character element.
+    Char(char),
+    /// Borrowed element from generic storage.
+    Ref(&'a Value),
+}
+
+impl Vector {
+    /// Borrow or copy out the element at `index` without building a
+    /// temporary [`Value`] (`None` past the end).
+    #[inline(always)]
+    #[must_use]
+    pub fn get_val_ref(&self, index: usize) -> Option<ValueRef<'_>> {
+        match &self.0.inner {
+            VectorInner::Generic(t) => t.get(index).map(ValueRef::Ref),
+            VectorInner::Ints(t) => t.get(index).copied().map(ValueRef::Int),
+            VectorInner::Chars(t) => t.get(index).copied().map(ValueRef::Char),
+        }
+    }
+}
+
 /// Vector storage: the generic trie of values, or the same trie over
 /// packed `i64`s or `char`s (#226: 8 or 4 bytes per element instead
 /// of a 64-byte `Value` — a vector of a string's chars was 16x its
@@ -602,6 +628,65 @@ impl std::fmt::Debug for Map {
     }
 }
 
+impl Map {
+    /// Fast lookup for scalar keys (`Char`, `Keyword`, `Int`, `Bool`,
+    /// `Nil`, `Str`) in inline-shaped maps without hashing or
+    /// recursive [`Value::eq`]. Returns `None` when backed by a trie
+    /// or for non-scalar keys so bitcode helpers can delegate to
+    /// `rt_n_*`.
+    #[inline]
+    #[must_use]
+    pub fn get_small_scalar(&self, k: &Value) -> Option<Option<&Value>> {
+        let small = self.0.small.as_deref()?;
+        if let Value::Char(c) = k {
+            return small
+                .shape
+                .ascii_map
+                .get(*c as usize)
+                .map(|&idx| small.vals.get(idx as usize));
+        }
+        if !is_small_scalar_key(k) {
+            return None;
+        }
+        let pos = small
+            .shape
+            .keys
+            .iter()
+            .position(|ek| small_scalar_eq(ek, k));
+        Some(pos.and_then(|idx| small.vals.get(idx)))
+    }
+
+    /// Entry count without panicking on missing invariants.
+    #[inline]
+    #[must_use]
+    pub fn len_opt(&self) -> Option<usize> {
+        if let Some(small) = &self.0.small {
+            return Some(small.vals.len());
+        }
+        self.0.inner.as_deref().map(|t| t.size())
+    }
+}
+
+#[inline]
+fn is_small_scalar_key(k: &Value) -> bool {
+    matches!(
+        k,
+        Value::Keyword(_) | Value::Int(_) | Value::Bool(_) | Value::Nil | Value::Str(_)
+    )
+}
+
+#[inline]
+fn small_scalar_eq(ek: &Value, k: &Value) -> bool {
+    match (ek, k) {
+        (Value::Keyword(ekw), Value::Keyword(kw)) => ekw.ptr_eq(kw),
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Nil, Value::Nil) => true,
+        (Value::Str(x), Value::Str(y)) => **x == **y,
+        _ => false,
+    }
+}
+
 /// The sort order of a sorted map or set (FT6): natural
 /// (`Util.compare`, nil-first) or a custom comparator fn called as
 /// `(cmp a b)` with `sort-by` number/boolean semantics.
@@ -706,6 +791,7 @@ impl List {
     }
 
     /// The element count.
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.inner.len()
@@ -1089,6 +1175,7 @@ impl Vector {
     }
 
     /// The element count.
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         vector_inner_len(&self.0.inner)
@@ -1125,6 +1212,7 @@ impl Vector {
 }
 
 /// The item count of a vector storage.
+#[inline]
 fn vector_inner_len(inner: &VectorInner) -> usize {
     match inner {
         VectorInner::Generic(t) => t.len(),
@@ -1763,7 +1851,8 @@ impl Map {
                 shape: Arc::clone(&small.shape),
                 vals: small.vals.clone(),
             }));
-        } else if let Some(inner) = data.inner.take() {
+        } else {
+            let inner = data.inner.take().expect("map has small or trie");
             data.inner = Some(Arc::new((*inner).clone()));
         }
         self
@@ -1886,6 +1975,7 @@ impl Set {
     }
 
     /// The element count.
+    #[inline]
     #[must_use]
     pub fn size(&self) -> usize {
         self.0.inner.size()
@@ -2669,13 +2759,12 @@ fn hash_tower_value<H: Hasher>(v: &Value, state: &mut H) {
             hash_bigint_bytes(&unscaled, state);
             state.write_i64(scale);
         }
-        _ => {
-            if let Value::Ratio(r) = v {
-                state.write_u8(25);
-                hash_bigint_bytes(r.numer(), state);
-                hash_bigint_bytes(r.denom(), state);
-            }
+        Value::Ratio(r) => {
+            state.write_u8(25);
+            hash_bigint_bytes(r.numer(), state);
+            hash_bigint_bytes(r.denom(), state);
         }
+        _ => unreachable!("tower gate"),
     }
 }
 
@@ -4307,6 +4396,13 @@ mod tests {
         super::hash_value_rest(&Value::Nil, &mut h);
     }
 
+    #[test]
+    #[should_panic(expected = "tower gate")]
+    fn hash_tower_value_rejects_non_tower() {
+        let mut h = DefaultHasher::new();
+        super::hash_tower_value(&Value::Nil, &mut h);
+    }
+
     fn host_def(kind: HostKind) -> Arc<HostDef> {
         Arc::new(HostDef {
             name: Arc::from("user.T"),
@@ -4397,5 +4493,61 @@ mod tests {
         assert!(plain_equals(&host_inst(&rec), &host_inst(&rec)));
         let typ = host_def(HostKind::Type);
         assert!(!plain_equals(&host_inst(&typ), &host_inst(&typ)));
+    }
+
+    #[test]
+    fn value_ref_and_small_map_scalar_lookup() {
+        use super::{Map, ValueRef, Vector};
+        let vi = Vector::from_ints(vec![11]);
+        let vc = Vector::from_chars(vec!['q']);
+        let vg = Vector::from_vec(vec![Value::Bool(true)]);
+        assert!(matches!(vi.get_val_ref(0), Some(ValueRef::Int(11))));
+        assert!(vi.get_val_ref(1).is_none());
+        assert!(matches!(vc.get_val_ref(0), Some(ValueRef::Char('q'))));
+        assert!(matches!(
+            vg.get_val_ref(0),
+            Some(ValueRef::Ref(Value::Bool(true)))
+        ));
+
+        let kw = Value::Keyword(Keyword::new(None, "a"));
+        let s = Value::Str(Arc::from("k"));
+        let small = Map::from_kvs_last_wins(vec![
+            (Value::Char('a'), Value::Int(1)),
+            (kw.clone(), Value::Int(2)),
+            (Value::Int(7), Value::Int(3)),
+            (Value::Bool(false), Value::Int(4)),
+            (Value::Nil, Value::Int(5)),
+            (s.clone(), Value::Int(6)),
+        ]);
+        assert_eq!(small.len_opt(), Some(6));
+        assert_eq!(
+            small.get_small_scalar(&Value::Char('a')),
+            Some(Some(&Value::Int(1)))
+        );
+        assert_eq!(small.get_small_scalar(&Value::Char('b')), Some(None));
+        assert_eq!(small.get_small_scalar(&Value::Char('é')), None);
+        assert_eq!(small.get_small_scalar(&kw), Some(Some(&Value::Int(2))));
+        assert_eq!(
+            small.get_small_scalar(&Value::Int(7)),
+            Some(Some(&Value::Int(3)))
+        );
+        assert_eq!(
+            small.get_small_scalar(&Value::Bool(false)),
+            Some(Some(&Value::Int(4)))
+        );
+        assert_eq!(
+            small.get_small_scalar(&Value::Nil),
+            Some(Some(&Value::Int(5)))
+        );
+        assert_eq!(small.get_small_scalar(&s), Some(Some(&Value::Int(6))));
+        assert_eq!(small.get_small_scalar(&Value::Vector(vi)), None);
+
+        let large = Map::from_kvs_last_wins(
+            (0..20)
+                .map(|i| (Value::Int(i), Value::Int(i * 10)))
+                .collect(),
+        );
+        assert_eq!(large.len_opt(), Some(20));
+        assert_eq!(large.get_small_scalar(&Value::Int(0)), None);
     }
 }

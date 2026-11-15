@@ -86,8 +86,10 @@ pub fn front_end(eval: &mut Evaluator, text: &str, path: &str) -> Result<FrontEn
     );
     let script = crate::script::run_script(&[], &format!("({FRONT_NS}/front-end)"));
     eval.eval_source(&script)?;
-    let out = slot.lock().expect("front-end slot").take();
-    out.unwrap_or_else(|| Err(SourceError::Internal("front end did not run".to_owned())))
+    slot.lock()
+        .expect("front-end slot")
+        .take()
+        .expect("front-end ran")
 }
 
 /// The build-time namespace holding the front-end entry.
@@ -281,7 +283,8 @@ fn fun_children<'a>(fun: &'a FunExpr, f: &mut dyn FnMut(&'a Expr)) {
     }
 }
 
-fn pattern_children<'a>(pat: &'a Pattern, f: &mut dyn FnMut(&'a Expr)) {
+/// Visit every `:or` default expression nested anywhere in `pat`.
+pub fn pattern_children<'a>(pat: &'a Pattern, f: &mut dyn FnMut(&'a Expr)) {
     match pat {
         Pattern::Symbol(_) => {}
         Pattern::Vec(v) => {
@@ -294,5 +297,24 @@ fn pattern_children<'a>(pat: &'a Pattern, f: &mut dyn FnMut(&'a Expr)) {
                 .for_each(|(p, _, _, _)| pattern_children(p, f));
             m.or.iter().for_each(|(_, e)| f(e));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::front_end;
+    use crate::eval::SourceError;
+    use crate::ns::boot;
+
+    #[test]
+    fn front_end_reports_macroexpansion_errors() {
+        let mut eval = boot();
+        let err = front_end(
+            &mut eval,
+            "(defmacro bad [] (throw (ex-info \"boom\" {}))) (bad)",
+            "t.clj",
+        )
+        .unwrap_err();
+        assert!(matches!(err, SourceError::Compile(_)), "{err:?}");
     }
 }
