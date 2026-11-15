@@ -40,6 +40,9 @@ use inkwell::types::{
 };
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, FunctionValue, IntValue, PointerValue};
 
+#[path = "scalar.rs"]
+mod scalar;
+
 /// "No index" for optional table indices (matches `clj-rt`).
 const NONE: u64 = u64::MAX;
 
@@ -92,6 +95,18 @@ enum LocalRef<'ctx> {
 struct RecurTarget<'ctx> {
     header: BasicBlock<'ctx>,
     patterns: Vec<(Pattern, Vec<PointerValue<'ctx>>)>,
+}
+
+/// How a lowered boolean/comparison operation delivers its `i1` result.
+enum BoolSink<'ctx> {
+    Slot {
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+    },
+    Jump {
+        join: BasicBlock<'ctx>,
+        phi: inkwell::values::PhiValue<'ctx>,
+    },
 }
 
 /// Per-function lowering state.
@@ -147,6 +162,8 @@ pub struct Lowerer<'ctx> {
     /// Direct-call targets by var: fn index and `(fixed, variadic,
     /// code)` arities.
     direct: HashMap<(String, String), (usize, Vec<ArityCode<'ctx>>)>,
+    /// Single-def top-level fn arities eligible for scalar-loop callee inlining.
+    callees: HashMap<(String, String), std::sync::Arc<[Arity]>>,
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -188,6 +205,7 @@ impl<'ctx> Lowerer<'ctx> {
             fast_vars,
             reserved: HashMap::new(),
             direct: HashMap::new(),
+            callees: HashMap::new(),
         }
     }
 
@@ -264,6 +282,10 @@ impl<'ctx> Lowerer<'ctx> {
             self.reserved
                 .insert(std::ptr::from_ref(fun) as usize, (k, funcs));
             self.direct.insert(key(sym), (k, arities));
+            if self.inline_arith {
+                self.callees
+                    .insert(key(sym), std::sync::Arc::clone(&fun.arities));
+            }
         }
     }
 
@@ -506,6 +528,13 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
+    fn drop_and_nil_slots(&self, func: FunctionValue<'ctx>, slots: &[PointerValue<'ctx>]) {
+        for slot in slots {
+            self.drop_v(func, *slot);
+            self.write_tag(*slot, 0);
+        }
+    }
+
     // ---- inline value primitives (`Value` is `repr(u8)`: tag byte at 0,
     // `Bool` payload at 1, `Int`/`Double` payload at 8; POD tags are
     // Nil 0, Bool 1, Int 2, Double 3, Char 9) ---------------------------
@@ -588,17 +617,17 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// `FastArith` over numeric (int/double) args when not all ints:
     /// computes in `f64` (at least one arg is a double), else `slow`.
-    fn lower_double_arith(
+    /// Branch to `go` (and return loaded numeric `f64` operands) when all `elems`
+    /// are ints or floats; else branch to `slow`.
+    fn lower_float_operands(
         &self,
         f: &FnCtx<'ctx>,
-        op: clj_eval::ext::FastArith,
         elems: &[PointerValue<'ctx>],
-        dest: PointerValue<'ctx>,
         slow: BasicBlock<'ctx>,
-        done: BasicBlock<'ctx>,
+    ) -> (
+        inkwell::values::FloatValue<'ctx>,
+        inkwell::values::FloatValue<'ctx>,
     ) {
-        use clj_eval::ext::FastArith;
-        use inkwell::FloatPredicate;
         let mut numeric = self.ctx.bool_type().const_int(1, false);
         for e in elems {
             let t = self.tag(*e);
@@ -627,28 +656,52 @@ impl<'ctx> Lowerer<'ctx> {
         } else {
             one
         };
+        (x, y)
+    }
+
+    fn lower_double_cmp(
+        &self,
+        f: &FnCtx<'ctx>,
+        op: clj_eval::ext::FastArith,
+        elems: &[PointerValue<'ctx>],
+        sink: &BoolSink<'ctx>,
+        slow: BasicBlock<'ctx>,
+    ) {
+        use clj_eval::ext::FastArith;
+        use inkwell::FloatPredicate;
+        let (x, y) = self.lower_float_operands(f, elems, slow);
+        let pred = match op {
+            FastArith::Lt => FloatPredicate::OLT,
+            FastArith::Lte => FloatPredicate::OLE,
+            FastArith::Gt => FloatPredicate::OGT,
+            _ => FloatPredicate::OGE,
+        };
+        let r = self
+            .builder
+            .build_float_compare(pred, x, y, "fc")
+            .expect("fcmp");
+        self.finish_bool(f.func, sink, r);
+    }
+
+    fn lower_double_arith(
+        &self,
+        f: &FnCtx<'ctx>,
+        op: clj_eval::ext::FastArith,
+        elems: &[PointerValue<'ctx>],
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        use clj_eval::ext::FastArith;
+        let (x, y) = self.lower_float_operands(f, elems, slow);
         let b = &self.builder;
-        match op {
-            FastArith::Lt | FastArith::Lte | FastArith::Gt | FastArith::Gte => {
-                let pred = match op {
-                    FastArith::Lt => FloatPredicate::OLT,
-                    FastArith::Lte => FloatPredicate::OLE,
-                    FastArith::Gt => FloatPredicate::OGT,
-                    _ => FloatPredicate::OGE,
-                };
-                let r = b.build_float_compare(pred, x, y, "fc").expect("fcmp");
-                self.write_bool(f.func, dest, r);
-            }
-            _ => {
-                let r = match op {
-                    FastArith::Add | FastArith::Inc => b.build_float_add(x, y, "fa"),
-                    FastArith::Sub | FastArith::Dec => b.build_float_sub(x, y, "fs"),
-                    _ => b.build_float_mul(x, y, "fm"),
-                }
-                .expect("fop");
-                self.write_double(f.func, dest, r);
-            }
+        let r = match op {
+            FastArith::Add | FastArith::Inc => b.build_float_add(x, y, "fa"),
+            FastArith::Sub | FastArith::Dec => b.build_float_sub(x, y, "fs"),
+            _ => b.build_float_mul(x, y, "fm"),
         }
+        .expect("fop");
+        self.write_double(f.func, dest, r);
         self.builder.build_unconditional_branch(done).expect("br");
     }
 
@@ -1156,6 +1209,20 @@ impl<'ctx> Lowerer<'ctx> {
         self.lower(f, last, dest)
     }
 
+    fn bc_fx_call<'a>(
+        &self,
+        expr: &'a Expr,
+    ) -> Option<(&'a clj_eval::expr::DirectCall, &'static str)> {
+        let Expr::DirectNative(call) = expr else {
+            return None;
+        };
+        (self.inline_arith && self.use_bitcode && call.var.sym.namespace() == Some("clojure.core"))
+            .then(|| {
+                clj_bc::bc_fx_symbol(call.var.sym.name(), call.args.len()).map(|s| (&**call, s))
+            })
+            .flatten()
+    }
+
     fn lower_discard(&mut self, f: &mut FnCtx<'ctx>, expr: &Expr) -> Result<(), Unsupported> {
         if let Expr::DirectNative(call) = expr {
             if self.try_lower_assoc_conj(f, call, None)? {
@@ -1166,17 +1233,7 @@ impl<'ctx> Lowerer<'ctx> {
             }
         }
         let t = self.slot(f);
-        let fx_sym = match expr {
-            Expr::DirectNative(call)
-                if self.inline_arith
-                    && self.use_bitcode
-                    && call.var.sym.namespace() == Some("clojure.core") =>
-            {
-                clj_bc::bc_fx_symbol(call.var.sym.name(), call.args.len()).map(|s| (call, s))
-            }
-            _ => None,
-        };
-        if let Some((call, sym)) = fx_sym {
+        if let Some((call, sym)) = self.bc_fx_call(expr) {
             self.lower_direct_with(f, call, Some(sym), t)?;
         } else {
             self.lower(f, expr, t)?;
@@ -1809,7 +1866,10 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let h = self.slot(f);
         self.lower(f, head, h)?;
-        let arr = self.lower_args(f, args)?;
+        let (arr, elems) = self.slot_array(f, args.len());
+        for (a, e) in args.iter().zip(&elems) {
+            self.lower(f, a, *e)?;
+        }
         let aref = self.slots_ref(f, arr, args.len());
         let st = self
             .call(
@@ -1819,6 +1879,9 @@ impl<'ctx> Lowerer<'ctx> {
             )
             .expect("st");
         self.check(f, st);
+        self.drop_v(f.func, h);
+        self.write_tag(h, 0);
+        self.drop_and_nil_slots(f.func, &elems);
         Ok(())
     }
 
@@ -1839,6 +1902,8 @@ impl<'ctx> Lowerer<'ctx> {
         // right after the call. Computed args are owned there.
         let (arr, elems) = self.slot_array(f, args.len());
         let mut aliases = Vec::new();
+        let mut temps = Vec::new();
+        let mut moved = Vec::new();
         for (i, (a, e)) in args.iter().zip(&elems).enumerate() {
             let local = match a {
                 Expr::Local(idx) => self.borrowable_before(f, *idx, &args[i + 1..]),
@@ -1847,8 +1912,12 @@ impl<'ctx> Lowerer<'ctx> {
             if let Some(p) = local {
                 self.copy_bits(*e, p);
                 aliases.push(*e);
+                if is_move(f, a) {
+                    moved.push(p);
+                }
             } else {
                 self.lower(f, a, *e)?;
+                temps.push(*e);
             }
         }
         let ok = self
@@ -1904,6 +1973,8 @@ impl<'ctx> Lowerer<'ctx> {
         self.check(f, st);
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
+        self.drop_and_nil_slots(f.func, &temps);
+        self.drop_and_nil_slots(f.func, &moved);
         Ok(())
     }
 
@@ -1961,26 +2032,26 @@ impl<'ctx> Lowerer<'ctx> {
         let k = self.var_of(&call.var);
         let n = call.args.len();
         let fast = fast_op(call.fast, n);
-        let core_name = (call.var.sym.namespace() == Some("clojure.core"))
-            .then(|| call.var.sym.name().to_owned());
+        let ns = call.var.sym.namespace();
+        let name = call.var.sym.name();
+        let core_name = (ns == Some("clojure.core")).then(|| name.to_owned());
         let has_own_op = core_name
             .as_deref()
-            .and_then(|name| native_abi::own_op(name, n))
+            .and_then(|cname| native_abi::own_op(cname, n))
             .is_some();
-        let moving = bc_override.is_none()
+        let bc_sym = bc_override.or_else(|| {
+            (fast.is_none() && self.use_bitcode)
+                .then(|| clj_bc::bc_ns_op_symbol(ns, name, n))
+                .flatten()
+        });
+        let moving = bc_sym.is_none()
             && fast.is_none()
             && (has_own_op
-                || (is_owned_move_op(core_name.as_deref(), n)
-                    && call.args.iter().any(|a| is_move(f, a))));
+                || (is_owned_move_op(ns, name, n) && call.args.iter().any(|a| is_move(f, a))));
         if moving {
             return self.lower_direct_moving(f, call, k, core_name.as_deref(), dest);
         }
-        let bc_sym = bc_override.or_else(|| {
-            (fast.is_none() && self.use_bitcode)
-                .then(|| clj_bc::bc_ns_op_symbol(call.var.sym.namespace(), call.var.sym.name(), n))
-                .flatten()
-        });
-        let (refs, temps) = self.arg_refs(f, &call.args, dest)?;
+        let (refs, temps, moved) = self.arg_refs(f, &call.args, dest)?;
         let slow = self.ctx.append_basic_block(f.func, "native_slow");
         let done = self.ctx.append_basic_block(f.func, "native_done");
         self.emit_direct_inline(
@@ -1994,7 +2065,8 @@ impl<'ctx> Lowerer<'ctx> {
             done,
         );
         self.emit_direct_slow(f, &refs, k, n, core_name.as_deref(), dest, slow, done);
-        self.drop_slots(f.func, &temps);
+        self.drop_and_nil_slots(f.func, &temps);
+        self.drop_and_nil_slots(f.func, &moved);
         Ok(())
     }
 
@@ -2199,18 +2271,26 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// Each argument as a slot the call may borrow: a plain local's own
     /// slot (no clone; never `dest`, which the call writes), else a
-    /// fresh slot holding the lowered argument. Returns the pointers and
-    /// the fresh slots (`temps`, dropped after the call). Locals are
-    /// immutable, so borrowing one reads the same value its evaluation
-    /// would have copied.
+    /// fresh slot holding the lowered argument. Returns the pointers,
+    /// the fresh slots (`temps`), and any borrowed local slots at their
+    /// last use (`moved`) to release right after the call completes.
+    #[allow(clippy::type_complexity)]
     fn arg_refs(
         &mut self,
         f: &mut FnCtx<'ctx>,
         args: &[Expr],
         dest: PointerValue<'ctx>,
-    ) -> Result<(Vec<PointerValue<'ctx>>, Vec<PointerValue<'ctx>>), Unsupported> {
+    ) -> Result<
+        (
+            Vec<PointerValue<'ctx>>,
+            Vec<PointerValue<'ctx>>,
+            Vec<PointerValue<'ctx>>,
+        ),
+        Unsupported,
+    > {
         let mut refs = Vec::with_capacity(args.len());
         let mut temps = Vec::new();
+        let mut moved = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let local = match a {
                 Expr::Local(idx) => self.borrowable_before(f, *idx, &args[i + 1..]),
@@ -2218,6 +2298,9 @@ impl<'ctx> Lowerer<'ctx> {
             };
             if let Some(p) = local.filter(|p| *p != dest) {
                 refs.push(p);
+                if is_move(f, a) {
+                    moved.push(p);
+                }
             } else {
                 let t = self.slot(f);
                 self.lower(f, a, t)?;
@@ -2225,7 +2308,7 @@ impl<'ctx> Lowerer<'ctx> {
                 temps.push(t);
             }
         }
-        Ok((refs, temps))
+        Ok((refs, temps, moved))
     }
 
     /// The slot holding local `idx`'s value, when it can be borrowed
@@ -2286,6 +2369,13 @@ impl<'ctx> Lowerer<'ctx> {
         done: BasicBlock<'ctx>,
     ) {
         use clj_eval::ext::FastArith;
+        if matches!(
+            op,
+            FastArith::Lt | FastArith::Lte | FastArith::Gt | FastArith::Gte
+        ) {
+            self.lower_cmp_arith(f, op, elems, &BoolSink::Slot { dest, done }, slow);
+            return;
+        }
         let n = elems.len();
         let two = self.i8t.const_int(2, false);
         let mut ints = self
@@ -2314,59 +2404,61 @@ impl<'ctx> Lowerer<'ctx> {
         } else {
             self.i64t.const_int(1, false)
         };
-        let cmp = |pred: IntPredicate, me: &Self| {
-            me.builder
-                .build_int_compare(pred, a, b, "cmp")
-                .expect("cmp")
+        let name = match op {
+            FastArith::Add | FastArith::Inc => "llvm.sadd.with.overflow",
+            FastArith::Sub | FastArith::Dec => "llvm.ssub.with.overflow",
+            _ => "llvm.smul.with.overflow",
         };
-        match op {
-            FastArith::Lt | FastArith::Lte | FastArith::Gt | FastArith::Gte => {
-                let pred = match op {
-                    FastArith::Lt => IntPredicate::SLT,
-                    FastArith::Lte => IntPredicate::SLE,
-                    FastArith::Gt => IntPredicate::SGT,
-                    _ => IntPredicate::SGE,
-                };
-                let r = cmp(pred, self);
-                self.write_bool(f.func, dest, r);
-                self.builder.build_unconditional_branch(done).expect("br");
-            }
-            _ => {
-                let name = match op {
-                    FastArith::Add | FastArith::Inc => "llvm.sadd.with.overflow",
-                    FastArith::Sub | FastArith::Dec => "llvm.ssub.with.overflow",
-                    _ => "llvm.smul.with.overflow",
-                };
-                let intr = inkwell::intrinsics::Intrinsic::find(name).expect("intrinsic");
-                let decl = intr
-                    .get_declaration(&self.module, &[self.i64t.into()])
-                    .expect("decl");
-                let pair = self
-                    .builder
-                    .build_call(decl, &[a.into(), b.into()], "ov")
-                    .expect("call")
-                    .try_as_basic_value()
-                    .expect_basic("pair")
-                    .into_struct_value();
-                let r = self
-                    .builder
-                    .build_extract_value(pair, 0, "r")
-                    .expect("ext")
-                    .into_int_value();
-                let o = self
-                    .builder
-                    .build_extract_value(pair, 1, "o")
-                    .expect("ext")
-                    .into_int_value();
-                let okb = self.ctx.append_basic_block(f.func, "native_ok");
-                self.builder
-                    .build_conditional_branch(o, slow, okb)
-                    .expect("br");
-                self.builder.position_at_end(okb);
-                self.write_int(f.func, dest, r);
-                self.builder.build_unconditional_branch(done).expect("br");
-            }
-        }
+        let intr = inkwell::intrinsics::Intrinsic::find(name).expect("intrinsic");
+        let decl = intr
+            .get_declaration(&self.module, &[self.i64t.into()])
+            .expect("decl");
+        let pair = self
+            .builder
+            .build_call(decl, &[a.into(), b.into()], "ov")
+            .expect("call")
+            .try_as_basic_value()
+            .expect_basic("pair")
+            .into_struct_value();
+        let r = self
+            .builder
+            .build_extract_value(pair, 0, "r")
+            .expect("ext")
+            .into_int_value();
+        let o = self
+            .builder
+            .build_extract_value(pair, 1, "o")
+            .expect("ext")
+            .into_int_value();
+        let okb = self.ctx.append_basic_block(f.func, "native_ok");
+        self.builder
+            .build_conditional_branch(o, slow, okb)
+            .expect("br");
+        self.builder.position_at_end(okb);
+        self.write_int(f.func, dest, r);
+        self.builder.build_unconditional_branch(done).expect("br");
+    }
+
+    fn emit_int_cmp(
+        &self,
+        f: &FnCtx<'ctx>,
+        op: clj_eval::ext::FastArith,
+        a: IntValue<'ctx>,
+        b: IntValue<'ctx>,
+        sink: &BoolSink<'ctx>,
+    ) {
+        use clj_eval::ext::FastArith;
+        let pred = match op {
+            FastArith::Lt => IntPredicate::SLT,
+            FastArith::Lte => IntPredicate::SLE,
+            FastArith::Gt => IntPredicate::SGT,
+            _ => IntPredicate::SGE,
+        };
+        let r = self
+            .builder
+            .build_int_compare(pred, a, b, "cmp")
+            .expect("cmp");
+        self.finish_bool(f.func, sink, r);
     }
 
     /// The slow block (the var's native, args moved in) and the join.
@@ -2543,24 +2635,37 @@ impl<'ctx> Lowerer<'ctx> {
     /// on `Int` args and branch to `slow` otherwise; every emitted
     /// fast path ends by branching to `done`, and the caller positions
     /// at `slow` next.
-    fn lower_intrinsic(
-        &mut self,
+    fn finish_bool(&self, func: FunctionValue<'ctx>, sink: &BoolSink<'ctx>, bit: IntValue<'ctx>) {
+        let cur = self.builder.get_insert_block().expect("bb");
+        match sink {
+            BoolSink::Slot { dest, done } => {
+                self.write_bool(func, *dest, bit);
+                self.builder.build_unconditional_branch(*done).expect("br");
+            }
+            BoolSink::Jump { join, phi } => {
+                phi.add_incoming(&[(&bit, cur)]);
+                self.builder.build_unconditional_branch(*join).expect("br");
+            }
+        }
+    }
+
+    /// Inline predicate intrinsics (`nil?`, `some?`, `not`, `=`, `not=`, `==`,
+    /// `zero?`, `pos?`, `neg?`, `even?`, `odd?`), emitting directly into `sink`.
+    fn lower_pred_intrinsic(
+        &self,
         f: &FnCtx<'ctx>,
         name: &str,
         a: &[PointerValue<'ctx>],
-        dest: PointerValue<'ctx>,
+        sink: &BoolSink<'ctx>,
         slow: BasicBlock<'ctx>,
-        done: BasicBlock<'ctx>,
     ) -> bool {
-        let n = a.len();
-        match (name, n) {
+        match (name, a.len()) {
             ("nil?" | "some?" | "not", 1) => {
                 let r = self.any_pred(name, a[0]);
-                self.write_bool(f.func, dest, r);
+                self.finish_bool(f.func, sink, r);
+                true
             }
             ("=" | "not=", 2) => {
-                // Ints inline; anything else takes `slow` (the VM's
-                // inline op, then the native).
                 let other = self.ctx.append_basic_block(f.func, "eq_other");
                 self.when_ints(f, a, other);
                 let (x, y) = (self.int_payload(a[0]), self.int_payload(a[1]));
@@ -2573,9 +2678,7 @@ impl<'ctx> Lowerer<'ctx> {
                     .builder
                     .build_int_compare(pred, x, y, "eq")
                     .expect("cmp");
-                self.write_bool(f.func, dest, r);
-                self.builder.build_unconditional_branch(done).expect("br");
-                // Chars compare by code point; anything else takes `slow`.
+                self.finish_bool(f.func, sink, r);
                 self.builder.position_at_end(other);
                 self.when_tag(f, a, TAG_CHAR, slow);
                 let (x, y) = (self.char_payload(a[0]), self.char_payload(a[1]));
@@ -2583,8 +2686,82 @@ impl<'ctx> Lowerer<'ctx> {
                     .builder
                     .build_int_compare(pred, x, y, "ceq")
                     .expect("cmp");
-                self.write_bool(f.func, dest, r);
+                self.finish_bool(f.func, sink, r);
+                true
             }
+            ("==", 2) => {
+                self.when_ints(f, a, slow);
+                let (x, y) = (self.int_payload(a[0]), self.int_payload(a[1]));
+                let r = self
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, x, y, "eq")
+                    .expect("cmp");
+                self.finish_bool(f.func, sink, r);
+                true
+            }
+            ("zero?" | "pos?" | "neg?" | "even?" | "odd?", 1) => {
+                self.when_ints(f, a, slow);
+                let r = self.int_pred(name, self.int_payload(a[0]));
+                self.finish_bool(f.func, sink, r);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Lower a scalar-result comparison (`<`, `<=`, `>`, `>=`) into `sink` without
+    /// boxing intermediate booleans when `sink` is a branch jump.
+    fn lower_cmp_arith(
+        &self,
+        f: &FnCtx<'ctx>,
+        op: clj_eval::ext::FastArith,
+        elems: &[PointerValue<'ctx>],
+        sink: &BoolSink<'ctx>,
+        slow: BasicBlock<'ctx>,
+    ) {
+        let two = self.i8t.const_int(2, false);
+        let a_int = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, self.tag(elems[0]), two, "a_int")
+            .expect("cmp");
+        let b_int = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, self.tag(elems[1]), two, "b_int")
+            .expect("cmp");
+        let ints = self.builder.build_and(a_int, b_int, "ints").expect("and");
+        let fastb = self.ctx.append_basic_block(f.func, "cmp_fast");
+        let dbl_check = self.ctx.append_basic_block(f.func, "cmp_dbl_check");
+        self.builder
+            .build_conditional_branch(ints, fastb, dbl_check)
+            .expect("br");
+        // Doubles (and int/double mixes): f64 math like the native.
+        self.builder.position_at_end(dbl_check);
+        self.lower_double_cmp(f, op, elems, sink, slow);
+        self.builder.position_at_end(fastb);
+        self.emit_int_cmp(
+            f,
+            op,
+            self.int_payload(elems[0]),
+            self.int_payload(elems[1]),
+            sink,
+        );
+    }
+
+    fn lower_intrinsic(
+        &mut self,
+        f: &FnCtx<'ctx>,
+        name: &str,
+        a: &[PointerValue<'ctx>],
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) -> bool {
+        let sink = BoolSink::Slot { dest, done };
+        if self.lower_pred_intrinsic(f, name, a, &sink, slow) {
+            return true;
+        }
+        let n = a.len();
+        match (name, n) {
             ("int" | "long", 1) => {
                 // A char's code point (always in range); anything else
                 // takes `slow`.
@@ -2595,20 +2772,6 @@ impl<'ctx> Lowerer<'ctx> {
                     .build_int_z_extend(c, self.i64t, "cp")
                     .expect("zext");
                 self.write_int(f.func, dest, n);
-            }
-            ("==", 2) => {
-                self.when_ints(f, a, slow);
-                let (x, y) = (self.int_payload(a[0]), self.int_payload(a[1]));
-                let r = self
-                    .builder
-                    .build_int_compare(IntPredicate::EQ, x, y, "eq")
-                    .expect("cmp");
-                self.write_bool(f.func, dest, r);
-            }
-            ("zero?" | "pos?" | "neg?" | "even?" | "odd?", 1) => {
-                self.when_ints(f, a, slow);
-                let r = self.int_pred(name, self.int_payload(a[0]));
-                self.write_bool(f.func, dest, r);
             }
             ("quot" | "rem" | "mod" | "max" | "min", 2)
             | (
@@ -2723,6 +2886,171 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.build_and(non_nil, ok, "truthy").expect("and")
     }
 
+    fn lower_cond_short_circuit(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        a: &Expr,
+        b: &Expr,
+        is_and: bool,
+        then_b: BasicBlock<'ctx>,
+        else_b: BasicBlock<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let next_b = self.ctx.append_basic_block(f.func, "cond.next");
+        if is_and {
+            self.lower_cond(f, a, next_b, else_b)?;
+        } else {
+            self.lower_cond(f, a, then_b, next_b)?;
+        }
+        self.builder.position_at_end(next_b);
+        let mark = f.env.len();
+        f.env.push(None);
+        let r = self.lower_cond(f, b, then_b, else_b);
+        f.env.truncate(mark);
+        r
+    }
+
+    fn lower_cond_if(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        test: &Expr,
+        then: &Expr,
+        els: &Expr,
+        then_b: BasicBlock<'ctx>,
+        else_b: BasicBlock<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let tb = self.ctx.append_basic_block(f.func, "cond.then");
+        let eb = self.ctx.append_basic_block(f.func, "cond.else");
+        self.lower_cond(f, test, tb, eb)?;
+        self.builder.position_at_end(tb);
+        self.lower_cond(f, then, then_b, else_b)?;
+        self.builder.position_at_end(eb);
+        self.lower_cond(f, els, then_b, else_b)
+    }
+
+    /// Branch to `then_b` when `test` is truthy, else `else_b`, lowering
+    /// short-circuit `and`/`or`, `not`, `if`, and inline predicates without
+    /// boxing intermediate booleans.
+    fn lower_cond(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        test: &Expr,
+        then_b: BasicBlock<'ctx>,
+        else_b: BasicBlock<'ctx>,
+    ) -> Result<(), Unsupported> {
+        if let Some((a, b, is_and)) = clj_eval::and_or_test(test, f.env.len()) {
+            return self.lower_cond_short_circuit(f, a, b, is_and, then_b, else_b);
+        }
+        match test {
+            Expr::Literal(v) => {
+                let target = if matches!(v, Value::Nil | Value::Bool(false)) {
+                    else_b
+                } else {
+                    then_b
+                };
+                self.builder.build_unconditional_branch(target).expect("br");
+                return Ok(());
+            }
+            Expr::If {
+                test: itest,
+                then,
+                els,
+            } => {
+                return self.lower_cond_if(f, itest, then, els, then_b, else_b);
+            }
+            Expr::DirectNative(call)
+                if self.inline_arith && self.try_lower_cond_call(f, call, then_b, else_b)? =>
+            {
+                return Ok(());
+            }
+            _ => {}
+        }
+        let t = self.slot(f);
+        self.lower(f, test, t)?;
+        let cond = self.truthy(t);
+        self.drop_v(f.func, t);
+        self.write_tag(t, 0);
+        self.builder
+            .build_conditional_branch(cond, then_b, else_b)
+            .expect("br");
+        Ok(())
+    }
+
+    fn try_lower_cond_call(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        then_b: BasicBlock<'ctx>,
+        else_b: BasicBlock<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        use clj_eval::ext::FastArith;
+        if call.var.sym.namespace() != Some("clojure.core") {
+            return Ok(false);
+        }
+        let name = call.var.sym.name();
+        let n = call.args.len();
+        if name == "not" && n == 1 {
+            self.lower_cond(f, &call.args[0], else_b, then_b)?;
+            return Ok(true);
+        }
+        let fast = fast_op(call.fast, n);
+        let is_cmp = n == 2
+            && matches!(
+                fast,
+                Some(FastArith::Lt | FastArith::Lte | FastArith::Gt | FastArith::Gte)
+            );
+        let is_pred = matches!(
+            (name, n),
+            (
+                "nil?" | "some?" | "zero?" | "pos?" | "neg?" | "even?" | "odd?",
+                1
+            ) | ("=" | "not=" | "==", 2)
+        );
+        if !is_cmp && !is_pred {
+            return Ok(false);
+        }
+        let slow_t = self.slot(f);
+        let (refs, temps, moved) = self.arg_refs(f, &call.args, slow_t)?;
+        let join = self.ctx.append_basic_block(f.func, "cond.join");
+        let here = self.builder.get_insert_block().expect("bb");
+        self.builder.position_at_end(join);
+        let phi = self
+            .builder
+            .build_phi(self.ctx.bool_type(), "cond")
+            .expect("phi");
+        self.builder.position_at_end(here);
+        let sink = BoolSink::Jump { join, phi };
+        let slow = self.ctx.append_basic_block(f.func, "cond.slow");
+        let slow_done = self.ctx.append_basic_block(f.func, "cond.slow_done");
+        let bc_sym = (fast.is_none() && self.use_bitcode)
+            .then(|| clj_bc::bc_op_symbol(name, n))
+            .flatten();
+        let bc_block = bc_sym.map(|_| self.ctx.append_basic_block(f.func, "cond.bc"));
+        let miss = bc_block.unwrap_or(slow);
+        if is_cmp {
+            self.lower_cmp_arith(f, fast.expect("cmp"), &refs, &sink, miss);
+        } else {
+            self.lower_pred_intrinsic(f, name, &refs, &sink, miss);
+        }
+        if let (Some(sym), Some(bb)) = (bc_sym, bc_block) {
+            self.emit_bc_op(f.func, bb, sym, &refs, slow_t, slow, slow_done);
+        }
+        let k = self.var_of(&call.var);
+        self.emit_direct_slow(f, &refs, k, n, Some(name), slow_t, slow, slow_done);
+        self.builder.position_at_end(slow_done);
+        let sc = self.truthy(slow_t);
+        self.drop_v(f.func, slow_t);
+        self.write_tag(slow_t, 0);
+        self.finish_bool(f.func, &sink, sc);
+        self.builder.position_at_end(join);
+        self.drop_and_nil_slots(f.func, &temps);
+        self.drop_and_nil_slots(f.func, &moved);
+        let bit = phi.as_basic_value().into_int_value();
+        self.builder
+            .build_conditional_branch(bit, then_b, else_b)
+            .expect("br");
+        Ok(true)
+    }
+
     fn lower_if(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -2731,15 +3059,10 @@ impl<'ctx> Lowerer<'ctx> {
         els: &Expr,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
-        let t = self.slot(f);
-        self.lower(f, test, t)?;
-        let cond = self.truthy(t);
         let then_b = self.ctx.append_basic_block(f.func, "then");
         let else_b = self.ctx.append_basic_block(f.func, "else");
         let merge = self.ctx.append_basic_block(f.func, "merge");
-        self.builder
-            .build_conditional_branch(cond, then_b, else_b)
-            .expect("br");
+        self.lower_cond(f, test, then_b, else_b)?;
         self.builder.position_at_end(then_b);
         self.lower(f, then, dest)?;
         self.builder.build_unconditional_branch(merge).expect("br");
@@ -2757,6 +3080,9 @@ impl<'ctx> Lowerer<'ctx> {
         body: &[Expr],
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
+        if self.try_lower_scalar_loop(f, bindings, body, dest)? {
+            return Ok(());
+        }
         let depth = f.env.len();
         let mut bound = Vec::new();
         let mut targets = Vec::new();
@@ -3403,15 +3729,22 @@ fn self_recurs(body: &[Expr]) -> bool {
     body.iter().any(walk)
 }
 
-/// Whether a direct core call can reuse moved (`Arc::strong_count == 1`)
-/// immutable collections; other ops use borrowed reads / `clj-bc` fast paths.
-fn is_owned_move_op(core_name: Option<&str>, argc: usize) -> bool {
-    match core_name {
-        Some("assoc") => argc >= 3 && argc % 2 == 1,
-        Some("conj" | "into" | "merge" | "dissoc" | "disj") => argc >= 2,
-        Some("pop" | "next" | "rest" | "transient" | "persistent!") => argc == 1,
-        Some("assoc-in") => argc == 3,
-        Some("update" | "update-in") => argc >= 3,
+/// Whether a direct call has an owned-args entry that can reuse moved
+/// (`Arc::strong_count == 1`) collections or release consumed inputs early.
+fn is_owned_move_op(ns: Option<&str>, name: &str, argc: usize) -> bool {
+    match (ns, name) {
+        (Some("clojure.string"), "join") => argc == 2,
+        (Some("clojure.core"), "assoc") => argc >= 3 && argc % 2 == 1,
+        (Some("clojure.core"), "conj" | "into" | "merge" | "dissoc" | "disj") => argc >= 2,
+        (Some("clojure.core"), "pop" | "next" | "rest" | "transient" | "persistent!") => argc == 1,
+        (Some("clojure.core"), "assoc-in") => argc == 3,
+        (Some("clojure.core"), "update" | "update-in") => argc >= 3,
+        (
+            Some("clojure.core"),
+            "str" | "vec" | "set" | "butlast" | "doall" | "dorun" | "drop-last" | "take-last"
+            | "frequencies" | "reverse" | "sort" | "sort-by" | "group-by" | "some" | "every?"
+            | "not-every?" | "not-any?" | "mapv" | "filterv" | "reduce" | "transduce",
+        ) => argc >= 1,
         _ => false,
     }
 }
@@ -3600,14 +3933,16 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(())
     }
 
-    /// Effect-only `(conj! coll x)` via `rt_n_conj_bang_fx` (no
-    /// transient clone/drop), falling back to ordinary lowering on 0.
+    /// Effect-only `(conj! coll x)` via inlined `rt_bc_2_conj_bang_fx` (when
+    /// bitcode enabled) + `rt_n_conj_bang_fx` (no transient clone/drop), falling
+    /// back to ordinary lowering on `0`.
     fn try_lower_conj_bang_fx(
         &mut self,
         f: &mut FnCtx<'ctx>,
         call: &clj_eval::expr::DirectCall,
     ) -> Result<bool, Unsupported> {
         if !self.inline_arith
+            || !self.use_bitcode
             || call.var.sym.namespace() != Some("clojure.core")
             || call.var.sym.name() != "conj!"
             || call.args.len() != 2
@@ -3615,7 +3950,24 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(false);
         }
         let tmp = self.slot(f);
-        let (refs, temps) = self.arg_refs(f, &call.args, tmp)?;
+        let (refs, temps, moved) = self.arg_refs(f, &call.args, tmp)?;
+        let done = self.ctx.append_basic_block(f.func, "cb_done");
+        let nfx = self.ctx.append_basic_block(f.func, "cb_nfx");
+        let ok = self
+            .call(
+                "rt_bc_2_conj_bang_fx",
+                Some(self.i8t),
+                &[tmp.into(), refs[0].into(), refs[1].into()],
+            )
+            .expect("ok");
+        let hit = self
+            .builder
+            .build_int_compare(IntPredicate::NE, ok, self.i8t.const_zero(), "cb_bc")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(hit, done, nfx)
+            .expect("br");
+        self.builder.position_at_end(nfx);
         let ok = self
             .call(
                 "rt_n_conj_bang_fx",
@@ -3628,7 +3980,6 @@ impl<'ctx> Lowerer<'ctx> {
             .build_int_compare(IntPredicate::NE, ok, self.i8t.const_zero(), "cb_hit")
             .expect("cmp");
         let slow = self.ctx.append_basic_block(f.func, "cb_miss");
-        let done = self.ctx.append_basic_block(f.func, "cb_done");
         self.builder
             .build_conditional_branch(hit, done, slow)
             .expect("br");
@@ -3639,7 +3990,8 @@ impl<'ctx> Lowerer<'ctx> {
         self.emit_direct_inline(f, fast, Some("conj!"), None, &refs, tmp, inner, done);
         self.emit_direct_slow(f, &refs, k, 2, Some("conj!"), tmp, inner, done);
         self.drop_v(f.func, tmp);
-        self.drop_slots(f.func, &temps);
+        self.drop_and_nil_slots(f.func, &temps);
+        self.drop_and_nil_slots(f.func, &moved);
         Ok(true)
     }
 }

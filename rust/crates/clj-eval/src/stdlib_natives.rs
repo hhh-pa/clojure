@@ -16,6 +16,7 @@
 //! upstream `string.clj` loads unchanged: its forms remain the
 //! vars' metadata source and the slow path (`core_lazy`).
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use clj_value::{Symbol, ThrowClass, Value};
@@ -166,12 +167,40 @@ fn native_includes(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
     }
 }
 
-fn join_vector(
+fn fast_join_sep(sep: &Value) -> Option<Cow<'_, str>> {
+    match sep {
+        Value::Str(s) => Some(Cow::Borrowed(s)),
+        Value::Char(c) => Some(Cow::Owned(c.to_string())),
+        Value::Nil => Some(Cow::Borrowed("")),
+        _ => None,
+    }
+}
+
+fn exact_join_cap(v: &clj_value::Vector, sep_len: usize) -> Option<usize> {
+    let mut total = v.len().saturating_sub(1).saturating_mul(sep_len);
+    for item in v.iter() {
+        let add = match item {
+            Value::Str(s) => s.len(),
+            Value::Char(c) => c.len_utf8(),
+            Value::Nil => 0,
+            _ => return None,
+        };
+        total = total.checked_add(add)?;
+    }
+    Some(total)
+}
+
+fn join_vector_buf(
     eval: &mut Evaluator,
     sep: &str,
     v: &clj_value::Vector,
-) -> Result<Value, NativeError> {
-    let mut out = String::with_capacity(v.len().saturating_mul(sep.len() + 4));
+) -> Result<String, NativeError> {
+    let cap = if v.len() >= 64 {
+        exact_join_cap(v, sep.len()).unwrap_or_else(|| v.len().saturating_mul(sep.len() + 4))
+    } else {
+        v.len().saturating_mul(sep.len() + 4)
+    };
+    let mut out = String::with_capacity(cap);
     let mut first = true;
     for item in v.iter() {
         if !first {
@@ -180,7 +209,7 @@ fn join_vector(
         first = false;
         crate::core::str_push(&mut out, eval, &item)?;
     }
-    Ok(Value::Str(Arc::from(out)))
+    Ok(out)
 }
 
 fn join_seq(eval: &mut Evaluator, sep: &str, coll: &Value) -> Result<Value, NativeError> {
@@ -222,19 +251,37 @@ fn native_join(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     let [sep, coll] = args else {
         return upstream(eval, "join", args);
     };
-    let sep = match sep {
-        Value::Str(s) => s.to_string(),
-        Value::Char(c) => c.to_string(),
-        Value::Nil => String::new(),
-        _ => return upstream(eval, "join", args),
+    let Some(sep) = fast_join_sep(sep) else {
+        return upstream(eval, "join", args);
     };
     if !is_seqable(coll) {
         return upstream(eval, "join", args);
     }
     if let Value::Vector(v) = coll {
-        return join_vector(eval, &sep, v);
+        return Ok(Value::Str(Arc::from(join_vector_buf(eval, &sep, v)?)));
     }
     join_seq(eval, &sep, coll)
+}
+
+/// Owned-args `clojure.string/join`: drops uniquely held large vectors
+/// before allocating the result `Arc<str>` so peak RSS avoids holding
+/// both `parts` and the joined output simultaneously.
+pub(crate) fn native_join_owned(
+    eval: &mut Evaluator,
+    mut args: smallvec::SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    if args.len() == 2 {
+        let coll = args.pop().unwrap_or(Value::Nil);
+        let sep_val = args.pop().unwrap_or(Value::Nil);
+        if let (Some(sep), Value::Vector(v)) = (fast_join_sep(&sep_val), &coll) {
+            let out = join_vector_buf(eval, sep.as_ref(), v)?;
+            drop(coll);
+            drop(sep_val);
+            return Ok(Value::Str(Arc::from(out.as_str())));
+        }
+        return native_join(eval, &[sep_val, coll]);
+    }
+    native_join(eval, &args)
 }
 
 /// Fallback for `BootMode::Lite` (no `core_lazy` embedded sources):
@@ -267,4 +314,64 @@ fn lite_string_fallback(
         ));
     }
     Err(crate::core::cce_err(&args[0], "java.lang.CharSequence"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{native_includes, native_join, native_join_owned};
+    use clj_value::{Value, Vector};
+    use smallvec::SmallVec;
+    use std::sync::Arc;
+
+    #[test]
+    fn join_owned_pre_sizes_large_and_handles_fallbacks() {
+        let mut eval = crate::aot_boot::boot_lite(
+            &[("clojure.string", "join"), ("clojure.core", "str")],
+            false,
+        );
+        // Large string/char/nil vector hits `exact_join_cap` (`Some`), while mixed ints hit `None`.
+        let mut strs: Vec<Value> = (0..70)
+            .map(|i| Value::Str(Arc::from(format!("x{i}"))))
+            .collect();
+        strs[0] = Value::Char('Z');
+        strs[1] = Value::Nil;
+        let out = native_join_owned(
+            &mut eval,
+            SmallVec::from_iter([
+                Value::Str(Arc::from(",")),
+                Value::Vector(Vector::from_vec(strs)),
+            ]),
+        )
+        .unwrap();
+        assert!(format!("{out:?}").contains("Z,,x2"));
+
+        let ints: Vec<Value> = (0..70).map(Value::Int).collect();
+        let out_ints = native_join_owned(
+            &mut eval,
+            SmallVec::from_iter([Value::Nil, Value::Vector(Vector::from_vec(ints))]),
+        )
+        .unwrap();
+        assert!(format!("{out_ints:?}").contains("0123"));
+
+        // Small vector (`len < 64`) and `native_join` / `native_includes` fallbacks.
+        let small = Value::Vector(Vector::from_vec(vec![Value::Int(1), Value::Int(2)]));
+        assert_eq!(
+            native_join(&mut eval, &[Value::Str(Arc::from(",")), small.clone()]).unwrap(),
+            Value::Str(Arc::from("1,2"))
+        );
+        assert!(native_join(&mut eval, &[Value::Str(Arc::from(",")), Value::Int(1)]).is_err());
+        assert!(native_includes(&mut eval, &[Value::Int(1)]).is_err());
+
+        // Non-vector / char sep / 1-arg fallback in `native_join_owned`.
+        let list = Value::List(clj_value::List::from_vec(vec![
+            Value::Int(1),
+            Value::Int(2),
+        ]));
+        let out_char_sep =
+            native_join_owned(&mut eval, SmallVec::from_iter([Value::Char(':'), list])).unwrap();
+        assert_eq!(out_char_sep, Value::Str(Arc::from("1:2")));
+
+        let out_one = native_join_owned(&mut eval, SmallVec::from_iter([small])).unwrap();
+        assert_eq!(out_one, Value::Str(Arc::from("12")));
+    }
 }

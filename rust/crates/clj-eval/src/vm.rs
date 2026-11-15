@@ -71,8 +71,8 @@ impl Frame<'_> {
 }
 
 /// Where a lexical local lives at run time.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Loc {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Loc {
     Reg(usize),
     Up(usize),
     Rec(usize),
@@ -738,20 +738,7 @@ fn inline_callee(root: &Value, argc: usize) -> Option<crate::vm_scalar::Callee> 
     let closure = crate::ext::as_closure(root)?;
     let code = closure.vm.as_ref().filter(|_| closure.conveyed.is_none())?;
     let fun = &code.fun;
-    let index = fun
-        .source
-        .iter()
-        .position(|a| a.rest.is_none() && a.fixed.len() == argc)?;
-    fun.source[index]
-        .fixed
-        .iter()
-        .all(|p| matches!(p, Pattern::Symbol(_)))
-        .then(|| crate::vm_scalar::Callee {
-            base: fun.base,
-            arities: Arc::clone(&fun.source),
-            index,
-            expect: Arc::clone(expect),
-        })
+    crate::vm_scalar::callee_for_arities(fun.base, &fun.source, argc, Some(Arc::clone(expect)))
 }
 
 impl Compiler {
@@ -2081,6 +2068,13 @@ pub(crate) fn and_or_shape(expr: &Expr, g: usize) -> Option<(&Expr, &Expr, bool)
     }
 }
 
+/// An `and`/`or` step at lexical slot `g` whose second arm `b` never reads `g`.
+#[must_use]
+pub fn and_or_test(expr: &Expr, g: usize) -> Option<(&Expr, &Expr, bool)> {
+    let (a, b, is_and) = and_or_shape(expr, g)?;
+    (!crate::vm_live::may_read(b, g, g + 1, g)).then_some((a, b, is_and))
+}
+
 /// One `loop` binding: the raw value's register, its init, and the
 /// destructuring unpack (none for a symbol).
 type LoopStep = (usize, Exec, Option<Exec>);
@@ -2949,5 +2943,52 @@ mod tests {
     fn patch_jump_ignores_non_jump_step() {
         let mut steps = [super::Step::Recur(Box::default())];
         super::patch_jump(&mut steps, 0);
+    }
+
+    #[test]
+    fn and_or_test_recognizes_and_or_and_rejects_live_reads() {
+        use crate::expr::{Expr, Pattern};
+        let sym = || Pattern::Symbol("g".to_owned());
+        let g0 = || Expr::Local(0);
+        let a = Expr::Literal(Value::Bool(true));
+        let b_pure = Expr::Literal(Value::Int(7));
+        let b_reads = Expr::Local(0);
+
+        let and_pure = Expr::Let {
+            bindings: vec![(sym(), a.clone())],
+            body: vec![Expr::If {
+                test: Box::new(g0()),
+                then: Box::new(b_pure.clone()),
+                els: Box::new(g0()),
+            }],
+        };
+        assert!(matches!(
+            super::and_or_test(&and_pure, 0),
+            Some((_, _, true))
+        ));
+
+        let or_pure = Expr::Let {
+            bindings: vec![(sym(), a.clone())],
+            body: vec![Expr::If {
+                test: Box::new(g0()),
+                then: Box::new(g0()),
+                els: Box::new(b_pure),
+            }],
+        };
+        assert!(matches!(
+            super::and_or_test(&or_pure, 0),
+            Some((_, _, false))
+        ));
+
+        let reads_g = Expr::Let {
+            bindings: vec![(sym(), a)],
+            body: vec![Expr::If {
+                test: Box::new(g0()),
+                then: Box::new(b_reads),
+                els: Box::new(g0()),
+            }],
+        };
+        assert!(super::and_or_test(&reads_g, 0).is_none());
+        assert!(super::and_or_test(&Expr::Literal(Value::Nil), 0).is_none());
     }
 }

@@ -48,7 +48,7 @@ use crate::vm_ops::{IntCtor, IntOp1, IntOp2, IntTest1, IntTest2, IntTestCtor, Si
 
 /// A scalar's kind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum K {
+pub enum K {
     Int,
     Char,
     Bool,
@@ -57,9 +57,9 @@ pub(crate) enum K {
 /// An unboxed scalar: its kind and payload (a char's code, a
 /// boolean's 0/1).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct Sv {
-    k: K,
-    v: i64,
+pub struct Sv {
+    pub k: K,
+    pub v: i64,
 }
 
 impl Sv {
@@ -113,14 +113,14 @@ impl Sv {
 
 /// A numeric cast (`int`, `long`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Cast {
+pub enum Cast {
     Int,
     Long,
 }
 
 /// A scalar expression.
 #[derive(Clone)]
-pub(crate) enum IExpr {
+pub enum IExpr {
     /// A loop variable, `let` temp, or nested loop variable.
     Slot(usize),
     /// A local bound outside the loop, read in place.
@@ -134,7 +134,7 @@ pub(crate) enum IExpr {
 
 /// A computing operation.
 #[derive(Clone)]
-pub(crate) enum Calc {
+pub enum Calc {
     Op1(IntOp1, IExpr),
     Op2(IntOp2, IExpr, IExpr),
     Cast(Cast, IExpr),
@@ -149,7 +149,7 @@ pub(crate) enum Calc {
 
 /// A control form in value position.
 #[derive(Clone)]
-pub(crate) enum Ctl {
+pub enum Ctl {
     If(Cond, IExpr, IExpr),
     Let(Box<[(usize, IExpr)]>, IExpr),
     /// Statements, then the value (`(do stmt… x)`).
@@ -162,7 +162,7 @@ pub(crate) enum Ctl {
 
 /// A branch test.
 #[derive(Clone)]
-pub(crate) enum Cond {
+pub enum Cond {
     Leaf(Cmp),
     Not(Box<Cond>),
     And(Box<Cond>, Box<Cond>),
@@ -171,7 +171,7 @@ pub(crate) enum Cond {
 
 /// A comparison or truth test.
 #[derive(Clone)]
-pub(crate) enum Cmp {
+pub enum Cmp {
     Truthy(IExpr),
     T1(IntTest1, IExpr),
     /// `<`/`<=`/`>`/`>=`/`==` over `Int`s.
@@ -182,7 +182,7 @@ pub(crate) enum Cmp {
 
 /// A transient vector mutation.
 #[derive(Clone)]
-pub(crate) enum Effect {
+pub enum Effect {
     /// `(assoc! t k v)` (`k` at most the count, which appends).
     Assoc(Loc, IExpr, IExpr),
     /// `(conj! t v)`.
@@ -193,7 +193,7 @@ pub(crate) enum Effect {
 
 /// A form run for its effect, in source order.
 #[derive(Clone)]
-pub(crate) enum Stmt {
+pub enum Stmt {
     Effect(Effect),
     /// `(if test then… else…)` over statements (`when`, `when-not`).
     If(Cond, Box<[Stmt]>, Box<[Stmt]>),
@@ -206,7 +206,7 @@ pub(crate) enum Stmt {
 
 /// A loop's exit value.
 #[derive(Clone)]
-pub(crate) enum ExitVal {
+pub enum ExitVal {
     Expr(IExpr),
     /// A literal (`nil`, a keyword …).
     Const(Value),
@@ -221,7 +221,7 @@ pub(crate) enum ExitVal {
 
 /// The end of one iteration.
 #[derive(Clone)]
-pub(crate) enum Leaf {
+pub enum Leaf {
     /// `recur`: one operand per target (`None` passes the
     /// variable through unchanged).
     Recur(Box<[Option<IExpr>]>),
@@ -231,7 +231,7 @@ pub(crate) enum Leaf {
 /// A loop body: a tree of tests, temps and statements ending in
 /// leaves.
 #[derive(Clone)]
-pub(crate) enum Node {
+pub enum Node {
     If(Cond, Box<Node>, Box<Node>),
     Let(Box<[(usize, IExpr)]>, Box<Node>),
     /// Statements, then the rest of the body.
@@ -242,10 +242,10 @@ pub(crate) enum Node {
 
 /// A nested loop used as a value.
 #[derive(Clone)]
-pub(crate) struct Inner {
-    slots: Box<[usize]>,
-    inits: Box<[IExpr]>,
-    body: Node,
+pub struct Inner {
+    pub slots: Box<[usize]>,
+    pub inits: Box<[IExpr]>,
+    pub body: Node,
 }
 
 /// A slot of the program's scalar file.
@@ -1459,8 +1459,31 @@ pub(crate) struct Callee {
     pub(crate) base: usize,
     pub(crate) arities: Arc<[Arity]>,
     pub(crate) index: usize,
-    /// The var's root at compilation (the identity witness).
-    pub(crate) expect: Arc<dyn ExtensionValue>,
+    /// The var's root at compilation (the identity witness; `None`
+    /// for static single-def AOT callees).
+    pub(crate) expect: Option<Arc<dyn ExtensionValue>>,
+}
+
+/// Select the fixed symbol-param arity matching `argc` for inlining.
+pub(crate) fn callee_for_arities(
+    base: usize,
+    arities: &Arc<[Arity]>,
+    argc: usize,
+    expect: Option<Arc<dyn ExtensionValue>>,
+) -> Option<Callee> {
+    let index = arities
+        .iter()
+        .position(|a| a.rest.is_none() && a.fixed.len() == argc)?;
+    arities[index]
+        .fixed
+        .iter()
+        .all(|p| matches!(p, Pattern::Symbol(_)))
+        .then(|| Callee {
+            base,
+            arities: Arc::clone(arities),
+            index,
+            expect,
+        })
 }
 
 /// An inlined call's site: valid while its var has no thread
@@ -1516,21 +1539,30 @@ struct Builder<'h> {
     /// The innermost loop's target slots (`None` for the outer
     /// loop, whose targets are slots `0..n`).
     inner: Option<Vec<usize>>,
+    /// Whether any arithmetic operation in the loop body uses a
+    /// promoting primed operator (`+'`, `-'`, `*'`, `inc'`, `dec'`).
+    primed: bool,
 }
 
-/// Compile `body` (one `loop`'s forms) over `targets`, whose
-/// bindings are the lexical indexes just below `body_base`: `None`
-/// when no iteration could run on scalars, or when the loop's boxed
-/// `history` (entries, trips begun) already fails [`judge`]'s trip
-/// rule.
-pub(crate) fn compile(
+/// The analyzed scalar AST of a `loop` body (shared by the VM's
+/// flat bytecode lowerer and `clj-aot`'s LLVM SSA lowerer).
+pub struct ScalarAst {
+    pub node: Node,
+    pub nslots: usize,
+    pub scalar: Vec<bool>,
+    pub boxed: Vec<bool>,
+    pub primed: bool,
+    sites: Vec<Site>,
+    roots: Vec<RootSite>,
+    max_depth: usize,
+}
+
+fn build_ast(
     host: &mut dyn Host,
     body: &[Expr],
     targets: &[usize],
     body_base: usize,
-    (entries, trips): (u32, u32),
-) -> Option<ScalarLoop> {
-    (entries < JUDGE_AFTER || trips >= MIN_TRIPS.saturating_mul(entries)).then_some(())?;
+) -> Option<ScalarAst> {
     let n = targets.len();
     let mut b = Builder {
         host,
@@ -1546,25 +1578,89 @@ pub(crate) fn compile(
         max_depth: 0,
         inlined: 0,
         inner: None,
+        primed: false,
     };
     let node = b.body(body);
     let clash = b.scalar.iter().zip(&b.boxed).any(|(s, x)| *s && *x);
     if clash || !productive(&node) {
         return None;
     }
+    Some(ScalarAst {
+        node,
+        nslots: b.nslots,
+        scalar: b.scalar,
+        boxed: b.boxed,
+        primed: b.primed,
+        sites: b.sites,
+        roots: b.roots,
+        max_depth: b.max_depth,
+    })
+}
+
+struct AotHost<'a> {
+    callees: &'a std::collections::HashMap<(String, String), Arc<[Arity]>>,
+}
+
+impl Host for AotHost<'_> {
+    fn resolve_local(&mut self, idx: usize) -> Loc {
+        Loc::Reg(idx)
+    }
+
+    fn reads(&self, expr: &Expr, g: usize) -> bool {
+        crate::vm_live::may_read(expr, g, g + 1, g)
+    }
+
+    fn site(&self, call: &DirectCall) -> Site {
+        Site::new(Arc::new(call.clone()))
+    }
+
+    fn callee(&self, var: &Var, argc: usize) -> Option<Callee> {
+        let ns = var.sym.namespace().unwrap_or("user").to_owned();
+        let arities = self.callees.get(&(ns, var.sym.name().to_owned()))?;
+        callee_for_arities(0, arities, argc, None)
+    }
+}
+
+/// Build the scalar AST for an AOT-compiled `loop` body (`None` when
+/// no iteration can execute on unboxed scalars).
+#[must_use]
+pub fn compile_aot_loop(
+    body: &[Expr],
+    targets: &[usize],
+    body_base: usize,
+    callees: &std::collections::HashMap<(String, String), Arc<[Arity]>>,
+) -> Option<ScalarAst> {
+    let mut host = AotHost { callees };
+    build_ast(&mut host, body, targets, body_base)
+}
+
+/// Compile `body` (one `loop`'s forms) over `targets`, whose
+/// bindings are the lexical indexes just below `body_base`: `None`
+/// when no iteration could run on scalars, or when the loop's boxed
+/// `history` (entries, trips begun) already fails [`judge`]'s trip
+/// rule.
+pub(crate) fn compile(
+    host: &mut dyn Host,
+    body: &[Expr],
+    targets: &[usize],
+    body_base: usize,
+    (entries, trips): (u32, u32),
+) -> Option<ScalarLoop> {
+    (entries < JUDGE_AFTER || trips >= MIN_TRIPS.saturating_mul(entries)).then_some(())?;
+    let ast = build_ast(host, body, targets, body_base)?;
     let mut lw = Lower {
         code: vec![Ins::Top],
-        nslots: b.nslots,
+        nslots: ast.nslots,
         consts: Vec::new(),
         loads: Vec::new(),
         colls: Vec::new(),
         effs: Vec::new(),
         exits: Vec::new(),
         labels: vec![0],
-        scalar: &b.scalar,
-        targets: &b.targets,
+        scalar: &ast.scalar,
+        targets,
     };
-    lw.node(&node, &Ctx::Outer);
+    lw.node(&ast.node, &Ctx::Outer);
     // Slot, effect, exit and collection ids are `u16`s.
     let ids = lw
         .nslots
@@ -1582,16 +1678,16 @@ pub(crate) fn compile(
     let mut code = lw.finish();
     let logs = mark_unlogged(&mut code);
     Some(ScalarLoop {
-        scalar: b.scalar.into(),
+        scalar: ast.scalar.into(),
         init: init.into(),
         code: code.into(),
         loads: loads.into(),
         colls: colls.into(),
         effs: effs.into(),
         exits: exits.into(),
-        sites: b.sites.into(),
-        roots: b.roots.into(),
-        depth: b.max_depth,
+        sites: ast.sites.into(),
+        roots: ast.roots.into(),
+        depth: ast.max_depth,
         logs,
         gid: crate::vm::next_site(),
         log_iters: AtomicUsize::new(0),
@@ -1940,11 +2036,13 @@ impl Builder<'_> {
         self.stack.pop();
         self.lex = outer;
         self.body_base = base;
-        self.roots.push(RootSite {
-            sid: crate::vm::next_site(),
-            var: var.clone(),
-            expect: Arc::clone(&callee.expect),
-        });
+        if let Some(expect) = callee.expect {
+            self.roots.push(RootSite {
+                sid: crate::vm::next_site(),
+                var: var.clone(),
+                expect,
+            });
+        }
         Some((binds, value))
     }
 
@@ -1967,6 +2065,10 @@ impl Builder<'_> {
 
     fn call_expr(&mut self, call: &DirectCall) -> IExpr {
         let args = &call.args;
+        self.primed |= matches!(
+            crate::vm_ops::core_name(call),
+            Some("+'") | Some("-'") | Some("*'") | Some("inc'") | Some("dec'")
+        );
         if let Some(op) = crate::vm_ops::int_value_op(call) {
             return match op {
                 IntCtor::One(op) => calc(Calc::Op1(op, self.expr(&args[0]))),
@@ -2227,7 +2329,13 @@ fn exit_expr(v: &ExitVal) -> std::option::IntoIter<&IExpr> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Co, Ins};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::{Co, Ins, compile_aot_loop};
+    use crate::aot_front::front_end;
+    use crate::expr::Expr;
+    use crate::ns::boot;
 
     #[test]
     fn ins_retarget_updates_matching_dest_only() {
@@ -2235,5 +2343,47 @@ mod tests {
         assert!(!ins.retarget(2, 3));
         assert!(ins.retarget(1, 3));
         assert!(!Ins::Miss.retarget(1, 3));
+    }
+
+    #[test]
+    fn compile_aot_loop_inlines_callee_and_tracks_primed() {
+        let src = "(def x 1)
+                   (def step (fn [x n] (< x n)))
+                   (def f (fn [s]
+                     (loop [i 0 acc 0]
+                       (if (and (step i (count s)) (< i 10))
+                         (if (pos? (inc i))
+                           (recur (inc i) (+' acc i))
+                           acc)
+                         acc))))
+                   1";
+        let mut ev = boot();
+        ev.eval_source(
+            "(defn step-vm [x] (+ x 1)) (defn run-vm [] (loop [i 0] (if (< i 5000) (recur (step-vm i)) i))) (run-vm)",
+        )
+        .expect("vm inline");
+        let front = front_end(&mut ev, src, "t.clj").expect("plan");
+        let mut callees = HashMap::new();
+        let mut ast = None;
+        for u in &front.units {
+            if let Expr::Def {
+                sym,
+                init: Some(init),
+                ..
+            } = &u.expr
+            {
+                if let Expr::Fn(fun) = init.as_ref() {
+                    let ns = sym.namespace().unwrap_or("user").to_owned();
+                    callees.insert((ns, sym.name().to_owned()), Arc::clone(&fun.arities));
+                    if let Expr::Loop { body, .. } = &fun.arities[0].body[0] {
+                        ast = compile_aot_loop(body, &[1, 2], 3, &callees);
+                    }
+                }
+            }
+        }
+        let ast = ast.expect("scalar ast");
+        assert!(ast.primed);
+        assert_eq!(ast.scalar, vec![true, true]);
+        assert!(compile_aot_loop(&[Expr::Local(1)], &[1], 2, &callees).is_none());
     }
 }

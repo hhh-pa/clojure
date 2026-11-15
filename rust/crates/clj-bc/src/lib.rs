@@ -48,8 +48,8 @@ impl OutSlot for Option<Value> {
 }
 
 #[inline(always)]
-fn clone_hot_scalar<O: OutSlot>(out: &mut O, src: &Value) -> bool {
-    let val = match src {
+fn clone_hot_scalar(src: &Value) -> Option<Value> {
+    Some(match src {
         Value::Nil => Value::Nil,
         Value::Bool(b) => Value::Bool(*b),
         Value::Int(n) => Value::Int(*n),
@@ -58,23 +58,19 @@ fn clone_hot_scalar<O: OutSlot>(out: &mut O, src: &Value) -> bool {
         Value::Str(s) => Value::Str(Arc::clone(s)),
         Value::Keyword(k) => Value::Keyword(k.clone()),
         Value::Symbol(s) => Value::Symbol(s.clone()),
-        _ => return false,
-    };
-    out.write_value(val);
-    true
+        _ => return None,
+    })
 }
 
 #[inline(always)]
-fn clone_hot_coll<O: OutSlot>(out: &mut O, src: &Value) -> bool {
-    let val = match src {
+fn clone_hot_coll(src: &Value) -> Option<Value> {
+    Some(match src {
         Value::Vector(v) => Value::Vector(v.clone()),
         Value::List(l) => Value::List(l.clone()),
         Value::Map(m) => Value::Map(m.clone()),
         Value::Set(s) => Value::Set(s.clone()),
-        _ => return false,
-    };
-    out.write_value(val);
-    true
+        _ => return None,
+    })
 }
 
 #[inline(always)]
@@ -112,15 +108,21 @@ fn clone_rare(src: &Value) -> Option<Value> {
     })
 }
 
+/// Clone `src` into an owned [`Value`] when it is a common POD or
+/// `Arc`-backed variant.
+#[inline(always)]
+pub(crate) fn clone_value(src: &Value) -> Option<Value> {
+    clone_hot_scalar(src)
+        .or_else(|| clone_hot_coll(src))
+        .or_else(|| clone_rare(src))
+}
+
 /// Write `src` clone into `out` when `src` is a common POD or
 /// `Arc`-backed variant. Returns `true` on success; `false` delegates
 /// rare/boxed variants cleanly to `rt_n_clone`.
 #[inline(always)]
 pub(crate) fn clone_fast<O: OutSlot>(out: &mut O, src: &Value) -> bool {
-    if clone_hot_scalar(out, src) || clone_hot_coll(out, src) {
-        return true;
-    }
-    match clone_rare(src) {
+    match clone_value(src) {
         Some(v) => {
             out.write_value(v);
             true
@@ -280,6 +282,7 @@ bc_ops2! {
     rt_bc_2_str_starts_with => BcOp2::StrStartsWith,
     rt_bc_2_str_ends_with => BcOp2::StrEndsWith,
     rt_bc_2_str_includes => BcOp2::StrIncludes,
+    rt_bc_2_conj_bang => BcOp2::ConjBang,
 }
 
 #[cfg(not(test))]
@@ -355,6 +358,83 @@ pub extern "C" fn rt_bc_3_assoc_bang_fx(
     i8::from(ops::assoc_bang_fast(out, a, b, c, false))
 }
 
+/// Effect-position `conj!` entrypoint: returns `1` with `Value::Nil` on hit.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_2_conj_bang_fx(out: &mut MaybeUninit<Value>, a: &Value, b: &Value) -> i8 {
+    i8::from(ops::conj_bang_fast(out, a, b, false))
+}
+
+/// Probe `v` as an ASCII string (`1` on hit, writing `ptr_out` and `len_out`).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_str(
+    v: &Value,
+    ptr_out: &mut *const u8,
+    len_out: &mut i64,
+    str_ascii: Option<StrAsciiFn>,
+) -> i8 {
+    i8::from(ops::scalar_str_probe(v, ptr_out, len_out, str_ascii))
+}
+
+/// Unboxed `count` entrypoint (`1` on hit, writing `len_out`).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_count(
+    v: &Value,
+    len_out: &mut i64,
+    str_ascii: Option<StrAsciiFn>,
+) -> i8 {
+    i8::from(ops::scalar_count(v, len_out, str_ascii))
+}
+
+/// Unboxed `nth` entrypoint (`1` on hit, writing `k_out` and `v_out`).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_nth(
+    coll: &Value,
+    idx: i64,
+    k_out: &mut u8,
+    v_out: &mut i64,
+    str_ascii: Option<StrAsciiFn>,
+) -> i8 {
+    i8::from(ops::scalar_nth(coll, idx, k_out, v_out, str_ascii))
+}
+
+/// Unboxed 2D `nth` entrypoint (`coll[idx][item]`, `1` on hit).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_nth2(
+    coll: &Value,
+    idx: i64,
+    item: i64,
+    k_out: &mut u8,
+    v_out: &mut i64,
+) -> i8 {
+    i8::from(ops::scalar_nth2(coll, idx, item, k_out, v_out))
+}
+
+/// Unboxed effect-position `assoc!` entrypoint (`1` on hit).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_assoc(tval: &Value, idx: i64, val: i64) -> i8 {
+    i8::from(ops::scalar_assoc(tval, idx, val))
+}
+
+/// Unboxed effect-position `conj!` entrypoint (`1` on hit).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_conj(tval: &Value, val: i64) -> i8 {
+    i8::from(ops::scalar_conj(tval, val))
+}
+
+/// Unboxed effect-position `pop!` entrypoint (`1` on hit).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_pop(tval: &Value) -> i8 {
+    i8::from(ops::scalar_pop(tval))
+}
+
 #[inline]
 pub(crate) fn is_transient_vec(v: &Value) -> Option<&Transient> {
     match v {
@@ -417,11 +497,13 @@ mod tests {
         assert_eq!(bc_op_symbol("inc", 1), Some("rt_bc_1_inc"));
         assert_eq!(bc_op_symbol("+", 2), Some("rt_bc_2_add"));
         assert_eq!(bc_op_symbol("assoc!", 3), Some("rt_bc_3_assoc_bang"));
+        assert_eq!(bc_op_symbol("conj!", 2), Some("rt_bc_2_conj_bang"));
         assert_eq!(bc_op_symbol("unknown", 1), None);
         assert_eq!(bc_op_symbol("unknown", 2), None);
         assert_eq!(bc_op_symbol("unknown", 3), None);
         assert_eq!(bc_op_symbol("inc", 4), None);
         assert_eq!(bc_fx_symbol("pop!", 1), Some("rt_bc_1_pop_bang_fx"));
+        assert_eq!(bc_fx_symbol("conj!", 2), Some("rt_bc_2_conj_bang_fx"));
         assert_eq!(bc_fx_symbol("assoc!", 3), Some("rt_bc_3_assoc_bang_fx"));
         assert_eq!(bc_fx_symbol("inc", 1), None);
 
@@ -938,5 +1020,114 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn conj_bang_fast_paths() {
+        let mut init = TransientVector::new();
+        init.conj(Value::Int(0)).unwrap();
+        let ctvec = Value::Transient(Transient::new(TransientKind::Vector(init)));
+        let tmap = Value::Transient(Transient::new(TransientKind::Map(TransientMap::new())));
+        assert!(run2(BcOp2::ConjBang, &ctvec, &Value::Int(7)).is_some());
+        let mut fx_out = None;
+        assert!(ops::conj_bang_fast(
+            &mut fx_out,
+            &ctvec,
+            &Value::Int(8),
+            false
+        ));
+        assert_eq!(fx_out, Some(Value::Nil));
+        assert_eq!(run2(BcOp2::ConjBang, &ctvec, &str_val("x")), None);
+        assert_eq!(run2(BcOp2::ConjBang, &Value::Nil, &Value::Int(1)), None);
+        assert_eq!(run2(BcOp2::ConjBang, &tmap, &Value::Int(1)), None);
+    }
+
+    #[test]
+    fn scalar_str_and_count_paths() {
+        let s = str_val("hello");
+        let mut ptr = std::ptr::null();
+        let mut len = -1;
+        assert!(ops::scalar_str_probe(&s, &mut ptr, &mut len, None));
+        assert_eq!(len, 5);
+        assert!(!ptr.is_null());
+        assert!(!ops::scalar_str_probe(
+            &Value::Nil,
+            &mut ptr,
+            &mut len,
+            None
+        ));
+        let utf8 = str_val("é");
+        assert!(!ops::scalar_str_probe(&utf8, &mut ptr, &mut len, None));
+
+        assert!(ops::scalar_count(&s, &mut len, None));
+        assert_eq!(len, 5);
+        let sv = Value::Vector(clj_value::Vector::from_ints(vec![1, 2]));
+        assert!(ops::scalar_count(&sv, &mut len, None));
+        assert_eq!(len, 2);
+        assert!(!ops::scalar_count(&Value::Int(1), &mut len, None));
+    }
+
+    #[test]
+    fn scalar_nth_and_transient_paths() {
+        let mut k = 99;
+        let mut v = -1;
+        let ivec = Value::Vector(clj_value::Vector::from_ints(vec![10, 20]));
+        assert!(ops::scalar_nth(&ivec, 1, &mut k, &mut v, None));
+        assert_eq!((k, v), (0, 20));
+        assert!(!ops::scalar_nth(&ivec, -1, &mut k, &mut v, None));
+
+        let cvec = Value::Vector(clj_value::Vector::from_chars(vec!['a']));
+        assert!(ops::scalar_nth(&cvec, 0, &mut k, &mut v, None));
+        assert_eq!((k, v), (1, i64::from(b'a')));
+
+        let gvec = Value::Vector(clj_value::Vector::from_vec(vec![
+            Value::Int(3),
+            Value::Char('z'),
+            Value::Bool(true),
+            str_val("no"),
+        ]));
+        assert!(ops::scalar_nth(&gvec, 0, &mut k, &mut v, None));
+        assert_eq!((k, v), (0, 3));
+        assert!(ops::scalar_nth(&gvec, 1, &mut k, &mut v, None));
+        assert_eq!((k, v), (1, i64::from(b'z')));
+        assert!(ops::scalar_nth(&gvec, 2, &mut k, &mut v, None));
+        assert_eq!((k, v), (2, 1));
+        assert!(!ops::scalar_nth(&gvec, 3, &mut k, &mut v, None));
+
+        let s = str_val("ab");
+        assert!(ops::scalar_nth(&s, 1, &mut k, &mut v, None));
+        assert_eq!((k, v), (1, i64::from(b'b')));
+        assert!(!ops::scalar_nth(&Value::Nil, 0, &mut k, &mut v, None));
+
+        let mut tv = TransientVector::new();
+        tv.conj(Value::Int(5)).unwrap();
+        let tval = Value::Transient(Transient::new(TransientKind::Vector(tv)));
+        assert!(ops::scalar_nth(&tval, 0, &mut k, &mut v, None));
+        assert_eq!((k, v), (0, 5));
+        assert!(ops::scalar_conj(&tval, 6));
+        assert!(ops::scalar_assoc(&tval, 1, 7));
+        assert!(!ops::scalar_assoc(&tval, -1, 7));
+        assert!(ops::scalar_pop(&tval));
+
+        let tmap = Value::Transient(Transient::new(TransientKind::Map(TransientMap::new())));
+        assert!(!ops::scalar_nth(&tmap, 0, &mut k, &mut v, None));
+        assert!(!ops::scalar_assoc(&tmap, 0, 1));
+        assert!(!ops::scalar_conj(&tmap, 1));
+        assert!(!ops::scalar_pop(&tmap));
+        assert!(!ops::scalar_assoc(&Value::Nil, 0, 1));
+        assert!(!ops::scalar_conj(&Value::Nil, 1));
+        assert!(!ops::scalar_pop(&Value::Nil));
+
+        let nested = Value::Vector(clj_value::Vector::from_vec(vec![
+            ivec.clone(),
+            str_val("x"),
+        ]));
+        assert!(ops::scalar_nth2(&nested, 0, 1, &mut k, &mut v));
+        assert_eq!((k, v), (0, 20));
+        assert!(!ops::scalar_nth2(&nested, 0, 5, &mut k, &mut v));
+        assert!(!ops::scalar_nth2(&nested, 1, 0, &mut k, &mut v));
+        assert!(!ops::scalar_nth2(&nested, -1, 0, &mut k, &mut v));
+        assert!(!ops::scalar_nth2(&nested, 0, -1, &mut k, &mut v));
+        assert!(!ops::scalar_nth2(&Value::Nil, 0, 0, &mut k, &mut v));
     }
 }

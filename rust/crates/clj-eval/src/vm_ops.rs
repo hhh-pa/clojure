@@ -1447,7 +1447,7 @@ op2!(Max, |a, b| ints(a, b, |x, y| Some(x.max(y))));
 /// op misses, so the caller deopts to the boxed road). A test
 /// pins the mirrors against the ops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntOp1 {
+pub enum IntOp1 {
     Inc,
     Dec,
     Negate,
@@ -1468,7 +1468,7 @@ impl IntOp1 {
 
 /// A two-argument op over unboxed ints (see [`IntOp1`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntOp2 {
+pub enum IntOp2 {
     Add,
     Sub,
     Mul,
@@ -1530,7 +1530,7 @@ impl IntOp2 {
 
 /// A one-argument predicate over an unboxed int (see [`IntOp1`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntTest1 {
+pub enum IntTest1 {
     Zero,
     Pos,
     Neg,
@@ -1549,7 +1549,7 @@ impl IntTest1 {
 
 /// A two-argument predicate over unboxed ints (see [`IntOp1`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntTest2 {
+pub enum IntTest2 {
     Lt,
     Lte,
     Gt,

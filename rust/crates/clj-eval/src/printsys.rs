@@ -1624,7 +1624,7 @@ mod tests {
 
     #[test]
     fn splitvec_token_is_pvec_or_subvec() {
-        let sp = clj_value::SplitVecValue::new(Arc::from("1 2"), Arc::from([(0, 1), (2, 1)]));
+        let sp = clj_value::SplitVecValue::new(Arc::from("1 2"), Arc::new(vec![(0, 1), (2, 1)]));
         let v = Value::Extension(Arc::new(sp.clone()));
         assert_eq!(token_of(&v), Some(TOK_PVEC));
         let w = Value::Extension(Arc::new(sp.window(0, 1)));

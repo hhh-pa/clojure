@@ -683,7 +683,7 @@ fn native_emit_ir_covers_assoc_conj_fx_and_nested_moves_259() {
     .expect("native build");
     let text = std::fs::read_to_string(&ir).expect("ir");
     std::fs::remove_file(&ir).expect("cleanup");
-    assert!(report.starts_with("aot: native "), "{report}");
+    assert!(!report.contains("(native:"), "{report}");
     assert!(text.contains("@rt_n_assoc_conj("), "{text}");
     assert!(
         text.contains("@rt_bc_2_str_starts_with")
@@ -716,7 +716,7 @@ fn native_emit_ir_marks_clojure_string_def_as_rebinding() {
     .expect("native build");
     let text = std::fs::read_to_string(&ir).expect("ir");
     std::fs::remove_file(&ir).expect("cleanup");
-    assert!(report.starts_with("aot: native "), "{report}");
+    assert!(!report.contains("(native:"), "{report}");
     assert!(text.contains("@rt_n_fast_vars"), "{text}");
 }
 
@@ -745,7 +745,7 @@ fn native_emit_ir_covers_owned_move_assoc_update_and_loop_unsupported() {
     )
     .expect("native build");
     std::fs::remove_file(&ir).expect("cleanup");
-    assert!(report.starts_with("aot: native "), "{report}");
+    assert!(!report.contains("(native:"), "{report}");
 
     let bad_loop = "\
 (defmacro bad-val [] (list 'quote +))
@@ -843,4 +843,122 @@ fn native_emit_ir_selects_lite_vs_full_boot() {
         assert!(report.starts_with("aot: native "), "{tag}: {report}");
         assert!(text.contains("@rt_n_main("), "{tag}: {text}");
     }
+}
+
+#[test]
+fn native_emit_ir_lowers_scalar_loops_and_branch_conds_271() {
+    let src = "\
+(defn step [x]
+  (let [y (+ x 1)]
+    (if (> y 0) y 0)))
+
+(defn multi
+  ([x] x)
+  ([x y] (+ x y)))
+
+(defn conds-and-preds [a b]
+  (let [v [1]
+        _ (if true 1 2)
+        _ (if false 1 2)
+        _ (if (or (< a b) (<= a b)) 1 2)
+        _ (if (and (> a b) (>= a b) (== a b)) 1 2)
+        _ (if (if (nil? a) (some? b) (not b)) 1 2)
+        _ (if (step a) 1 2)
+        c (< a b)
+        d (<= a b)
+        e (> a b)
+        f (>= a b)
+        g (== a b)
+        h (nil? a)
+        i (some? a)
+        j (not a)
+        k (int a)
+        l (long b)]
+    (step v)
+    (let [x [1]] (vec x))
+    [c d e f g h i j k l]))
+
+(defn scalar-pure [s pairs outer-n outer-box]
+  (loop [i 0 acc 0 pass s]
+    (if (and (< i (count s)) (<= i 100) (> 200 i) (>= 200 i) (== i i))
+      (let [ch (nth s i)
+            [p0 p1] (nth pairs 0)
+            b (if (= ch \\a) true false)
+            u (if b 1 (if (not (or (zero? i) (pos? i) (neg? i))) 2 3))
+            v (+ (- (* (inc (dec (- (bit-not (int (long outer-n)))))) 1) p0) (quot p1 1))
+            w (do (+ v 1) (step i))
+            inner-v (loop [j 0] (if (< j 2) (recur (+ j 1)) (+ j w)))
+            flag (< i 5)
+            cmp-v (if flag 1 0)]
+        (if (< i 1)
+          (let [z (+ i 1)] (+ z 1))
+          (+ i 2))
+        (loop [k 0]
+          (if (< k 1)
+            (recur (+ k 1))
+            nil))
+        (recur (+ i 1) (+ acc inner-v cmp-v u) pass))
+      (if (= i 999)
+        :done
+        (if (= i 998)
+          pass
+          (if (= i 997)
+            acc
+            (if (= i 996)
+              outer-box
+              (if (= i 995)
+                (let [{:keys [k]} i] k)
+                (if (= i 994)
+                  (println i)
+                  (+ acc 1))))))))))
+
+(defn scalar-mut [n]
+  (let [t (transient [10 20])]
+    (loop [i 0]
+      (if (< i n)
+        (do
+          (if (< i 1)
+            (let [z (+ i 1)] (conj! t z))
+            (conj! t i))
+          (assoc! t 0 i)
+          (pop! t)
+          (recur (+ i 1)))
+        (conj! t 99)))))
+
+(defn scalar-fallbacks [n]
+  (let [t (transient [1])]
+    (letfn [(cell-fn [x] x)
+            (use-cell [m]
+              (loop [i 0]
+                (if (< i m)
+                  (recur (+ i 1))
+                  cell-fn)))]
+      [(use-cell n)
+       (loop [[a b] [1 2]]
+         (if a (recur [nil b]) b))
+       (loop [i 0]
+         (if (< i n)
+           (do (conj! t i) (recur (+' i 1)))
+           i))])))
+
+(println (conds-and-preds 1 2) (scalar-pure \"ab\" [[3 4]] 5 :box) (scalar-mut 2) (scalar-fallbacks 2))
+";
+    let ir = tmp("scalar-271.ll");
+    let report = clj_aot::build_str(
+        src,
+        "s271.clj",
+        &tmp("nope-s271"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("scalar 271 native");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    assert!(!report.contains("(native:"), "{report}");
+    assert!(text.contains("sc_hdr"), "{text}");
+    assert!(text.contains("sc_deopt"), "{text}");
 }

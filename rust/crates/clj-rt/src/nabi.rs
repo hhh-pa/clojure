@@ -641,7 +641,10 @@ pub extern "C" fn rt_n_cap_host() {
 /// Register `BootMode::Lite` `clojure.string` capability natives.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_cap_string() {
-    native::declare_lite_string_cap(clj_eval::aot_boot::LITE_CAP_STRING);
+    native::declare_lite_string_cap(
+        clj_eval::aot_boot::LITE_CAP_STRING,
+        clj_eval::aot_boot::LITE_OWNED_STRING,
+    );
 }
 
 /// Lightweight `(require 'clojure.string)` / `(require '[clojure.string :as s])`

@@ -208,8 +208,14 @@ pub(crate) fn declare_lite_core_cap(
 }
 
 /// Register the `BootMode::Lite` `clojure.string` native capability group.
-pub(crate) fn declare_lite_string_cap(caps: &'static [clj_eval::aot_boot::LiteNativeSlice]) {
-    building(|b| b.lite_string = Some(caps));
+pub(crate) fn declare_lite_string_cap(
+    caps: &'static [clj_eval::aot_boot::LiteNativeSlice],
+    owned: clj_eval::aot_boot::LiteOwnedSlice,
+) {
+    building(|b| {
+        b.lite_string = Some(caps);
+        b.lite_owned_caps.push(owned);
+    });
 }
 
 /// Declare fn descriptor `k`.

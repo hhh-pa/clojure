@@ -77,6 +77,7 @@ pub enum BcOp2 {
     StrStartsWith = 24,
     StrEndsWith = 25,
     StrIncludes = 26,
+    ConjBang = 27,
 }
 
 /// Ternary bitcode opcodes.
@@ -143,6 +144,7 @@ pub(crate) const OP2_SYMBOLS: &[(&str, &str)] = &[
     ("nth", "rt_bc_2_nth"),
     ("get", "rt_bc_2_get"),
     ("contains?", "rt_bc_2_contains"),
+    ("conj!", "rt_bc_2_conj_bang"),
 ];
 
 pub(crate) const OP3_SYMBOLS: &[(&str, &str)] = &[
@@ -188,6 +190,7 @@ pub fn bc_ns_op_symbol(ns: Option<&str>, name: &str, arity: usize) -> Option<&'s
 pub fn bc_fx_symbol(name: &str, arity: usize) -> Option<&'static str> {
     match (name, arity) {
         ("pop!", 1) => Some("rt_bc_1_pop_bang_fx"),
+        ("conj!", 2) => Some("rt_bc_2_conj_bang_fx"),
         ("assoc!", 3) => Some("rt_bc_3_assoc_bang_fx"),
         _ => None,
     }
@@ -399,6 +402,27 @@ pub(crate) fn pop_bang_fast<O: OutSlot>(out: &mut O, a: &Value, keep_ret: bool) 
     finish_bang(out, ok, a, keep_ret)
 }
 
+#[inline]
+pub(crate) fn conj_bang_fast<O: OutSlot>(
+    out: &mut O,
+    a: &Value,
+    b: &Value,
+    keep_ret: bool,
+) -> bool {
+    let (Some(t), Value::Int(n)) = (is_transient_vec(a), b) else {
+        return false;
+    };
+    let ok = {
+        let mut guard = t.lock();
+        if let TransientKind::Vector(tv) = &mut *guard {
+            tv.conj_int_no_grow(*n)
+        } else {
+            false
+        }
+    };
+    finish_bang(out, ok, a, keep_ret)
+}
+
 #[inline(always)]
 pub(crate) fn apply2<O: OutSlot>(
     out: &mut O,
@@ -428,6 +452,7 @@ pub(crate) fn apply2<O: OutSlot>(
         BcOp2::StrStartsWith | BcOp2::StrEndsWith | BcOp2::StrIncludes => {
             apply2_str_pred(out, op, a, b)
         }
+        BcOp2::ConjBang => conj_bang_fast(out, a, b, true),
     }
 }
 
@@ -788,4 +813,156 @@ pub(crate) fn assoc_bang_fast<O: OutSlot>(
         }
     };
     finish_bang(out, ok, tval, keep_ret)
+}
+
+#[inline]
+fn scalar_val_ref(vr: ValueRef<'_>) -> Option<(u8, i64)> {
+    match vr {
+        ValueRef::Int(n) => Some((0, n)),
+        ValueRef::Char(c) => Some((1, i64::from(u32::from(c)))),
+        ValueRef::Ref(Value::Int(n)) => Some((0, *n)),
+        ValueRef::Ref(Value::Char(c)) => Some((1, i64::from(u32::from(*c)))),
+        ValueRef::Ref(Value::Bool(b)) => Some((2, i64::from(*b))),
+        ValueRef::Ref(_) => None,
+    }
+}
+
+/// Probe `v` as an ASCII string, writing its byte pointer and byte length.
+#[inline]
+pub(crate) fn scalar_str_probe(
+    v: &Value,
+    ptr_out: &mut *const u8,
+    len_out: &mut i64,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
+    let Value::Str(s) = v else {
+        return false;
+    };
+    if !is_ascii_cached(v, s, str_ascii) {
+        return false;
+    }
+    *ptr_out = s.as_ptr();
+    *len_out = s.len() as i64;
+    true
+}
+
+/// Unboxed `count` fast path writing `len_out`.
+#[inline]
+pub(crate) fn scalar_count(v: &Value, len_out: &mut i64, str_ascii: Option<StrAsciiFn>) -> bool {
+    let Some(n) = coll_count(v, str_ascii).and_then(|n| i64::try_from(n).ok()) else {
+        return false;
+    };
+    *len_out = n;
+    true
+}
+
+/// Unboxed `nth` fast path writing `(k_out, v_out)` (`0 = Int, 1 = Char, 2 = Bool`).
+#[inline]
+pub(crate) fn scalar_nth(
+    coll: &Value,
+    idx: i64,
+    k_out: &mut u8,
+    v_out: &mut i64,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let pair = match coll {
+        Value::Vector(v) => v.get_val_ref(i).and_then(scalar_val_ref),
+        Value::Str(s) => nth_str_fast(coll, s, i, str_ascii)
+            .flatten()
+            .map(|c| (1, i64::from(u32::from(c)))),
+        Value::Transient(t) => scalar_nth_transient(t, i),
+        _ => None,
+    };
+    let Some((k, val)) = pair else {
+        return false;
+    };
+    *k_out = k;
+    *v_out = val;
+    true
+}
+
+#[inline]
+fn scalar_nth_transient(t: &clj_value::Transient, i: usize) -> Option<(u8, i64)> {
+    let guard = t.lock();
+    let TransientKind::Vector(tv) = &*guard else {
+        return None;
+    };
+    tv.get_val_ref(i).and_then(scalar_val_ref)
+}
+
+/// Unboxed nested `nth` (`coll[idx][item]`) for destructured tuple vectors.
+#[inline]
+pub(crate) fn scalar_nth2(
+    coll: &Value,
+    idx: i64,
+    item: i64,
+    k_out: &mut u8,
+    v_out: &mut i64,
+) -> bool {
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let Ok(j) = usize::try_from(item) else {
+        return false;
+    };
+    let Some(ValueRef::Ref(Value::Vector(inner))) = (match coll {
+        Value::Vector(v) => v.get_val_ref(i),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let Some((k, val)) = inner.get_val_ref(j).and_then(scalar_val_ref) else {
+        return false;
+    };
+    *k_out = k;
+    *v_out = val;
+    true
+}
+
+/// Unboxed effect-position `assoc!` on a transient integer vector.
+#[inline]
+pub(crate) fn scalar_assoc(tval: &Value, idx: i64, val: i64) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.assoc_int_in_bounds(i, val)
+    } else {
+        false
+    }
+}
+
+/// Unboxed effect-position `conj!` on a transient integer vector.
+#[inline]
+pub(crate) fn scalar_conj(tval: &Value, val: i64) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.conj_int_no_grow(val)
+    } else {
+        false
+    }
+}
+
+/// Unboxed effect-position `pop!` on a transient scalar vector.
+#[inline]
+pub(crate) fn scalar_pop(tval: &Value) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.pop_scalar_opt()
+    } else {
+        false
+    }
 }

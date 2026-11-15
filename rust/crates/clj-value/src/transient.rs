@@ -391,8 +391,26 @@ impl TransientVector {
         }
     }
 
-    /// Overwrite an existing packed integer slot in bounds (`false` when
-    /// out of bounds, non-int buffer, or invalidated; zero allocation).
+    /// Append an integer only when packed `Ints` already has spare
+    /// capacity (`false` when reallocation, non-int buffer, or
+    /// invalidation occurs; avoids heap growth and `Value` drop glue).
+    #[inline(always)]
+    pub fn conj_int_no_grow(&mut self, n: i64) -> bool {
+        if !self.valid {
+            return false;
+        }
+        if let TransientItems::Ints(x) = &mut self.items {
+            if x.len() < x.capacity() {
+                x.push(n);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Overwrite an existing packed integer slot in bounds, or append when
+    /// `idx == len` and capacity allows (`false` when out of bounds,
+    /// reallocation needed, non-int buffer, or invalidated; zero allocation).
     #[inline(always)]
     pub fn assoc_int_in_bounds(&mut self, idx: usize, n: i64) -> bool {
         if !self.valid {
@@ -401,6 +419,10 @@ impl TransientVector {
         if let TransientItems::Ints(x) = &mut self.items {
             if let Some(slot) = x.get_mut(idx) {
                 *slot = n;
+                return true;
+            }
+            if idx == x.len() && x.len() < x.capacity() {
+                x.push(n);
                 return true;
             }
         }
@@ -431,21 +453,21 @@ impl TransientVector {
         self.valid = false;
         let items = std::mem::replace(&mut self.items, TransientItems::Ints(Vec::new()));
         // Zero-copy for packed runs (no re-scan); growth slack is shed
-        // first — the frozen vector never grows.
+        // first — the frozen vector never grows, and generic buffers shed
+        // excess capacity before trie construction so peak stays tight.
         Ok(match items {
             TransientItems::Ints(mut x) => {
-                if x.capacity() > x.len() * 2 && x.capacity() - x.len() > 1024 {
-                    x.shrink_to_fit();
-                }
+                shed_slack(&mut x);
                 Vector::from_flat_ints(x)
             }
             TransientItems::Chars(mut x) => {
-                if x.capacity() > x.len() * 2 && x.capacity() - x.len() > 1024 {
-                    x.shrink_to_fit();
-                }
+                shed_slack(&mut x);
                 Vector::from_flat_chars(x)
             }
-            TransientItems::Generic(x) => Vector::from_vec(x),
+            TransientItems::Generic(mut x) => {
+                shed_slack(&mut x);
+                Vector::from_vec(x)
+            }
         })
     }
 }
@@ -453,6 +475,13 @@ impl TransientVector {
 impl Default for TransientVector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Release excess capacity above `1024` trailing slots before freezing.
+fn shed_slack<T>(items: &mut Vec<T>) {
+    if items.capacity() - items.len() > 1024 {
+        items.shrink_to_fit();
     }
 }
 
@@ -1203,6 +1232,16 @@ mod tests {
         assert!(!tv.assoc_int_opt(5, 50));
         assert_eq!(tv.nth_opt(1), Some(Value::Int(25)));
 
+        let mut no_grow = TransientVector::new();
+        assert!(!no_grow.conj_int_no_grow(1));
+        assert!(!no_grow.assoc_int_in_bounds(0, 1));
+        assert!(no_grow.conj_int_opt(1));
+        assert!(no_grow.conj_int_no_grow(2));
+        assert!(no_grow.assoc_int_in_bounds(2, 3));
+        assert!(!no_grow.assoc_int_in_bounds(4, 5));
+        assert_eq!(no_grow.nth_opt(1), Some(Value::Int(2)));
+        assert_eq!(no_grow.nth_opt(2), Some(Value::Int(3)));
+
         // Generic transient
         let mut tg = TransientVector::new();
         let foo_val = Value::Str(std::sync::Arc::from("foo"));
@@ -1258,7 +1297,13 @@ mod tests {
         let mut t_shrink_ints = TransientVector::new();
         let mut t_shrink_chars =
             TransientVector::from_vector(&crate::Vector::from_chars(vec!['x']));
-        for items in [&mut t_shrink_ints.items, &mut t_shrink_chars.items] {
+        let mut t_shrink_generic =
+            TransientVector::from_vector(&crate::Vector::from_vec(vec![Value::Bool(true)]));
+        for items in [
+            &mut t_shrink_ints.items,
+            &mut t_shrink_chars.items,
+            &mut t_shrink_generic.items,
+        ] {
             if let super::TransientItems::Ints(v) = items {
                 v.reserve(2000);
                 v.push(1);
@@ -1266,9 +1311,13 @@ mod tests {
             if let super::TransientItems::Chars(v) = items {
                 v.reserve(2000);
             }
+            if let super::TransientItems::Generic(v) = items {
+                v.reserve(2000);
+            }
         }
         let _ = t_shrink_ints.persistent().unwrap();
         let _ = t_shrink_chars.persistent().unwrap();
+        let _ = t_shrink_generic.persistent().unwrap();
 
         // Panic-free bitcode helpers: get_val_ref, assoc_int_in_bounds, pop_scalar_opt
         let mut tbi = TransientVector::new();
@@ -1276,7 +1325,7 @@ mod tests {
         assert!(matches!(tbi.get_val_ref(0), Some(crate::ValueRef::Int(10))));
         assert!(tbi.get_val_ref(1).is_none());
         assert!(tbi.assoc_int_in_bounds(0, 99));
-        assert!(!tbi.assoc_int_in_bounds(1, 99));
+        assert!(!tbi.assoc_int_in_bounds(5, 99));
         assert!(matches!(tbi.get_val_ref(0), Some(crate::ValueRef::Int(99))));
         assert!(tbi.pop_scalar_opt());
         assert!(!tbi.pop_scalar_opt());
@@ -1287,6 +1336,7 @@ mod tests {
             Some(crate::ValueRef::Char('z'))
         ));
         assert!(!tbc.assoc_int_in_bounds(0, 1));
+        assert!(!tbc.conj_int_no_grow(1));
         assert!(tbc.pop_scalar_opt());
 
         let mut tbg =
@@ -1299,6 +1349,7 @@ mod tests {
         let _ = tbg.persistent().unwrap();
         assert!(tbg.get_val_ref(0).is_none());
         assert!(!tbg.assoc_int_in_bounds(0, 1));
+        assert!(!tbg.conj_int_no_grow(1));
         assert!(!tbg.pop_scalar_opt());
     }
 }

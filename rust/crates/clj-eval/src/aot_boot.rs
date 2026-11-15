@@ -37,6 +37,9 @@ pub const LITE_OWNED_CORE: LiteOwnedSlice = crate::ns::OWNED_CORE_ENTRIES;
 /// `BootMode::Lite` sequence/transducer owned-args entries.
 pub const LITE_OWNED_SEQ: LiteOwnedSlice = crate::ns::OWNED_SEQ_ENTRIES;
 
+/// `BootMode::Lite` `clojure.string` owned-args entries.
+pub const LITE_OWNED_STRING: LiteOwnedSlice = &[("join", crate::stdlib_natives::native_join_owned)];
+
 /// Bitmask of runtime native capability groups required by a `BootMode::Lite`
 /// program so link-time GC strips unreferenced subsystems (`re`, `num_bigint`,
 /// `classemu`, `seqs`/`lazy`, `clojure.string`).
@@ -290,7 +293,10 @@ fn install_lite_var(
             return;
         }
         if let Some(f) = find_native(string_tables, name) {
-            eval.install_native_ptr_with_owned(ns, name, f, None);
+            let owned = owned_groups
+                .iter()
+                .find_map(|entries| owned_entry_in(entries, name));
+            eval.install_native_ptr_with_owned(ns, name, f, owned);
         }
     }
 }
@@ -309,7 +315,7 @@ pub fn boot_lite(vars: &[(&str, &str)], need_stdin: bool) -> Evaluator {
             LITE_CAP_RE,
             LITE_CAP_HOST,
         ],
-        &[LITE_OWNED_CORE, LITE_OWNED_SEQ],
+        &[LITE_OWNED_CORE, LITE_OWNED_SEQ, LITE_OWNED_STRING],
         LITE_CAP_STRING,
         true,
     )

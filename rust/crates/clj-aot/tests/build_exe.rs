@@ -509,4 +509,35 @@ fn native_binary_exercises_lite_ns_stdin_and_full_cli() {
     assert_eq!(stdout, "");
     assert_eq!(code, 1);
     assert!(stderr.contains("IndexOutOfBoundsException"), "{stderr}");
+
+    let scalar_src = "\
+(defn step [x] (+ x 1))
+(defn run-scalar [s u pairs]
+  (let [t (transient [])]
+    (loop [i 0 acc 0]
+      (if (< i 20)
+        (do
+          (conj! t i)
+          (if (> i 0) (assoc! t (- i 1) (* i 2)) nil)
+          (recur (step i) (+ acc (if (= (nth s (mod i (count s))) \\a) 1 0))))
+        (do
+          (pop! t)
+          [acc
+           (count (persistent! t))
+           (loop [j 0 uacc 0]
+             (if (< j (count u))
+               (recur (+ j 1) (+ uacc (if (= (nth u j) \\é) 10 1)))
+               uacc))
+           (loop [k 0 pacc 0]
+             (if (< k (count pairs))
+               (let [[a b] (nth pairs k)]
+                 (recur (+ k 1) (+ pacc a b)))
+               pacc))])))))
+(println (run-scalar \"aba\" \"aé\" [[3 4] [5 6]]))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("scalar-271", scalar_src, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[13 19 11 18]\n", "", 0)
+    );
 }

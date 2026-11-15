@@ -479,7 +479,8 @@ fn native_backed(ns: &str, name: &str) -> bool {
 fn install_lib_natives(eval: &mut Evaluator, ns: &str) {
     if ns == "clojure.string" {
         for &(name, f) in crate::stdlib_natives::STRING_NATIVES {
-            eval.install_native(ns, name, Arc::new(f) as Arc<NativeImpl>);
+            let owned = crate::ns::owned_entry_in(crate::aot_boot::LITE_OWNED_STRING, name);
+            eval.install_native_ptr_with_owned(ns, name, f, owned);
         }
     }
 }

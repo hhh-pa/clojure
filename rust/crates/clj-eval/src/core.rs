@@ -5252,7 +5252,7 @@ mod tests {
         use std::cmp::Ordering;
         let sp = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
             Arc::from("1 2"),
-            Arc::from([(0, 1), (2, 1)]),
+            Arc::new(vec![(0, 1), (2, 1)]),
         )));
         let plain = Value::Vector(clj_value::Vector::from_vec(vec![
             Value::Str(Arc::from("1")),

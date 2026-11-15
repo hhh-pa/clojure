@@ -866,7 +866,7 @@ impl crate::ExtensionValue for SubVectorValue {
 /// [`SubVectorValue`] view.
 pub struct SplitVecValue {
     base: Arc<str>,
-    spans: Arc<[(u32, u32)]>,
+    spans: Arc<Vec<(u32, u32)>>,
     /// Span window: pieces are `spans[off..off + len]`.
     off: usize,
     len: usize,
@@ -923,7 +923,7 @@ impl SplitVecValue {
     /// Pieces of `base` at `(start, len)` byte spans (the caller
     /// upholds UTF-8 boundaries, as split match offsets do).
     #[must_use]
-    pub fn new(base: Arc<str>, spans: Arc<[(u32, u32)]>) -> Self {
+    pub fn new(base: Arc<str>, spans: Arc<Vec<(u32, u32)>>) -> Self {
         let len = spans.len();
         Self {
             base,
@@ -2262,7 +2262,7 @@ mod tests {
     #[test]
     fn splitvec_helpers_and_fallbacks() {
         let base: Arc<str> = Arc::from("10 010 7");
-        let spans: Arc<[(u32, u32)]> = Arc::from([(0, 2), (3, 3), (7, 1)]);
+        let spans: Arc<Vec<(u32, u32)>> = Arc::new(vec![(0, 2), (3, 3), (7, 1)]);
         let sp = super::SplitVecValue::new(Arc::clone(&base), Arc::clone(&spans));
         assert_eq!(sp.len(), 3);
         assert!(!sp.is_empty());

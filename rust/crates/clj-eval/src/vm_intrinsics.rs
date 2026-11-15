@@ -274,7 +274,7 @@ mod tests {
         // Split vectors answer nth/get/count from their spans.
         let sp = Value::Extension(std::sync::Arc::new(clj_value::SplitVecValue::new(
             std::sync::Arc::from("10 010 7"),
-            std::sync::Arc::from([(0, 2), (3, 3), (7, 1)]),
+            std::sync::Arc::new(vec![(0, 2), (3, 3), (7, 1)]),
         )));
         assert_eq!(
             nth_of(&sp, &Value::Int(1), None),

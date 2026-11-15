@@ -107,3 +107,13 @@ pub use expr::{
 };
 pub use ext::{Closure, NativeFn, NativeImpl, NsHandle, as_closure, as_native, as_ns, munge};
 pub use ns::{boot, load_native, load_text_as_file};
+pub use vm::and_or_test;
+
+pub mod aot_scalar {
+    pub use crate::vm::Loc;
+    pub use crate::vm_ops::{IntOp1, IntOp2, IntTest1, IntTest2};
+    pub use crate::vm_scalar::{
+        Calc, Cast, Cmp, Cond, Ctl, Effect, ExitVal, IExpr, Inner, K, Leaf, Node, ScalarAst, Stmt,
+        Sv, compile_aot_loop,
+    };
+}

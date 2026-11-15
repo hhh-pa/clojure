@@ -281,9 +281,13 @@ fn split_pieces(
         .then(|| pattern_pieces_vec::<Vec<(u32, u32)>>(text, source, limit))
         .transpose()?;
     match spans {
-        Some(spans) if spans.len() >= SPLIT_LAZY_MIN => Ok(Value::Extension(Arc::new(
-            SplitVecValue::new(Arc::clone(base), Arc::from(spans)),
-        ))),
+        Some(mut spans) if spans.len() >= SPLIT_LAZY_MIN => {
+            spans.shrink_to_fit();
+            Ok(Value::Extension(Arc::new(SplitVecValue::new(
+                Arc::clone(base),
+                Arc::new(spans),
+            ))))
+        }
         Some(spans) => Ok(Value::Vector(Vector::from_vec(materialize_spans(
             text, &spans,
         )))),
@@ -847,6 +851,12 @@ mod tests {
         assert_eq!(shown(0, true), shown(0, false));
         assert_eq!(shown(-1, true), shown(-1, false));
         assert_eq!(shown(2, true), shown(2, false));
+        let large: Arc<str> = Arc::from("x,".repeat(SPLIT_LAZY_MIN + 4));
+        assert!(matches!(
+            split_pieces(&large, ",", 0, true).expect("large split"),
+            Value::Extension(_)
+        ));
+        assert!(split_pieces(&base, "(", 0, true).is_err());
     }
 
     #[test]
