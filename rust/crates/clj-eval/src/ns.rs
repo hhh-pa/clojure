@@ -1110,48 +1110,97 @@ fn native_ns_unalias(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
     Ok(Value::Nil)
 }
 
+/// Simple JVM exception names mapped to [`ThrowClass`].
+const THROW_CLASSES: &[(&str, ThrowClass)] = &[
+    ("Exception", ThrowClass::Exception),
+    ("Error", ThrowClass::Error),
+    ("RuntimeException", ThrowClass::RuntimeException),
+    (
+        "IllegalArgumentException",
+        ThrowClass::IllegalArgumentException,
+    ),
+    ("IllegalStateException", ThrowClass::IllegalStateException),
+    (
+        "IllegalMonitorStateException",
+        ThrowClass::IllegalMonitorStateException,
+    ),
+    (
+        "UnsupportedOperationException",
+        ThrowClass::UnsupportedOperationException,
+    ),
+    ("AssertionError", ThrowClass::AssertionError),
+    ("ArityException", ThrowClass::ArityException),
+    ("NullPointerException", ThrowClass::NullPointerException),
+    ("ClassCastException", ThrowClass::ClassCastException),
+    ("ClassNotFoundException", ThrowClass::ClassNotFoundException),
+    (
+        "IndexOutOfBoundsException",
+        ThrowClass::IndexOutOfBoundsException,
+    ),
+    (
+        "ArrayIndexOutOfBoundsException",
+        ThrowClass::ArrayIndexOutOfBoundsException,
+    ),
+    ("ArrayStoreException", ThrowClass::ArrayStoreException),
+    (
+        "NegativeArraySizeException",
+        ThrowClass::NegativeArraySizeException,
+    ),
+    ("OutOfMemoryError", ThrowClass::OutOfMemoryError),
+    ("ArithmeticException", ThrowClass::ArithmeticException),
+    ("ExceptionInfo", ThrowClass::ExceptionInfo),
+    ("FileNotFoundException", ThrowClass::FileNotFoundException),
+    ("ExecutionException", ThrowClass::ExecutionException),
+    ("CancellationException", ThrowClass::CancellationException),
+    (
+        "RejectedExecutionException",
+        ThrowClass::RejectedExecutionException,
+    ),
+    ("IllegalAccessError", ThrowClass::IllegalAccessError),
+    ("NumberFormatException", ThrowClass::NumberFormatException),
+    (
+        "StringIndexOutOfBoundsException",
+        ThrowClass::StringIndexOutOfBoundsException,
+    ),
+    (
+        "IllegalFormatConversionException",
+        ThrowClass::IllegalFormatConversionException,
+    ),
+    (
+        "UnknownFormatConversionException",
+        ThrowClass::UnknownFormatConversionException,
+    ),
+    (
+        "MissingFormatConversionException",
+        ThrowClass::MissingFormatConversionException,
+    ),
+    (
+        "MissingFormatArgumentException",
+        ThrowClass::MissingFormatArgumentException,
+    ),
+    (
+        "IllegalFormatPrecisionException",
+        ThrowClass::IllegalFormatPrecisionException,
+    ),
+    (
+        "IllegalFormatCodePointException",
+        ThrowClass::IllegalFormatCodePointException,
+    ),
+    ("IOException", ThrowClass::IOException),
+    ("Compiler$CompilerException", ThrowClass::CompilerException),
+    ("LispReader$ReaderException", ThrowClass::ReaderException),
+    ("ReaderException", ThrowClass::ReaderException),
+];
+
 /// A JVM class name (simple or fully qualified) to its
 /// [`ThrowClass`]. Unknown names — including the port-only
 /// `ReaderError` deferrals — fall back to `Exception`.
 pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
-    match name.rsplit('.').next().unwrap_or(name) {
-        "Exception" => ThrowClass::Exception,
-        "Error" => ThrowClass::Error,
-        "RuntimeException" => ThrowClass::RuntimeException,
-        "IllegalArgumentException" => ThrowClass::IllegalArgumentException,
-        "IllegalStateException" => ThrowClass::IllegalStateException,
-        "IllegalMonitorStateException" => ThrowClass::IllegalMonitorStateException,
-        "UnsupportedOperationException" => ThrowClass::UnsupportedOperationException,
-        "AssertionError" => ThrowClass::AssertionError,
-        "ArityException" => ThrowClass::ArityException,
-        "NullPointerException" => ThrowClass::NullPointerException,
-        "ClassCastException" => ThrowClass::ClassCastException,
-        "ClassNotFoundException" => ThrowClass::ClassNotFoundException,
-        "IndexOutOfBoundsException" => ThrowClass::IndexOutOfBoundsException,
-        "ArrayIndexOutOfBoundsException" => ThrowClass::ArrayIndexOutOfBoundsException,
-        "ArrayStoreException" => ThrowClass::ArrayStoreException,
-        "NegativeArraySizeException" => ThrowClass::NegativeArraySizeException,
-        "OutOfMemoryError" => ThrowClass::OutOfMemoryError,
-        "ArithmeticException" => ThrowClass::ArithmeticException,
-        "ExceptionInfo" => ThrowClass::ExceptionInfo,
-        "FileNotFoundException" => ThrowClass::FileNotFoundException,
-        "ExecutionException" => ThrowClass::ExecutionException,
-        "CancellationException" => ThrowClass::CancellationException,
-        "RejectedExecutionException" => ThrowClass::RejectedExecutionException,
-        "IllegalAccessError" => ThrowClass::IllegalAccessError,
-        "NumberFormatException" => ThrowClass::NumberFormatException,
-        "StringIndexOutOfBoundsException" => ThrowClass::StringIndexOutOfBoundsException,
-        "IllegalFormatConversionException" => ThrowClass::IllegalFormatConversionException,
-        "UnknownFormatConversionException" => ThrowClass::UnknownFormatConversionException,
-        "MissingFormatConversionException" => ThrowClass::MissingFormatConversionException,
-        "MissingFormatArgumentException" => ThrowClass::MissingFormatArgumentException,
-        "IllegalFormatPrecisionException" => ThrowClass::IllegalFormatPrecisionException,
-        "IllegalFormatCodePointException" => ThrowClass::IllegalFormatCodePointException,
-        "IOException" => ThrowClass::IOException,
-        "Compiler$CompilerException" => ThrowClass::CompilerException,
-        "LispReader$ReaderException" | "ReaderException" => ThrowClass::ReaderException,
-        _ => ThrowClass::Exception,
-    }
+    let short = name.rsplit('.').next().unwrap_or(name);
+    THROW_CLASSES
+        .iter()
+        .find_map(|&(k, cls)| (k == short).then_some(cls))
+        .unwrap_or(ThrowClass::Exception)
 }
 
 /// A load/eval failure as a native error: a real

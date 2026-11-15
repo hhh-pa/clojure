@@ -335,5 +335,12 @@ mod tests {
         let fallback_err = super::run_native_str("(println (re-matches :bad \"a\"))", "f.clj", &[])
             .expect("native re fallback errors cleanly");
         assert_eq!(fallback_err, 1);
+        let full_fallback_err = super::run_native_str(
+            "(require 'clojure.set) (println (clojure.set/union #{1} #{2}) (+ 1 2 3 nil))",
+            "f.clj",
+            &[],
+        )
+        .expect("full boot core_ref fallback errors cleanly");
+        assert_eq!(full_fallback_err, 1);
     }
 }

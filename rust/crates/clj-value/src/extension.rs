@@ -123,12 +123,9 @@ impl ThrowClass {
             Self::ArityException => "clojure.lang.ArityException",
             Self::NullPointerException => "java.lang.NullPointerException",
             Self::ClassCastException => "java.lang.ClassCastException",
-            Self::IndexOutOfBoundsException => "java.lang.IndexOutOfBoundsException",
-            Self::ArrayIndexOutOfBoundsException => "java.lang.ArrayIndexOutOfBoundsException",
-            Self::NegativeArraySizeException => "java.lang.NegativeArraySizeException",
-            // `ArithmeticException` lives in `jvm_name_rest` (which
-            // has budget); the chain still matches every variant
-            // exactly once.
+            // `ArithmeticException` and array/VM errors live in
+            // chained helpers (`jvm_name_mid`/`jvm_name_array`);
+            // the chain still matches every variant exactly once.
             other => other.jvm_name_mid(),
         }
     }
@@ -215,16 +212,14 @@ impl ThrowClass {
         }
     }
 
-    /// Array exceptions plus the error classes that arrived
+    /// Array/index exceptions plus the error classes that arrived
     /// with the array slice (S15) and the #205 call-depth guard.
     /// Chained so each match stays under the complexity gate.
     fn jvm_name_array(&self) -> &'static str {
         match self {
-            // Only `ArrayStoreException`, `OutOfMemoryError`, and
-            // `StackOverflowError` reach here:
-            // `ArrayIndexOutOfBoundsException` and
-            // `NegativeArraySizeException` are answered directly
-            // by `jvm_name`, like every other upstream variant.
+            Self::IndexOutOfBoundsException => "java.lang.IndexOutOfBoundsException",
+            Self::ArrayIndexOutOfBoundsException => "java.lang.ArrayIndexOutOfBoundsException",
+            Self::NegativeArraySizeException => "java.lang.NegativeArraySizeException",
             Self::ArrayStoreException => "java.lang.ArrayStoreException",
             Self::OutOfMemoryError => "java.lang.OutOfMemoryError",
             Self::StackOverflowError => "java.lang.StackOverflowError",
@@ -294,9 +289,6 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         "java.lang.Throwable" => None,
         "java.lang.Exception" | "java.lang.Error" => Some("java.lang.Throwable"),
         "java.lang.RuntimeException" => Some("java.lang.Exception"),
-        "java.util.concurrent.ExecutionException" => Some("java.lang.Exception"),
-        "java.util.concurrent.CancellationException" => Some("java.lang.IllegalStateException"),
-        "java.util.concurrent.RejectedExecutionException" => Some("java.lang.RuntimeException"),
         "java.lang.NumberFormatException" => Some("java.lang.IllegalArgumentException"),
         "java.io.FileNotFoundException" => Some("java.io.IOException"),
         "java.io.IOException" => Some("java.lang.Exception"),
@@ -317,6 +309,17 @@ fn throw_parent(jvm_name: &str) -> Option<&'static str> {
         | "clojure.lang.ExceptionInfo"
         | "clojure.lang.Compiler$CompilerException"
         | "clojure.lang.LispReader$ReaderException" => Some("java.lang.RuntimeException"),
+        _ => throw_parent_concurrent(jvm_name),
+    }
+}
+
+/// The `java.util.concurrent` branch of [`throw_parent`] (split for
+/// the complexity budget; chains into [`throw_parent_rest`]).
+fn throw_parent_concurrent(jvm_name: &str) -> Option<&'static str> {
+    match jvm_name {
+        "java.util.concurrent.ExecutionException" => Some("java.lang.Exception"),
+        "java.util.concurrent.CancellationException" => Some("java.lang.IllegalStateException"),
+        "java.util.concurrent.RejectedExecutionException" => Some("java.lang.RuntimeException"),
         _ => throw_parent_rest(jvm_name),
     }
 }

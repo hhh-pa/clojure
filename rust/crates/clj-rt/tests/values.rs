@@ -93,6 +93,9 @@ fn argv_skips_program_name_and_nils_when_empty() {
     let bad = CString::new(b"a\xffb".to_vec()).unwrap();
     let argv = [prog.as_ptr(), bad.as_ptr()];
     assert_eq!(render(unsafe { rt_argv(argv.as_ptr(), 2) }), "(a�b)");
+    // Null argv entries become nil instead of hitting UB in CStr::from_ptr.
+    let argv = [prog.as_ptr(), std::ptr::null(), a.as_ptr()];
+    assert_eq!(render(unsafe { rt_argv(argv.as_ptr(), 3) }), "(nil a)");
 }
 
 #[test]

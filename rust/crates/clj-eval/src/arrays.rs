@@ -648,12 +648,92 @@ fn ctor_seq(
     Ok(Value::Array(Array::new(ArrayDesc::flat(base), store)))
 }
 
-/// The 2-arity `Numbers` constructor: sizes through
-/// `checkCast`+`intCast` (`nth_index`), then scalar-or-seq init
-/// per base — `int`/`long`/`float`/`double` fill `Number` inits,
+/// Whether a 2-arity `Numbers` constructor init scalar-fills:
+/// `int`/`long`/`float`/`double` fill `Number` inits,
 /// `boolean`/`char` fill exact wrappers, `byte`/`short` always
 /// seq-fill (the port erased the wrappers; oracles `c-*`,
 /// `b-*-longseq`, `d-*-init`).
+fn ctor_is_scalar(base: BaseType, init: &Value) -> bool {
+    match base {
+        BaseType::Int | BaseType::Long | BaseType::Float | BaseType::Double => is_number(init),
+        BaseType::Boolean => matches!(init, Value::Bool(_)),
+        BaseType::Char => matches!(init, Value::Char(_)),
+        BaseType::Byte | BaseType::Short | BaseType::Object => false,
+    }
+}
+
+/// Scalar-fill an `int[]` (the `intValue` narrowing).
+fn ctor_scalar_ints(base: BaseType, size: usize, init: &Value) -> Result<ArrayStore, NativeError> {
+    let f = num_int_narrow(init)?;
+    let mut v: Vec<i32> = zero_vec(base, size, 0)?;
+    v.fill(f);
+    Ok(ArrayStore::Ints(v))
+}
+
+/// Scalar-fill a `long[]` (the `longValue` narrowing).
+fn ctor_scalar_longs(base: BaseType, size: usize, init: &Value) -> Result<ArrayStore, NativeError> {
+    let f = num_long_narrow(init)?;
+    let mut v: Vec<i64> = zero_vec(base, size, 0)?;
+    v.fill(f);
+    Ok(ArrayStore::Longs(v))
+}
+
+/// Scalar-fill a `float[]`/`double[]` (the exact `f64` — the port
+/// keeps `float` exact per D3, so both widths share this).
+fn ctor_scalar_floats(
+    base: BaseType,
+    size: usize,
+    init: &Value,
+) -> Result<ArrayStore, NativeError> {
+    let method = if base == BaseType::Float {
+        "floatValue"
+    } else {
+        "doubleValue"
+    };
+    let f = num_double_narrow(init, method)?;
+    let mut v: Vec<f64> = zero_vec(base, size, 0.0)?;
+    v.fill(f);
+    if base == BaseType::Float {
+        Ok(ArrayStore::Floats(v))
+    } else {
+        Ok(ArrayStore::Doubles(v))
+    }
+}
+
+/// Scalar-fill a `boolean[]` (the strict `(Boolean)` unbox).
+fn ctor_scalar_bools(base: BaseType, size: usize, init: &Value) -> Result<ArrayStore, NativeError> {
+    let f = bool_fill(init)?;
+    let mut v: Vec<bool> = zero_vec(base, size, false)?;
+    v.fill(f);
+    Ok(ArrayStore::Bools(v))
+}
+
+/// Scalar-fill a `char[]` (the strict `(Character)` unbox).
+fn ctor_scalar_chars(base: BaseType, size: usize, init: &Value) -> Result<ArrayStore, NativeError> {
+    let f = char_fill(init)?;
+    let mut v: Vec<char> = zero_vec(base, size, '\0')?;
+    v.fill(f);
+    Ok(ArrayStore::Chars(v))
+}
+
+/// Scalar-fill one store past the [`ctor_is_scalar`] gate (one arm
+/// per fill family).
+fn ctor_scalar_store(base: BaseType, size: usize, init: &Value) -> Result<ArrayStore, NativeError> {
+    match base {
+        BaseType::Int => ctor_scalar_ints(base, size, init),
+        BaseType::Long => ctor_scalar_longs(base, size, init),
+        BaseType::Float | BaseType::Double => ctor_scalar_floats(base, size, init),
+        BaseType::Boolean => ctor_scalar_bools(base, size, init),
+        _ => {
+            debug_assert_eq!(base, BaseType::Char);
+            ctor_scalar_chars(base, size, init)
+        }
+    }
+}
+
+/// The 2-arity `Numbers` constructor: sizes through
+/// `checkCast`+`intCast` (`nth_index`), then scalar-or-seq init
+/// per base (see [`ctor_is_scalar`]).
 fn ctor_init(
     eval: &mut Evaluator,
     base: BaseType,
@@ -664,62 +744,12 @@ fn ctor_init(
         return Err(neg_size(size));
     }
     let size = size as usize;
-    let scalar = match base {
-        BaseType::Int | BaseType::Long | BaseType::Float | BaseType::Double => is_number(init),
-        BaseType::Boolean => matches!(init, Value::Bool(_)),
-        BaseType::Char => matches!(init, Value::Char(_)),
-        BaseType::Byte | BaseType::Short | BaseType::Object => false,
-    };
-    if !scalar {
+    if !ctor_is_scalar(base, init) {
         let items = seq_items(eval, init)?;
         let store = fill_store(base, size, &items)?;
         return Ok(Value::Array(Array::new(ArrayDesc::flat(base), store)));
     }
-    let store = match base {
-        BaseType::Int => {
-            let f = num_int_narrow(init)?;
-            let mut v: Vec<i32> = zero_vec(base, size, 0)?;
-            v.fill(f);
-            ArrayStore::Ints(v)
-        }
-        BaseType::Long => {
-            let f = num_long_narrow(init)?;
-            let mut v: Vec<i64> = zero_vec(base, size, 0)?;
-            v.fill(f);
-            ArrayStore::Longs(v)
-        }
-        BaseType::Float | BaseType::Double => {
-            let method = if base == BaseType::Float {
-                "floatValue"
-            } else {
-                "doubleValue"
-            };
-            let f = num_double_narrow(init, method)?;
-            let mut v: Vec<f64> = zero_vec(base, size, 0.0)?;
-            v.fill(f);
-            if base == BaseType::Float {
-                ArrayStore::Floats(v)
-            } else {
-                ArrayStore::Doubles(v)
-            }
-        }
-        BaseType::Boolean => {
-            let f = bool_fill(init)?;
-            let mut v: Vec<bool> = zero_vec(base, size, false)?;
-            v.fill(f);
-            ArrayStore::Bools(v)
-        }
-        // The scalar gate above admits only `Char` past the
-        // earlier arms (`Byte`/`Short`/`Object` never scalar-fill,
-        // asserted in debug builds).
-        _ => {
-            debug_assert_eq!(base, BaseType::Char);
-            let f = char_fill(init)?;
-            let mut v: Vec<char> = zero_vec(base, size, '\0')?;
-            v.fill(f);
-            ArrayStore::Chars(v)
-        }
-    };
+    let store = ctor_scalar_store(base, size, init)?;
     Ok(Value::Array(Array::new(ArrayDesc::flat(base), store)))
 }
 
@@ -904,38 +934,59 @@ enum DirectStore {
     Ref,
 }
 
-/// Store through the direct `RT.aset` overloads: shape-match the
-/// val (else the 3-arg no-match — oracle `ix-order`), coerce
-/// (failing coercions beat bounds — oracle `ord-int-huge-oob`),
-/// bounds-check (the `Index` text — oracle `b-oob`), store.
-fn aset_direct(eval: &mut Evaluator, a: &Array, i: i32, v: &Value) -> Result<(), NativeError> {
-    let desc = a.desc();
-    let store = match (desc.base, desc.dims, v) {
-        // Refs and nesting match anything (the store check
-        // runs after bounds).
-        (_, 2.., _) | (BaseType::Object, _, _) => DirectStore::Ref,
-        (BaseType::Boolean, _, Value::Bool(b)) => DirectStore::Bool(*b),
-        (BaseType::Char, _, Value::Char(c)) => DirectStore::Char(*c),
-        (BaseType::Float, _, Value::Double(d)) => DirectStore::Float(*d),
-        (BaseType::Double, _, Value::Double(d)) => DirectStore::Double(*d),
-        (BaseType::Int, _, Value::Int(l)) => DirectStore::Int(int_exact_long(*l)?),
-        (BaseType::Long, _, Value::Int(l)) => DirectStore::Long(*l),
+/// Shape-match the val through the direct `RT.aset` primitive
+/// overloads (else the 3-arg no-match — oracle `ix-order`),
+/// coercing (failing coercions beat bounds — oracle
+/// `ord-int-huge-oob`). Caller routes refs and nesting first.
+fn aset_direct_prim(
+    eval: &mut Evaluator,
+    base: BaseType,
+    v: &Value,
+) -> Result<DirectStore, NativeError> {
+    match (base, v) {
+        (BaseType::Boolean, Value::Bool(b)) => Ok(DirectStore::Bool(*b)),
+        (BaseType::Char, Value::Char(c)) => Ok(DirectStore::Char(*c)),
+        (BaseType::Float, Value::Double(d)) => Ok(DirectStore::Float(*d)),
+        (BaseType::Double, Value::Double(d)) => Ok(DirectStore::Double(*d)),
+        (BaseType::Int, Value::Int(l)) => Ok(DirectStore::Int(int_exact_long(*l)?)),
+        (BaseType::Long, Value::Int(l)) => Ok(DirectStore::Long(*l)),
         // D2: the JVM only matches the erased `Short`/`Byte`
         // wrappers; the port stores in-range `Int`s (else the
         // width range error — without this `(aset s 0 (short
         // x))` could never work). The range check runs with the
-        // other coercions, before bounds — uniform with `Int`
-        // (unobservable on the JVM, which never matches here).
-        (BaseType::Short, _, Value::Int(l)) => {
-            DirectStore::Short(core_short(eval, &Value::Int(*l))? as i16)
+        // other coercions, before bounds — uniform with `Int`.
+        (BaseType::Short, Value::Int(l)) => {
+            Ok(DirectStore::Short(core_short(eval, &Value::Int(*l))? as i16))
         }
-        (BaseType::Byte, _, Value::Int(l)) => {
-            DirectStore::Byte(core_byte(eval, &Value::Int(*l))? as i8)
+        (BaseType::Byte, Value::Int(l)) => {
+            Ok(DirectStore::Byte(core_byte(eval, &Value::Int(*l))? as i8))
         }
-        _ => return Err(no_match("aset", 3)),
-    };
-    let n = a.len();
-    let i = check_bounds(i, n)?;
+        _ => Err(no_match("aset", 3)),
+    }
+}
+
+/// Shape-match the val through the direct `RT.aset` overloads:
+/// refs and nesting match anything (the store check runs after
+/// bounds), primitives narrow through [`aset_direct_prim`].
+fn aset_direct_shape(
+    eval: &mut Evaluator,
+    base: BaseType,
+    dims: u32,
+    v: &Value,
+) -> Result<DirectStore, NativeError> {
+    if dims >= 2 || base == BaseType::Object {
+        return Ok(DirectStore::Ref);
+    }
+    aset_direct_prim(eval, base, v)
+}
+
+/// Store a coerced direct val past bounds (caller bounds-checks).
+fn aset_direct_store(
+    a: &Array,
+    i: usize,
+    store: DirectStore,
+    v: &Value,
+) -> Result<(), NativeError> {
     let mut cell = a.lock();
     match (store, &mut *cell) {
         (DirectStore::Bool(b), ArrayStore::Bools(v)) => v[i] = b,
@@ -955,6 +1006,17 @@ fn aset_direct(eval: &mut Evaluator, a: &Array, i: i32, v: &Value) -> Result<(),
         _ => unreachable!("direct store shape"),
     }
     Ok(())
+}
+
+/// Store through the direct `RT.aset` overloads: shape-match the
+/// val (see [`aset_direct_shape`]), bounds-check (the `Index`
+/// text — oracle `b-oob`), store (see [`aset_direct_store`]).
+fn aset_direct(eval: &mut Evaluator, a: &Array, i: i32, v: &Value) -> Result<(), NativeError> {
+    let desc = a.desc();
+    let store = aset_direct_shape(eval, desc.base, desc.dims, v)?;
+    let n = a.len();
+    let i = check_bounds(i, n)?;
+    aset_direct_store(a, i, store, v)
 }
 
 /// Store into refs: dims-1 checks the `into-array` narrowing
@@ -1002,6 +1064,115 @@ fn store_ref(a: &Array, i: usize, v: &Value) -> Result<(), NativeError> {
     }
 }
 
+fn aset_raw_int(a: &Array, i: usize, v: &Value) -> Result<(), NativeError> {
+    let x = match v {
+        Value::Char(c) => Some(*c as i32),
+        _ => None,
+    };
+    let mut cell = a.lock();
+    match (&mut *cell, x) {
+        (ArrayStore::Ints(slots), Some(x)) => {
+            slots[i] = x;
+            Ok(())
+        }
+        _ => Err(arg_mismatch()),
+    }
+}
+
+fn aset_raw_long(a: &Array, i: usize, v: &Value) -> Result<(), NativeError> {
+    let x = match v {
+        Value::Int(l) => Some(*l),
+        Value::Char(c) => Some(*c as i64),
+        _ => None,
+    };
+    let mut cell = a.lock();
+    match (&mut *cell, x) {
+        (ArrayStore::Longs(slots), Some(x)) => {
+            slots[i] = x;
+            Ok(())
+        }
+        _ => Err(arg_mismatch()),
+    }
+}
+
+fn aset_raw_char(a: &Array, i: usize, v: &Value) -> Result<(), NativeError> {
+    let x = match v {
+        Value::Char(c) => Some(*c),
+        _ => None,
+    };
+    let mut cell = a.lock();
+    match (&mut *cell, x) {
+        (ArrayStore::Chars(slots), Some(x)) => {
+            slots[i] = x;
+            Ok(())
+        }
+        _ => Err(arg_mismatch()),
+    }
+}
+
+fn aset_raw_float(a: &Array, i: usize, v: &Value) -> Result<(), NativeError> {
+    let x = match v {
+        Value::Int(l) => Some(*l as f64),
+        Value::Char(c) => Some(*c as i64 as f64),
+        _ => None,
+    };
+    let mut cell = a.lock();
+    match (&mut *cell, x) {
+        (ArrayStore::Floats(slots), Some(x)) => {
+            slots[i] = x;
+            Ok(())
+        }
+        _ => Err(arg_mismatch()),
+    }
+}
+
+fn aset_raw_double(a: &Array, i: usize, v: &Value) -> Result<(), NativeError> {
+    let x = match v {
+        Value::Double(d) => Some(*d),
+        Value::Int(l) => Some(*l as f64),
+        Value::Char(c) => Some(*c as i64 as f64),
+        _ => None,
+    };
+    let mut cell = a.lock();
+    match (&mut *cell, x) {
+        (ArrayStore::Doubles(slots), Some(x)) => {
+            slots[i] = x;
+            Ok(())
+        }
+        _ => Err(arg_mismatch()),
+    }
+}
+
+fn aset_raw_bool(a: &Array, i: usize, v: &Value) -> Result<(), NativeError> {
+    let x = match v {
+        Value::Bool(b) => Some(*b),
+        _ => None,
+    };
+    let mut cell = a.lock();
+    match (&mut *cell, x) {
+        (ArrayStore::Bools(slots), Some(x)) => {
+            slots[i] = x;
+            Ok(())
+        }
+        _ => Err(arg_mismatch()),
+    }
+}
+
+/// A raw tail `Array.set` into a flat (dims-1) array (split from
+/// [`aset_raw`] for the complexity budget).
+fn aset_raw_flat(a: &Array, i: usize, desc: &ArrayDesc, v: &Value) -> Result<(), NativeError> {
+    match desc.base {
+        BaseType::Int => aset_raw_int(a, i, v),
+        BaseType::Long => aset_raw_long(a, i, v),
+        BaseType::Short | BaseType::Byte => Err(arg_mismatch()),
+        BaseType::Char => aset_raw_char(a, i, v),
+        BaseType::Float => aset_raw_float(a, i, v),
+        BaseType::Double => aset_raw_double(a, i, v),
+        BaseType::Boolean => aset_raw_bool(a, i, v),
+        BaseType::Object => store_raw_ref(a, i, desc, v),
+    }
+}
+
 /// A raw tail `aset` step (`Array.set`: bounds first, then the
 /// exact-unbox + JLS-widen rules — the port reads `Int` as JVM
 /// `Long`, so `int[]`←`Int` misses while `long[]`←`Int` stores;
@@ -1021,83 +1192,12 @@ fn aset_raw(a: &Array, i: i32, v: &Value) -> Result<(), NativeError> {
         return Err(aioobe_empty());
     }
     let i = i as usize;
-    // Nesting stores through the ref rule; flat `Object` tails
-    // fall into the `match` below (same destination — a live arm
-    // instead of an untestable fallback).
+    // Nesting stores through the ref rule; flat tails dispatch
+    // per base below.
     if desc.dims > 1 {
         return store_raw_ref(a, i, &desc, v);
     }
-    let mut cell = a.lock();
-    macro_rules! prim {
-        ($variant:ident, $ok:expr) => {
-            match (&mut *cell, $ok) {
-                (ArrayStore::$variant(slots), Some(x)) => {
-                    slots[i] = x;
-                    Ok(())
-                }
-                _ => Err(arg_mismatch()),
-            }
-        };
-    }
-    match desc.base {
-        // `set` widens `Character` to `int`, but never narrows
-        // `Long` (the port's `Int`) down to it.
-        BaseType::Int => prim!(
-            Ints,
-            match v {
-                Value::Char(c) => Some(*c as i32),
-                _ => None,
-            }
-        ),
-        BaseType::Long => prim!(
-            Longs,
-            match v {
-                Value::Int(l) => Some(*l),
-                Value::Char(c) => Some(*c as i64),
-                _ => None,
-            }
-        ),
-        // No port value unboxes to `short`/`byte` (the exact
-        // wrappers are erased, `Long` never narrows).
-        BaseType::Short => Err(arg_mismatch()),
-        BaseType::Byte => Err(arg_mismatch()),
-        BaseType::Char => prim!(
-            Chars,
-            match v {
-                Value::Char(c) => Some(*c),
-                _ => None,
-            }
-        ),
-        // `long`/`char` widen to `float`, `double` never narrows.
-        BaseType::Float => prim!(
-            Floats,
-            match v {
-                Value::Int(l) => Some(*l as f64),
-                Value::Char(c) => Some(*c as i64 as f64),
-                _ => None,
-            }
-        ),
-        BaseType::Double => prim!(
-            Doubles,
-            match v {
-                Value::Double(d) => Some(*d),
-                Value::Int(l) => Some(*l as f64),
-                Value::Char(c) => Some(*c as i64 as f64),
-                _ => None,
-            }
-        ),
-        BaseType::Boolean => prim!(
-            Bools,
-            match v {
-                Value::Bool(b) => Some(*b),
-                _ => None,
-            }
-        ),
-        BaseType::Object => {
-            drop(cell);
-            store_raw_ref(a, i, &desc, v)
-        }
-    }
+    aset_raw_flat(a, i, &desc, v)
 }
 
 /// A raw tail store into refs: nil fits, assignable fits, misses
@@ -1219,18 +1319,30 @@ enum SetXVal {
     Double(f64),
 }
 
+/// Coerce the val through the matching wide core fn (see
+/// [`setx_coerce`]).
+fn setx_coerce_wide(eval: &mut Evaluator, x: SetX, v: &Value) -> Result<SetXVal, NativeError> {
+    match x {
+        SetX::Int => Ok(SetXVal::Int(core_int(eval, v)?)),
+        SetX::Long => Ok(SetXVal::Int(core_long(eval, v)?)),
+        SetX::Float => Ok(SetXVal::Double(core_float(eval, v)?)),
+        _ => {
+            debug_assert!(matches!(x, SetX::Double));
+            Ok(SetXVal::Double(core_double(eval, v)?))
+        }
+    }
+}
+
 /// Coerce the val through the matching core fn (`boolean` is
-/// truthiness and never fails — oracle `c-bool`).
+/// truthiness and never fails — oracle `c-bool`). Split by width
+/// for the complexity budget.
 fn setx_coerce(eval: &mut Evaluator, x: SetX, v: &Value) -> Result<SetXVal, NativeError> {
     match x {
         SetX::Boolean => Ok(SetXVal::Bool(!matches!(v, Value::Nil | Value::Bool(false)))),
         SetX::Byte => Ok(SetXVal::Int(core_byte(eval, v)?)),
         SetX::Char => Ok(SetXVal::Char(core_char(eval, v)?)),
         SetX::Short => Ok(SetXVal::Int(core_short(eval, v)?)),
-        SetX::Int => Ok(SetXVal::Int(core_int(eval, v)?)),
-        SetX::Long => Ok(SetXVal::Int(core_long(eval, v)?)),
-        SetX::Float => Ok(SetXVal::Double(core_float(eval, v)?)),
-        SetX::Double => Ok(SetXVal::Double(core_double(eval, v)?)),
+        wide => setx_coerce_wide(eval, wide, v),
     }
 }
 
@@ -1775,9 +1887,23 @@ fn native_to_array_2d(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     Ok(Value::Array(Array::new(desc, ArrayStore::Arrays(rows))))
 }
 
+/// Coerce one element through a wide `vector-of` type's core fn
+/// (see [`vector_coerce`]).
+fn vector_coerce_wide(eval: &mut Evaluator, elem: Elem8, v: &Value) -> Result<Value, NativeError> {
+    match elem {
+        Elem8::Int => Ok(Value::Int(core_int(eval, v)?)),
+        Elem8::Long => Ok(Value::Int(core_long(eval, v)?)),
+        Elem8::Float => Ok(Value::Double(core_float(eval, v)?)),
+        _ => {
+            debug_assert!(matches!(elem, Elem8::Double));
+            Ok(Value::Double(core_double(eval, v)?))
+        }
+    }
+}
+
 /// Coerce one element through the `vector-of` type's core fn
 /// (the `ArrayManager` rule — `boolean` is truthiness; shared
-/// with `conj`/`assoc`).
+/// with `conj`/`assoc`). Split by width for the complexity budget.
 pub(crate) fn vector_coerce(
     eval: &mut Evaluator,
     elem: Elem8,
@@ -1788,10 +1914,33 @@ pub(crate) fn vector_coerce(
         Elem8::Byte => Ok(Value::Int(core_byte(eval, v)?)),
         Elem8::Char => Ok(Value::Char(core_char(eval, v)?)),
         Elem8::Short => Ok(Value::Int(core_short(eval, v)?)),
-        Elem8::Int => Ok(Value::Int(core_int(eval, v)?)),
-        Elem8::Long => Ok(Value::Int(core_long(eval, v)?)),
-        Elem8::Float => Ok(Value::Double(core_float(eval, v)?)),
-        Elem8::Double => Ok(Value::Double(core_double(eval, v)?)),
+        wide => vector_coerce_wide(eval, wide, v),
+    }
+}
+
+/// Resolve a `vector-of` element type keyword (table-driven so
+/// `native_vector_of` stays under the complexity budget).
+const VECTOR_OF_TYPES: &[(&str, Elem8)] = &[
+    ("boolean", Elem8::Boolean),
+    ("byte", Elem8::Byte),
+    ("char", Elem8::Char),
+    ("short", Elem8::Short),
+    ("int", Elem8::Int),
+    ("long", Elem8::Long),
+    ("float", Elem8::Float),
+    ("double", Elem8::Double),
+];
+
+fn vector_of_elem(eval: &mut Evaluator, t: &Value) -> Result<Elem8, NativeError> {
+    let found = match t {
+        Value::Keyword(k) if k.namespace().is_none() => VECTOR_OF_TYPES
+            .iter()
+            .find_map(|&(name, e)| (name == k.name()).then_some(e)),
+        _ => None,
+    };
+    match found {
+        Some(elem) => Ok(elem),
+        None => Err(unrecognized(eval, t)?),
     }
 }
 
@@ -1799,20 +1948,7 @@ fn native_vector_of(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     if args.is_empty() {
         return Err(NativeError::arity("clojure.core/vector-of", 0));
     }
-    let elem = match &args[0] {
-        Value::Keyword(k) if k.namespace().is_none() => match k.name() {
-            "boolean" => Elem8::Boolean,
-            "byte" => Elem8::Byte,
-            "char" => Elem8::Char,
-            "short" => Elem8::Short,
-            "int" => Elem8::Int,
-            "long" => Elem8::Long,
-            "float" => Elem8::Float,
-            "double" => Elem8::Double,
-            _ => return Err(unrecognized(eval, &args[0])?),
-        },
-        _ => return Err(unrecognized(eval, &args[0])?),
-    };
+    let elem = vector_of_elem(eval, &args[0])?;
     let mut items = Vec::with_capacity(args.len() - 1);
     for v in &args[1..] {
         items.push(vector_coerce(eval, elem, v)?);

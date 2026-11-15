@@ -1245,6 +1245,26 @@ impl<'ctx> Lowerer<'ctx> {
                 self.call("rt_n_varref", None, &[dest.into(), self.u64c(k)]);
                 Ok(())
             }
+            Expr::If { test, then, els } => self.lower_if(f, test, then, els, dest),
+            Expr::Do(body) => self.lower_body(f, body, dest),
+            Expr::Let { bindings, body } => self.lower_let(f, bindings, body, dest),
+            Expr::Loop { bindings, body } => self.lower_loop(f, bindings, body, dest),
+            Expr::Recur(args) => self.lower_recur(f, args),
+            Expr::Invoke { head, args, .. } => self.lower_invoke(f, head, args, dest),
+            Expr::DirectNative(call) => self.lower_direct(f, call, dest),
+            other => self.lower_form(f, other, dest),
+        }
+    }
+
+    /// Lower literals/collections, fns, defs, and control-flow forms
+    /// off the hot scalar/call path.
+    fn lower_form(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        expr: &Expr,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        match expr {
             Expr::VecLit(items, meta) => {
                 self.lower_coll(f, "rt_n_vec_lit", items, meta.as_ref(), dest, false)
             }
@@ -1258,18 +1278,11 @@ impl<'ctx> Lowerer<'ctx> {
                     .collect();
                 self.lower_coll(f, "rt_n_map_lit", &flat, meta.as_ref(), dest, true)
             }
-            Expr::If { test, then, els } => self.lower_if(f, test, then, els, dest),
-            Expr::Do(body) => self.lower_body(f, body, dest),
-            Expr::Let { bindings, body } => self.lower_let(f, bindings, body, dest),
-            Expr::Loop { bindings, body } => self.lower_loop(f, bindings, body, dest),
-            Expr::Recur(args) => self.lower_recur(f, args),
             Expr::Fn(fun) => {
                 let base = f.env.len();
                 self.make_closure(f, fun, base, dest)
             }
             Expr::LetFn { fns, body } => self.lower_letfn(f, fns, body, dest),
-            Expr::Invoke { head, args, .. } => self.lower_invoke(f, head, args, dest),
-            Expr::DirectNative(call) => self.lower_direct(f, call, dest),
             Expr::Def {
                 sym,
                 doc,
@@ -1285,14 +1298,7 @@ impl<'ctx> Lowerer<'ctx> {
                 *span,
                 dest,
             ),
-            Expr::Throw(e) => {
-                let t = self.slot(f);
-                self.lower(f, e, t)?;
-                self.call("rt_n_throw", Some(self.i32t), &[t.into()]);
-                self.builder.build_unconditional_branch(f.fail).expect("br");
-                self.dead_end(f);
-                Ok(())
-            }
+            Expr::Throw(e) => self.lower_throw(f, e, dest),
             Expr::NewThrowable { class, message } => {
                 let c = self.constant(Const::Str(class.jvm_name().to_owned()));
                 let m = self.constant(Const::Str(message.clone()));
@@ -1308,57 +1314,7 @@ impl<'ctx> Lowerer<'ctx> {
                 catches,
                 finally_body,
             } => self.lower_try(f, body, catches, finally_body, dest),
-            Expr::Set { var, val } => {
-                let k = self.var_of(var);
-                let t = self.slot(f);
-                self.lower(f, val, t)?;
-                let st = self
-                    .call(
-                        "rt_n_set_var",
-                        Some(self.i32t),
-                        &[dest.into(), self.u64c(k), t.into()],
-                    )
-                    .expect("st");
-                self.check(f, st);
-                Ok(())
-            }
-            Expr::Binding { pairs, body } => self.lower_binding(f, pairs, body, dest),
-            Expr::Declare { syms, span } => {
-                let v = Value::Vector(Vector::from_vec(
-                    syms.iter().cloned().map(Value::Symbol).collect(),
-                ));
-                let k = self.value_const(&v)?;
-                self.call(
-                    "rt_n_declare",
-                    None,
-                    &[
-                        dest.into(),
-                        self.u64c(k),
-                        self.i32t.const_int(u64::from(span.line), false).into(),
-                        self.i32t.const_int(u64::from(span.col), false).into(),
-                    ],
-                );
-                Ok(())
-            }
-            Expr::Ns {
-                name,
-                doc,
-                attr,
-                clauses,
-            } => {
-                if self.lite {
-                    let np = self.str_ptr(name);
-                    self.call("rt_n_ns_lite", None, &[dest.into(), np.into()]);
-                    return Ok(());
-                }
-                let v = ns_desc(name, doc.as_deref(), attr.as_ref(), clauses);
-                let k = self.value_const(&v)?;
-                let st = self
-                    .call("rt_n_ns", Some(self.i32t), &[dest.into(), self.u64c(k)])
-                    .expect("st");
-                self.check(f, st);
-                Ok(())
-            }
+            Expr::Set { var, val } => self.lower_set(f, var, val, dest),
             Expr::CaseStar {
                 expr,
                 shift,
@@ -1368,39 +1324,64 @@ impl<'ctx> Lowerer<'ctx> {
                 skip,
                 test,
             } => self.lower_case(f, expr, *shift, *mask, default, cases, skip, *test, dest),
-            Expr::WithRedefs { pairs, body } => {
-                let exprs: Vec<Expr> = pairs.iter().map(|(_, e)| e.clone()).collect();
-                let vals = self.lower_args(f, &exprs)?;
-                let ks: Vec<u64> = pairs.iter().map(|(v, _)| self.var_of(v)).collect();
-                let karr = self.u64_array(&ks);
-                let b = self.slot(f);
-                self.body_closure(f, 0, body, b)?;
-                let vref = self.slots_ref(f, vals, pairs.len());
-                let st = self
-                    .call(
-                        "rt_n_with_redefs",
-                        Some(self.i32t),
-                        &[dest.into(), karr.into(), vref.into(), b.into()],
-                    )
-                    .expect("st");
-                self.check(f, st);
-                Ok(())
-            }
-            Expr::WithBindings { map, body } => {
-                let m = self.slot(f);
-                self.lower(f, map, m)?;
-                let b = self.slot(f);
-                self.body_closure(f, 0, body, b)?;
-                let st = self
-                    .call(
-                        "rt_n_with_bindings",
-                        Some(self.i32t),
-                        &[dest.into(), m.into(), b.into()],
-                    )
-                    .expect("st");
-                self.check(f, st);
-                Ok(())
-            }
+            other => self.lower_scope_form(f, other, dest),
+        }
+    }
+
+    fn lower_throw(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        e: &Expr,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let _ = dest;
+        let t = self.slot(f);
+        self.lower(f, e, t)?;
+        self.call("rt_n_throw", Some(self.i32t), &[t.into()]);
+        self.builder.build_unconditional_branch(f.fail).expect("br");
+        self.dead_end(f);
+        Ok(())
+    }
+
+    fn lower_set(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        var: &clj_value::Var,
+        val: &Expr,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let k = self.var_of(var);
+        let t = self.slot(f);
+        self.lower(f, val, t)?;
+        let st = self
+            .call(
+                "rt_n_set_var",
+                Some(self.i32t),
+                &[dest.into(), self.u64c(k), t.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        Ok(())
+    }
+
+    /// Lower dynamic-binding, namespace, and runtime-wrapper forms.
+    fn lower_scope_form(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        expr: &Expr,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        match expr {
+            Expr::Binding { pairs, body } => self.lower_binding(f, pairs, body, dest),
+            Expr::Declare { syms, span } => self.lower_declare(syms, *span, dest),
+            Expr::Ns {
+                name,
+                doc,
+                attr,
+                clauses,
+            } => self.lower_ns(f, name, doc.as_deref(), attr.as_ref(), clauses, dest),
+            Expr::WithRedefs { pairs, body } => self.lower_with_redefs(f, pairs, body, dest),
+            Expr::WithBindings { map, body } => self.lower_with_bindings(f, map, body, dest),
             Expr::Time { expr } => {
                 let b = self.slot(f);
                 self.body_closure(f, 0, std::slice::from_ref(expr.as_ref()), b)?;
@@ -1410,51 +1391,9 @@ impl<'ctx> Lowerer<'ctx> {
                 self.check(f, st);
                 Ok(())
             }
-            Expr::WithOutStr { out, body } => {
-                let k = self.value_const(&Value::Symbol(out.clone()))?;
-                let b = self.slot(f);
-                self.body_closure(f, 0, body, b)?;
-                let st = self
-                    .call(
-                        "rt_n_with_out_str",
-                        Some(self.i32t),
-                        &[dest.into(), self.u64c(k), b.into()],
-                    )
-                    .expect("st");
-                self.check(f, st);
-                Ok(())
-            }
-            Expr::WithInStr { input, s, body } => {
-                let k = self.value_const(&Value::Symbol(input.clone()))?;
-                let sv = self.slot(f);
-                self.lower(f, s, sv)?;
-                let b = self.slot(f);
-                self.body_closure(f, 0, body, b)?;
-                let st = self
-                    .call(
-                        "rt_n_with_in_str",
-                        Some(self.i32t),
-                        &[dest.into(), self.u64c(k), sv.into(), b.into()],
-                    )
-                    .expect("st");
-                self.check(f, st);
-                Ok(())
-            }
-            Expr::Locking { lockee, body } => {
-                let t = self.slot(f);
-                self.lower(f, lockee, t)?;
-                let b = self.slot(f);
-                self.body_closure(f, 0, body, b)?;
-                let st = self
-                    .call(
-                        "rt_n_locking",
-                        Some(self.i32t),
-                        &[dest.into(), t.into(), b.into()],
-                    )
-                    .expect("st");
-                self.check(f, st);
-                Ok(())
-            }
+            Expr::WithOutStr { out, body } => self.lower_with_out_str(f, out, body, dest),
+            Expr::WithInStr { input, s, body } => self.lower_with_in_str(f, input, s, body, dest),
+            Expr::Locking { lockee, body } => self.lower_locking(f, lockee, body, dest),
             Expr::Sync { body } | Expr::Io { body } => {
                 let io = u64::from(matches!(expr, Expr::Io { .. }));
                 let b = self.slot(f);
@@ -1469,30 +1408,181 @@ impl<'ctx> Lowerer<'ctx> {
                 self.check(f, st);
                 Ok(())
             }
+            other => self.lower_tail_form(f, other, dest),
+        }
+    }
+
+    fn lower_declare(
+        &mut self,
+        syms: &[Symbol],
+        span: clj_reader::Span,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let v = Value::Vector(Vector::from_vec(
+            syms.iter().cloned().map(Value::Symbol).collect(),
+        ));
+        let k = self.value_const(&v)?;
+        self.call(
+            "rt_n_declare",
+            None,
+            &[
+                dest.into(),
+                self.u64c(k),
+                self.i32t.const_int(u64::from(span.line), false).into(),
+                self.i32t.const_int(u64::from(span.col), false).into(),
+            ],
+        );
+        Ok(())
+    }
+
+    fn lower_ns(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        name: &str,
+        doc: Option<&str>,
+        attr: Option<&Map>,
+        clauses: &[NsClause],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        if self.lite {
+            let np = self.str_ptr(name);
+            self.call("rt_n_ns_lite", None, &[dest.into(), np.into()]);
+            return Ok(());
+        }
+        let v = ns_desc(name, doc, attr, clauses);
+        let k = self.value_const(&v)?;
+        let st = self
+            .call("rt_n_ns", Some(self.i32t), &[dest.into(), self.u64c(k)])
+            .expect("st");
+        self.check(f, st);
+        Ok(())
+    }
+
+    fn lower_with_redefs(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        pairs: &[(clj_value::Var, Expr)],
+        body: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let exprs: Vec<Expr> = pairs.iter().map(|(_, e)| e.clone()).collect();
+        let vals = self.lower_args(f, &exprs)?;
+        let ks: Vec<u64> = pairs.iter().map(|(v, _)| self.var_of(v)).collect();
+        let karr = self.u64_array(&ks);
+        let b = self.slot(f);
+        self.body_closure(f, 0, body, b)?;
+        let vref = self.slots_ref(f, vals, pairs.len());
+        let st = self
+            .call(
+                "rt_n_with_redefs",
+                Some(self.i32t),
+                &[dest.into(), karr.into(), vref.into(), b.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        Ok(())
+    }
+
+    fn lower_with_bindings(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        map: &Expr,
+        body: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let m = self.slot(f);
+        self.lower(f, map, m)?;
+        let b = self.slot(f);
+        self.body_closure(f, 0, body, b)?;
+        let st = self
+            .call(
+                "rt_n_with_bindings",
+                Some(self.i32t),
+                &[dest.into(), m.into(), b.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        Ok(())
+    }
+
+    fn lower_with_out_str(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        out: &Symbol,
+        body: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let k = self.value_const(&Value::Symbol(out.clone()))?;
+        let b = self.slot(f);
+        self.body_closure(f, 0, body, b)?;
+        let st = self
+            .call(
+                "rt_n_with_out_str",
+                Some(self.i32t),
+                &[dest.into(), self.u64c(k), b.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        Ok(())
+    }
+
+    fn lower_with_in_str(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        input: &Symbol,
+        s: &Expr,
+        body: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let k = self.value_const(&Value::Symbol(input.clone()))?;
+        let sv = self.slot(f);
+        self.lower(f, s, sv)?;
+        let b = self.slot(f);
+        self.body_closure(f, 0, body, b)?;
+        let st = self
+            .call(
+                "rt_n_with_in_str",
+                Some(self.i32t),
+                &[dest.into(), self.u64c(k), sv.into(), b.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        Ok(())
+    }
+
+    fn lower_locking(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        lockee: &Expr,
+        body: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let t = self.slot(f);
+        self.lower(f, lockee, t)?;
+        let b = self.slot(f);
+        self.body_closure(f, 0, body, b)?;
+        let st = self
+            .call(
+                "rt_n_locking",
+                Some(self.i32t),
+                &[dest.into(), t.into(), b.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        Ok(())
+    }
+
+    /// Lower lazy-seq, delay, bound-fn, defmacro, and assert forms.
+    fn lower_tail_form(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        expr: &Expr,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        match expr {
             Expr::LazySeqStar { body } => self.wrap_body(f, 0, "clojure.core/fn", body, dest),
             Expr::DelayStar { display, body } => self.wrap_body(f, 1, display, body, dest),
-            Expr::BoundFn { name, fun } => {
-                let depth = f.env.len();
-                let cell = name.as_ref().map(|_| {
-                    let c = self.slot(f);
-                    self.call("rt_n_cell_new", None, &[c.into()]);
-                    f.env.push(Some(LocalRef::Cell(c)));
-                    c
-                });
-                let t = self.slot(f);
-                let base = f.env.len();
-                self.make_closure(f, fun, base, t)?;
-                self.call(
-                    "rt_n_wrap_fn",
-                    None,
-                    &[dest.into(), self.i8t.const_int(2, false).into(), t.into()],
-                );
-                if let Some(c) = cell {
-                    self.call("rt_n_cell_set", None, &[c.into(), dest.into()]);
-                }
-                f.env.truncate(depth);
-                Ok(())
-            }
+            Expr::BoundFn { name, fun } => self.lower_bound_fn(f, name.as_deref(), fun, dest),
             Expr::DefMacro {
                 sym,
                 doc,
@@ -1500,64 +1590,124 @@ impl<'ctx> Lowerer<'ctx> {
                 arglists,
                 fun,
                 span,
-            } => {
-                let desc = Value::Vector(Vector::from_vec(vec![
-                    Value::Symbol(sym.clone()),
-                    doc.as_deref()
-                        .map_or(Value::Nil, |d| Value::Str(std::sync::Arc::from(d))),
-                    attr.clone().map_or(Value::Nil, Value::Map),
-                    Value::Vector(Vector::from_vec(arglists.clone())),
-                    Value::Int(i64::from(span.line)),
-                    Value::Int(i64::from(span.col)),
-                ]));
-                let k = self.value_const(&desc)?;
-                let t = self.slot(f);
-                let base = f.env.len();
-                self.make_closure(f, fun, base, t)?;
-                let st = self
-                    .call(
-                        "rt_n_defmacro",
-                        Some(self.i32t),
-                        &[dest.into(), self.u64c(k), t.into()],
-                    )
-                    .expect("st");
-                self.check(f, st);
-                Ok(())
-            }
+            } => self.lower_defmacro(
+                f,
+                sym,
+                doc.as_deref(),
+                attr.as_ref(),
+                arglists,
+                fun,
+                *span,
+                dest,
+            ),
             Expr::Assert {
                 test,
                 message,
                 form,
-            } => {
-                let t = self.slot(f);
-                self.lower(f, test, t)?;
-                let ok = self.truthy(t);
-                let fail_b = self.ctx.append_basic_block(f.func, "assert_fail");
-                let pass_b = self.ctx.append_basic_block(f.func, "assert_pass");
-                self.builder
-                    .build_conditional_branch(ok, pass_b, fail_b)
-                    .expect("br");
-                self.builder.position_at_end(fail_b);
-                let msg = match message {
-                    Some(m) => {
-                        let ms = self.slot(f);
-                        self.lower(f, m, ms)?;
-                        ms
-                    }
-                    None => self.ptr.const_null(),
-                };
-                let fk = self.constant(Const::Str(form.clone()));
-                self.call(
-                    "rt_n_assert_fail",
-                    Some(self.i32t),
-                    &[msg.into(), self.u64c(fk)],
-                );
-                self.builder.build_unconditional_branch(f.fail).expect("br");
-                self.builder.position_at_end(pass_b);
-                self.write_nil(f.func, dest);
-                Ok(())
-            }
+            } => self.lower_assert(f, test, message.as_deref(), form, dest),
+            _ => unreachable!("lower_tail_form partition"),
         }
+    }
+
+    fn lower_bound_fn(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        name: Option<&str>,
+        fun: &FunExpr,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let depth = f.env.len();
+        let cell = name.map(|_| {
+            let c = self.slot(f);
+            self.call("rt_n_cell_new", None, &[c.into()]);
+            f.env.push(Some(LocalRef::Cell(c)));
+            c
+        });
+        let t = self.slot(f);
+        let base = f.env.len();
+        self.make_closure(f, fun, base, t)?;
+        self.call(
+            "rt_n_wrap_fn",
+            None,
+            &[dest.into(), self.i8t.const_int(2, false).into(), t.into()],
+        );
+        if let Some(c) = cell {
+            self.call("rt_n_cell_set", None, &[c.into(), dest.into()]);
+        }
+        f.env.truncate(depth);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_defmacro(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        sym: &Symbol,
+        doc: Option<&str>,
+        attr: Option<&Map>,
+        arglists: &[Value],
+        fun: &FunExpr,
+        span: clj_reader::Span,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let desc = Value::Vector(Vector::from_vec(vec![
+            Value::Symbol(sym.clone()),
+            doc.map_or(Value::Nil, |d| Value::Str(std::sync::Arc::from(d))),
+            attr.cloned().map_or(Value::Nil, Value::Map),
+            Value::Vector(Vector::from_vec(arglists.to_vec())),
+            Value::Int(i64::from(span.line)),
+            Value::Int(i64::from(span.col)),
+        ]));
+        let k = self.value_const(&desc)?;
+        let t = self.slot(f);
+        let base = f.env.len();
+        self.make_closure(f, fun, base, t)?;
+        let st = self
+            .call(
+                "rt_n_defmacro",
+                Some(self.i32t),
+                &[dest.into(), self.u64c(k), t.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        Ok(())
+    }
+
+    fn lower_assert(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        test: &Expr,
+        message: Option<&Expr>,
+        form: &str,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let t = self.slot(f);
+        self.lower(f, test, t)?;
+        let ok = self.truthy(t);
+        let fail_b = self.ctx.append_basic_block(f.func, "assert_fail");
+        let pass_b = self.ctx.append_basic_block(f.func, "assert_pass");
+        self.builder
+            .build_conditional_branch(ok, pass_b, fail_b)
+            .expect("br");
+        self.builder.position_at_end(fail_b);
+        let msg = match message {
+            Some(m) => {
+                let ms = self.slot(f);
+                self.lower(f, m, ms)?;
+                ms
+            }
+            None => self.ptr.const_null(),
+        };
+        let fk = self.constant(Const::Str(form.to_owned()));
+        self.call(
+            "rt_n_assert_fail",
+            Some(self.i32t),
+            &[msg.into(), self.u64c(fk)],
+        );
+        self.builder.build_unconditional_branch(f.fail).expect("br");
+        self.builder.position_at_end(pass_b);
+        self.write_nil(f.func, dest);
+        Ok(())
     }
 
     /// A `let`: each init lowered into its slot; a symbol binding
@@ -3959,4 +4109,32 @@ fn expr_lite_ok(e: &Expr, defined: &BTreeSet<(String, String)>) -> bool {
         }
     });
     ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "lower_tail_form partition")]
+    fn lower_tail_form_rejects_upstream_expr() {
+        let ctx = Context::create();
+        let mut lowerer = Lowerer::with_bitcode(&ctx, false);
+        let func = lowerer
+            .module
+            .add_function("test_fn", lowerer.code_ty, None);
+        let entry = ctx.append_basic_block(func, "entry");
+        let dest = lowerer.ptr.const_null();
+        let mut f = FnCtx {
+            func,
+            entry,
+            fail: entry,
+            slots: Vec::new(),
+            env: Vec::new(),
+            recur: Vec::new(),
+            captured: dest,
+            moves: Vec::new(),
+        };
+        let _ = lowerer.lower_tail_form(&mut f, &Expr::Literal(Value::Nil), dest);
+    }
 }

@@ -115,15 +115,16 @@ fn var_pairs(ks: &CSlice<u64>, values: &CSlice<Value>) -> Vec<(clj_value::Var, V
         .collect()
 }
 
-/// The C `argv` strings after the program name.
+/// The C `argv` strings after the program name (skipping any null entry).
 fn argv_strings(argv: &CSlice<*const c_char>) -> Vec<String> {
     argv.get()
         .iter()
         .skip(1)
-        .map(|a| {
+        .filter(|&&a| !a.is_null())
+        .map(|&a| {
             // SAFETY: `argv` is the C runtime's `main` vector (via
-            // generated code): every entry is a NUL-terminated string.
-            unsafe { CStr::from_ptr(*a) }.to_string_lossy().into_owned()
+            // generated code): every non-null entry is a NUL-terminated string.
+            unsafe { CStr::from_ptr(a) }.to_string_lossy().into_owned()
         })
         .collect()
 }
@@ -961,4 +962,28 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_conj_bang_fx,
         rt_n_str_ascii,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    #[test]
+    fn argv_strings_skips_prog_and_null_entries() {
+        let prog = CString::new("prog").unwrap();
+        let a = CString::new("alpha").unwrap();
+        let b = CString::new("beta").unwrap();
+        let mut ptrs = [
+            prog.as_ptr().cast_mut(),
+            std::ptr::null_mut(),
+            a.as_ptr().cast_mut(),
+            b.as_ptr().cast_mut(),
+        ];
+        let slice = CSlice {
+            ptr: ptrs.as_mut_ptr(),
+            len: ptrs.len(),
+        };
+        assert_eq!(argv_strings(&slice), vec!["alpha", "beta"]);
+    }
 }

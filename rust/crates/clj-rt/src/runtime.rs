@@ -335,11 +335,16 @@ pub(crate) fn nth_worker(owned: Vec<Value>, path: &str, line: u32, col: u32) -> 
 /// The `*command-line-args*` value over borrowed C strings:
 /// `argv[0]` already skipped by the shim; no entries is nil,
 /// else a list of lossy-decoded strings (the JVM shape).
-pub(crate) fn argv_worker(entries: &[&CStr]) -> *mut Value {
+pub(crate) fn argv_worker(entries: &[Option<&CStr>]) -> *mut Value {
     let mut items = Vec::new();
     for entry in entries {
-        let text = entry.to_string_lossy().into_owned();
-        items.push(Value::Str(Arc::from(text.as_str())));
+        match entry {
+            Some(cstr) => {
+                let text = cstr.to_string_lossy().into_owned();
+                items.push(Value::Str(Arc::from(text.as_str())));
+            }
+            None => items.push(Value::Nil),
+        }
     }
     if items.is_empty() {
         give(Value::Nil)
@@ -667,8 +672,9 @@ mod tests {
         let b = c"b";
         let bad = c"a\xffb";
         assert_eq!(render(argv_worker(&[])), "nil");
-        assert_eq!(render(argv_worker(&[a, b])), "(a b)");
-        assert_eq!(render(argv_worker(&[bad])), "(a�b)");
+        assert_eq!(render(argv_worker(&[Some(a), Some(b)])), "(a b)");
+        assert_eq!(render(argv_worker(&[None, Some(a)])), "(nil a)");
+        assert_eq!(render(argv_worker(&[Some(bad)])), "(a�b)");
     }
 
     #[test]

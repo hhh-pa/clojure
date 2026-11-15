@@ -1375,12 +1375,63 @@ impl Evaluator {
     pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
         match expr {
             Expr::Literal(v) | Expr::Quote(v) => Ok(v.clone()),
-            Expr::VecLit(elems, meta) => self.eval_vec(elems, meta.clone(), env),
-            Expr::MapLit(pairs, meta) => self.eval_map_lit(pairs, meta.clone(), env),
-            Expr::SetLit(elems, meta) => self.eval_set_lit(elems, meta.clone(), env),
             Expr::Global(var) => Ok(self.deref_var_cached(var.id, &var.sym)),
             Expr::Local(idx) => Ok(env.get(*idx)),
             Expr::VarRef(var) => Ok(Value::Var(var.clone())),
+            Expr::If { test, then, els } => self.eval_if(test, then, els, env),
+            Expr::Do(exprs) => self.eval_body(exprs, env),
+            Expr::Let { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
+            Expr::Loop { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
+            Expr::Recur(args) => self.eval_recur_expr(args, env),
+            Expr::Invoke { head, args, span } => self.eval_invoke_expr(head, args, *span, env),
+            Expr::DirectNative(call) => self.eval_direct_native(call, env),
+            other => self.eval_non_hot(other, env),
+        }
+    }
+
+    #[inline]
+    fn eval_recur_expr(&mut self, args: &[Expr], env: &Env) -> Result<Value, Signal> {
+        // Pooled arg buffer (see `recur_pool`): steady-state loops
+        // never allocate here.
+        let mut values = self.recur_pool.pop().unwrap_or_default();
+        values.clear();
+        values.reserve(args.len());
+        for arg in args {
+            values.push(self.eval(arg, env)?);
+        }
+        Err(Signal::Recur(values))
+    }
+
+    #[inline]
+    fn eval_invoke_expr(
+        &mut self,
+        head: &Expr,
+        args: &[Expr],
+        span: Span,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let callee = self.eval(head, env)?;
+        // Stack-inline arg buffer (spills past 4 args, like the old
+        // heap `Vec`): calls never escape this buffer, so most
+        // arities allocate nothing.
+        let mut values: SmallVec<[Value; 4]> = SmallVec::new();
+        for arg in args {
+            values.push(self.eval(arg, env)?);
+        }
+        self.invoke_args(&callee, values, span)
+    }
+
+    /// Literal collections, fns, defs, and control flow off the fast
+    /// scalar/call path (split from [`Evaluator::eval`] for the
+    /// complexity budget).
+    #[inline]
+    fn eval_non_hot(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        match expr {
+            Expr::VecLit(elems, meta) => self.eval_vec(elems, meta.clone(), env),
+            Expr::MapLit(pairs, meta) => self.eval_map_lit(pairs, meta.clone(), env),
+            Expr::SetLit(elems, meta) => self.eval_set_lit(elems, meta.clone(), env),
+            Expr::Fn(fun) => Ok(Value::Extension(Arc::new(self.make_closure(fun, env)))),
+            Expr::LetFn { fns, body } => self.eval_letfn(fns, body, env),
             Expr::Def {
                 sym,
                 doc,
@@ -1395,23 +1446,7 @@ impl Evaluator {
                 *span,
                 env,
             ),
-            Expr::If { test, then, els } => self.eval_if(test, then, els, env),
-            Expr::Do(exprs) => self.eval_body(exprs, env),
-            Expr::Let { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
-            Expr::Loop { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
-            Expr::LetFn { fns, body } => self.eval_letfn(fns, body, env),
-            Expr::Fn(fun) => Ok(Value::Extension(Arc::new(self.make_closure(fun, env)))),
-            Expr::Recur(args) => {
-                // Pooled arg buffer (see `recur_pool`): steady-state
-                // loops never allocate here.
-                let mut values = self.recur_pool.pop().unwrap_or_default();
-                values.clear();
-                values.reserve(args.len());
-                for arg in args {
-                    values.push(self.eval(arg, env)?);
-                }
-                Err(Signal::Recur(values))
-            }
+            Expr::Set { var, val } => self.eval_set(var, val, env),
             Expr::Throw(inner) => self.eval_throw(inner, env),
             Expr::NewThrowable { class, message } => Ok(Value::Throwable(Arc::new(Throwable {
                 id: self.next_id(),
@@ -1425,7 +1460,14 @@ impl Evaluator {
                 catches,
                 finally_body,
             } => self.eval_try(body, catches, finally_body, env),
-            Expr::Set { var, val } => self.eval_set(var, val, env),
+            other => self.eval_scope_form(other, env),
+        }
+    }
+
+    /// Dynamic-binding, namespace, and macro forms (split from
+    /// [`Evaluator::eval`] for the complexity budget).
+    fn eval_scope_form(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        match expr {
             Expr::Binding { pairs, body } => self.eval_binding(pairs, body, env),
             Expr::WithRedefs { pairs, body } => self.eval_with_redefs(pairs, body, env),
             Expr::WithBindings { map, body } => self.eval_with_bindings(map, body, env),
@@ -1454,15 +1496,7 @@ impl Evaluator {
                 doc,
                 attr,
                 clauses,
-            } => {
-                let Some(hooks) = self.lazy_hooks else {
-                    return Err(self.throw(NativeError::new(
-                        ThrowClass::IllegalStateException,
-                        "ns requires full boot".to_owned(),
-                    )));
-                };
-                (hooks.eval_ns)(self, name, doc.as_deref(), attr.as_ref(), clauses)
-            }
+            } => self.eval_ns_hook(name, doc.as_deref(), attr.as_ref(), clauses),
             Expr::Assert {
                 test,
                 message,
@@ -1470,6 +1504,30 @@ impl Evaluator {
             } => self.eval_assert(test, message.as_deref(), form, env),
             Expr::Time { expr } => self.eval_time(expr, env),
             Expr::WithOutStr { out, body } => self.eval_with_out_str(out, body, env),
+            other => self.eval_tail_form(other, env),
+        }
+    }
+
+    fn eval_ns_hook(
+        &mut self,
+        name: &str,
+        doc: Option<&str>,
+        attr: Option<&Map>,
+        clauses: &[crate::expr::NsClause],
+    ) -> Result<Value, Signal> {
+        let Some(hooks) = self.lazy_hooks else {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalStateException,
+                "ns requires full boot".to_owned(),
+            )));
+        };
+        (hooks.eval_ns)(self, name, doc, attr, clauses)
+    }
+
+    /// Leaf stream/tx/dispatch forms (split from [`Evaluator::eval`]
+    /// for the complexity budget).
+    fn eval_tail_form(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        match expr {
             Expr::WithInStr { input, s, body } => self.eval_with_in_str(input, s, body, env),
             Expr::LazySeqStar { body } => {
                 Ok(crate::lazy::thunk0_value(Arc::clone(body), env.clone()))
@@ -1488,18 +1546,7 @@ impl Evaluator {
                 skip,
                 test,
             } => self.eval_case_star(expr, *shift, *mask, default, cases, skip, *test, env),
-            Expr::Invoke { head, args, span } => {
-                let callee = self.eval(head, env)?;
-                // Stack-inline arg buffer (spills past 4 args, like
-                // the old heap `Vec`): calls never escape this
-                // buffer, so most arities allocate nothing.
-                let mut values: SmallVec<[Value; 4]> = SmallVec::new();
-                for arg in args {
-                    values.push(self.eval(arg, env)?);
-                }
-                self.invoke_args(&callee, values, *span)
-            }
-            Expr::DirectNative(call) => self.eval_direct_native(call, env),
+            _ => unreachable!("eval_tail_form partition"),
         }
     }
 
@@ -2755,10 +2802,6 @@ impl Evaluator {
             return self.invoke_map(callee, args);
         }
         match callee {
-            Value::Nil => Err(self.throw(NativeError::new(
-                ThrowClass::NullPointerException,
-                "Cannot invoke nil as a function".to_owned(),
-            ))),
             Value::Extension(_) => self.invoke_extension(callee, args),
             Value::Keyword(_) | Value::Symbol(_) => self.invoke_keyed_name(callee, args),
             Value::Vector(v) => self.invoke_vector(v, args),
@@ -2767,12 +2810,24 @@ impl Evaluator {
             Value::Map(_) => self.invoke_map(callee, args),
             Value::Set(s) => self.invoke_set(s, args),
             Value::Var(v) => self.invoke_var(v, args),
+            Value::Promise(p) => self.invoke_promise(p, args),
+            Value::MultiFn(m) => crate::multi::invoke_multifn(self, m, args),
+            other => self.invoke_fallback(other, args),
+        }
+    }
+
+    /// Cold invoke arms (split from [`Evaluator::invoke`] for the
+    /// complexity budget): nil/unbound throws, `Ref` deref, and `IFn` cast.
+    fn invoke_fallback(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        match callee {
+            Value::Nil => Err(self.throw(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke nil as a function".to_owned(),
+            ))),
             Value::Unbound(u) => Err(self.throw(NativeError::new(
                 ThrowClass::IllegalStateException,
                 format!("Attempting to call unbound fn: #'{}", u.sym),
             ))),
-            Value::Promise(p) => self.invoke_promise(p, args),
-            Value::MultiFn(m) => crate::multi::invoke_multifn(self, m, args),
             Value::Ref(r) => {
                 let value = crate::stm::tx_deref(self, r);
                 self.invoke(&value, args)
@@ -3612,39 +3667,38 @@ impl Evaluator {
             }
             Value::Vector(v) => {
                 let items: Vec<Value> = v.iter().collect();
-                match items.as_slice() {
-                    [k, val] => Ok(map.insert(k.clone(), val.clone())),
-                    _ => Err(self.throw(NativeError::new(
-                        ThrowClass::IllegalArgumentException,
-                        "Vector arg to map conj must be a pair".to_owned(),
-                    ))),
-                }
+                self.conj_map_pair(map, &items)
             }
             // `Vec` is an `IPersistentVector`: pairs assoc like vectors.
-            Value::PrimitiveVector(p) => match p.items().as_slice() {
-                [k, val] => Ok(map.insert(k.clone(), val.clone())),
-                _ => Err(self.throw(NativeError::new(
-                    ThrowClass::IllegalArgumentException,
-                    "Vector arg to map conj must be a pair".to_owned(),
-                ))),
-            },
+            Value::PrimitiveVector(p) => self.conj_map_pair(map, &p.items()),
             Value::MapEntry { key, val, .. } => Ok(map.insert(*key, *val)),
-            other => match self.seq_opt(&other)? {
-                None => Ok(map),
-                Some(l) => {
-                    // One pair per entry (Oracle FX2
-                    // `conj-seq-entries`); the first non-entry is
-                    // the `Map$Entry` cast error.
-                    for head in l.iter() {
-                        let Value::MapEntry { key, val, .. } = head else {
-                            return Err(self.throw(cast_entry(head)));
-                        };
-                        map = map.insert((**key).clone(), (**val).clone());
-                    }
-                    Ok(map)
-                }
-            },
+            other => self.conj_map_seq(map, &other),
         }
+    }
+
+    fn conj_map_pair(&mut self, map: Map, items: &[Value]) -> Result<Map, Signal> {
+        match items {
+            [k, val] => Ok(map.insert(k.clone(), val.clone())),
+            _ => Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Vector arg to map conj must be a pair".to_owned(),
+            ))),
+        }
+    }
+
+    fn conj_map_seq(&mut self, mut map: Map, other: &Value) -> Result<Map, Signal> {
+        let Some(l) = self.seq_opt(other)? else {
+            return Ok(map);
+        };
+        // One pair per entry (Oracle FX2 `conj-seq-entries`); the
+        // first non-entry is the `Map$Entry` cast error.
+        for head in l.iter() {
+            let Value::MapEntry { key, val, .. } = head else {
+                return Err(self.throw(cast_entry(head)));
+            };
+            map = map.insert((**key).clone(), (**val).clone());
+        }
+        Ok(map)
     }
 
     /// `seq-to-map-for-destructuring`: only lists convert (S4 has no
@@ -4550,5 +4604,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(scalar_res.last().unwrap(), &Value::Int(3));
+    }
+
+    #[test]
+    #[should_panic(expected = "eval_tail_form partition")]
+    fn eval_tail_form_rejects_upstream_expr() {
+        let mut eval = crate::ns::boot();
+        let _ = eval.eval_tail_form(&Expr::Literal(Value::Nil), &Env::new());
     }
 }

@@ -2492,16 +2492,10 @@ fn hash_debug(payload: &dyn std::fmt::Debug) -> u64 {
     hasher.finish()
 }
 
-/// The monitor-table key for a lockee: minted ids where they
-/// exist, allocation addresses for shared heaps, value bits for
-/// inline kinds (same object always maps alike; distinct objects
-/// sharing a key only serialize — timing, never semantics).
-/// Nil maps to 0, but both callers raise the synchronized-block
-/// NPE first, so it never reaches the table.
-pub(crate) fn monitor_key(v: &Value) -> u64 {
-    const MIX: u64 = 0x9e37_79b9_7f4a_7c15;
-    let (tag, payload): (u64, u64) = match v {
-        Value::Nil => (0, 0),
+/// Scalar monitor key `(tag, payload)` (split from [`monitor_key`]).
+#[inline]
+fn monitor_key_scalar(v: &Value) -> Option<(u64, u64)> {
+    Some(match v {
         Value::Bool(b) => (1, u64::from(*b)),
         Value::Int(i) => (2, *i as u64),
         Value::Double(f) => (3, f.to_bits()),
@@ -2511,6 +2505,16 @@ pub(crate) fn monitor_key(v: &Value) -> u64 {
         Value::Ratio(r) => (7, hash_debug(r)),
         Value::Str(s) => (8, Arc::as_ptr(s) as *const () as usize as u64),
         Value::Char(c) => (9, u64::from(*c)),
+        Value::Uuid(u) => (18, u.hi ^ u.lo),
+        Value::Instant(t) => (19, t.millis as u64),
+        _ => return None,
+    })
+}
+
+/// Named, regex, URI, and structural value monitor key `(tag, payload)`.
+#[inline]
+fn monitor_key_named(v: &Value) -> Option<(u64, u64)> {
+    Some(match v {
         // Symbols key by minted id (JVM identity): distinct-but-equal
         // symbols are distinct monitors, so a distinct exit IMSes
         // instead of releasing (gap #114). Clones preserve the id,
@@ -2527,13 +2531,19 @@ pub(crate) fn monitor_key(v: &Value) -> u64 {
         Value::Map(m) => (15, m.id()),
         Value::Set(s) => (16, s.id()),
         Value::Regex(r) => (17, Arc::as_ptr(r) as *const () as usize as u64),
-        Value::Uuid(u) => (18, u.hi ^ u.lo),
-        Value::Instant(t) => (19, t.millis as u64),
         Value::Uri(u) => (20, u.id()),
         Value::TaggedLiteral { tag, form, .. } => (21, hash_debug(&(tag, form.as_ref()))),
         Value::ReaderConditional { form, splicing, .. } => {
             (22, hash_debug(&(form.as_ref(), splicing)))
         }
+        _ => return None,
+    })
+}
+
+/// Var/cell/executor monitor key `(tag, payload)`.
+#[inline]
+fn monitor_key_cell(v: &Value) -> Option<(u64, u64)> {
+    Some(match v {
         Value::Var(v) => (23, v.id),
         Value::Unbound(u) => (24, u.var_id),
         Value::Throwable(t) => (25, t.id),
@@ -2545,13 +2555,35 @@ pub(crate) fn monitor_key(v: &Value) -> u64 {
         Value::Agent(a) => (31, a.id()),
         Value::Volatile(w) => (32, w.id()),
         Value::Ref(r) => (33, r.id()),
-        Value::Extension(e) => (34, Arc::as_ptr(e) as *const () as usize as u64),
-        Value::HostType(h) => (35, Arc::as_ptr(h) as usize as u64),
-        Value::MultiFn(m) => (36, Arc::as_ptr(m) as usize as u64),
-        Value::Class(c) => (37, Arc::as_ptr(c) as usize as u64),
-        Value::Array(a) => (38, a.id()),
-        Value::PrimitiveVector(p) => (39, hash_debug(&(p.elem(), p.len()))),
         Value::Executor(x) => (40, x.id()),
+        _ => return None,
+    })
+}
+
+/// The monitor-table key for a lockee: minted ids where they
+/// exist, allocation addresses for shared heaps, value bits for
+/// inline kinds (same object always maps alike; distinct objects
+/// sharing a key only serialize — timing, never semantics).
+/// Nil maps to 0, but both callers raise the synchronized-block
+/// NPE first, so it never reaches the table.
+pub(crate) fn monitor_key(v: &Value) -> u64 {
+    const MIX: u64 = 0x9e37_79b9_7f4a_7c15;
+    let (tag, payload): (u64, u64) = if let Some(pair) = monitor_key_scalar(v) {
+        pair
+    } else if let Some(pair) = monitor_key_named(v) {
+        pair
+    } else if let Some(pair) = monitor_key_cell(v) {
+        pair
+    } else {
+        match v {
+            Value::Extension(e) => (34, Arc::as_ptr(e) as *const () as usize as u64),
+            Value::HostType(h) => (35, Arc::as_ptr(h) as usize as u64),
+            Value::MultiFn(m) => (36, Arc::as_ptr(m) as usize as u64),
+            Value::Class(c) => (37, Arc::as_ptr(c) as usize as u64),
+            Value::Array(a) => (38, a.id()),
+            Value::PrimitiveVector(p) => (39, hash_debug(&(p.elem(), p.len()))),
+            _ => (0, 0),
+        }
     };
     tag.wrapping_mul(MIX).wrapping_add(payload)
 }
@@ -3318,5 +3350,59 @@ mod tests {
             Err(std::io::Error::other("boom")),
         );
         assert!(fired.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn monitor_key_covers_every_value_category() {
+        let mut eval = crate::boot();
+        let samples = eval
+            .eval_source(
+                r#"
+                nil
+                (do
+                  (declare unb)
+                  (def v-var 1)
+                  (defmulti mf identity)
+                  (defrecord R [x])
+                  (let [exec (executor)
+                        f (future 1)]
+                    @f
+                    [nil true 1 1.5 1N 1000000000000000000000000000000N 1.5M 1/2
+                     "s" \a 's :k '(1) [1] (first {:a 1}) {:a 1} #{1} #"a"
+                     #uuid "00000000-0000-0000-0000-000000000000"
+                     #inst "2020-01-01T00:00:00Z"
+                     (java.net.URI. "https://example.com")
+                     #'v-var (ex-info "e" {}) (transient [])
+                     (atom 1) (delay 1) f (promise) (agent 1) (volatile! 1) (ref 1)
+                     (lazy-seq nil) (->R 1) mf String (int-array 1) (vector-of :int 1) exec]))
+                "#,
+            )
+            .unwrap();
+        for vec_val in samples {
+            if let Value::Vector(items) = vec_val {
+                for item in items.iter() {
+                    let k = monitor_key(&item);
+                    assert_eq!(k, monitor_key(&item.clone()));
+                }
+            }
+        }
+        // Cover Unbound, TaggedLiteral, ReaderConditional directly too.
+        let unbound = Value::Unbound(clj_value::Unbound {
+            sym: Symbol::new(None, "unb"),
+            var_id: 99,
+        });
+        let tagged = Value::TaggedLiteral {
+            tag: Box::new(Symbol::new(None, "t")),
+            form: Box::new(Value::Int(1)),
+            id: 1,
+        };
+        let cond = Value::ReaderConditional {
+            form: Box::new(Value::Vector(clj_value::Vector::from_vec(vec![]))),
+            splicing: false,
+            id: 2,
+        };
+        assert_ne!(monitor_key(&unbound), 0);
+        assert_ne!(monitor_key(&tagged), 0);
+        assert_ne!(monitor_key(&cond), 0);
     }
 }

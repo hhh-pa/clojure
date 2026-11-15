@@ -17,9 +17,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 
 use clj_value::{
-    ConsValue, Keyword, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass,
-    Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value,
-    Vector, new_map, new_set,
+    Array, ConsValue, Keyword, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue,
+    ThrowClass, Transient, TransientError, TransientKind, TransientMap, TransientSet,
+    TransientVector, Value, Vector, new_map, new_set,
 };
 use smallvec::SmallVec;
 
@@ -112,11 +112,24 @@ pub(crate) fn lookup_present(
         // `f-get-*`, `e-get-*`).
         Value::Array(a) => Ok(lookup_array_slot(a, key)),
         Value::PrimitiveVector(p) => Ok(lookup_pv_slot(p, key)),
-        Value::Set(s) if s.is_sorted() => Ok(sorted_lookup_set(eval, s, key)?),
-        Value::Set(s) => Ok(s.get(key).cloned()),
+        Value::Set(s) => lookup_set_slot(eval, s, key),
         Value::Str(s) => Ok(lookup_str_slot(s, key)),
         Value::Transient(t) => transient_get(t, key),
         other => lookup_present_fallback(other, key),
+    }
+}
+
+/// A set slot (sorted sets resolve through the comparator; split from
+/// [`lookup_present`] for the complexity budget).
+fn lookup_set_slot(
+    eval: &mut Evaluator,
+    s: &Set,
+    key: &Value,
+) -> Result<Option<Value>, NativeError> {
+    if s.is_sorted() {
+        Ok(sorted_lookup_set(eval, s, key)?)
+    } else {
+        Ok(s.get(key).cloned())
     }
 }
 
@@ -1486,31 +1499,37 @@ fn native_contains(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
         Value::Map(m) => contains_map(eval, m, key),
         Value::Vector(x) => Ok(Value::Bool(contains_vector(x, key))),
         // Entries contain integer keys 0 and 1 (Oracle FX2 `contains`).
-        Value::MapEntry { .. } => {
-            Ok(Value::Bool(int_key(key).is_some_and(|i| {
-                usize::try_from(i as i32).is_ok_and(|idx| idx < 2)
-            })))
-        }
+        Value::MapEntry { .. } => Ok(Value::Bool(contains_entry(key))),
         Value::Set(s) => contains_set(eval, s, key),
         Value::Str(s) => contains_str(s, coll, key),
         Value::Transient(t) => Ok(Value::Bool(transient_get(t, key)?.is_some())),
-        // Arrays: `Number` keys narrow (`intValue`) to a bounds
-        // check, anything else is unsupported (S15 oracles
-        // `b-contains`, `f-contains-*`, `e-contains-nil`).
-        Value::Array(a) => {
-            let Some(i) = crate::arrays::array_intvalue_key(key) else {
-                return Err(NativeError::new(
-                    ThrowClass::IllegalArgumentException,
-                    format!("contains? not supported on type: {}", jvm_class_of(coll)),
-                ));
-            };
-            Ok(Value::Bool(
-                usize::try_from(i).is_ok_and(|idx| idx < a.len()),
-            ))
-        }
+        Value::Array(a) => contains_array(a, coll, key),
         Value::PrimitiveVector(p) => Ok(Value::Bool(contains_pv(p, key))),
         _ => contains_fallback(coll, key),
     }
+}
+
+/// `contains?` over an entry (split from [`native_contains`] for
+/// the complexity budget): integer keys 0 and 1 (Oracle FX2
+/// `contains`).
+fn contains_entry(key: &Value) -> bool {
+    int_key(key).is_some_and(|i| usize::try_from(i as i32).is_ok_and(|idx| idx < 2))
+}
+
+/// `contains?` over an array (split from [`native_contains`] for
+/// the complexity budget): `Number` keys narrow (`intValue`) to a
+/// bounds check, anything else is unsupported (S15 oracles
+/// `b-contains`, `f-contains-*`, `e-contains-nil`).
+fn contains_array(a: &Array, coll: &Value, key: &Value) -> Result<Value, NativeError> {
+    let Some(i) = crate::arrays::array_intvalue_key(key) else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("contains? not supported on type: {}", jvm_class_of(coll)),
+        ));
+    };
+    Ok(Value::Bool(
+        usize::try_from(i).is_ok_and(|idx| idx < a.len()),
+    ))
 }
 
 fn native_find(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

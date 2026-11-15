@@ -36,7 +36,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::BasicMetadataTypeEnum;
-use inkwell::types::{FloatType, IntType, PointerType};
+use inkwell::types::{BasicTypeEnum, FloatType, IntType, PointerType};
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue, PointerValue};
 
 /// Prims in discriminant order (index `== prim as usize`;
@@ -396,50 +396,44 @@ impl<'ctx> Lower<'ctx> {
         value
     }
 
-    /// Pack lowered arguments into an array for a helper call
-    /// (always at least one slot — zero-length allocas are
-    /// avoided even for empty calls). The array is hoisted to the
-    /// entry block: an alloca in a loop body would reallocate on
-    /// every iteration and overflow the stack on long loops.
+    /// Pack lowered arguments into a uniform-pointer struct for a
+    /// helper call (always at least one slot — zero-length allocas
+    /// are avoided even for empty calls). The struct has identical
+    /// layout to `[ptr x N]` (zero padding), while using safe struct
+    /// GEPs. The struct is hoisted to the entry block: an alloca in
+    /// a loop body would reallocate on every iteration and overflow
+    /// the stack on long loops.
     fn pack_args(
         &mut self,
         func: FunctionValue<'ctx>,
         slots: &[PointerValue<'ctx>],
         args: &[SubsetExpr],
     ) -> (PointerValue<'ctx>, IntValue<'ctx>) {
-        let array_ty = self.ptr.array_type(args.len().max(1) as u32);
+        let fields: Vec<BasicTypeEnum> = vec![self.ptr.into(); args.len().max(1)];
+        let struct_ty = self.ctx.struct_type(&fields, false);
         let current = self.builder.get_insert_block().expect("insert block");
         let entry = func.get_first_basic_block().expect("entry block");
         match entry.get_first_instruction() {
             Some(first) => self.builder.position_before(&first),
             None => self.builder.position_at_end(entry),
         }
-        let array = self
+        let argv = self
             .builder
-            .build_alloca(array_ty, "argv")
+            .build_alloca(struct_ty, "argv")
             .expect("alloca argv");
         self.builder.position_at_end(current);
-        let zero = self.i32t.const_zero();
         for (i, arg) in args.iter().enumerate() {
             let value = self.lower_expr(func, slots, arg);
-            // Safety: index `i` is in bounds (`i < args.len()`).
-            let slot = unsafe {
-                self.builder.build_in_bounds_gep(
-                    array_ty,
-                    array,
-                    &[zero, self.i32t.const_int(i as u64, false)],
-                    "arg",
-                )
-            }
-            .expect("gep");
+            let slot = self
+                .builder
+                .build_struct_gep(struct_ty, argv, i as u32, "arg")
+                .expect("gep");
             self.builder.build_store(slot, value).expect("store arg");
         }
-        // Safety: the base element always exists (`max(1)` slot).
-        let base = unsafe {
-            self.builder
-                .build_in_bounds_gep(array_ty, array, &[zero, zero], "argv0")
-        }
-        .expect("gep");
+        let base = self
+            .builder
+            .build_struct_gep(struct_ty, argv, 0, "argv0")
+            .expect("geiger-safe gep");
         (base, self.i64t.const_int(args.len() as u64, false))
     }
 
@@ -929,12 +923,13 @@ impl Lower<'_> {
         self.builder.position_at_end(entry);
         let args = func.get_nth_param(0).expect("args").into_pointer_value();
         let mut loaded: Vec<BasicMetadataValueEnum> = Vec::with_capacity(arity);
+        let fields: Vec<BasicTypeEnum> = vec![self.ptr.into(); arity];
+        let args_ty = self.ctx.struct_type(&fields, false);
         let builder = &self.builder;
         for i in 0..arity {
-            let index = [self.i64t.const_int(i as u64, false)];
-            // SAFETY: the generated GEP stays in bounds — `i < arity`,
-            // and the runtime passes exactly `arity` boxes.
-            let slot = unsafe { builder.build_gep(self.ptr, args, &index, "argp") }.expect("gep");
+            let slot = builder
+                .build_struct_gep(args_ty, args, i as u32, "argp")
+                .expect("gep");
             let arg = self
                 .builder
                 .build_load(self.ptr, slot, "arg")

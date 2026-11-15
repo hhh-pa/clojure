@@ -182,26 +182,28 @@ pub unsafe extern "C" fn rt_vec_push(vec: *mut Value, elem: *mut Value) -> *mut 
 ///
 /// # Safety
 ///
-/// `argv` must be valid for `argc` entries (`argc >= 0`), each a
-/// valid NUL-terminated C string.
+/// `argv` must be valid for `argc` entries (`argc >= 0`), each
+/// either null or a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_argv(argv: *const *const c_char, argc: i32) -> *mut Value {
     argv_worker(&unsafe { argv_entries(argv, argc) })
 }
 
-/// C argv minus the program name.
+/// C argv minus the program name (`None` for any null entry so
+/// buggy callers do not hit UB in `CStr::from_ptr`).
 ///
 /// # Safety
 ///
-/// `argv` must be valid for `argc` entries (`argc >= 0`), each a
-/// valid NUL-terminated C string outliving `'a`.
-unsafe fn argv_entries<'a>(argv: *const *const c_char, argc: i32) -> Vec<&'a CStr> {
-    let mut entries = Vec::new();
+/// `argv` must be valid for `argc` entries (`argc >= 0`), each
+/// either null or a valid NUL-terminated C string outliving `'a`.
+unsafe fn argv_entries<'a>(argv: *const *const c_char, argc: i32) -> Vec<Option<&'a CStr>> {
     // Safety: the caller guarantees validity (see module docs).
-    for i in 1..argc {
-        entries.push(unsafe { CStr::from_ptr(*argv.offset(i as isize)) });
-    }
-    entries
+    (1..argc)
+        .map(|i| unsafe {
+            let entry = *argv.offset(i as isize);
+            (!entry.is_null()).then(|| CStr::from_ptr(entry))
+        })
+        .collect()
 }
 
 /// Clone the borrowed box into a fresh owned box.
@@ -504,7 +506,8 @@ pub unsafe extern "C" fn rt_run_program(
     let source = unsafe { text(source, source_len) };
     let path = unsafe { text(path, path_len) };
     let args: Vec<String> = unsafe { argv_entries(argv, argc) }
-        .iter()
+        .into_iter()
+        .flatten()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
     crate::mixed::run_program(&path, &source, &args)

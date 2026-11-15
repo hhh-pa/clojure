@@ -169,6 +169,15 @@ fn is_env_var(var: &clj_value::Var) -> bool {
 /// Call `f` on every direct child expression of `expr` (patterns'
 /// `:or` defaults and fn arity bodies included).
 pub fn for_each_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+    if for_each_simple_child(expr, f) || for_each_binding_child(expr, f) {
+        return;
+    }
+    for_each_scope_child(expr, f);
+}
+
+/// Leaf, linear-sequence, and direct-call forms; returns `true` when `expr`
+/// matched and was visited.
+fn for_each_simple_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) -> bool {
     match expr {
         Expr::Literal(_)
         | Expr::Global(_)
@@ -177,82 +186,116 @@ pub fn for_each_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
         | Expr::VarRef(_)
         | Expr::NewThrowable { .. }
         | Expr::Declare { .. }
-        | Expr::Ns { .. } => {}
+        | Expr::Ns { .. } => true,
         Expr::VecLit(items, _) | Expr::SetLit(items, _) | Expr::Do(items) | Expr::Recur(items) => {
             items.iter().for_each(f);
+            true
         }
-        Expr::MapLit(pairs, _) => pairs.iter().for_each(|(k, v)| {
-            f(k);
-            f(v);
-        }),
-        Expr::Def { init, meta, .. } => {
-            init.iter().for_each(|e| f(e));
-            meta.iter().flatten().for_each(|(k, v)| {
-                f(k);
-                f(v);
-            });
+        Expr::WithOutStr { body, .. }
+        | Expr::DelayStar { body, .. }
+        | Expr::Sync { body }
+        | Expr::Io { body } => {
+            body.iter().for_each(f);
+            true
+        }
+        Expr::LazySeqStar { body } => {
+            body.iter().for_each(f);
+            true
+        }
+        Expr::Throw(e) | Expr::Time { expr: e } | Expr::Set { val: e, .. } => {
+            f(e);
+            true
         }
         Expr::If { test, then, els } => {
             f(test);
             f(then);
             f(els);
+            true
+        }
+        Expr::Invoke { head, args, .. } => {
+            f(head);
+            args.iter().for_each(f);
+            true
+        }
+        Expr::DirectNative(call) => {
+            call.args.iter().for_each(f);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Binding, definition, and fn-literal forms; returns `true` when `expr`
+/// matched and was visited.
+fn for_each_binding_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) -> bool {
+    match expr {
+        Expr::MapLit(pairs, _) => {
+            visit_expr_pairs(pairs, f);
+            true
+        }
+        Expr::Def { init, meta, .. } => {
+            if let Some(e) = init.as_deref() {
+                f(e);
+            }
+            if let Some(pairs) = meta.as_deref() {
+                visit_expr_pairs(pairs, f);
+            }
+            true
         }
         Expr::Let { bindings, body } => {
-            for (pat, init) in bindings {
-                pattern_children(pat, f);
-                f(init);
-            }
-            body.iter().for_each(f);
+            visit_expr_bindings(bindings, body, f);
+            true
         }
         Expr::Loop { bindings, body } => {
-            for (pat, init) in bindings {
-                pattern_children(pat, f);
-                f(init);
-            }
-            body.iter().for_each(f);
+            visit_expr_bindings(bindings, body, f);
+            true
         }
         Expr::LetFn { fns, body } => {
-            fns.iter().for_each(|(_, fun)| fun_children(fun, f));
+            for (_, fun) in fns {
+                fun_children(fun, f);
+            }
             body.iter().for_each(f);
+            true
         }
         Expr::Fn(fun) | Expr::BoundFn { fun, .. } | Expr::DefMacro { fun, .. } => {
             fun_children(fun, f);
+            true
         }
-        Expr::Throw(e) | Expr::Time { expr: e } => f(e),
+        _ => false,
+    }
+}
+
+/// Dynamic-scope, try/catch, assert, and `case*` forms.
+fn for_each_scope_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+    match expr {
         Expr::Try {
             body,
             catches,
             finally_body,
         } => {
             body.iter().for_each(&mut *f);
-            catches.iter().for_each(|c| c.body.iter().for_each(&mut *f));
+            for catch in catches {
+                catch.body.iter().for_each(&mut *f);
+            }
             finally_body.iter().for_each(f);
         }
-        Expr::Set { val, .. } => f(val),
         Expr::Binding { pairs, body } | Expr::WithRedefs { pairs, body } => {
-            pairs.iter().for_each(|(_, e)| f(e));
+            for (_, e) in pairs {
+                f(e);
+            }
             body.iter().for_each(f);
         }
-        Expr::WithBindings { map, body } => {
+        Expr::WithBindings { map, body }
+        | Expr::WithInStr { s: map, body, .. }
+        | Expr::Locking { lockee: map, body } => {
             f(map);
             body.iter().for_each(f);
         }
         Expr::Assert { test, message, .. } => {
             f(test);
-            message.iter().for_each(|m| f(m));
-        }
-        Expr::WithOutStr { body, .. }
-        | Expr::DelayStar { body, .. }
-        | Expr::Sync { body }
-        | Expr::Io { body } => body.iter().for_each(f),
-        Expr::LazySeqStar { body } => body.iter().for_each(f),
-        Expr::WithInStr { s, body, .. } => {
-            f(s);
-            body.iter().for_each(f);
-        }
-        Expr::Locking { lockee, body } => {
-            f(lockee);
-            body.iter().for_each(f);
+            if let Some(m) = message.as_deref() {
+                f(m);
+            }
         }
         Expr::CaseStar {
             expr,
@@ -262,17 +305,32 @@ pub fn for_each_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
         } => {
             f(expr);
             f(default);
-            cases.iter().for_each(|(_, test, then)| {
+            for (_, test, then) in cases {
                 f(test);
                 f(then);
-            });
+            }
         }
-        Expr::Invoke { head, args, .. } => {
-            f(head);
-            args.iter().for_each(f);
-        }
-        Expr::DirectNative(call) => call.args.iter().for_each(f),
+        _ => {}
     }
+}
+
+fn visit_expr_pairs<'a>(pairs: &'a [(Expr, Expr)], f: &mut dyn FnMut(&'a Expr)) {
+    for (k, v) in pairs {
+        f(k);
+        f(v);
+    }
+}
+
+fn visit_expr_bindings<'a>(
+    bindings: &'a [(Pattern, Expr)],
+    body: &'a [Expr],
+    f: &mut dyn FnMut(&'a Expr),
+) {
+    for (pat, init) in bindings {
+        pattern_children(pat, f);
+        f(init);
+    }
+    body.iter().for_each(f);
 }
 
 fn fun_children<'a>(fun: &'a FunExpr, f: &mut dyn FnMut(&'a Expr)) {
@@ -316,5 +374,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, SourceError::Compile(_)), "{err:?}");
+    }
+
+    #[test]
+    fn scope_child_skips_non_scope_expr() {
+        let mut visited = false;
+        super::for_each_scope_child(&clj_eval_expr_literal(), &mut |_| visited = true);
+        assert!(!visited);
+    }
+
+    fn clj_eval_expr_literal() -> crate::expr::Expr {
+        crate::expr::Expr::Literal(clj_value::Value::Nil)
     }
 }
