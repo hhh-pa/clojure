@@ -253,14 +253,22 @@ pub(crate) fn native_module_with_helpers<'ctx>(
     }
     // Native modules are optimized (inlining, mem2reg over scalars,
     // CFG simplification of the inline value paths + linked helpers).
+    optimize_module(&module, &machine, "default<O2>")?;
+    Ok((module, defns))
+}
+
+fn optimize_module(
+    module: &inkwell::module::Module<'_>,
+    machine: &inkwell::targets::TargetMachine,
+    passes: &str,
+) -> Result<(), NativeFail> {
     module
         .run_passes(
-            "default<O2>",
-            &machine,
+            passes,
+            machine,
             inkwell::passes::PassBuilderOptions::create(),
         )
-        .map_err(|e| NativeFail::Unsupported(e.to_string()))?;
-    Ok((module, defns))
+        .map_err(|e| NativeFail::Unsupported(e.to_string()))
 }
 
 fn helper_exports_to_internalize<'ctx>(helper: &inkwell::module::Module<'ctx>) -> Vec<String> {
@@ -453,5 +461,9 @@ mod tests {
         let triple = TargetMachine::get_default_triple();
         let layout = machine.get_target_data().get_data_layout();
         assert!(link_helpers(&bad_ctx, &bad_mod, b"bad-bc", &triple, &layout).is_err());
+        assert!(
+            native_module_with_helpers(&bad_ctx, "(println 1)", "t.clj", Some(b"bad-bc")).is_err()
+        );
+        assert!(super::optimize_module(&bad_mod, &machine, "definitely-invalid-pass").is_err());
     }
 }

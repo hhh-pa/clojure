@@ -467,11 +467,7 @@ impl EmissionGuard {
             n
         });
         let lock = if nested == 0 {
-            Some(
-                PRINT_EMISSION_LOCK
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()),
-            )
+            Some(clj_value::unpoison(PRINT_EMISSION_LOCK.lock()))
         } else {
             None
         };
@@ -769,10 +765,7 @@ fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
     };
     // Live-or-removed (the detached `*ns*` keeps aliases/refers,
     // like the JVM; #80).
-    if let Some(maps) = eval.registry.reader_maps(&cur) {
-        opts.aliases = maps.aliases;
-        opts.refers = maps.refers;
-    }
+    crate::reader::apply_reader_maps(eval, &cur, &mut opts, false);
     crate::core::snapshot_data_readers(eval, &mut opts)?;
     opts.read_eval = seed.read_eval;
     opts.suppress_read = seed.suppress_read;
@@ -896,5 +889,26 @@ mod tests {
         // Custom errors carry no ` (os error N)` suffix to strip.
         let custom = Error::other("custom");
         assert_eq!(strerror(&custom), "custom");
+    }
+
+    #[test]
+    fn spit_onto_directory_fails_with_file_error() {
+        let mut eval = Evaluator::new_bare("user");
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let err = native_spit(
+            &mut eval,
+            &[
+                Value::Str(Arc::from(dir.as_str())),
+                Value::Str(Arc::from("x")),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err.class,
+                ThrowClass::FileNotFoundException | ThrowClass::IOException
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 }

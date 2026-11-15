@@ -1163,15 +1163,6 @@ fn alt_result_expr(expr: &Value, gret: &Value) -> Value {
 /// Go-thread sequence (names only — `clj-go-{n}`).
 static GO_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// `future-call`'s spawn failure, reused for `go` threads (the
-/// JVM's `unable to create native thread`).
-fn go_spawn_failed() -> NativeError {
-    NativeError::new(
-        ThrowClass::RuntimeException,
-        "unable to create native thread".to_owned(),
-    )
-}
-
 /// The `go` spawn + completion protocol (D12, public like
 /// upstream's `ioc-alts!`): run the thunk on its own thread with
 /// the calling thread's bindings conveyed, deliver a non-nil
@@ -1188,10 +1179,9 @@ fn native_go_call(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     let thunk = args[1].clone();
     let child = eval.fork_for_thread(eval.clone_bindings());
     let n = GO_SEQ.fetch_add(1, Ordering::Relaxed);
-    let handle = std::thread::Builder::new()
-        .name(format!("clj-go-{n}"))
-        .spawn(move || run_go_body(child, port, thunk))
-        .map_err(|_| go_spawn_failed())?;
+    let handle = crate::concurrency::spawn_named(format!("clj-go-{n}"), move || {
+        run_go_body(child, port, thunk)
+    })?;
     drop(handle); // detached: daemon semantics (parked gos never hold the exit join)
     Ok(Value::Nil)
 }
@@ -1670,14 +1660,6 @@ mod tests {
         let opaque: Box<dyn std::any::Any + Send> = Box::new(42u32);
         let fallback = go_outcome(Err(opaque)).expect_err("fallback maps");
         assert_eq!(fallback.message.as_deref(), Some("go block panicked"));
-    }
-
-    /// `go` spawn failure reports the JVM's native-thread text.
-    #[test]
-    fn go_spawn_failed_shape() {
-        let err = go_spawn_failed();
-        assert_eq!(err.class, ThrowClass::RuntimeException);
-        assert_eq!(err.message, "unable to create native thread");
     }
 
     /// `go_deliver` lands the result on a buffer-1 channel.

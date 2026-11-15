@@ -703,6 +703,25 @@ mod tests {
         // overwrites the placeholder.
         declare_var(1, "user".to_owned(), "plain".to_owned());
         declare_var(0, "clojure.core".to_owned(), "inc".to_owned());
+        extern "C" fn stub_code(_: *mut Value, _: *const Value, _: usize, _: *const Value) -> i32 {
+            0
+        }
+        assert_eq!(
+            stub_code(std::ptr::null_mut(), std::ptr::null(), 0, std::ptr::null()),
+            0
+        );
+        let desc = FnDesc {
+            display: Arc::from("stub"),
+            arities: Arc::from([ArityDesc {
+                fixed: 0,
+                variadic: false,
+                code: stub_code,
+            }]),
+        };
+        declare_fn(1, desc.clone());
+        declare_fn(0, desc);
+        set_const(1, Value::Int(1));
+        set_const(0, Value::Int(0));
         freeze(native_abi::registry_epoch_handle(&eval));
         let _scope = ActiveScope::enter(&mut eval);
         with_active(|eval| {

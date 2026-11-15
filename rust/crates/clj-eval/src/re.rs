@@ -848,4 +848,24 @@ mod tests {
         assert_eq!(shown(-1, true), shown(-1, false));
         assert_eq!(shown(2, true), shown(2, false));
     }
+
+    #[test]
+    fn cut_kind_matches_all_whitespace_char_classes() {
+        assert!(matches!(
+            cut_kind("a", r"[ \t\n\r\f\x0B]+"),
+            Some(CutKind::Run(_))
+        ));
+        assert!(matches!(
+            cut_kind("a", r"[ \t\n\r\f]+"),
+            Some(CutKind::Run(_))
+        ));
+        assert!(matches!(
+            cut_kind("a", r"[ \t\n\r]+"),
+            Some(CutKind::Run(_))
+        ));
+        assert!(matches!(
+            cut_kind("a", r"[\x00-\x20]+"),
+            Some(CutKind::Run(_))
+        ));
+    }
 }

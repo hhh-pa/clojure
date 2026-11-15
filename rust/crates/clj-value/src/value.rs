@@ -1859,7 +1859,8 @@ impl Map {
                 shape: Arc::clone(&small.shape),
                 vals: small.vals.clone(),
             }));
-        } else if let Some(inner) = data.inner.take() {
+        } else {
+            let inner = data.inner.take().expect("map has small or trie");
             data.inner = Some(Arc::new((*inner).clone()));
         }
         self
@@ -2770,13 +2771,12 @@ fn hash_tower_value<H: Hasher>(v: &Value, state: &mut H) {
             hash_bigint_bytes(&unscaled, state);
             state.write_i64(scale);
         }
-        _ => {
-            if let Value::Ratio(r) = v {
-                state.write_u8(25);
-                hash_bigint_bytes(r.numer(), state);
-                hash_bigint_bytes(r.denom(), state);
-            }
+        Value::Ratio(r) => {
+            state.write_u8(25);
+            hash_bigint_bytes(r.numer(), state);
+            hash_bigint_bytes(r.denom(), state);
         }
+        _ => unreachable!("tower gate"),
     }
 }
 
@@ -4406,6 +4406,13 @@ mod tests {
         // so scalars never arrive here (only a dispatch bug could).
         let mut h = DefaultHasher::new();
         super::hash_value_rest(&Value::Nil, &mut h);
+    }
+
+    #[test]
+    #[should_panic(expected = "tower gate")]
+    fn hash_tower_value_rejects_non_tower() {
+        let mut h = DefaultHasher::new();
+        super::hash_tower_value(&Value::Nil, &mut h);
     }
 
     fn host_def(kind: HostKind) -> Arc<HostDef> {

@@ -954,14 +954,19 @@ mod tests {
     use super::*;
     use crate::ns::boot;
 
-    /// Call a server native by table name (panics on `Err`).
-    fn call(eval: &mut Evaluator, name: &str, args: &[Value]) -> Value {
-        let (_, f) = SERVER_NATIVES
+    /// Look up a test-exercised native by table name.
+    fn native_fn(name: &str) -> NativeFnPtr {
+        SERVER_NATIVES
             .iter()
             .chain(XML_NATIVES.iter())
             .find(|(n, _)| *n == name)
-            .unwrap_or_else(|| panic!("no such native: {name}"));
-        f(eval, args).unwrap_or_else(|e| panic!("{name} failed: {e:?}"))
+            .expect("no such native")
+            .1
+    }
+
+    /// Call a server native by table name (panics on `Err`).
+    fn call(eval: &mut Evaluator, name: &str, args: &[Value]) -> Value {
+        native_fn(name)(eval, args).unwrap_or_else(|e| panic!("{name} failed: {e:?}"))
     }
 
     /// Call a native, expecting an error (returns `Class | message`).
@@ -973,12 +978,7 @@ mod tests {
     /// `None` when the call succeeds (for "fails eventually" loops
     /// where early writes may still land in buffers).
     fn call_err_opt(eval: &mut Evaluator, name: &str, args: &[Value]) -> Option<String> {
-        let (_, f) = SERVER_NATIVES
-            .iter()
-            .chain(XML_NATIVES.iter())
-            .find(|(n, _)| *n == name)
-            .unwrap_or_else(|| panic!("no such native: {name}"));
-        f(eval, args)
+        native_fn(name)(eval, args)
             .err()
             .map(|e| format!("{} | {}", e.class.jvm_name(), e.message))
     }

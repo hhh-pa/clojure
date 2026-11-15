@@ -422,8 +422,9 @@ mod tests {
     #[test]
     fn non_rng_declines_bounded_draw() {
         // The shuffle guard runs first, so only this test fires
-        // the `None` arm (non-RNGs never draw).
+        // the `None` / zero-byte fallback arms (non-RNGs never draw).
         assert!(random_next_int(&Value::Int(5), 2).is_none());
         assert!(random_next_int(&Value::Nil, 2).is_none());
+        assert_eq!(super::random_bytes(&Value::Nil, 2), vec![0, 0]);
     }
 }

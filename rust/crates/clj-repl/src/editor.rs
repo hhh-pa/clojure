@@ -345,15 +345,17 @@ pub fn default_history_path() -> Option<PathBuf> {
 /// anything else passes through unchanged (`~user/` stays the
 /// shell's job).
 fn expand_tilde(path: &Path) -> PathBuf {
+    expand_tilde_with(path, home_dir())
+}
+
+fn expand_tilde_with(path: &Path, home: Option<PathBuf>) -> PathBuf {
     if path.as_os_str() == "~" {
-        return home_dir().unwrap_or_else(|| path.to_owned());
+        return home.unwrap_or_else(|| path.to_owned());
     }
     let text = path.to_string_lossy();
-    match text.strip_prefix("~/") {
-        Some(rest) => home_dir()
-            .map(|home| home.join(rest))
-            .unwrap_or_else(|| path.to_owned()),
-        None => path.to_owned(),
+    match (text.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => path.to_owned(),
     }
 }
 
@@ -494,6 +496,44 @@ impl LineSource for RustyLineSource {
         // Admission (blanks/dupes) is the backend's call, and an in-memory
         // add cannot fail with IO; discard the outcome either way.
         let _ = self.editor.add_history_entry(line);
+    }
+}
+
+#[cfg(test)]
+mod tilde_and_history_tests {
+    use super::{LineSource, RustyLineSource, expand_tilde_with};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn expand_tilde_with_covers_present_and_absent_home() {
+        let home = Some(PathBuf::from("/tmp/home"));
+        assert_eq!(
+            expand_tilde_with(Path::new("~"), home.clone()),
+            PathBuf::from("/tmp/home")
+        );
+        assert_eq!(expand_tilde_with(Path::new("~"), None), PathBuf::from("~"));
+        assert_eq!(
+            expand_tilde_with(Path::new("~/hist"), home),
+            PathBuf::from("/tmp/home/hist")
+        );
+        assert_eq!(
+            expand_tilde_with(Path::new("~/hist"), None),
+            PathBuf::from("~/hist")
+        );
+        assert_eq!(
+            expand_tilde_with(Path::new("/abs"), None),
+            PathBuf::from("/abs")
+        );
+    }
+
+    #[test]
+    fn load_history_errors_when_path_is_a_directory() {
+        let dir = std::env::temp_dir().join(format!("clj-repl-hist-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let mut src = RustyLineSource::new(Vec::new(), |_| true).expect("editor");
+        let res = src.load_history(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(res.is_err(), "expected error loading directory: {res:?}");
     }
 }
 

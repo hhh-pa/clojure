@@ -2285,4 +2285,39 @@ mod tests {
         // documented empty walk regardless.
         assert!(chain_past_self("null").is_empty());
     }
+
+    #[test]
+    fn exception_info_and_host_types_include_expected_supers() {
+        assert!(is_assignable_from(
+            "clojure.lang.IExceptionInfo",
+            "clojure.lang.ExceptionInfo"
+        ));
+        assert!(is_assignable_from(
+            "java.io.Serializable",
+            "java.lang.RuntimeException"
+        ));
+        for (name, kind, takes_this, expected) in [
+            ("user.T", HostKind::Type, false, "clojure.lang.IType"),
+            ("user.P", HostKind::Interface, true, "java.lang.Object"),
+        ] {
+            let inst = Value::HostType(Arc::new(HostVal::Inst(HostInst {
+                def: Arc::new(HostDef {
+                    name: Arc::from(name),
+                    kind,
+                    fields: Vec::new(),
+                    methods: HashMap::new(),
+                    interfaces: Vec::new(),
+                    prefix: None,
+                    impl_ns: None,
+                    sigs: HashMap::new(),
+                    takes_this,
+                    struct_keys: Vec::new(),
+                }),
+                content: new_map(),
+                meta: None,
+                proxy_map: None,
+            })));
+            assert!(is_instance_of(expected, &inst));
+        }
+    }
 }

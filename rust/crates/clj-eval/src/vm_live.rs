@@ -131,10 +131,8 @@ impl Walk {
     }
 
     fn kill(&self, start: usize, count: usize, live: &mut Live) {
-        for i in start..start + count {
-            if i >= self.base {
-                live.remove(i - self.base);
-            }
+        for i in start.max(self.base)..start + count {
+            live.remove(i - self.base);
         }
     }
 

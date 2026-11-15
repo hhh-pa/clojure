@@ -112,7 +112,7 @@ impl Future {
     /// Lock the cell (short critical sections only; the body runs
     /// outside the lock — poison is unreachable).
     fn lock(&self) -> MutexGuard<'_, FutureState> {
-        self.cell.state.lock().unwrap_or_else(|e| e.into_inner())
+        crate::unpoison(self.cell.state.lock())
     }
 
     /// Publish `outcome` unless already done or cancelled (a
@@ -162,11 +162,7 @@ impl Future {
     pub fn get(&self) -> FutureState {
         let mut state = self.lock();
         while matches!(*state, FutureState::Pending) {
-            state = self
-                .cell
-                .ready
-                .wait(state)
-                .unwrap_or_else(|e| e.into_inner());
+            state = crate::unpoison(self.cell.ready.wait(state));
         }
         state.clone()
     }
@@ -184,11 +180,7 @@ impl Future {
             if remaining.is_zero() {
                 return None;
             }
-            let (next, result) = self
-                .cell
-                .ready
-                .wait_timeout(state, remaining)
-                .unwrap_or_else(|e| e.into_inner());
+            let (next, result) = crate::unpoison(self.cell.ready.wait_timeout(state, remaining));
             state = next;
             if result.timed_out() && matches!(*state, FutureState::Pending) {
                 return None;

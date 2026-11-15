@@ -93,7 +93,7 @@ impl Delay {
     /// Lock the cell (short critical sections only; the body runs
     /// outside the lock — poison is unreachable).
     pub fn lock(&self) -> MutexGuard<'_, DelayState> {
-        self.cell.state.lock().unwrap_or_else(|e| e.into_inner())
+        crate::unpoison(self.cell.state.lock())
     }
 
     /// Block until the in-progress force settles, returning the
@@ -103,10 +103,7 @@ impl Delay {
         &self,
         state: MutexGuard<'a, DelayState>,
     ) -> MutexGuard<'a, DelayState> {
-        self.cell
-            .ready
-            .wait(state)
-            .unwrap_or_else(|e| e.into_inner())
+        crate::unpoison(self.cell.ready.wait(state))
     }
 
     /// Wake every waiter after publishing an outcome (or restoring

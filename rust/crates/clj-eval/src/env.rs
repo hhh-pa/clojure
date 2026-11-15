@@ -766,9 +766,9 @@ impl NamespaceRegistry {
         if *next_id != before {
             by_id.insert(id, Arc::clone(&ns.handle.name));
         }
-        if let Some(st) = ns.state_mut(id) {
-            st.root = Some(root);
-        }
+        ns.state_mut(id)
+            .expect("freshly interned var has state")
+            .root = Some(root);
         id
     }
 
@@ -2089,10 +2089,8 @@ impl Env {
             // Poison is unreachable (nothing panics while holding a
             // frame lock); recover like `SharedRegistry::lock` so a
             // poisoned lock keeps the write instead of dropping it.
-            let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(slot) = guard.get_mut(idx - frame.base) {
-                *slot = value;
-            }
+            let mut guard = clj_value::unpoison(slots.lock());
+            guard[idx - frame.base] = value;
         } else {
             debug_assert!(false, "set on an immutable frame");
         }
@@ -2412,5 +2410,16 @@ mod tests {
         drop(non_empty_clone);
         assert!(!isolated.is_bound(2));
         let _keep_alive = bind_counts();
+    }
+
+    #[test]
+    fn reserve_vars_and_intern_def_target_tolerate_missing_ns() {
+        let mut reg = NamespaceRegistry::new();
+        reg.ensure_ns("user");
+        reg.reserve_vars("no.such.ns", 4);
+        reg.reserve_vars("user", 4);
+        let id = reg.intern_def_target(&sym(Some("brand.new.ns"), "v"));
+        assert!(reg.ns_id("brand.new.ns").is_some());
+        assert_eq!(reg.lookup(&sym(Some("brand.new.ns"), "v")), Some(id));
     }
 }

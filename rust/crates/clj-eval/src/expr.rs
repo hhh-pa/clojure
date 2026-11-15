@@ -3252,6 +3252,7 @@ fn spec_valid_key_list(v: &Value, kind: KeyKind) -> bool {
 /// so `Exception`/`IllegalArgumentException` render `Syntax error`
 /// while anything else (our `ClassCastException`s) renders
 /// `Unexpected error` (probe25).
+#[derive(Debug)]
 struct WalkError {
     class: &'static str,
     message: String,
@@ -4391,9 +4392,11 @@ impl<'a> Analyzer<'a> {
                 rest_pat = Some(Box::new(pat));
                 rest = tail.get(1..).unwrap_or(&[]);
             } else if is_as(first) {
-                if let Some(Value::Symbol(sym)) = tail.first() {
-                    as_sym = Some(sym.name().to_owned());
-                }
+                let sym = tail
+                    .first()
+                    .and_then(|v| as_symbol(v))
+                    .expect("validated :as symbol");
+                as_sym = Some(sym.name().to_owned());
                 break;
             } else {
                 let validated = as_pat(first).expect("patterns validated before building");
@@ -4452,7 +4455,8 @@ impl<'a> Analyzer<'a> {
             }
             if is_outlet_directive(kw) {
                 set_outlet(kw, v, acc);
-            } else if let Some(dir) = as_key_directive(kw) {
+            } else {
+                let dir = as_key_directive(kw).expect("validated key directive");
                 build_keys(v, &dir, &mut acc.keys, &mut acc.extra_keys);
             }
             return Ok(());
@@ -4567,13 +4571,12 @@ fn build_keys(
             extra_keys.push(unquote_key(&post_amp_key(dir, &form)));
             continue;
         }
-        if let Ok((key, local)) = key_for(dir, &form) {
-            keys.push(KeyBinding {
-                local,
-                key,
-                required: dir.required,
-            });
-        }
+        let (key, local) = key_for(dir, &form).expect("validated key form");
+        keys.push(KeyBinding {
+            local,
+            key,
+            required: dir.required,
+        });
     }
 }
 
@@ -5710,5 +5713,24 @@ mod tests {
         assert!(err.bare);
         assert_eq!(err.class, super::class::RUNTIME);
         assert!(err.message.contains("recur escaped forcing a form"));
+    }
+
+    #[test]
+    fn try_seq_clause_force_errors_surface_as_compile_errors() {
+        let mut eval = crate::boot();
+        let err_head = eval
+            .eval_source("(defmacro bad-try-head [] (list 'try (lazy-seq (throw (ex-info \"h\" {}))))) (bad-try-head)")
+            .unwrap_err();
+        assert!(
+            matches!(err_head, crate::eval::SourceError::Uncaught(_)),
+            "{err_head:?}"
+        );
+        let err_tail = eval
+            .eval_source("(defmacro bad-try-tail [] (list 'try (cons 'finally (lazy-seq (throw (ex-info \"t\" {})))))) (bad-try-tail)")
+            .unwrap_err();
+        assert!(
+            matches!(err_tail, crate::eval::SourceError::Uncaught(_)),
+            "{err_tail:?}"
+        );
     }
 }

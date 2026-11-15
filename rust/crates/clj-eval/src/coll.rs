@@ -1676,11 +1676,10 @@ thread_local! {
 
 #[inline(always)]
 fn set_ascii_slot(slot: usize, ptr: usize, len: usize, is_ascii: bool) {
-    if slot < ASCII_CACHE_SLOTS {
-        let mut slots = ASCII_SLOTS.get();
-        slots[slot] = (ptr, len, is_ascii);
-        ASCII_SLOTS.set(slots);
-    }
+    debug_assert!(slot < ASCII_CACHE_SLOTS);
+    let mut slots = ASCII_SLOTS.get();
+    slots[slot] = (ptr, len, is_ascii);
+    ASCII_SLOTS.set(slots);
 }
 
 /// Answer `f` over the memoized scan for a string, if it is one of
@@ -3462,5 +3461,24 @@ mod tests {
         let long_ascii: Arc<str> = Arc::from("a".repeat(200));
         assert!(str_ascii(&long_ascii));
         assert!(str_ascii(&long_ascii));
+    }
+
+    #[test]
+    fn last_walks_empty_and_nonempty_chunks() {
+        let mut eval = crate::boot();
+        assert_eq!(
+            eval.eval_source("(last (chunk-cons (chunk (chunk-buffer 4)) '(1 2)))")
+                .unwrap()
+                .last(),
+            Some(&Value::Int(2))
+        );
+        assert_eq!(
+            eval.eval_source(
+                "(last (chunk-cons (chunk (doto (chunk-buffer 4) (chunk-append 10) (chunk-append 20))) nil))"
+            )
+            .unwrap()
+            .last(),
+            Some(&Value::Int(20))
+        );
     }
 }

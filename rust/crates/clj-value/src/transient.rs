@@ -1256,17 +1256,18 @@ mod tests {
 
         // Persistent shrink condition
         let mut t_shrink_ints = TransientVector::new();
-        if let super::TransientItems::Ints(ref mut v) = t_shrink_ints.items {
-            v.reserve(2000);
-            v.push(1);
-        }
-        let _ = t_shrink_ints.persistent().unwrap();
-
         let mut t_shrink_chars =
             TransientVector::from_vector(&crate::Vector::from_chars(vec!['x']));
-        if let super::TransientItems::Chars(ref mut v) = t_shrink_chars.items {
-            v.reserve(2000);
+        for items in [&mut t_shrink_ints.items, &mut t_shrink_chars.items] {
+            if let super::TransientItems::Ints(v) = items {
+                v.reserve(2000);
+                v.push(1);
+            }
+            if let super::TransientItems::Chars(v) = items {
+                v.reserve(2000);
+            }
         }
+        let _ = t_shrink_ints.persistent().unwrap();
         let _ = t_shrink_chars.persistent().unwrap();
 
         // Panic-free bitcode helpers: get_val_ref, assoc_int_in_bounds, pop_scalar_opt

@@ -358,10 +358,7 @@ fn native_in_ns(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     // `RT.inNamespace` is a thread-local `set`: the top frame when
     // bound (boot pushes a base frame, so the root never moves),
     // else the root.
-    let star = Symbol::new(Some("clojure.core"), "*ns*");
-    if let Some(var_id) = id_of(&eval.registry, &star) {
-        set_ns_current(eval, var_id, ns_value(&key, id));
-    }
+    set_core_ns(eval, ns_value(&key, id));
     Ok(ns_value(&key, id))
 }
 
@@ -377,6 +374,13 @@ fn set_root(reg: &SharedRegistry, id: u64, v: Value) {
 fn set_ns_current(eval: &mut Evaluator, var_id: u64, handle: Value) {
     if !eval.set_binding_top(var_id, handle.clone()) {
         set_root(&eval.registry, var_id, handle);
+    }
+}
+
+/// Point `clojure.core/*ns*` (top frame or root) at `handle`, if booted.
+pub(crate) fn set_core_ns(eval: &mut Evaluator, handle: Value) {
+    if let Some(var_id) = core_var(eval, "*ns*") {
+        set_ns_current(eval, var_id, handle);
     }
 }
 
@@ -1217,6 +1221,13 @@ pub(crate) fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
     id_of(&eval.registry, &Symbol::new(Some("clojure.core"), name))
 }
 
+/// Push a thread binding for `clojure.core/<name>` if that core var exists.
+pub(crate) fn push_core_binding(eval: &mut Evaluator, name: &str, value: Value) {
+    if let Some(id) = core_var(eval, name) {
+        eval.push_binding(core_var_handle(id, name), value);
+    }
+}
+
 /// Stamp `:arglists` meta on an installed `clojure.core` var
 /// (one vector per arity; S8 single-arity calls route through
 /// here too).
@@ -1689,14 +1700,10 @@ fn in_load_frame<R>(
     let cur = eval.registry.current().to_owned();
     let depth = eval.bindings_depth();
     let source_path = source_path_value(&file_star);
-    if let Some(id) = core_var(eval, "*file*") {
-        eval.push_binding(core_var_handle(id, "*file*"), file_star);
-    }
+    push_core_binding(eval, "*file*", file_star);
     // S18: every load binds `*source-path*` alongside `*file*`
     // (no existing test can observe the new var).
-    if let Some(id) = core_var(eval, "*source-path*") {
-        eval.push_binding(core_var_handle(id, "*source-path*"), source_path);
-    }
+    push_core_binding(eval, "*source-path*", source_path);
     if isolate_ns {
         // Always `Some`: the depth is captured up front, so the
         // isolation frame never records here.
@@ -1707,9 +1714,7 @@ fn in_load_frame<R>(
     // `m-*` — `Compiler.load` binds it the same way). The push rides
     // the `depth` pop below (captured up front, so the pop restores
     // exactly this frame's pushes).
-    if let Some(id) = core_var(eval, "*read-eval*") {
-        eval.push_binding(core_var_handle(id, "*read-eval*"), Value::Bool(true));
-    }
+    push_core_binding(eval, "*read-eval*", Value::Bool(true));
     let out = body(eval);
     eval.registry.set_current(&cur);
     eval.pop_bindings(depth);
@@ -1936,12 +1941,8 @@ fn load_lib_phase(
     // The verbose binding is observable; the echo itself waits for
     // `*out*` printing in S5D.
     let outer_verbose = deref_core(eval, "*loading-verbosely*").is_truthy() || opts.verbose;
-    let depth = core_var(eval, "*loading-verbosely*").map(|id| {
-        eval.push_binding(
-            core_var_handle(id, "*loading-verbosely*"),
-            Value::Bool(outer_verbose),
-        )
-    });
+    let depth = eval.bindings_depth();
+    push_core_binding(eval, "*loading-verbosely*", Value::Bool(outer_verbose));
     let out = match load {
         Some(kind) => {
             let r = match kind {
@@ -1970,9 +1971,7 @@ fn load_lib_phase(
             }
         }
     };
-    if let Some(d) = depth {
-        eval.pop_bindings(d);
-    }
+    eval.pop_bindings(depth);
     out
 }
 
@@ -2923,9 +2922,7 @@ pub fn boot() -> Evaluator {
     boot_core_vars(&mut eval, user_handle.clone());
     crate::printsys::boot_print_system(&mut eval);
     crate::reader::boot_read_arglists(&mut eval);
-    if let Some(id) = core_var(&eval, "*ns*") {
-        eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
-    }
+    push_core_binding(&mut eval, "*ns*", user_handle);
     // Embedded `core.clj` composites (their privates resolve in
     // `clojure.core`), then `user` refers the publics — the file
     // carries no `ns` form by design. Its defs register lazily: the
@@ -2947,9 +2944,7 @@ pub fn boot() -> Evaluator {
 fn boot_in_ns(eval: &mut Evaluator, name: &str) {
     let id = eval.registry.ensure_ns(name);
     eval.registry.set_current(name);
-    if let Some(var_id) = core_var(eval, "*ns*") {
-        set_ns_current(eval, var_id, ns_value(name, id));
-    }
+    set_core_ns(eval, ns_value(name, id));
 }
 
 /// Install the §N natives into `clojure.core`.
@@ -3227,6 +3222,80 @@ mod tests {
     }
 
     #[test]
+    fn set_core_ns_on_bare_eval_is_idle() {
+        let mut eval = Evaluator::new_bare("user");
+        set_core_ns(&mut eval, Value::Nil);
+        assert_eq!(deref_core(&eval, "*ns*"), Value::Nil);
+    }
+
+    #[test]
+    fn intern_routed_errors_and_bare_intern_skips_meta() {
+        let mut eval = boot();
+        let q = Symbol::new(Some("missing.ns"), "x");
+        assert!(intern_routed(&mut eval, "missing.ns", None, &q).is_err());
+        assert!(intern_routed(&mut eval, "user", Some(999_999), &q).is_err());
+
+        let args = [
+            Value::Symbol(Symbol::new(None, "user")),
+            Value::Symbol(Symbol::new(None, "plain-unmetad")),
+        ];
+        assert!(native_intern(&mut eval, &args).is_ok());
+        let plain_id = eval
+            .registry
+            .lookup(&Symbol::new(Some("user"), "plain-unmetad"))
+            .unwrap();
+        eval.registry.with_state_mut(plain_id, |st| st.meta = None);
+        assert!(native_intern(&mut eval, &args).is_ok());
+
+        let m = Map::from_kvs_last_wins(vec![(
+            Value::Keyword(Keyword::new(None, "tag")),
+            Value::Keyword(Keyword::new(None, "k")),
+        )]);
+        let meta_sym = Symbol::new(None, "metad-var").with_meta(Some(m));
+        let args_meta = [
+            Value::Symbol(Symbol::new(None, "user")),
+            Value::Symbol(meta_sym),
+            Value::Int(7),
+        ];
+        assert!(native_intern(&mut eval, &args_meta).is_ok());
+    }
+
+    #[test]
+    fn throw_class_for_covers_runtime_exception_subclasses() {
+        let cases = [
+            ("Error", ThrowClass::Error),
+            ("RuntimeException", ThrowClass::RuntimeException),
+            (
+                "IllegalMonitorStateException",
+                ThrowClass::IllegalMonitorStateException,
+            ),
+            (
+                "UnsupportedOperationException",
+                ThrowClass::UnsupportedOperationException,
+            ),
+            ("NullPointerException", ThrowClass::NullPointerException),
+            (
+                "IndexOutOfBoundsException",
+                ThrowClass::IndexOutOfBoundsException,
+            ),
+            (
+                "ArrayIndexOutOfBoundsException",
+                ThrowClass::ArrayIndexOutOfBoundsException,
+            ),
+            ("ArrayStoreException", ThrowClass::ArrayStoreException),
+            (
+                "NegativeArraySizeException",
+                ThrowClass::NegativeArraySizeException,
+            ),
+            ("ClassNotFoundException", ThrowClass::ClassNotFoundException),
+            ("OutOfMemoryError", ThrowClass::OutOfMemoryError),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(throw_class_for(name), expected, "mismatch for {name}");
+        }
+    }
+
+    #[test]
     fn set_ns_current_without_frame_sets_root() {
         let mut eval = Evaluator::new_bare("user");
         let star = Symbol::new(Some("clojure.core"), "*ns*");
@@ -3250,5 +3319,21 @@ mod tests {
         }
         assert!(super::owned_entry("map").is_none());
         assert!(super::owned_entry("").is_none());
+    }
+
+    #[test]
+    fn push_core_binding_skips_missing_and_pushes_present() {
+        let mut eval = Evaluator::new_bare("user");
+        super::push_core_binding(&mut eval, "*missing*", Value::Int(1));
+        assert_eq!(eval.bindings_depth(), 0);
+        let id = eval
+            .registry
+            .intern(&Symbol::new(Some("clojure.core"), "*x*"));
+        super::push_core_binding(&mut eval, "*x*", Value::Int(42));
+        assert_eq!(eval.bindings_depth(), 1);
+        assert_eq!(
+            eval.deref_var(id, &Symbol::new(Some("clojure.core"), "*x*")),
+            Value::Int(42)
+        );
     }
 }

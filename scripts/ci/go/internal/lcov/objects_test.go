@@ -72,10 +72,12 @@ func TestTestObjectsSupportsLegacyAndNewLayouts(t *testing.T) {
 	root := t.TempDir()
 
 	legacy := filepath.Join(root, "debug", "deps", "legacy_stub")
+	bin := filepath.Join(root, "debug", "clojure_rs")
 	newDebug := filepath.Join(root, "debug", "build", "clj-core", "abc123", "out", "clj_core-abc123")
 	newRelease := filepath.Join(root, "release", "build", "clj-value", "def456", "out", "clj_value-def456")
 
 	writeTestFile(t, legacy, []byte("#!/bin/sh\n"), 0o755)
+	writeTestFile(t, bin, []byte("#!/bin/sh\n"), 0o755)
 	writeTestFile(t, filepath.Join(root, "debug", "deps", "libclj.rlib"), []byte("archive"), 0o755)
 	writeTestFile(t, newDebug, makeSyntheticELF("__llvm_covmap"), 0o755)
 	writeTestFile(t, newRelease, makeSyntheticELF(".llvm_covmap"), 0o755)
@@ -95,7 +97,7 @@ func TestTestObjectsSupportsLegacyAndNewLayouts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TestObjects error: %v", err)
 	}
-	want := []string{newDebug, legacy, newRelease}
+	want := []string{newDebug, bin, legacy, newRelease}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("TestObjects = %v, want %v", got, want)
 	}

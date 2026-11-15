@@ -151,4 +151,8 @@ fn nabi_assoc_conj_fallbacks() {
             .iter()
             .any(|(name, _)| *name == "rt_n_str_ascii")
     );
+    let mut cell_out = Value::Int(99);
+    cljrt::nabi::rt_n_cell_set(&Value::Nil, &Value::Int(1));
+    cljrt::nabi::rt_n_cell_get(&mut cell_out, &Value::Nil);
+    assert_eq!(cell_out, Value::Int(99));
 }

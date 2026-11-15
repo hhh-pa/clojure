@@ -2252,9 +2252,7 @@ mod tests {
     }
 
     fn millis(s: &str) -> i64 {
-        Instant::from_str(s)
-            .unwrap_or_else(|e| panic!("{s}: {e:?}"))
-            .millis
+        Instant::from_str(s).expect("valid instant vector").millis
     }
 
     /// Millis vectors (probes `i-ms-*`).

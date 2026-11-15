@@ -21,6 +21,7 @@ func TestObjects(covtarget string) ([]string, error) {
 	seen := make(map[string]bool)
 	for _, sub := range []string{"debug", "release"} {
 		profile := filepath.Join(covtarget, sub)
+		collectFlatDir(profile, seen, &objs)
 		collectFlatDir(filepath.Join(profile, "deps"), seen, &objs)
 		collectNewLayout(filepath.Join(profile, "build"), seen, &objs)
 	}

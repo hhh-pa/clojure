@@ -376,27 +376,31 @@ impl ChanState {
     /// checks `full?`, so refills overfill the same way); consuming
     /// a `reduced` putter aborts (the JVM aborts when the refill
     /// step returns `reduced`).
+    /// Commit one popped put registration into the buffer; returns
+    /// whether refilling may continue (`false` on abort).
+    fn accept_put_reg(&mut self, reg: Reg) -> bool {
+        let val = reg
+            .put_val
+            .clone()
+            .expect("put registration carries a value");
+        let won = reg.waiter.try_win(reg.op, Value::Bool(true));
+        if won {
+            self.buf.push_back(val);
+            self.buf.extend(reg.rest);
+        }
+        if won && reg.reduced {
+            self.abort_locked();
+            return false;
+        }
+        true
+    }
+
     fn refill(&mut self) {
         while self.refill_room() {
             let Some(reg) = self.next_putter() else {
                 break;
             };
-            let val = reg
-                .put_val
-                .clone()
-                .expect("put registration carries a value");
-            // Flags, not nesting: a lost commit (a co-registered
-            // alt won elsewhere mid-refill) is race-only, so the
-            // branches below stay straight-line and every line
-            // runs on the common paths.
-            let won = reg.waiter.try_win(reg.op, Value::Bool(true));
-            let done = won && reg.reduced;
-            if won {
-                self.buf.push_back(val);
-                self.buf.extend(reg.rest);
-            }
-            if done {
-                self.abort_locked();
+            if !self.accept_put_reg(reg) {
                 break;
             }
         }
@@ -413,18 +417,21 @@ impl ChanState {
         self.closed = true;
     }
 
+    /// Serve one queued taker from the front of the buffer (or nil
+    /// once closed/drained), leaving buffered items intact on a lost commit.
+    fn serve_take_reg(&mut self, reg: &Reg) {
+        let val = self.buf.front().cloned().unwrap_or(Value::Nil);
+        if reg.waiter.try_win(reg.op, val) {
+            self.buf.pop_front();
+        }
+    }
+
     /// Hand queued takers buffered values (one each, in order),
     /// then nil to the rest (the close/abort serving).
     fn serve_takes_all(&mut self) {
         let takes: Vec<Reg> = self.takes.drain(..).collect();
-        for reg in takes {
-            // Peek-then-pop: a lost commit (a co-registered alt won
-            // elsewhere) leaves the buffered value for the next
-            // taker.
-            let val = self.buf.front().cloned().unwrap_or(Value::Nil);
-            if reg.waiter.try_win(reg.op, val) {
-                self.buf.pop_front();
-            }
+        for reg in &takes {
+            self.serve_take_reg(reg);
         }
     }
 
@@ -436,10 +443,7 @@ impl ChanState {
             let Some(reg) = self.next_taker() else {
                 break;
             };
-            let val = self.buf.front().cloned().unwrap_or(Value::Nil);
-            if reg.waiter.try_win(reg.op, val) {
-                self.buf.pop_front();
-            }
+            self.serve_take_reg(&reg);
         }
     }
 
@@ -1378,5 +1382,23 @@ mod tests {
             ch.put_xform(Value::Int(-1), &w, 0, &mut echo_stepper),
             Err(ChanError::QueueFull { puts: true })
         ));
+    }
+
+    #[test]
+    fn lost_commit_puts_and_takes_preserve_buffer_and_killed_waiter_is_idempotent() {
+        let buf = fixed(2);
+        let ch = Channel::new(Some(&buf));
+        let killed = Arc::new(Waiter::new());
+        killed.kill();
+        // Second kill hits the non-Pending arm.
+        killed.kill();
+
+        let mut state = ch.state.lock().expect("channel lock");
+        assert!(state.accept_put_reg(Reg::put(&killed, 0, Value::Int(11))));
+        assert!(state.buf.is_empty());
+
+        state.buf.push_back(Value::Int(22));
+        state.serve_take_reg(&Reg::take(&killed, 0));
+        assert_eq!(state.buf.len(), 1);
     }
 }

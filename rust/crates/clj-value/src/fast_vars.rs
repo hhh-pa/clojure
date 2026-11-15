@@ -62,25 +62,19 @@ impl BindCounts {
     #[inline]
     #[must_use]
     pub fn is_bound(&self, var_id: u64) -> bool {
-        self.slots
-            .get(Self::slot_index(var_id))
-            .is_none_or(|c| c.load(Ordering::Acquire) != 0)
+        self.slots[Self::slot_index(var_id)].load(Ordering::Acquire) != 0
     }
 
     /// Record `n` added binding entries for `var_id`.
     #[inline]
     pub fn add(&self, var_id: u64, n: usize) {
-        if let Some(c) = self.slots.get(Self::slot_index(var_id)) {
-            c.fetch_add(n, Ordering::AcqRel);
-        }
+        self.slots[Self::slot_index(var_id)].fetch_add(n, Ordering::AcqRel);
     }
 
     /// Release `n` removed binding entries for `var_id`.
     #[inline]
     pub fn sub(&self, var_id: u64, n: usize) {
-        if let Some(c) = self.slots.get(Self::slot_index(var_id)) {
-            c.fetch_sub(n, Ordering::Release);
-        }
+        self.slots[Self::slot_index(var_id)].fetch_sub(n, Ordering::Release);
     }
 }
 
@@ -189,6 +183,8 @@ mod tests {
         let table = FastVars::new(Arc::clone(&reg_epoch), Arc::clone(&bind_counts), 2);
 
         assert_eq!(table.get(0), None);
+        assert_eq!(table.get(99), None);
+        table.record(99, 0, 7, &Value::Int(10));
         assert_eq!(table.get(99), None);
 
         // Odd epoch (mutation in progress) neither records nor serves.

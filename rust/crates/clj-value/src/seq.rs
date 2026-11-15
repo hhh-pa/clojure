@@ -1779,9 +1779,7 @@ impl IterateValue {
 
     /// Memoize a realized head.
     pub fn store_seed(&self, v: Value) {
-        if let Ok(mut seed) = self.seed.lock() {
-            *seed = Some(v);
-        }
+        *crate::unpoison(self.seed.lock()) = Some(v);
     }
 
     /// The metadata map, if any.

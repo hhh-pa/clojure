@@ -102,3 +102,32 @@ pub use value::{
     intern_string_value, map_entry, new_map, new_set, reader_conditional, tagged_literal,
 };
 pub use volatile::Volatile;
+
+/// Unwrap a [`std::sync::LockResult`], recovering the guard even after
+/// a panic poisoned the lock (used for short critical sections whose
+/// invariants remain intact).
+#[must_use]
+pub fn unpoison<T>(res: std::sync::LockResult<T>) -> T {
+    match res {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+mod unpoison_tests {
+    use super::unpoison;
+    use std::sync::Mutex;
+
+    #[test]
+    fn unpoison_recovers_ok_and_poisoned_guards() {
+        let m = Mutex::new(41);
+        assert_eq!(*unpoison(m.lock()), 41);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut g = m.lock().unwrap();
+            *g = 42;
+            panic!("poison test");
+        }));
+        assert_eq!(*unpoison(m.lock()), 42);
+    }
+}

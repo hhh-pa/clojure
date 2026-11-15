@@ -747,4 +747,18 @@ mod tests {
         assert_eq!(err.class, ThrowClass::IllegalArgumentException);
         assert_eq!(err.message, "5 is not a protocol");
     }
+
+    #[test]
+    fn merge_one_skips_non_int_arity_keys() {
+        let am = map_with(vec![
+            (Value::Keyword(Keyword::new(None, "k")), Value::Nil),
+            (Value::Int(1), Value::Int(42)),
+        ]);
+        let merged = merge_one(&new_map(), new_map(), "m", &Value::Map(am));
+        let entry = merged.get(&Value::Str(Arc::from("m"))).unwrap();
+        assert!(matches!(
+            entry,
+            Value::Map(m) if m.get(&Value::Int(1)).is_some() && m.size() == 1
+        ));
+    }
 }

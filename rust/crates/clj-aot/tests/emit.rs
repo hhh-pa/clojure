@@ -719,3 +719,55 @@ fn native_emit_ir_marks_clojure_string_def_as_rebinding() {
     assert!(report.starts_with("aot: native "), "{report}");
     assert!(text.contains("@rt_n_fast_vars"), "{text}");
 }
+
+#[test]
+fn native_emit_ir_covers_owned_move_assoc_update_and_loop_unsupported() {
+    let ir = tmp("owned-move-ops.ll");
+    let src = "\
+(defn mv-ops [m]
+  (let [a (assoc m :a 1 :b 2)
+        b (assoc-in a [:x] 3)
+        c (update b :x inc)
+        d (update-in c [:x] inc)]
+    d))
+(println (mv-ops {:x 0}))
+";
+    let report = clj_aot::build_str(
+        src,
+        "f.clj",
+        &tmp("nope-mv"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("native build");
+    std::fs::remove_file(&ir).expect("cleanup");
+    assert!(report.starts_with("aot: native "), "{report}");
+
+    let bad_loop = "\
+(defmacro bad-val [] (list 'quote +))
+(defn g [] (loop [x 0] (bad-val)))
+(println (g))
+";
+    let bad_ir = tmp("bad-loop.ll");
+    let bad_report = clj_aot::build_str(
+        bad_loop,
+        "f.clj",
+        &tmp("nope-bad-loop"),
+        &EmitOptions {
+            emit_ir: Some(bad_ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("mixed fallback");
+    std::fs::remove_file(&bad_ir).expect("cleanup");
+    assert!(
+        bad_report.contains("(native: constant without a readable form:"),
+        "{bad_report}"
+    );
+}

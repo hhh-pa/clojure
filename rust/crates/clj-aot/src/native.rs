@@ -953,7 +953,7 @@ impl<'ctx> Lowerer<'ctx> {
                 self.fns.len() - 1
             }
         };
-        let here = self.builder.get_insert_block();
+        let here = self.builder.get_insert_block().expect("positioned");
         let mut arities = Vec::new();
         for (i, arity) in fun.arities.iter().enumerate() {
             let func = match &reserved {
@@ -969,9 +969,7 @@ impl<'ctx> Lowerer<'ctx> {
             arities.push((arity.fixed.len(), arity.rest.is_some(), code));
         }
         self.fns[k].arities = arities;
-        if let Some(b) = here {
-            self.builder.position_at_end(b);
-        }
+        self.builder.position_at_end(here);
         Ok((k as u64, captured))
     }
 
@@ -2636,9 +2634,7 @@ impl<'ctx> Lowerer<'ctx> {
         let (k, captured) = self.lower_fun(fun, base, f)?;
         let (arr, elems) = self.slot_array(f, captured.len());
         for (idx, e) in captured.iter().zip(&elems) {
-            let src = self
-                .local_slot(f, *idx)
-                .ok_or_else(|| Unsupported(format!("captured local {idx} unresolved")))?;
+            let src = self.local_slot(f, *idx).expect("analyzed local is visible");
             self.clone_v(f.func, *e, src);
         }
         let cref = self.slots_ref(f, arr, captured.len());

@@ -93,10 +93,7 @@ fn edn_reader_opts(eval: &mut Evaluator) -> Result<ReaderOpts, NativeError> {
         read_eval: false,
         ..Default::default()
     };
-    if let Some(maps) = eval.registry.reader_maps(&cur) {
-        opts.aliases = maps.aliases;
-        opts.refers = maps.refers;
-    }
+    crate::reader::apply_reader_maps(eval, &cur, &mut opts, false);
     crate::core::snapshot_data_readers(eval, &mut opts)?;
     Ok(opts)
 }
@@ -230,18 +227,23 @@ fn canonical_path_str(base: Option<&str>, path: &str) -> String {
             prefix = anc.to_path_buf();
             break;
         }
-        if let Some(name) = anc.file_name() {
-            tail.push(name.to_os_string());
-        } else if matches!(
-            anc.components().next_back(),
-            Some(std::path::Component::ParentDir)
-        ) {
-            tail.push(std::ffi::OsString::from(".."));
-        }
+        tail.extend(missing_tail_step(anc));
     }
     let out = std::fs::canonicalize(&prefix).unwrap_or(prefix);
     let joined = join_tail(out, &tail).to_string_lossy().into_owned();
     strip_verbatim_prefix(&joined)
+}
+
+/// One missing path segment for [`canonical_path_str`], preserving `..`.
+fn missing_tail_step(anc: &std::path::Path) -> Option<std::ffi::OsString> {
+    if let Some(name) = anc.file_name() {
+        return Some(name.to_os_string());
+    }
+    matches!(
+        anc.components().next_back(),
+        Some(std::path::Component::ParentDir)
+    )
+    .then(|| std::ffi::OsString::from(".."))
 }
 
 /// Strip Rust's Windows verbatim prefix (`\\?\`) from a
@@ -447,5 +449,15 @@ mod tests {
             r"C:\Users\a".to_owned()
         );
         assert_eq!(strip_verbatim_prefix("/tmp/x"), "/tmp/x".to_owned());
+    }
+
+    #[test]
+    fn canonical_path_pops_parent_over_nonexistent_ancestor() {
+        let out = super::canonical_path_str(None, "/nonexistent-anchor-xyz-123/sub/..");
+        assert!(out.ends_with("nonexistent-anchor-xyz-123"), "got {out}");
+        assert!(!out.contains("sub"), "got {out}");
+        let cur = super::canonical_path_str(Some("/nonexistent-anchor-xyz-123"), ".");
+        assert!(cur.ends_with("nonexistent-anchor-xyz-123"), "got {cur}");
+        assert_eq!(super::missing_tail_step(std::path::Path::new("")), None);
     }
 }
