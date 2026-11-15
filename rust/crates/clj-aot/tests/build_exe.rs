@@ -423,3 +423,90 @@ fn native_binary_preserves_nested_or_defaults_and_assoc_miss_parity() {
         ("[10 20] [[30 40] [30 40]] :err :err\n", "", 0)
     );
 }
+
+#[test]
+fn native_binary_exercises_lite_ns_stdin_and_full_cli() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let dir = tmp("lite-stdin");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let out = dir.join(format!("prog{}", exe_suffix()));
+    let lite_src = "\
+(ns demo.app (:require [clojure.string :as s]))
+(println (read-line) (s/join \",\" *command-line-args*))
+";
+    let report = clj_aot::build_str(
+        lite_src,
+        "f.clj",
+        &out,
+        &EmitOptions::default(),
+        &LinkOptions {
+            runtime_archive: Some(ensure_archive()),
+            exe_dir: dir.clone(),
+            linker: None,
+        },
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("compile lite stdin");
+    assert!(report.starts_with("aot: native "), "{report}");
+    let mut child = Command::new(&out)
+        .args(["x", "y"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lite");
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(b"hi\n")
+        .expect("write stdin");
+    let ran = child.wait_with_output().expect("wait lite");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+    assert_eq!(
+        (
+            String::from_utf8_lossy(&ran.stdout).into_owned().as_str(),
+            String::from_utf8_lossy(&ran.stderr).into_owned().as_str(),
+            ran.status.code()
+        ),
+        ("hi x,y\n", "", Some(0))
+    );
+
+    let req_src = "\
+(require 'clojure.string '[clojure.string :as rq] '[clojure.string :refer [trim]])
+(println (trim (rq/join \",\" [(Long/parseLong \"7\") (instance? Long 1)])))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("lite-require-string", req_src, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("7,true\n", "", 0)
+    );
+
+    let caps_src = "\
+(println (deref (atom [(re-find #\"a+\" \"baa\") (re-matches #\"a+\" \"aa\") (vec (take 2 (map inc [1 2]))) (Long/parseLong \"7\")])))
+";
+    let (stdout, stderr, code, _report) =
+        build_mode_and_run("lite-caps-seq-re-host", caps_src, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[aa aa [2 3] 7]\n", "", 0)
+    );
+
+    let full_src = "\
+(ns demo.full (:require [clojure.set :as s]))
+(println (s/subset? #{1} #{1 2}) (vec *command-line-args*))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("full-ns-cli", full_src, &["a"]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("true [a]\n", "", 0)
+    );
+
+    let full_err_src = "(run! (fn [_] (nth [1] 5)) [1])";
+    let (stdout, stderr, code, _report) = build_mode_and_run("full-err", full_err_src, &[]);
+    assert_eq!(stdout, "");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("IndexOutOfBoundsException"), "{stderr}");
+}

@@ -555,7 +555,7 @@ fn native_emit_ir_lowers_units_constants_and_main_259() {
     let text = std::fs::read_to_string(&ir).expect("ir");
     std::fs::remove_file(&ir).expect("cleanup");
     for needle in [
-        "@rt_n_main(",
+        "@rt_n_main_lite(",
         "@rt_n_declare_var(",
         "@rt_n_declare_fn(",
         "@rt_n_set_const(",
@@ -770,4 +770,77 @@ fn native_emit_ir_covers_owned_move_assoc_update_and_loop_unsupported() {
         bad_report.contains("(native: constant without a readable form:"),
         "{bad_report}"
     );
+}
+
+#[test]
+fn native_emit_ir_selects_lite_vs_full_boot() {
+    let lite_src = "\
+(ns demo.app
+  (:refer-clojure :exclude [get])
+  (:require [clojure.string :as s] clojure.string))
+(require 'clojure.string '[clojure.string :as rq] '[clojure.string :refer [trim]])
+(declare fwd)
+(def ^:dynamic *d* 1)
+(defn fwd [x] (trim (s/join \",\" [x (Long/parseLong \"7\")])))
+(defn g [] (binding [*d* 2] (set! *d* 3) (vector *d* #'fwd (fwd \"ok\") (rq/blank? \" \") (instance? Long 1))))
+(println (g))
+";
+    let lite_ir = tmp("boot-lite.ll");
+    let lite_report = clj_aot::build_str(
+        lite_src,
+        "f.clj",
+        &tmp("nope-lite"),
+        &EmitOptions {
+            emit_ir: Some(lite_ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("lite native");
+    let lite_text = std::fs::read_to_string(&lite_ir).expect("ir");
+    std::fs::remove_file(&lite_ir).expect("cleanup");
+    assert!(lite_report.starts_with("aot: native "), "{lite_report}");
+    assert!(
+        lite_text.contains("@rt_n_require_string_lite("),
+        "{lite_text}"
+    );
+    assert!(lite_text.contains("@rt_n_ns_lite("), "{lite_text}");
+    assert!(lite_text.contains("@rt_n_main_lite("), "{lite_text}");
+
+    for (tag, full_src) in [
+        ("macro", "(defmacro m [x] x) (println (m 1))"),
+        ("ns-use", "(ns demo.u (:use clojure.string)) (println 1)"),
+        (
+            "ns-import",
+            "(ns demo.i (:import [java.util Locale])) (println Locale/US)",
+        ),
+        (
+            "ns-set",
+            "(ns demo.s (:require [clojure.set :as s])) (println (s/union #{1} #{2}))",
+        ),
+        ("top-req-other", "(require 'clojure.set) (println 1)"),
+        ("top-req-dyn", "(let [x 'clojure.string] (require x))"),
+        ("top-req-empty", "(defn f [] (require)) (println 1)"),
+        ("core-lazy", "(run! println [1])"),
+        ("redef", "(with-redefs [inc dec] (println (inc 1)))"),
+    ] {
+        let ir = tmp(&format!("boot-full-{tag}.ll"));
+        let report = clj_aot::build_str(
+            full_src,
+            "f.clj",
+            &tmp("nope-full"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("full native");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        assert!(report.starts_with("aot: native "), "{tag}: {report}");
+        assert!(text.contains("@rt_n_main("), "{tag}: {text}");
+    }
 }

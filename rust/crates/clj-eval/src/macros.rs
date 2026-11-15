@@ -511,10 +511,10 @@ fn native_apply(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     eval.call(&args[0], &spread).map_err(signal_to_native)
 }
 
-/// The S5C natives installed into `clojure.core` by [`boot`](crate::ns::boot).
-pub(crate) const MACRO_NATIVES: &[(&str, NativeFnPtr)] = &[
-    ("macroexpand-1", native_macroexpand_1),
-    ("macroexpand", native_macroexpand),
+/// Pure core value/call natives hosted alongside macro helpers (`list`,
+/// `apply`, `vector`, `hash-map`, `hash-set`, `gensym`): safe under
+/// `BootMode::Lite` without pulling in `macroexpand*` or `eval`.
+pub(crate) const MACRO_LITE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("gensym", native_gensym),
     // Early (S5C rows): syntax-quote expansions call these.
     ("list", native_list),
@@ -522,6 +522,12 @@ pub(crate) const MACRO_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("vector", native_vector),
     ("hash-map", native_hash_map),
     ("hash-set", native_hash_set),
+];
+
+/// Macro-expansion natives installed into `clojure.core` by [`boot`](crate::ns::boot).
+pub(crate) const MACRO_NATIVES: &[(&str, NativeFnPtr)] = &[
+    ("macroexpand-1", native_macroexpand_1),
+    ("macroexpand", native_macroexpand),
 ];
 
 #[cfg(test)]

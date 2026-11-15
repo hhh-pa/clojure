@@ -728,7 +728,10 @@ fn native_spit(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 /// `String.length` NPE (probe `rs-opts-nilstr`), not the 1-arity
 /// bare NPE. Errors stay bare `RuntimeException`s (no
 /// `ReaderException` wrapper — every `rs-opts-*` throw row).
-fn native_read_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_read_string(
+    eval: &mut Evaluator,
+    args: &[Value],
+) -> Result<Value, NativeError> {
     check_arity("clojure.core/read-string", args, &[1, 2])?;
     let s_arg = args.last().expect("arity 1..=2 has a last arg");
     if matches!(s_arg, Value::Nil) {
@@ -819,7 +822,7 @@ fn land_read_string_error(e: ReaderError) -> NativeError {
 }
 
 /// The S5D IO natives installed into `clojure.core`.
-pub(crate) const IO_NATIVES: &[(&str, NativeFnPtr)] = &[
+pub(crate) const IO_LITE_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("print", native_print),
     ("println", native_println),
     ("pr", native_pr),
@@ -828,7 +831,6 @@ pub(crate) const IO_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("flush", native_flush),
     ("slurp", native_slurp),
     ("spit", native_spit),
-    ("read-string", native_read_string),
     ("PrintWriter-on", native_printwriter_on),
 ];
 

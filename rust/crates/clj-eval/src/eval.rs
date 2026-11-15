@@ -27,7 +27,7 @@ use crate::coll::native_nth;
 use crate::env::{Bindings, Env, FxHashMap, SharedRegistry};
 use crate::error::{CompileError, NativeError, Signal, jvm_class_of, span_of};
 use crate::expr::{
-    Analyzer, CaseTest, Catch, DirectCall, Expr, MapPattern, Pattern, pattern_names,
+    Analyzer, CaseTest, Catch, DirectCall, Expr, MapPattern, NsClause, Pattern, pattern_names,
 };
 use crate::ext::{Closure, FastArith, NativeFn, NsHandle, as_closure, as_native};
 
@@ -159,6 +159,42 @@ pub(crate) fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
     }
 }
 
+/// Hook signature for evaluating a `(ns ...)` form in full boot mode.
+pub(crate) type EvalNsHook =
+    fn(&mut Evaluator, &str, Option<&str>, Option<&Map>, &[NsClause]) -> Result<Value, Signal>;
+/// Hook signature for borrowed VM invocation.
+pub(crate) type VmCallHook = fn(&mut Evaluator, &Value, &[Value]) -> Option<Result<Value, Signal>>;
+/// Hook signature for moved-args VM invocation.
+pub(crate) type VmApplyMovedHook =
+    fn(&mut Evaluator, &Value, &mut SmallVec<[Value; 4]>) -> Option<Result<Value, Signal>>;
+
+/// Indirect hooks into `crate::core_lazy`, `crate::vm`, and interpreter
+/// closure/ns evaluation installed only by full [`crate::ns::boot`], keeping
+/// embedded stdlib sources, the VM, and interpreter eval out of Lite AOT links.
+pub(crate) struct LazyHooks {
+    pub(crate) force: fn(&mut Evaluator, u64) -> bool,
+    pub(crate) force_meta: fn(&mut Evaluator, u64) -> bool,
+    pub(crate) interpreted: fn(&mut Evaluator, u64) -> Option<Value>,
+    pub(crate) eval_ns: EvalNsHook,
+    pub(crate) apply_closure: fn(&mut Evaluator, &Closure, &[Value]) -> Result<Value, Signal>,
+    pub(crate) vm_call: VmCallHook,
+    pub(crate) vm_apply_moved: VmApplyMovedHook,
+    pub(crate) vm_call1: fn(
+        &mut Evaluator,
+        &crate::vm::VmCode,
+        &crate::vm::CompiledArity,
+        Value,
+    ) -> Result<Value, Signal>,
+    pub(crate) vm_call2: fn(
+        &mut Evaluator,
+        &crate::vm::VmCode,
+        &crate::vm::CompiledArity,
+        Value,
+        Value,
+    ) -> Result<Value, Signal>,
+    pub(crate) eval_expr: fn(&mut Evaluator, &Expr, &crate::env::Env) -> Result<Value, Signal>,
+}
+
 /// The evaluator: shared lineage state (namespace registry plus
 /// identity counters), per-thread bindings, load path, spawned
 /// future threads, and the ambient native call span. `Send + Sync`
@@ -241,6 +277,8 @@ pub struct Evaluator {
     /// its first entry rather than once it runs hot (see
     /// [`set_eager_tier`](Self::set_eager_tier)).
     pub(crate) eager_tier: bool,
+    /// Optional `core_lazy`/interpreter dispatch hooks (`None` in Lite AOT boot).
+    pub(crate) lazy_hooks: Option<&'static LazyHooks>,
 }
 
 /// Pooled `recur` buffers retained per evaluator (see
@@ -298,7 +336,8 @@ impl Evaluator {
     /// registry from [`new_bare`](Self::new_bare) instead).
     #[must_use]
     pub fn new(source: &str) -> Self {
-        let this = Self::new_bare(source);
+        let mut this = Self::new_bare(source);
+        this.lazy_hooks = Some(&crate::ns::FULL_LAZY_HOOKS);
         this.registry.ensure_ns("user");
         this.registry.set_current("user");
         this
@@ -333,6 +372,7 @@ impl Evaluator {
             call_depth: 0,
             recur_pool: Vec::new(),
             eager_tier: false,
+            lazy_hooks: None,
         }
     }
 
@@ -392,6 +432,7 @@ impl Evaluator {
             // cross threads).
             recur_pool: Vec::new(),
             eager_tier: self.eager_tier,
+            lazy_hooks: self.lazy_hooks,
         }
     }
 
@@ -1022,7 +1063,13 @@ impl Evaluator {
         name: &str,
         func: Arc<crate::ext::NativeImpl>,
     ) -> Value {
-        self.install_native_inner(ns, name, func, FastArith::None)
+        self.install_native_inner(
+            ns,
+            name,
+            func,
+            FastArith::None,
+            crate::ns::owned_entry(name),
+        )
     }
 
     /// Install a table-driven `fn`-pointer native (like
@@ -1030,8 +1077,21 @@ impl Evaluator {
     /// integer tag reads off the installing pointer — only the
     /// genuine core arith/compare fns tag, never lookalikes).
     pub fn install_native_ptr(&mut self, ns: &str, name: &str, f: crate::ns::NativeFnPtr) -> Value {
+        let owned = crate::ns::owned_entry(name);
+        self.install_native_ptr_with_owned(ns, name, f, owned)
+    }
+
+    /// Install a table-driven `fn`-pointer native with an explicit owned-args
+    /// handler (`None` for borrow-only or stripped `Lite` builds).
+    pub(crate) fn install_native_ptr_with_owned(
+        &mut self,
+        ns: &str,
+        name: &str,
+        f: crate::ns::NativeFnPtr,
+        owned: Option<Arc<crate::ext::OwnedNativeImpl>>,
+    ) -> Value {
         let func: Arc<crate::ext::NativeImpl> = Arc::new(f);
-        self.install_native_inner(ns, name, func, crate::core::fast_arith_for(f))
+        self.install_native_inner(ns, name, func, crate::core::fast_arith_for(f), owned)
     }
 
     /// Install one native root (shared by the `Arc` and
@@ -1042,6 +1102,7 @@ impl Evaluator {
         name: &str,
         func: Arc<crate::ext::NativeImpl>,
         fast: FastArith,
+        owned: Option<Arc<crate::ext::OwnedNativeImpl>>,
     ) -> Value {
         let id = self.next_id();
         let sym = Symbol::new(Some(ns), name);
@@ -1055,7 +1116,7 @@ impl Evaluator {
             id,
             display: Arc::from(display),
             func,
-            owned: crate::ns::owned_entry(name),
+            owned,
             meta: None,
             fast,
         }));
@@ -1275,7 +1336,20 @@ impl Evaluator {
     /// this call evaluated its form. A lock-free miss for every
     /// other var.
     pub(crate) fn force_lazy(&mut self, id: u64) -> bool {
-        self.registry.is_lazy(id) && crate::core_lazy::force(self, id)
+        self.registry.is_lazy(id) && self.lazy_hooks.is_some_and(|h| (h.force)(self, id))
+    }
+
+    /// Force a native-backed var's `core.clj` metadata when full boot installed
+    /// lazy hooks (`false` in Lite mode).
+    pub(crate) fn force_meta(&mut self, id: u64) -> bool {
+        self.lazy_hooks.is_some_and(|h| (h.force_meta)(self, id))
+    }
+
+    /// Evaluate the upstream interpreted fallback for native var `id`, if full
+    /// boot installed lazy hooks.
+    pub(crate) fn lazy_interpreted(&mut self, id: u64) -> Option<Value> {
+        let hooks = self.lazy_hooks?;
+        (hooks.interpreted)(self, id)
     }
 
     /// Swap the source name (spans and `:file` metadata), returning
@@ -1380,7 +1454,15 @@ impl Evaluator {
                 doc,
                 attr,
                 clauses,
-            } => crate::ns::eval_ns_form(self, name, doc.as_deref(), attr.as_ref(), clauses),
+            } => {
+                let Some(hooks) = self.lazy_hooks else {
+                    return Err(self.throw(NativeError::new(
+                        ThrowClass::IllegalStateException,
+                        "ns requires full boot".to_owned(),
+                    )));
+                };
+                (hooks.eval_ns)(self, name, doc.as_deref(), attr.as_ref(), clauses)
+            }
             Expr::Assert {
                 test,
                 message,
@@ -2421,8 +2503,10 @@ impl Evaluator {
     pub(crate) fn call(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         // A VM closure's fixed arity runs directly (#226: natives
         // call back per item; no apply dispatch, no arg buffer).
-        if let Some((code, arity)) = crate::vm::fixed_target(callee, args.len()) {
-            return crate::vm::call_borrowed(self, code, arity, args);
+        if let Some(hooks) = self.lazy_hooks {
+            if let Some(result) = (hooks.vm_call)(self, callee, args) {
+                return result;
+            }
         }
         self.invoke(callee, args)
     }
@@ -2447,15 +2531,14 @@ impl Evaluator {
     pub(crate) fn invoke_args(
         &mut self,
         callee: &Value,
-        args: SmallVec<[Value; 4]>,
+        mut args: SmallVec<[Value; 4]>,
         span: Span,
     ) -> Result<Value, Signal> {
         // VM closures take the buffer by move (accumulators stay
         // uniquely owned through `reduce`-style step calls).
-        if let Some(closure) = crate::ext::as_closure(callee) {
-            if let (Some(code), None) = (&closure.vm, &closure.conveyed) {
-                let mut args = args;
-                return crate::vm::apply_moved(self, closure, code, &mut args);
+        if let Some(hooks) = self.lazy_hooks {
+            if let Some(result) = (hooks.vm_apply_moved)(self, callee, &mut args) {
+                return result;
             }
         }
         // The call site stays visible to natives for the
@@ -2761,7 +2844,13 @@ impl Evaluator {
             return (native.func)(self, args).map_err(|e| self.throw(e));
         }
         if let Some(closure) = as_closure(callee) {
-            return self.apply_closure(closure, args);
+            let Some(hooks) = self.lazy_hooks else {
+                return Err(self.throw(NativeError::new(
+                    ThrowClass::UnsupportedOperationException,
+                    "Closure invocation requires full boot".to_owned(),
+                )));
+            };
+            return (hooks.apply_closure)(self, closure, args);
         }
         if let Some(sv) = crate::lazy::as_subvector(callee) {
             return self.invoke_subvector(sv, args);
@@ -2951,7 +3040,11 @@ impl Evaluator {
     /// closure re-pushes its conveyed bindings as one frame around
     /// the call (popped in a `finally`, like the JVM's
     /// `resetThreadBindingFrame`).
-    fn apply_closure(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
+    pub(crate) fn apply_closure(
+        &mut self,
+        closure: &Closure,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
         // The #205 call-depth guard: infinite recursion throws
         // the catchable `StackOverflowError` (like the JVM)
         // instead of aborting the process. Every unbounded

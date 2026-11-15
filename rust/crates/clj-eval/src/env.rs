@@ -88,9 +88,11 @@ pub struct Namespace {
     ids: FxHashMap<Symbol, u64>,
     aliases: FxHashMap<String, (String, u64)>,
     refers: Arc<ReferTable>,
-    /// Shared copy-on-write: every namespace starts from the same
-    /// default imports (see `classemu::default_import_map`).
-    imports: Arc<FxHashMap<String, Arc<ClassVal>>>,
+    /// Shared copy-on-write, initialized lazily: every namespace starts
+    /// from the same default imports (see `classemu::default_import_map`),
+    /// deferred until imports are inspected or mutated so minimal AOT
+    /// startup skips instantiating default class descriptors.
+    imports: OnceLock<Arc<FxHashMap<String, Arc<ClassVal>>>>,
     /// This namespace's publics as a refer table, built on demand and
     /// dropped by every intern, unmap, and var state write (privacy
     /// is var meta).
@@ -144,7 +146,7 @@ impl Namespace {
             ids: FxHashMap::default(),
             aliases: FxHashMap::default(),
             refers: Arc::default(),
-            imports: crate::classemu::default_import_map(),
+            imports: OnceLock::new(),
             publics_table: None,
             meta: None,
             handle: Arc::new(NsHandle {
@@ -155,6 +157,16 @@ impl Namespace {
         }
     }
 
+    fn imports_map(&self) -> &Arc<FxHashMap<String, Arc<ClassVal>>> {
+        self.imports
+            .get_or_init(crate::classemu::default_import_map)
+    }
+
+    fn imports_mut(&mut self) -> &mut Arc<FxHashMap<String, Arc<ClassVal>>> {
+        let _ = self.imports_map();
+        self.imports.get_mut().expect("imports initialized")
+    }
+
     /// [`ReaderMaps`] for this namespace (cached until a mapping
     /// changes).
     pub fn reader_maps(&mut self) -> ReaderMaps {
@@ -162,13 +174,14 @@ impl Namespace {
             return m.clone();
         }
         let defaults = crate::classemu::default_import_map();
+        let imports = self.imports_map();
         let maps = ReaderMaps {
             aliases: Arc::new(self.alias_map()),
             refers: self.refers.clone(),
-            class_map: if Arc::ptr_eq(&self.imports, &defaults) {
+            class_map: if Arc::ptr_eq(imports, &defaults) {
                 default_class_map()
             } else {
-                Arc::new(class_map_of(&self.imports))
+                Arc::new(class_map_of(imports))
             },
         };
         self.reader_maps = Some(maps.clone());
@@ -314,7 +327,10 @@ impl Namespace {
         let fresh = self.ids.is_empty()
             && self.refers.is_empty()
             && !publics.shadows_default_import
-            && Arc::ptr_eq(&self.imports, &crate::classemu::default_import_map());
+            && self
+                .imports
+                .get()
+                .is_none_or(|m| Arc::ptr_eq(m, &crate::classemu::default_import_map()));
         if fresh {
             self.refers = if exclude.is_empty() {
                 Arc::clone(&publics.table)
@@ -356,25 +372,32 @@ impl Namespace {
 
     /// Install an import: simple name → class (S16 `import`).
     pub fn import_class(&mut self, simple: &str, class: Arc<ClassVal>) {
-        Arc::make_mut(&mut self.imports).insert(simple.to_owned(), class);
+        Arc::make_mut(self.imports_mut()).insert(simple.to_owned(), class);
         self.reader_maps = None;
     }
 
     /// Drop the import of a simple name (`true` when there was one),
     /// copying the shared table only then.
     fn drop_import(&mut self, name: &str) -> bool {
-        self.imports.contains_key(name) && Arc::make_mut(&mut self.imports).remove(name).is_some()
+        if let Some(m) = self.imports.get() {
+            if !m.contains_key(name) {
+                return false;
+            }
+        } else if !crate::classemu::is_default_import(name) {
+            return false;
+        }
+        Arc::make_mut(self.imports_mut()).remove(name).is_some()
     }
 
     /// The import for a simple name, if any.
     #[must_use]
     pub fn get_import(&self, simple: &str) -> Option<Arc<ClassVal>> {
-        self.imports.get(simple).cloned()
+        self.imports_map().get(simple).cloned()
     }
 
     /// Import mappings: simple name to class.
     pub fn imports(&self) -> impl Iterator<Item = (&str, &Arc<ClassVal>)> + '_ {
-        self.imports.iter().map(|(n, c)| (n.as_str(), c))
+        self.imports_map().iter().map(|(n, c)| (n.as_str(), c))
     }
 
     /// Interned mappings: qualified symbol to var id.
@@ -2484,5 +2507,12 @@ mod tests {
         let id = reg.intern_def_target(&sym(Some("brand.new.ns"), "v"));
         assert!(reg.ns_id("brand.new.ns").is_some());
         assert_eq!(reg.lookup(&sym(Some("brand.new.ns"), "v")), Some(id));
+        // Lazy `imports`: lowercase interns skip `default_import_map`; dropping a
+        // default import (`String`) materializes it, then initialized misses stay cheap.
+        let mut ns = Namespace::new("lazy.imports", 1);
+        assert!(!ns.drop_import("lower"));
+        assert!(ns.drop_import("String"));
+        assert!(!ns.drop_import("Missing"));
+        assert!(ns.imports().any(|(n, _)| n == "Long"));
     }
 }

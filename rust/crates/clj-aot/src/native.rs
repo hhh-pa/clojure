@@ -131,6 +131,10 @@ pub struct Lowerer<'ctx> {
     /// Inline the analyzer's `FastArith` int ops (off when the program
     /// can rebind vars, so core arithmetic always means the native).
     inline_arith: bool,
+    /// Boot the compiled binary via `rt_n_main_lite` / `rt_n_ns_lite` (no
+    /// embedded stdlib `core_lazy` evaluation) when the program uses only
+    /// Lite-safe core/string natives and user-defined vars.
+    lite: bool,
     /// Emit and link LLVM bitcode runtime helpers (`clj-bc`) instead
     /// of going straight to out-of-line `rt_n_*` shims.
     use_bitcode: bool,
@@ -179,6 +183,7 @@ impl<'ctx> Lowerer<'ctx> {
             strings: HashMap::new(),
             fn_seq: 0,
             inline_arith: true,
+            lite: false,
             use_bitcode,
             fast_vars,
             reserved: HashMap::new(),
@@ -193,6 +198,7 @@ impl<'ctx> Lowerer<'ctx> {
         path: &str,
     ) -> Result<Module<'ctx>, Unsupported> {
         self.inline_arith = !front.units.iter().any(|u| mentions_rebinding(&u.expr));
+        self.lite = can_lite_program(front);
         self.reserve_defns(front);
         let mut tops = Vec::with_capacity(front.units.len());
         for (i, unit) in front.units.iter().enumerate() {
@@ -1262,24 +1268,7 @@ impl<'ctx> Lowerer<'ctx> {
                 self.make_closure(f, fun, base, dest)
             }
             Expr::LetFn { fns, body } => self.lower_letfn(f, fns, body, dest),
-            Expr::Invoke { head, args, .. } if self.direct_target(head, args.len()).is_some() => {
-                self.lower_direct_invoke(f, head, args, dest)
-            }
-            Expr::Invoke { head, args, .. } => {
-                let h = self.slot(f);
-                self.lower(f, head, h)?;
-                let arr = self.lower_args(f, args)?;
-                let aref = self.slots_ref(f, arr, args.len());
-                let st = self
-                    .call(
-                        "rt_n_invoke",
-                        Some(self.i32t),
-                        &[dest.into(), h.into(), aref.into()],
-                    )
-                    .expect("st");
-                self.check(f, st);
-                Ok(())
-            }
+            Expr::Invoke { head, args, .. } => self.lower_invoke(f, head, args, dest),
             Expr::DirectNative(call) => self.lower_direct(f, call, dest),
             Expr::Def {
                 sym,
@@ -1357,6 +1346,11 @@ impl<'ctx> Lowerer<'ctx> {
                 attr,
                 clauses,
             } => {
+                if self.lite {
+                    let np = self.str_ptr(name);
+                    self.call("rt_n_ns_lite", None, &[dest.into(), np.into()]);
+                    return Ok(());
+                }
                 let v = ns_desc(name, doc.as_deref(), attr.as_ref(), clauses);
                 let k = self.value_const(&v)?;
                 let st = self
@@ -1650,6 +1644,34 @@ impl<'ctx> Lowerer<'ctx> {
         Some((var.clone(), *k, code))
     }
 
+    /// Invoke lowering: handles pure `clojure.string` `require` forms in
+    /// `BootMode::Lite`, guarded direct calls of compiled `defn`s, and general
+    /// dynamic invocations.
+    fn lower_invoke(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        head: &Expr,
+        args: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        if self.direct_target(head, args.len()).is_some() {
+            return self.lower_direct_invoke(f, head, args, dest);
+        }
+        let h = self.slot(f);
+        self.lower(f, head, h)?;
+        let arr = self.lower_args(f, args)?;
+        let aref = self.slots_ref(f, arr, args.len());
+        let st = self
+            .call(
+                "rt_n_invoke",
+                Some(self.i32t),
+                &[dest.into(), h.into(), aref.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        Ok(())
+    }
+
     /// A call of a compiled top-level `defn`: guarded direct call of
     /// its arity code (the var still holds that fn; depth/stack under
     /// the interpreter's limits), else the general invoke.
@@ -1761,6 +1783,15 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
+        if self.lite
+            && let Some(aliases) = lite_direct_require_aliases(call)
+        {
+            for alias in aliases {
+                let ap = self.str_ptr(alias.as_deref().unwrap_or(""));
+                self.call("rt_n_require_string_lite", None, &[dest.into(), ap.into()]);
+            }
+            return Ok(());
+        }
         if self.try_lower_assoc_conj(f, call, Some(dest))? {
             return Ok(());
         }
@@ -1908,23 +1939,40 @@ impl<'ctx> Lowerer<'ctx> {
         let op = core_name
             .and_then(|name| native_abi::inline_op(name, n))
             .unwrap_or(u32::MAX);
-        let mut call_args: Vec<BasicMetadataValueEnum> = vec![
-            dest.into(),
-            self.i32t.const_int(u64::from(op), false).into(),
-            self.u64c(k),
-        ];
-        let shim = match refs.len() {
-            1 => "rt_n_op1",
-            2 => "rt_n_op2",
-            3 => "rt_n_op3",
-            _ => "rt_n_core_ref",
-        };
-        if (1..=3).contains(&refs.len()) {
-            call_args.extend(refs.iter().map(|r| BasicMetadataValueEnum::from(*r)));
+        let st = if op == u32::MAX {
+            let s = self.refs_slice(f, refs);
+            self.call(
+                "rt_n_core_call",
+                Some(self.i32t),
+                &[dest.into(), self.u64c(k), s.into()],
+            )
+            .expect("st")
+        } else if native_abi::is_re_op(op) && refs.len() == 2 {
+            self.call(
+                "rt_n_op2_re",
+                Some(self.i32t),
+                &[dest.into(), self.u64c(k), refs[0].into(), refs[1].into()],
+            )
+            .expect("st")
         } else {
-            call_args.push(self.refs_slice(f, refs).into());
-        }
-        let st = self.call(shim, Some(self.i32t), &call_args).expect("st");
+            let mut call_args: Vec<BasicMetadataValueEnum> = vec![
+                dest.into(),
+                self.i32t.const_int(u64::from(op), false).into(),
+                self.u64c(k),
+            ];
+            let shim = match refs.len() {
+                1 => "rt_n_op1",
+                2 => "rt_n_op2",
+                3 => "rt_n_op3",
+                _ => "rt_n_core_ref",
+            };
+            if (1..=3).contains(&refs.len()) {
+                call_args.extend(refs.iter().map(|r| BasicMetadataValueEnum::from(*r)));
+            } else {
+                call_args.push(self.refs_slice(f, refs).into());
+            }
+            self.call(shim, Some(self.i32t), &call_args).expect("st")
+        };
         self.check(f, st);
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
@@ -3097,8 +3145,43 @@ impl<'ctx> Lowerer<'ctx> {
             .build_struct_gep(ty, argv_ref, 1, "an")
             .expect("gep");
         self.builder.build_store(p1, n).expect("store");
-        let code = self
-            .call(
+        let code = if self.lite {
+            let var_refs: Vec<(&str, &str)> = self
+                .vars
+                .iter()
+                .map(|(ns, n)| (ns.as_str(), n.as_str()))
+                .collect();
+            let caps = clj_eval::aot_boot::lite_caps_for(&var_refs);
+            for (cap, sym) in [
+                (clj_eval::aot_boot::LiteCaps::IO, "rt_n_cap_io"),
+                (clj_eval::aot_boot::LiteCaps::CORE, "rt_n_cap_core"),
+                (clj_eval::aot_boot::LiteCaps::SEQ, "rt_n_cap_seq"),
+                (clj_eval::aot_boot::LiteCaps::RE, "rt_n_cap_re"),
+                (clj_eval::aot_boot::LiteCaps::HOST, "rt_n_cap_host"),
+                (clj_eval::aot_boot::LiteCaps::STRING, "rt_n_cap_string"),
+            ] {
+                if caps.contains(cap) {
+                    self.call(sym, None, &[]);
+                }
+            }
+            let need_stdin = var_refs
+                .iter()
+                .any(|&(ns, n)| clj_eval::aot_boot::is_lite_stdin_var(ns, n));
+            let stdin_flag = self.i8t.const_int(u64::from(need_stdin), false);
+            self.call(
+                "rt_n_main_lite",
+                Some(self.i32t),
+                &[
+                    pp.into(),
+                    argv_ref.into(),
+                    init.as_global_value().as_pointer_value().into(),
+                    tops_ref.into(),
+                    stdin_flag.into(),
+                ],
+            )
+            .expect("code")
+        } else {
+            self.call(
                 "rt_n_main",
                 Some(self.i32t),
                 &[
@@ -3108,7 +3191,8 @@ impl<'ctx> Lowerer<'ctx> {
                     tops_ref.into(),
                 ],
             )
-            .expect("code");
+            .expect("code")
+        };
         self.builder.build_return(Some(&code)).expect("ret");
     }
 }
@@ -3751,4 +3835,128 @@ fn sanitize(s: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .take(40)
         .collect()
+}
+
+/// Whether `front` can boot cleanly under `BootMode::Lite` (no embedded
+/// stdlib / compiler / runtime eval / non-Lite namespaces or rebinds).
+fn can_lite_program(front: &FrontEnd) -> bool {
+    let mut defined = BTreeSet::new();
+    for u in &front.units {
+        if mentions_rebinding(&u.expr) {
+            return false;
+        }
+        collect_lite_defs(&u.expr, &mut defined);
+    }
+    front.units.iter().all(|u| expr_lite_ok(&u.expr, &defined))
+}
+
+fn sym_key(sym: &Symbol) -> (String, String) {
+    (
+        sym.namespace().unwrap_or("user").to_owned(),
+        sym.name().to_owned(),
+    )
+}
+
+fn collect_lite_defs(e: &Expr, defined: &mut BTreeSet<(String, String)>) {
+    match e {
+        Expr::Def { sym, .. } => {
+            defined.insert(sym_key(sym));
+        }
+        Expr::Declare { syms, .. } => {
+            for sym in syms {
+                defined.insert(sym_key(sym));
+            }
+        }
+        _ => {}
+    }
+    for_each_child(e, &mut |c| collect_lite_defs(c, defined));
+}
+
+fn var_lite_ok(sym: &Symbol, defined: &BTreeSet<(String, String)>) -> bool {
+    let ns = sym.namespace().unwrap_or("user");
+    let name = sym.name();
+    match ns {
+        "clojure.core" => clj_eval::aot_boot::is_lite_core_var(name),
+        "clojure.string" => clj_eval::aot_boot::is_lite_string_var(name),
+        _ => defined.contains(&(ns.to_owned(), name.to_owned())),
+    }
+}
+
+fn is_clojure_string_sym(v: &Value) -> bool {
+    matches!(v, Value::Symbol(s) if s.namespace().is_none() && s.name() == "clojure.string")
+}
+
+fn lite_require_spec_alias(v: &Value) -> Option<Option<String>> {
+    if is_clojure_string_sym(v) {
+        return Some(None);
+    }
+    let Value::Vector(items) = v else {
+        return None;
+    };
+    let mut it = items.iter();
+    if !it.next().is_some_and(|first| is_clojure_string_sym(&first)) {
+        return None;
+    }
+    while let Some(k) = it.next() {
+        if matches!(&k, Value::Keyword(kw) if kw.namespace().is_none() && kw.name() == "as")
+            && let Some(Value::Symbol(sym)) = it.next()
+        {
+            return Some(Some(sym.name().to_owned()));
+        }
+    }
+    Some(None)
+}
+
+fn lite_direct_require_aliases(call: &clj_eval::expr::DirectCall) -> Option<Vec<Option<String>>> {
+    if call.var.sym.namespace() != Some("clojure.core")
+        || call.var.sym.name() != "require"
+        || call.args.is_empty()
+    {
+        return None;
+    }
+    call.args
+        .iter()
+        .map(|arg| match arg {
+            Expr::Quote(val) => lite_require_spec_alias(val),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ns_clause_lite_ok(clause: &NsClause) -> bool {
+    match clause {
+        NsClause::ReferClojure(_) => true,
+        NsClause::Require(specs) => specs.iter().all(|v| lite_require_spec_alias(v).is_some()),
+        NsClause::Use(_) | NsClause::Import(_) => false,
+    }
+}
+
+fn expr_lite_ok(e: &Expr, defined: &BTreeSet<(String, String)>) -> bool {
+    if let Expr::DirectNative(call) = e
+        && lite_direct_require_aliases(call).is_some()
+    {
+        return true;
+    }
+    let here = match e {
+        Expr::DefMacro { .. } => false,
+        Expr::Ns { clauses, .. } => clauses.iter().all(ns_clause_lite_ok),
+        Expr::Global(v) | Expr::VarRef(v) | Expr::Set { var: v, .. } => {
+            var_lite_ok(&v.sym, defined)
+        }
+        Expr::DirectNative(call) => var_lite_ok(&call.var.sym, defined),
+        Expr::Binding { pairs, .. } | Expr::WithRedefs { pairs, .. } => {
+            pairs.iter().all(|(v, _)| var_lite_ok(&v.sym, defined))
+        }
+        _ => true,
+    };
+    if !here {
+        return false;
+    }
+    let mut ok = true;
+    for_each_child(e, &mut |c| {
+        if ok && !expr_lite_ok(c, defined) {
+            ok = false;
+        }
+    });
+    ok
 }

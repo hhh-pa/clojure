@@ -2320,6 +2320,19 @@ const DEFAULT_IMPORTS: &[&str] = &[
     "clojure.lang.ExceptionInfo",
 ];
 
+/// Whether `simple` is one of [`DEFAULT_IMPORTS`]'s unqualified names (pure
+/// string check so `drop_import` on lowercase var names avoids materializing
+/// [`default_import_map`]).
+pub(crate) fn is_default_import(simple: &str) -> bool {
+    simple
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_uppercase)
+        && DEFAULT_IMPORTS
+            .iter()
+            .any(|fqn| fqn.rsplit('.').next() == Some(simple))
+}
+
 /// The default imports as `(simple-name, class)` pairs for
 /// namespace seeding. Every name resolves: a missing row is a
 /// lattice bug and fails loud here rather than seeding a

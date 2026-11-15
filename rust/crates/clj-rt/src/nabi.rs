@@ -174,6 +174,24 @@ pub extern "C" fn rt_n_main(
     native::run_main(&path.text(), &argv_strings(argv), init, tops.get().to_vec())
 }
 
+/// Run the program under `BootMode::Lite` (`need_stdin != 0` initializes `*in*`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_main_lite(
+    path: &CSlice<u8>,
+    argv: &CSlice<*const c_char>,
+    init: Code,
+    tops: &CSlice<Code>,
+    need_stdin: u8,
+) -> i32 {
+    native::run_main_lite(
+        &path.text(),
+        &argv_strings(argv),
+        init,
+        tops.get().to_vec(),
+        need_stdin != 0,
+    )
+}
+
 // ---- constant builders -------------------------------------------------
 
 /// `out = "…"`.
@@ -305,6 +323,13 @@ pub extern "C" fn rt_n_core_ref(out: &mut Value, op: u32, k: u64, args: &CSlice<
     }
 }
 
+/// [`rt_n_core_ref`] for core ops without any inline VM op (`op == u32::MAX`),
+/// keeping `APPLY1`/`APPLY2`/`APPLY3` unreferenced when a binary uses none.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_core_call(out: &mut Value, k: u64, args: &CSlice<&Value>) -> i32 {
+    core_fallback(out, k, args.get())
+}
+
 /// Fallback of the `rt_n_op*` shims: var `k`'s native with the args
 /// cloned.
 fn core_fallback(out: &mut Value, k: u64, args: &[&Value]) -> i32 {
@@ -327,10 +352,24 @@ pub extern "C" fn rt_n_op1(out: &mut Value, op: u32, k: u64, a: &Value) -> i32 {
     }
 }
 
-/// [`rt_n_core_ref`] for two borrowed args (no argument array).
+/// [`rt_n_core_ref`] for two borrowed args excluding `re-matches` (no regex
+/// dependency for non-regex programs).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_op2(out: &mut Value, op: u32, k: u64, a: &Value, b: &Value) -> i32 {
-    match native_abi::apply2(op, a, b) {
+    match native_abi::apply2_no_re(op, a, b) {
+        Some(v) => {
+            *out = v;
+            0
+        }
+        None => core_fallback(out, k, &[a, b]),
+    }
+}
+
+/// Dedicated inline `(re-matches pat s)` fast path so `rt_n_op2` stays free of
+/// `regex_automata`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_op2_re(out: &mut Value, k: u64, a: &Value, b: &Value) -> i32 {
+    match native_abi::apply_re_matches(a, b) {
         Some(v) => {
             *out = v;
             0
@@ -550,6 +589,68 @@ pub extern "C" fn rt_n_declare(out: &mut Value, syms_k: u64, line: u32, col: u32
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_ns(out: &mut Value, ns_k: u64) -> i32 {
     finish(out, native::run_ns(native::constant(ns_k as usize)))
+}
+
+/// Lightweight `(ns name …)` transition in `BootMode::Lite`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_ns_lite(out: &mut Value, name: &CSlice<u8>) {
+    let ns = name.text();
+    with_active(|eval| clj_eval::aot_boot::ensure_ns_lite(eval, &ns));
+    *out = Value::Nil;
+}
+
+/// Register `BootMode::Lite` I/O capability natives (`println`, `slurp`, …).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_cap_io() {
+    native::declare_lite_core_cap(clj_eval::aot_boot::LITE_CAP_IO, None, false);
+}
+
+/// Register `BootMode::Lite` core capability natives.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_cap_core() {
+    native::declare_lite_core_cap(
+        clj_eval::aot_boot::LITE_CAP_CORE,
+        Some(clj_eval::aot_boot::LITE_OWNED_CORE),
+        false,
+    );
+}
+
+/// Register `BootMode::Lite` sequence/lazy/transducer capability natives.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_cap_seq() {
+    native::declare_lite_core_cap(
+        clj_eval::aot_boot::LITE_CAP_SEQ,
+        Some(clj_eval::aot_boot::LITE_OWNED_SEQ),
+        true,
+    );
+}
+
+/// Register `BootMode::Lite` regex capability natives.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_cap_re() {
+    native::declare_lite_core_cap(clj_eval::aot_boot::LITE_CAP_RE, None, false);
+}
+
+/// Register `BootMode::Lite` host/concurrency/STM/protocol capability natives.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_cap_host() {
+    native::declare_lite_core_cap(clj_eval::aot_boot::LITE_CAP_HOST, None, false);
+}
+
+/// Register `BootMode::Lite` `clojure.string` capability natives.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_cap_string() {
+    native::declare_lite_string_cap(clj_eval::aot_boot::LITE_CAP_STRING);
+}
+
+/// Lightweight `(require 'clojure.string)` / `(require '[clojure.string :as s])`
+/// in `BootMode::Lite`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_require_string_lite(out: &mut Value, alias: &CSlice<u8>) {
+    let text = alias.text();
+    let alias_opt = (!text.is_empty()).then_some(text.as_str());
+    with_active(|eval| clj_eval::aot_boot::require_string_lite(eval, alias_opt));
+    *out = Value::Nil;
 }
 
 /// `case*` dispatch for constant descriptor `case_k`: `*sel` gets -1
@@ -790,6 +891,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_declare_fn,
         rt_n_set_const,
         rt_n_main,
+        rt_n_main_lite,
         rt_n_str,
         rt_n_kw,
         rt_n_sym,
@@ -806,8 +908,10 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_invoke,
         rt_n_native_mv,
         rt_n_core_ref,
+        rt_n_core_call,
         rt_n_op1,
         rt_n_op2,
+        rt_n_op2_re,
         rt_n_op3,
         rt_n_core_own,
         rt_n_enter_fn,
@@ -825,6 +929,14 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_set_var,
         rt_n_declare,
         rt_n_ns,
+        rt_n_ns_lite,
+        rt_n_cap_io,
+        rt_n_cap_core,
+        rt_n_cap_seq,
+        rt_n_cap_re,
+        rt_n_cap_host,
+        rt_n_cap_string,
+        rt_n_require_string_lite,
         rt_n_case,
         rt_n_equiv,
         rt_n_nth_nil,

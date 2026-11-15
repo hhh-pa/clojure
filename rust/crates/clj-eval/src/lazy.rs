@@ -2801,11 +2801,17 @@ fn step_reductions(
 /// `recur` re-invokes the body (the zero-arg `fn` boundary, like the
 /// JVM closure); nested loops consume their own first.
 fn step_thunk0(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Forced, Signal> {
+    let Some(hooks) = eval.lazy_hooks else {
+        return Err(eval.throw(NativeError::new(
+            ThrowClass::UnsupportedOperationException,
+            "lazy-seq body requires full boot".to_owned(),
+        )));
+    };
     loop {
         let mut value = Value::Nil;
         let mut recurred = false;
         for expr in body {
-            match eval.eval(expr, env) {
+            match (hooks.eval_expr)(eval, expr, env) {
                 Ok(v) => value = v,
                 Err(Signal::Recur(args)) if args.is_empty() => {
                     recurred = true;

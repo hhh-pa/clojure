@@ -26,6 +26,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+pub mod aot_boot;
 pub mod aot_front;
 pub mod aot_subset;
 pub mod arrays;

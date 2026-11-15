@@ -44,12 +44,17 @@ pub(crate) const STRING_NATIVES: &[(&str, Native)] = &[
 /// found live or in a `remove-ns` tombstone, so a captured native
 /// keeps working like the JVM's self-contained fn; only an
 /// `ns-unmap`ped name has no definition left to run.
+/// Fallback to the interpreted `clojure.string` definition (or direct Lite
+/// handling when `lazy_hooks` is absent in `BootMode::Lite`).
 fn upstream(eval: &mut Evaluator, name: &str, args: &[Value]) -> Result<Value, NativeError> {
     let sym = Symbol::new(Some("clojure.string"), name);
     let f = eval
         .registry
         .lookup_in_live_or_removed("clojure.string", &sym)
-        .and_then(|id| crate::core_lazy::interpreted(eval, id));
+        .and_then(|id| eval.lazy_interpreted(id));
+    if f.is_none() && eval.lazy_hooks.is_none() {
+        return lite_string_fallback(eval, name, args);
+    }
     match f {
         Some(f) => eval.call(&f, args).map_err(signal_to_native),
         None => Err(NativeError::new(
@@ -230,4 +235,36 @@ fn native_join(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         return join_vector(eval, &sep, v);
     }
     join_seq(eval, &sep, coll)
+}
+
+/// Fallback for `BootMode::Lite` (no `core_lazy` embedded sources):
+/// supports 1-arg / arbitrary-sep `join` directly and surfaces Clojure-shaped
+/// arity / null / cast errors on invalid calls to `STRING_NATIVES`.
+fn lite_string_fallback(
+    eval: &mut Evaluator,
+    name: &str,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    if name == "join" {
+        crate::ns::check_arity("clojure.string/join", args, &[1, 2])?;
+        if args.len() == 1 {
+            return join_seq(eval, "", &args[0]);
+        }
+        let mut sep = String::new();
+        crate::core::str_push(&mut sep, eval, &args[0])?;
+        return join_seq(eval, &sep, &args[1]);
+    }
+    let expected: &[usize] = match name {
+        "split" => &[2, 3],
+        "starts-with?" | "ends-with?" | "includes?" => &[2],
+        _ => &[1],
+    };
+    crate::ns::check_arity(&format!("clojure.string/{name}"), args, expected)?;
+    if args.iter().any(|v| matches!(v, Value::Nil)) {
+        return Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            format!("Null argument in clojure.string/{name}"),
+        ));
+    }
+    Err(crate::core::cce_err(&args[0], "java.lang.CharSequence"))
 }

@@ -118,6 +118,19 @@ pub fn layout_args(archive: &Path, linux: bool) -> Vec<String> {
     args
 }
 
+/// Dead-strip unreferenced sections when linking a native binary (`--gc-sections`
+/// on Linux, `-dead_strip` on macOS) so unused archive tables stay unlinked.
+#[must_use]
+pub fn gc_section_args(linux: bool, macos: bool) -> Vec<String> {
+    if linux {
+        vec!["-Wl,--gc-sections".to_owned()]
+    } else if macos {
+        vec!["-Wl,-dead_strip".to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Build the link command (`cc` on Unix, `link` on Windows; the
 /// override names the linker program for tests). The Windows arm
 /// carries the system libs a Rust staticlib needs: `rustc` links
@@ -157,6 +170,7 @@ pub fn link_command(
             linker: linker_override.unwrap_or("link").to_owned(),
             args: vec![
                 "/NOLOGO".to_owned(),
+                "/OPT:REF".to_owned(),
                 exe(obj),
                 exe(archive),
                 format!("/OUT:{}", exe(out)),
@@ -291,6 +305,13 @@ mod tests {
     }
 
     #[test]
+    fn gc_section_args_cover_each_platform() {
+        assert_eq!(super::gc_section_args(true, false), ["-Wl,--gc-sections"]);
+        assert_eq!(super::gc_section_args(false, true), ["-Wl,-dead_strip"]);
+        assert!(super::gc_section_args(false, false).is_empty());
+    }
+
+    #[test]
     fn archive_names() {
         assert_eq!(super::archive_name(Platform::Unix), "libcljrt.a");
         assert_eq!(super::archive_name(Platform::Windows), "cljrt.lib");
@@ -368,6 +389,7 @@ mod tests {
                 linker: "link".to_owned(),
                 args: vec![
                     "/NOLOGO".to_owned(),
+                    "/OPT:REF".to_owned(),
                     "f.o".to_owned(),
                     "libcljrt.a".to_owned(),
                     "/OUT:f".to_owned(),

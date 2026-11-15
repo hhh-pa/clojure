@@ -686,7 +686,10 @@ pub fn call_core(
 /// id for [`apply_inline`]), if it has one.
 #[must_use]
 pub fn inline_op(name: &str, arity: usize) -> Option<u32> {
-    use crate::vm_ops::{APPLY1, APPLY2, APPLY3, APPLYN};
+    use crate::vm_ops::{APPLY1, APPLY2, APPLY3, APPLYN, RE_MATCHES_OP};
+    if arity == 2 && name == RE_MATCHES_OP.0 {
+        return Some(RE_MATCHES_TAG);
+    }
     let pos = match arity {
         1 => APPLY1.iter().position(|r| r.0 == name),
         2 => APPLY2.iter().position(|r| r.0 == name),
@@ -705,20 +708,28 @@ pub fn inline_op(name: &str, arity: usize) -> Option<u32> {
 
 /// [`inline_op`]'s mark for a 3+-argument fold or comparison chain.
 const NARY_OP: u32 = 1 << 30;
+/// Dedicated inline tag for `(re-matches pat s)` so `APPLY2` stays regex-free.
+const RE_MATCHES_TAG: u32 = 1 << 29;
 
-/// Bit mask covering disjoint op-namespace tag bits so [`NARY_OP`] and
-/// [`OWN_BIT`] can never alias inside shared `u32` dispatch helpers.
-const TAG_MASK: u32 = NARY_OP | OWN_BIT;
+/// Bit mask covering disjoint op-namespace tag bits so [`RE_MATCHES_TAG`],
+/// [`NARY_OP`], and [`OWN_BIT`] can never alias inside shared `u32` dispatch helpers.
+const TAG_MASK: u32 = RE_MATCHES_TAG | NARY_OP | OWN_BIT;
+
+/// Whether `id` is the dedicated regex inline op (`(re-matches ...)`).
+#[must_use]
+pub const fn is_re_op(id: u32) -> bool {
+    id == RE_MATCHES_TAG
+}
 
 /// Apply inline op `id` ([`inline_op`] at `args.len()`) to borrowed
-/// args — the same inline answers the VM gives. `None`: the case is not
-/// covered (or `id` names no op), so the caller runs the native.
+/// args — the same inline answers the VM gives (excluding regex ops so
+/// non-regex AOT binaries strip `regex_automata`).
 #[must_use]
 pub fn apply_inline(id: u32, args: &[&Value]) -> Option<Value> {
     use crate::vm_ops::APPLYN;
     match args {
         [a] => apply1(id, a),
-        [a, b] => apply2(id, a, b),
+        [a, b] => apply2_no_re(id, a, b),
         [a, b, c] => apply3(id, a, b, c),
         _ if id != u32::MAX && (id & TAG_MASK) == NARY_OP => {
             let (_, op, chain) = APPLYN.get((id & !NARY_OP) as usize)?;
@@ -734,10 +745,26 @@ pub fn apply1(id: u32, a: &Value) -> Option<Value> {
     crate::vm_ops::APPLY1.get(id as usize)?.1(a)
 }
 
-/// [`apply_inline`] for two args.
+/// [`apply_inline`] for two args (including `re-matches`).
 #[must_use]
 pub fn apply2(id: u32, a: &Value, b: &Value) -> Option<Value> {
+    if id == RE_MATCHES_TAG {
+        return apply_re_matches(a, b);
+    }
+    apply2_no_re(id, a, b)
+}
+
+/// [`apply_inline`] for two args excluding `re-matches` (keeps `regex_automata`
+/// stripped from non-regex AOT binaries).
+#[must_use]
+pub fn apply2_no_re(id: u32, a: &Value, b: &Value) -> Option<Value> {
     crate::vm_ops::APPLY2.get(id as usize)?.1(a, b)
+}
+
+/// Inline `(re-matches pat s)` fast path for `rt_n_op2_re`.
+#[must_use]
+pub fn apply_re_matches(a: &Value, b: &Value) -> Option<Value> {
+    (crate::vm_ops::RE_MATCHES_OP.1)(a, b)
 }
 
 /// Cached O(1) ASCII check for strings (memoizes long strings after one scan).
@@ -1025,5 +1052,27 @@ mod tests {
         assert_eq!(apply_own(mul3_id, &mut mul_args), None);
         let mut assoc_miss = [Value::Int(2), Value::Int(3), Value::Int(4)];
         assert_eq!(apply_own(assoc_id, &mut assoc_miss), None);
+
+        let re_id = inline_op("re-matches", 2).expect("re-matches");
+        assert!(is_re_op(re_id));
+        assert!(!is_re_op(add_id));
+        let re_pattern = crate::re::RE_NATIVES
+            .iter()
+            .find(|&&(k, _)| k == "re-pattern")
+            .expect("re-pattern")
+            .1;
+        let pat = re_pattern(
+            &mut Evaluator::new_bare("user"),
+            &[Value::Str(Arc::from("a+"))],
+        )
+        .expect("pat");
+        let aa = Value::Str(Arc::from("aa"));
+        assert_eq!(apply2_no_re(re_id, &pat, &aa), None);
+        assert_eq!(apply2(re_id, &pat, &aa), Some(aa.clone()));
+        assert_eq!(
+            apply2(add_id, &Value::Int(2), &Value::Int(3)),
+            Some(Value::Int(5))
+        );
+        assert_eq!(apply_re_matches(&pat, &aa), Some(aa));
     }
 }

@@ -63,6 +63,10 @@ struct Building {
     vars: Vec<VarSlot>,
     consts: Vec<Value>,
     fns: Vec<Option<FnDesc>>,
+    lite_core_caps: Vec<&'static [clj_eval::aot_boot::LiteNativeSlice]>,
+    lite_owned_caps: Vec<clj_eval::aot_boot::LiteOwnedSlice>,
+    lite_string: Option<&'static [clj_eval::aot_boot::LiteNativeSlice]>,
+    lite_seq_helpers: bool,
 }
 
 static BUILDING: Mutex<Option<Building>> = Mutex::new(None);
@@ -186,6 +190,26 @@ pub(crate) fn declare_var(k: usize, ns: String, name: String) {
             core: OnceLock::new(),
         };
     });
+}
+
+/// Register one `BootMode::Lite` core native capability group.
+pub(crate) fn declare_lite_core_cap(
+    caps: &'static [clj_eval::aot_boot::LiteNativeSlice],
+    owned: Option<clj_eval::aot_boot::LiteOwnedSlice>,
+    seq_helpers: bool,
+) {
+    building(|b| {
+        b.lite_core_caps.push(caps);
+        if let Some(o) = owned {
+            b.lite_owned_caps.push(o);
+        }
+        b.lite_seq_helpers |= seq_helpers;
+    });
+}
+
+/// Register the `BootMode::Lite` `clojure.string` native capability group.
+pub(crate) fn declare_lite_string_cap(caps: &'static [clj_eval::aot_boot::LiteNativeSlice]) {
+    building(|b| b.lite_string = Some(caps));
 }
 
 /// Declare fn descriptor `k`.
@@ -418,13 +442,29 @@ fn call_code(eval: &mut Evaluator, code: Code, captured: &[Value], argv: &[Value
     })
 }
 
-/// Run a compiled program: boot, `run`'s frame, constants, then the
-/// top-level thunks in load order inside the `load-file` frame.
-/// Returns the process exit code (0, or 1 after the diagnostic).
-pub(crate) fn run_main(path: &str, args: &[String], init: Code, tops: Vec<Code>) -> i32 {
-    // A fresh program: this thread's caches index the new tables.
+fn reset_thread_caches() {
     ROOTS.with(|r| r.borrow_mut().clear());
     CREATED.with(|c| c.borrow_mut().clear());
+}
+
+fn execute_units(
+    eval: &mut Evaluator,
+    init: Code,
+    tops: &[Code],
+) -> Result<Value, clj_eval::error::Signal> {
+    run_code(eval, init)?;
+    freeze(native_abi::registry_epoch_handle(eval));
+    let mut last = Value::Nil;
+    for &top in tops {
+        last = run_code(eval, top)?;
+    }
+    Ok(last)
+}
+
+/// Run a compiled program using full Clojure boot: `boot`, `run`'s binding
+/// frame (plus `clojure.string` preload), constants, then top-level thunks.
+pub(crate) fn run_main(path: &str, args: &[String], init: Code, tops: Vec<Code>) -> i32 {
+    reset_thread_caches();
     let mut eval = clj_eval::boot();
     let file: Arc<str> = Arc::from(path);
     let tops: Arc<[Code]> = tops.into();
@@ -433,15 +473,7 @@ pub(crate) fn run_main(path: &str, args: &[String], init: Code, tops: Vec<Code>)
         "run-native",
         Arc::new(move |eval: &mut Evaluator, _: &[Value]| {
             let tops = Arc::clone(&tops);
-            clj_eval::load_native(eval, &file, move |eval| {
-                run_code(eval, init)?;
-                freeze(native_abi::registry_epoch_handle(eval));
-                let mut last = Value::Nil;
-                for top in tops.iter() {
-                    last = run_code(eval, *top)?;
-                }
-                Ok(last)
-            })
+            clj_eval::load_native(eval, &file, move |eval| execute_units(eval, init, &tops))
         }),
     );
     let script =
@@ -456,6 +488,50 @@ pub(crate) fn run_main(path: &str, args: &[String], init: Code, tops: Vec<Code>)
     eval.join_drainers();
     std::mem::forget(eval);
     let _flushed = std::io::Write::flush(&mut std::io::stdout());
+    code
+}
+
+/// Run a compiled program using `BootMode::Lite`: bootstraps only the minimal
+/// IO/print/CLI dynamics and the subset vars declared in `BUILDING.vars`,
+/// inside a direct CLI binding frame (no `eval_source` / `core_lazy` boot).
+pub(crate) fn run_main_lite(
+    path: &str,
+    args: &[String],
+    init: Code,
+    tops: Vec<Code>,
+    need_stdin: bool,
+) -> i32 {
+    reset_thread_caches();
+    let (declared, core_caps, owned_caps, string_cap, seq_helpers) = building(|b| {
+        let declared: Vec<(String, String)> = b
+            .vars
+            .iter()
+            .map(|v| (v.ns.clone(), v.name.clone()))
+            .collect();
+        (
+            declared,
+            std::mem::take(&mut b.lite_core_caps),
+            std::mem::take(&mut b.lite_owned_caps),
+            std::mem::take(&mut b.lite_string),
+            std::mem::take(&mut b.lite_seq_helpers),
+        )
+    });
+    let refs: Vec<(&str, &str)> = declared
+        .iter()
+        .map(|(ns, name)| (ns.as_str(), name.as_str()))
+        .collect();
+    let mut eval = clj_eval::aot_boot::boot_lite_with_caps(
+        &refs,
+        need_stdin,
+        &core_caps,
+        &owned_caps,
+        string_cap.unwrap_or(&[]),
+        seq_helpers,
+    );
+    let code = clj_eval::aot_boot::run_with_cli_frame(&mut eval, path, args, move |eval| {
+        execute_units(eval, init, &tops)
+    });
+    std::mem::forget(eval);
     code
 }
 

@@ -35,7 +35,7 @@ use clj_value::{Map, Symbol, ThrowClass, Throwable, Value, Var, Vector};
 use smallvec::SmallVec;
 
 use crate::env::{Env, SharedRegistry};
-use crate::error::Signal;
+use crate::error::{NativeError, Signal};
 use crate::eval::Evaluator;
 use crate::expr::{Arity, CaseTest, Catch, DirectCall, Expr, FunExpr, Pattern, pattern_count};
 use crate::ext::Closure;
@@ -275,6 +275,32 @@ pub(crate) enum Prepared<'c> {
     Native(&'c crate::ext::NativeFn),
 }
 
+pub(crate) fn vm_call1(
+    ev: &mut Evaluator,
+    code: &VmCode,
+    arity: &CompiledArity,
+    a: Value,
+) -> Result<Value, Signal> {
+    let mut regs: SmallVec<[Value; 8]> = SmallVec::new();
+    reserve_regs(&mut regs, arity.nregs);
+    regs.push(a);
+    ev.guarded_call(|ev| run_arity(ev, code, arity, &mut regs))
+}
+
+pub(crate) fn vm_call2(
+    ev: &mut Evaluator,
+    code: &VmCode,
+    arity: &CompiledArity,
+    a: Value,
+    b: Value,
+) -> Result<Value, Signal> {
+    let mut regs: SmallVec<[Value; 8]> = SmallVec::new();
+    reserve_regs(&mut regs, arity.nregs);
+    regs.push(a);
+    regs.push(b);
+    ev.guarded_call(|ev| run_arity(ev, code, arity, &mut regs))
+}
+
 impl<'c> Prepared<'c> {
     /// `callee` prepared for `argc` args: a VM closure without
     /// conveyed bindings with a fixed arity for the count, or a
@@ -290,10 +316,13 @@ impl<'c> Prepared<'c> {
     pub(crate) fn call1(&self, ev: &mut Evaluator, a: Value) -> Result<Value, Signal> {
         match self {
             Prepared::Vm { code, arity } => {
-                let mut regs: SmallVec<[Value; 8]> = SmallVec::new();
-                reserve_regs(&mut regs, arity.nregs);
-                regs.push(a);
-                ev.guarded_call(|ev| run_arity(ev, code, arity, &mut regs))
+                let Some(hooks) = ev.lazy_hooks else {
+                    return Err(ev.throw(NativeError::new(
+                        ThrowClass::UnsupportedOperationException,
+                        "VM closure invocation requires full boot".to_owned(),
+                    )));
+                };
+                (hooks.vm_call1)(ev, code, arity, a)
             }
             Prepared::Native(n) => call_native(ev, n, smallvec::smallvec![a]),
         }
@@ -303,11 +332,13 @@ impl<'c> Prepared<'c> {
     pub(crate) fn call2(&self, ev: &mut Evaluator, a: Value, b: Value) -> Result<Value, Signal> {
         match self {
             Prepared::Vm { code, arity } => {
-                let mut regs: SmallVec<[Value; 8]> = SmallVec::new();
-                reserve_regs(&mut regs, arity.nregs);
-                regs.push(a);
-                regs.push(b);
-                ev.guarded_call(|ev| run_arity(ev, code, arity, &mut regs))
+                let Some(hooks) = ev.lazy_hooks else {
+                    return Err(ev.throw(NativeError::new(
+                        ThrowClass::UnsupportedOperationException,
+                        "VM closure invocation requires full boot".to_owned(),
+                    )));
+                };
+                (hooks.vm_call2)(ev, code, arity, a, b)
             }
             Prepared::Native(n) => {
                 if let (Value::Int(x), Value::Int(y)) = (&a, &b) {

@@ -642,8 +642,11 @@ pub(crate) const APPLY2: &[(&str, Apply2)] = &[
     ("dissoc", <Dissoc as Op2>::apply),
     ("contains?", <Contains as Op2>::apply),
     ("conj!", <ConjBang as Op2>::apply),
-    ("re-matches", <ReMatches as Op2>::apply),
 ];
+
+/// Specialized regex matcher kept outside [`APPLY2`] so non-regex AOT binaries
+/// calling `rt_n_op2` strip `regex_automata`.
+pub(crate) const RE_MATCHES_OP: (&str, Apply2) = ("re-matches", <ReMatches as Op2>::apply);
 
 pub(crate) const APPLY3: &[(&str, Apply3)] = &[
     ("assoc!", <AssocBang as Op3>::apply),
@@ -2422,12 +2425,13 @@ mod tests {
 
 #[cfg(test)]
 mod apply_tests {
-    use super::{APPLY1, APPLY2, APPLY3, APPLYN, BINARY, NARY, TERNARY, UNARY};
+    use super::{APPLY1, APPLY2, APPLY3, APPLYN, BINARY, NARY, RE_MATCHES_OP, TERNARY, UNARY};
 
     #[test]
     fn apply_tables_cover_every_specialized_op() {
         let a1: Vec<&str> = APPLY1.iter().map(|r| r.0).collect();
-        let a2: Vec<&str> = APPLY2.iter().map(|r| r.0).collect();
+        let mut a2: Vec<&str> = APPLY2.iter().map(|r| r.0).collect();
+        a2.push(RE_MATCHES_OP.0);
         let a3: Vec<&str> = APPLY3.iter().map(|r| r.0).collect();
         assert_eq!(a1, UNARY.iter().map(|r| r.0).collect::<Vec<_>>());
         assert_eq!(a2, BINARY.iter().map(|r| r.0).collect::<Vec<_>>());

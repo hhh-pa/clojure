@@ -373,6 +373,10 @@ fn finish(
     let mut cmd = link_command(platform, &tmp, &archive, out, link.linker.as_deref());
     cmd.args
         .extend(link::layout_args(&archive, cfg!(target_os = "linux")));
+    cmd.args.extend(link::gc_section_args(
+        cfg!(target_os = "linux"),
+        cfg!(target_os = "macos"),
+    ));
     let linked = run_link(&cmd).map_err(CompileError::Link);
     let _removed = std::fs::remove_file(&tmp);
     linked

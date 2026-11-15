@@ -1260,7 +1260,7 @@ fn native_read_plus_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value
 /// the verbatim `Var.get()` NPE (probe `rl-nil-in`); non-readers
 /// fail the `BufferedReader` cast (probes `rl-str-in`,
 /// `rl-num-in`).
-fn native_read_line(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_read_line(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/read-line", args, &[0])?;
     let stream_value = deref_core(eval, "*in*");
     if matches!(stream_value, Value::Nil) {
