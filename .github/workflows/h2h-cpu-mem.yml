@@ -1,26 +1,36 @@
-# Head-to-head ins/RSS gate: clojure-rs revisions vs CPython
-# and vs each other, across the snippet suite (hhh-pa/clojure-code-snippet).
-# The suite runs a CPython baseline leg plus TWO clojure-rs legs
-# (rs-from, rs-to), every leg instrumented in a single sweep: GNU
+# Head-to-head ins/RSS gate: clojure-rs (`run` and `build` AOT) vs
+# CPython, native OCaml (`ocamlopt -O2`), and vs master across the
+# snippet suites (hhh-pa/clojure-code-snippet, python-code-snippet,
+# ocaml-code-snippet).
+# The suite runs baseline legs (CPython, OCaml) plus four native legs
+# (`rs-from`, `rs-to` built `--no-default-features` for `clojure-rs run`,
+# and `aot-from`, `aot-to` built with default `aot` feature for
+# `clojure-rs build`), every leg instrumented in a single sweep: GNU
 # time (cpu_s, maxrss_kb) plus Intel Pin instruction counts. The
 # gate compares instruction counts and RSS only (15% margin):
 # cpu_s is collected but never gated, immune to the wall-time
 # wobble that reds a cpu gate on no-op changes.
-# python-code-snippet mirrors clojure-code-snippet case by case,
-# so instruction counts and RSS compare directly.
-# All three legs of a shard run on the SAME runner: identical
-# binaries differed by up to 20% in Pin instruction counts across
-# the runners' CPU models, so cross-runner legs fail the
-# rs-from-vs-rs-to check on changes that affect nothing. Each of
-# the 32 measure jobs builds both native revisions (cargo cache),
-# then sweeps rs-from, rs-to and CPython over the same K/32 case
-# slice with the same snip measure binary (CPython via
-# --script-extension .py): identical discovery, grouping and
-# shard rule on every leg, so each shard covers exactly the same
-# algorithms everywhere by construction. The h2h-compare job
-# unions the shards per leg and gates on per-case medians. The
-# gate rule: clojure-rs must beat CPython, AND rs-from must
-# win-or-tie vs rs-to on every case — ANY loss fails the PR.
+# python-code-snippet mirrors clojure-code-snippet case by case, and
+# ocaml-code-snippet mirrors 393 of 394 scripts (all except Clojure-only
+# string_related/suffix_tree/string_function_calculation), so instruction
+# counts and RSS compare directly.
+# All legs of a shard run on the SAME runner: identical binaries
+# differed by up to 20% in Pin instruction counts across the runners'
+# CPU models, so cross-runner legs fail the from-vs-to check on
+# changes that affect nothing. Each of the 32 measure jobs builds both
+# native revisions (`run` before LLVM setup, `aot` with LLVM 23 +
+# staticlib LTO archive), then sweeps rs-from, rs-to, CPython, aot-from,
+# aot-to, and OCaml over the same K/32 case slice with the same snip
+# measure binary (CPython via --script-extension .py, OCaml via
+# --script-extension .ml): identical discovery, grouping and shard rule
+# on every leg, so each shard covers exactly the same algorithms
+# everywhere by construction. The h2h-compare job unions the shards per
+# leg and gates on per-case medians across four comparisons:
+#   - recipes      (`python` vs `rs-from`)
+#   - recipes-rsrs (`rs-to` vs `rs-from`)
+#   - aot-rsrs     (`aot-to` vs `aot-from`)
+#   - aot-ocaml    (`OCAML` vs `AOT`, allowing Clojure-only scripts)
+# Any loss fails the PR unless waived.
 #
 # Triggering (rust.yml is the prerequisite): this gate runs on
 # pull_request, but every leg waits behind the wait-rust job,
@@ -46,7 +56,8 @@
 # This is a gate, not a tracker: it reports no Bencher history.
 # Triage mode: dispatch with report_only=true, tag '[waive-h2h]' in PR
 # title or commit message, or add PR label 'waive-h2h' (or 'waive-recipes'
-# for CPython only) and click "Re-run failed jobs" on the compare step.
+# for CPython only, 'waive-ocaml' for AOT vs OCaml only) and click
+# "Re-run failed jobs" on the compare step.
 #
 # Session recipe: the flags below encode the workstation h2h sweep
 # (PR225 test plan): --repeat 3 --no-alloc --no-perf --jobs 3, GNU
@@ -75,6 +86,10 @@ on:
         description: 'Pin python-code-snippet to this revision (40-char SHA or ref; empty = master branch head)'
         required: false
         default: ''
+      ocaml_snippets_sha:
+        description: 'Pin ocaml-code-snippet to this revision (40-char SHA or ref; empty = master branch head)'
+        required: false
+        default: ''
       rs_from:
         description: 'Native-vs-native head: 40-char SHA or branch/tag (empty = PR head, or dispatched ref)'
         required: false
@@ -85,6 +100,11 @@ on:
         default: ''
       report_only:
         description: 'Triage mode: print verdicts but keep the gate green'
+        required: false
+        default: false
+        type: boolean
+      waive_ocaml:
+        description: 'Triage mode: print AOT vs OCaml verdicts without failing the job'
         required: false
         default: false
         type: boolean
@@ -100,11 +120,13 @@ permissions:
 
 env:
   # Default suite revisions: follow the head of master branch of
-  # https://github.com/hhh-pa/clojure-code-snippet and
-  # https://github.com/hhh-pa/python-code-snippet respectively.
-  # Manual dispatch may override either to a specific SHA/ref (bisection).
+  # https://github.com/hhh-pa/clojure-code-snippet,
+  # https://github.com/hhh-pa/python-code-snippet, and
+  # https://github.com/hhh-pa/ocaml-code-snippet respectively.
+  # Manual dispatch may override any of them to a specific SHA/ref (bisection).
   SNIPPETS_SHA_DEFAULT: master
   PYTHON_SNIPPETS_SHA_DEFAULT: master
+  OCAML_SNIPPETS_SHA_DEFAULT: master
   # Pinned (not floating "3.11"): interpreter micro versions move
   # cpu numbers and the sweep must stay comparable run to run.
   # Bump deliberately.
@@ -179,6 +201,7 @@ jobs:
     outputs:
       snippets_sha: ${{ steps.resolve.outputs.snippets_sha }}
       python_snippets_sha: ${{ steps.resolve.outputs.python_snippets_sha }}
+      ocaml_snippets_sha: ${{ steps.resolve.outputs.ocaml_snippets_sha }}
       rs_from_sha: ${{ steps.resolve.outputs.rs_from_sha }}
       rs_to_sha: ${{ steps.resolve.outputs.rs_to_sha }}
     steps:
@@ -186,8 +209,10 @@ jobs:
         run: |
           snippets="${{ inputs.snippets_sha }}"
           pysnippets="${{ inputs.python_snippets_sha }}"
+          ocsnippets="${{ inputs.ocaml_snippets_sha }}"
           [ -z "$snippets" ] && snippets="${{ env.SNIPPETS_SHA_DEFAULT }}"
           [ -z "$pysnippets" ] && pysnippets="${{ env.PYTHON_SNIPPETS_SHA_DEFAULT }}"
+          [ -z "$ocsnippets" ] && ocsnippets="${{ env.OCAML_SNIPPETS_SHA_DEFAULT }}"
           from="${{ inputs.rs_from }}"
           to="${{ inputs.rs_to }}"
           [ -z "$from" ] && from="${{ github.sha }}"
@@ -208,9 +233,10 @@ jobs:
           }
           snippets_sha="$(to_sha "$snippets" https://github.com/hhh-pa/clojure-code-snippet)"
           pysnippets_sha="$(to_sha "$pysnippets" https://github.com/hhh-pa/python-code-snippet)"
+          ocsnippets_sha="$(to_sha "$ocsnippets" https://github.com/hhh-pa/ocaml-code-snippet)"
           from_sha="$(to_sha "$from" https://github.com/${{ github.repository }})"
           to_sha="$(to_sha "$to" https://github.com/${{ github.repository }})"
-          for sha in "$snippets_sha" "$pysnippets_sha" "$from_sha" "$to_sha"; do
+          for sha in "$snippets_sha" "$pysnippets_sha" "$ocsnippets_sha" "$from_sha" "$to_sha"; do
             if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
               echo "error: resolved revision is not a 40-char SHA: '$sha'" >&2
               exit 1
@@ -218,12 +244,14 @@ jobs:
           done
           echo "snippets_sha=$snippets_sha" >> "$GITHUB_OUTPUT"
           echo "python_snippets_sha=$pysnippets_sha" >> "$GITHUB_OUTPUT"
+          echo "ocaml_snippets_sha=$ocsnippets_sha" >> "$GITHUB_OUTPUT"
           echo "rs_from_sha=$from_sha" >> "$GITHUB_OUTPUT"
           echo "rs_to_sha=$to_sha" >> "$GITHUB_OUTPUT"
           {
             echo "suite revisions:"
             echo "  clojure-code-snippet: \`$snippets_sha\` ($snippets)"
             echo "  python-code-snippet: \`$pysnippets_sha\` ($pysnippets)"
+            echo "  ocaml-code-snippet: \`$ocsnippets_sha\` ($ocsnippets)"
             echo "native-vs-native revisions:"
             echo "  from: \`$from_sha\` ($from)"
             echo "  to: \`$to_sha\` ($to)"
@@ -296,6 +324,13 @@ jobs:
           ref: ${{ needs.resolve.outputs.python_snippets_sha }}
           path: pysnippets
 
+      - name: Check out ocaml suite
+        uses: actions/checkout@v5
+        with:
+          repository: hhh-pa/ocaml-code-snippet
+          ref: ${{ needs.resolve.outputs.ocaml_snippets_sha }}
+          path: ocamlsnippets
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -340,10 +375,49 @@ jobs:
             --passphrase "$RESOURCES_PASSPHRASE" \
             -d tests/resources.tar.xz.asc | tar -xJ -C tests/resources --strip-components=1
 
+      - name: Decrypt and extract ocaml resources
+        env:
+          RESOURCES_PASSPHRASE: ${{ secrets.RESOURCES_PASSPHRASE }}
+        working-directory: ocamlsnippets
+        run: |
+          if [ -z "$RESOURCES_PASSPHRASE" ]; then
+            echo "error: the RESOURCES_PASSPHRASE secret (granted to ${{ github.repository }}) is not configured." >&2
+            exit 1
+          fi
+          mkdir -p tests/resources
+          gpg --batch --yes --pinentry-mode loopback \
+            --passphrase "$RESOURCES_PASSPHRASE" \
+            -d tests/resources.tar.xz.asc | tar -xJ -C tests/resources --strip-components=1
+
       - name: Install GNU time
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y time
+
+      - name: Install OCaml
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.3
+        with:
+          packages: ocaml ocaml-native-compilers
+          version: 1.0
+
+      - name: Provision OCaml isolated build wrapper
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/ocaml-build" << 'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          script=$1
+          out=$2
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          cp "$script" "$work/$(basename "$script")"
+          ocamlopt -O2 -o "$work/a.out" "$work/$(basename "$script")"
+          mv "$work/a.out" "$out"
+          EOF
+          chmod +x "$RUNNER_TEMP/bin/ocaml-build"
+          printf 'let () = print_endline "ok"\n' > "$RUNNER_TEMP/ocaml-smoke.ml"
+          "$RUNNER_TEMP/bin/ocaml-build" "$RUNNER_TEMP/ocaml-smoke.ml" "$RUNNER_TEMP/ocaml-smoke"
+          test "$("$RUNNER_TEMP/ocaml-smoke")" = "ok"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -360,7 +434,7 @@ jobs:
       - name: Build rs-from clojure-rs
         run: |
           cd h2h-from/rust
-          cargo build --release --locked --no-default-features
+          cargo build --release --locked --no-default-features -p clojure-rs
           mkdir -p "$GITHUB_WORKSPACE/cljrs-from"
           cp target/release/clojure-rs "$GITHUB_WORKSPACE/cljrs-from/"
           echo "clojure-rs rs-from: \`${{ needs.resolve.outputs.rs_from_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
@@ -368,10 +442,42 @@ jobs:
       - name: Build rs-to clojure-rs
         run: |
           cd h2h-to/rust
-          cargo build --release --locked --no-default-features
+          cargo build --release --locked --no-default-features -p clojure-rs
           mkdir -p "$GITHUB_WORKSPACE/cljrs-to"
           cp target/release/clojure-rs "$GITHUB_WORKSPACE/cljrs-to/"
           echo "clojure-rs rs-to: \`${{ needs.resolve.outputs.rs_to_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # Provision LLVM 23 AFTER the --no-default-features interpreter builds so
+      # `run` binaries stay decoupled from LLVM env/path setup, then build both
+      # default-feature `aot` toolchains alongside `libcljrt.a` and `hot-text.ld`.
+      - name: Set up LLVM 23
+        uses: ./h2h/.github/actions/setup-llvm
+
+      - name: Build aot-from clojure-rs
+        run: |
+          cd h2h-from/rust
+          cargo build --release --locked -p clojure-rs
+          cargo rustc --release --locked -p clj-rt --crate-type staticlib
+          mkdir -p "$GITHUB_WORKSPACE/aot-from-bin"
+          cp target/release/clojure-rs target/release/libcljrt.a "$GITHUB_WORKSPACE/aot-from-bin/"
+          if [ -f hot-text.ld ]; then cp hot-text.ld "$GITHUB_WORKSPACE/aot-from-bin/"; fi
+          printf '(println (+ 1 2))\n' > "$RUNNER_TEMP/aot-from-smoke.clj"
+          "$GITHUB_WORKSPACE/aot-from-bin/clojure-rs" build "$RUNNER_TEMP/aot-from-smoke.clj" -o "$RUNNER_TEMP/aot-from-smoke"
+          test "$("$RUNNER_TEMP/aot-from-smoke")" = "3"
+          echo "clojure-rs aot-from: \`${{ needs.resolve.outputs.rs_from_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build aot-to clojure-rs
+        run: |
+          cd h2h-to/rust
+          cargo build --release --locked -p clojure-rs
+          cargo rustc --release --locked -p clj-rt --crate-type staticlib
+          mkdir -p "$GITHUB_WORKSPACE/aot-to-bin"
+          cp target/release/clojure-rs target/release/libcljrt.a "$GITHUB_WORKSPACE/aot-to-bin/"
+          if [ -f hot-text.ld ]; then cp hot-text.ld "$GITHUB_WORKSPACE/aot-to-bin/"; fi
+          printf '(println (+ 1 2))\n' > "$RUNNER_TEMP/aot-to-smoke.clj"
+          "$GITHUB_WORKSPACE/aot-to-bin/clojure-rs" build "$RUNNER_TEMP/aot-to-smoke.clj" -o "$RUNNER_TEMP/aot-to-smoke"
+          test "$("$RUNNER_TEMP/aot-to-smoke")" = "3"
+          echo "clojure-rs aot-to: \`${{ needs.resolve.outputs.rs_to_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cache instrumentation kit
         id: instrumentation-cache
@@ -459,6 +565,76 @@ jobs:
           path: pysnippets/h2h-recipes-python-shard-${{ matrix.shard }}.json
           retention-days: 7
 
+      - name: Measure aot-from shard
+        if: always()
+        working-directory: snippets
+        run: |
+          ./scripts/ci/go/snip measure --resources tests/resources \
+            --repeat 3 --no-alloc --no-perf --jobs 3 --timeout 300 \
+            --runtime aot-from \
+            --build-template "$GITHUB_WORKSPACE/aot-from-bin/clojure-rs build {script} -o {out}" \
+            --build-cache "$RUNNER_TEMP/aot-from-build-cache" \
+            --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
+            --pin-repeat 2 --pin-timeout 1500 \
+            --shard ${{ matrix.shard }}/32 \
+            --output "h2h-recipes-aot-from-shard-${{ matrix.shard }}.json" \
+            --summary-file "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload aot-from shard results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: h2h-recipes-aot-from-shard-${{ matrix.shard }}
+          path: snippets/h2h-recipes-aot-from-shard-${{ matrix.shard }}.json
+          retention-days: 7
+
+      - name: Measure aot-to shard
+        if: always()
+        working-directory: snippets
+        run: |
+          ./scripts/ci/go/snip measure --resources tests/resources \
+            --repeat 3 --no-alloc --no-perf --jobs 3 --timeout 300 \
+            --runtime aot-to \
+            --build-template "$GITHUB_WORKSPACE/aot-to-bin/clojure-rs build {script} -o {out}" \
+            --build-cache "$RUNNER_TEMP/aot-to-build-cache" \
+            --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
+            --pin-repeat 2 --pin-timeout 1500 \
+            --shard ${{ matrix.shard }}/32 \
+            --output "h2h-recipes-aot-to-shard-${{ matrix.shard }}.json" \
+            --summary-file "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload aot-to shard results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: h2h-recipes-aot-to-shard-${{ matrix.shard }}
+          path: snippets/h2h-recipes-aot-to-shard-${{ matrix.shard }}.json
+          retention-days: 7
+
+      - name: Measure ocaml shard
+        if: always()
+        working-directory: ocamlsnippets
+        run: |
+          ../snippets/scripts/ci/go/snip measure --resources tests/resources \
+            --repeat 3 --no-alloc --no-perf --jobs 3 --timeout 300 \
+            --runtime ocaml \
+            --build-template "$RUNNER_TEMP/bin/ocaml-build {script} {out}" \
+            --build-cache "$RUNNER_TEMP/ocaml-build-cache" \
+            --script-extension .ml \
+            --pin --pin-bin "$INSTRUMENTATION_BIN" --pin-tool "$INSTRUMENTATION_TOOL" \
+            --pin-repeat 2 --pin-timeout 1500 \
+            --shard ${{ matrix.shard }}/32 \
+            --output "h2h-recipes-ocaml-shard-${{ matrix.shard }}.json" \
+            --summary-file "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload ocaml shard results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: h2h-recipes-ocaml-shard-${{ matrix.shard }}
+          path: ocamlsnippets/h2h-recipes-ocaml-shard-${{ matrix.shard }}.json
+          retention-days: 7
+
   # Fan-in: union the shards per leg and diff the legs. Strict
   # across-the-board gate, both directions: CPython vs rs-from AND
   # rs-from vs rs-to on instruction counts and RSS (15% margin) —
@@ -495,10 +671,11 @@ jobs:
           cd scripts/ci/go
           go build -o h2h-compare ./cmd/h2h-compare
 
-      - name: Compare legs (strict gate, both directions)
+      - name: Compare legs (strict gate across run and AOT suites)
         env:
           GH_TOKEN: ${{ github.token }}
           REPORT_ONLY: ${{ inputs.report_only }}
+          WAIVE_OCAML_INPUT: ${{ inputs.waive_ocaml }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
@@ -510,24 +687,36 @@ jobs:
           # Determine whether any check is manually waived
           waive_all=false
           waive_recipes=false
+          waive_ocaml=false
 
           if [ "$REPORT_ONLY" = "true" ]; then
             waive_all=true
+          fi
+          if [ "$WAIVE_OCAML_INPUT" = "true" ]; then
+            waive_ocaml=true
           fi
 
           # Inspect PR title, body, and commit message for tags
           tags="$PR_TITLE $PR_BODY $COMMIT_MSG"
           if echo "$tags" | grep -Eq '\[(waive-h2h|waive h2h|report-only)\]'; then
             waive_all=true
-          elif echo "$tags" | grep -Eq '\[(waive-recipes|waive recipes)\]'; then
+          fi
+          if echo "$tags" | grep -Eq '\[(waive-recipes|waive recipes)\]'; then
             waive_recipes=true
+          fi
+          if echo "$tags" | grep -Eq '\[(waive-ocaml|waive ocaml)\]'; then
+            waive_ocaml=true
           fi
 
           # Inspect event payload labels
           if echo "$EVENT_LABELS" | grep -Eq '(waive-h2h|waive-gate|report-only)'; then
             waive_all=true
-          elif echo "$EVENT_LABELS" | grep -Eq 'waive-recipes'; then
+          fi
+          if echo "$EVENT_LABELS" | grep -Eq 'waive-recipes'; then
             waive_recipes=true
+          fi
+          if echo "$EVENT_LABELS" | grep -Eq 'waive-ocaml'; then
+            waive_ocaml=true
           fi
 
           # Inspect live PR labels (works even when clicking "Re-run failed jobs")
@@ -535,26 +724,40 @@ jobs:
             labels="$(gh pr view "$PR_NUM" --json labels --jq '.labels[].name' 2>/dev/null || true)"
             if echo "$labels" | grep -Eq '^(waive-h2h|waive-gate|report-only)$'; then
               waive_all=true
-            elif echo "$labels" | grep -Eq '^waive-recipes$'; then
+            fi
+            if echo "$labels" | grep -Eq '^waive-recipes$'; then
               waive_recipes=true
+            fi
+            if echo "$labels" | grep -Eq '^waive-ocaml$'; then
+              waive_ocaml=true
             fi
           fi
 
           recipes_flag=""
           rsrs_flag=""
+          aot_rsrs_flag=""
+          aot_ocaml_flag=""
           if [ "$waive_all" = "true" ]; then
             echo "::notice::H2H gate fully waived (report-only mode enabled)."
             recipes_flag="--report-only"
             rsrs_flag="--report-only"
-          elif [ "$waive_recipes" = "true" ]; then
-            echo "::notice::H2H recipes (CPython baseline) gate waived (report-only mode enabled)."
-            recipes_flag="--report-only"
+            aot_rsrs_flag="--report-only"
+            aot_ocaml_flag="--report-only"
+          else
+            if [ "$waive_recipes" = "true" ]; then
+              echo "::notice::H2H recipes (CPython baseline) gate waived (report-only mode enabled)."
+              recipes_flag="--report-only"
+            fi
+            if [ "$waive_ocaml" = "true" ]; then
+              echo "::notice::H2H aot-ocaml (OCaml baseline) gate waived (report-only mode enabled)."
+              aot_ocaml_flag="--report-only"
+            fi
           fi
 
           rc=0
-          # Two comparisons, all verdict tables in the summary; any
-          # can fail the job unless triage mode greens everything.
-          # Both gate instruction counts + RSS only (15% margin):
+          # Four comparisons, all verdict tables in the summary; any
+          # can fail the job unless triage mode waives that comparison.
+          # All four gate instruction counts + RSS only (15% margin):
           # cpu_s is collected but never compared.
           $compare \
             --label recipes \
@@ -574,6 +777,25 @@ jobs:
             --merged-rs h2h-recipes-rs-from-merged.json \
             --metrics mem,ins --margin 0.15 \
             --summary-file "$GITHUB_STEP_SUMMARY" $rsrs_flag || rc=$?
+          $compare \
+            --label aot-rsrs \
+            --base-name aot-to --challenger-name aot-from \
+            --jvm h2h-recipes-aot-to-shard-*/h2h-recipes-aot-to-shard-*.json \
+            --rs h2h-recipes-aot-from-shard-*/h2h-recipes-aot-from-shard-*.json \
+            --merged-jvm h2h-recipes-aot-to-merged.json \
+            --merged-rs h2h-recipes-aot-from-merged.json \
+            --metrics mem,ins --margin 0.15 \
+            --summary-file "$GITHUB_STEP_SUMMARY" $aot_rsrs_flag || rc=$?
+          $compare \
+            --label aot-ocaml \
+            --base-name OCAML --challenger-name AOT \
+            --jvm h2h-recipes-ocaml-shard-*/h2h-recipes-ocaml-shard-*.json \
+            --rs h2h-recipes-aot-from-shard-*/h2h-recipes-aot-from-shard-*.json \
+            --allow-extra-challenger \
+            --merged-jvm h2h-recipes-ocaml-merged.json \
+            --merged-rs h2h-recipes-aot-from-merged.json \
+            --metrics mem,ins --margin 0.15 \
+            --summary-file "$GITHUB_STEP_SUMMARY" $aot_ocaml_flag || rc=$?
           exit $rc
 
       - name: Upload merged leg JSONs

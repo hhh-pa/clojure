@@ -110,6 +110,7 @@ func TestUsageErrors(t *testing.T) {
 		{"--label", "x", "--jvm", "testdata/chal.json", "--rs", "testdata/chal.json", "--margin", "abc"},
 		{"--label", "x", "--jvm", "testdata/chal.json", "--rs", "testdata/chal.json", "--metrics", "cpu,bogus"},
 		{"--label", "x", "--jvm", "testdata/does-not-exist.json", "--rs", "testdata/chal.json"},
+		{"--label", "x", "--jvm", "testdata/chal.json", "--rs", "testdata/chal.json", "--allow-extra-challenger=true"},
 	} {
 		_, stderr, code := cmdtest.RunBothEnv(t, bin, ".", nil, args...)
 		if code != 2 {
@@ -185,6 +186,13 @@ func TestParseArgs(t *testing.T) {
 	if _, err := parseArgs([]string{"--label", "x", "--jvm", "a", "--rs"}); err == nil {
 		t.Fatal("dangling --rs must fail")
 	}
+	o, err = parseArgs([]string{"--label", "aot-ocaml", "--jvm", "o.json", "--rs", "a.json", "--allow-extra-challenger"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !o.allowExtraChallenger {
+		t.Fatalf("allowExtraChallenger should be true: %+v", o)
+	}
 }
 
 func TestFormats(t *testing.T) {
@@ -208,5 +216,141 @@ func TestShort(t *testing.T) {
 	}
 	if got := short(caseKey{"l", "s", "c"}); got != "l/c" {
 		t.Fatalf("short case = %q", got)
+	}
+}
+
+func writeLegReport(t *testing.T, path string, cases [][4]any) {
+	t.Helper()
+	results := make([]map[string]any, 0, len(cases))
+	for _, c := range cases {
+		results = append(results, map[string]any{
+			"label":  c[0],
+			"stem":   "solution",
+			"script": "src/" + c[0].(string) + "/solution.clj",
+			"case":   c[1],
+			"ok":     true,
+			"error":  nil,
+			"runs":   []map[string]any{{"wall_s": 0.1}},
+			"summary": map[string]any{
+				"cpu_s":            map[string]any{"min": 0.1, "median": 0.1, "max": 0.1},
+				"maxrss_kb":        map[string]any{"min": c[2], "median": c[2], "max": c[2]},
+				"pin_instructions": map[string]any{"min": c[3], "median": c[3], "max": c[3]},
+			},
+		})
+	}
+	doc := map[string]any{
+		"failures": []string{},
+		"missing":  []string{},
+		"config":   map[string]any{"shard": "0/1", "repeat": 1},
+		"results":  results,
+	}
+	data, err := json.MarshalIndent(doc, "", " ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAllowExtraChallenger(t *testing.T) {
+	bin := cmdtest.Build(t, ".")
+	work := t.TempDir()
+	base := filepath.Join(work, "ocaml.json")
+	chal := filepath.Join(work, "aot.json")
+	disjoint := filepath.Join(work, "disjoint.json")
+	summary := filepath.Join(work, "summary.md")
+
+	writeLegReport(t, base, [][4]any{
+		{"sort/quick", "case_0", 10000, 1000000},
+	})
+	writeLegReport(t, chal, [][4]any{
+		{"sort/quick", "case_0", 9000, 900000},
+		{"string/extra", "case_0", 9000, 900000},
+	})
+	writeLegReport(t, disjoint, [][4]any{
+		{"string/other", "case_0", 9000, 900000},
+	})
+
+	// Strict default rejects challenger-only cases.
+	stdout, code := cmdtest.Run(t, bin, ".",
+		"--label", "aot-ocaml",
+		"--base-name", "OCAML", "--challenger-name", "AOT",
+		"--jvm", base, "--rs", chal,
+		"--metrics", "mem,ins", "--margin", "0.15")
+	if code != 1 || !strings.Contains(stdout, "leg mismatch (only-OCAML 0, only-AOT 1)") {
+		t.Fatalf("strict mode mismatch output:\ncode=%d\n%s", code, stdout)
+	}
+
+	// --allow-extra-challenger passes when all base cases match and common cases win/tie.
+	stdout, code = cmdtest.Run(t, bin, ".",
+		"--label", "aot-ocaml",
+		"--base-name", "OCAML", "--challenger-name", "AOT",
+		"--jvm", base, "--rs", chal,
+		"--allow-extra-challenger",
+		"--metrics", "mem,ins", "--margin", "0.15",
+		"--summary-file", summary)
+	if code != 0 || !strings.Contains(stdout, "GATE aot-ocaml: PASS") {
+		t.Fatalf("allow-extra-challenger expected PASS, code=%d:\n%s", code, stdout)
+	}
+	sumBytes, err := os.ReadFile(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sumBytes), "note: skipped 1 AOT-only case(s) not present in OCAML") {
+		t.Fatalf("summary missing skipped note:\n%s", string(sumBytes))
+	}
+
+	// Missing base case still fails even with --allow-extra-challenger.
+	stdout, code = cmdtest.Run(t, bin, ".",
+		"--label", "aot-ocaml",
+		"--base-name", "OCAML", "--challenger-name", "AOT",
+		"--jvm", chal, "--rs", base,
+		"--allow-extra-challenger",
+		"--metrics", "mem,ins", "--margin", "0.15")
+	if code != 1 || !strings.Contains(stdout, "leg mismatch (only-OCAML 1)") {
+		t.Fatalf("missing base case must still fail, code=%d:\n%s", code, stdout)
+	}
+
+	// Zero common cases still fails even with --allow-extra-challenger.
+	stdout, code = cmdtest.Run(t, bin, ".",
+		"--label", "aot-ocaml",
+		"--base-name", "OCAML", "--challenger-name", "AOT",
+		"--jvm", base, "--rs", disjoint,
+		"--allow-extra-challenger",
+		"--metrics", "mem,ins", "--margin", "0.15")
+	if code != 1 || !strings.Contains(stdout, "no compared cases") {
+		t.Fatalf("empty intersection must fail, code=%d:\n%s", code, stdout)
+	}
+}
+
+func TestAllowExtraChallengerDirect(t *testing.T) {
+	work := t.TempDir()
+	base := filepath.Join(work, "ocaml.json")
+	chal := filepath.Join(work, "aot.json")
+	summary := filepath.Join(work, "summary.md")
+	writeLegReport(t, base, [][4]any{{"sort/quick", "case_0", 10000, 1000000}})
+	writeLegReport(t, chal, [][4]any{
+		{"sort/quick", "case_0", 9000, 900000},
+		{"string/extra", "case_0", 9000, 900000},
+	})
+	if code := run([]string{
+		"--label", "aot-ocaml",
+		"--base-name", "OCAML", "--challenger-name", "AOT",
+		"--jvm", base, "--rs", chal,
+		"--allow-extra-challenger",
+		"--metrics", "mem,ins", "--margin", "0.15",
+		"--summary-file", summary,
+	}); code != 0 {
+		t.Fatalf("in-process allow-extra-challenger exit = %d, want 0", code)
+	}
+	if code := run([]string{
+		"--label", "aot-ocaml",
+		"--base-name", "OCAML", "--challenger-name", "AOT",
+		"--jvm", chal, "--rs", base,
+		"--allow-extra-challenger",
+		"--metrics", "mem,ins", "--margin", "0.15",
+	}); code != 1 {
+		t.Fatalf("in-process missing-base exit = %d, want 1", code)
 	}
 }
