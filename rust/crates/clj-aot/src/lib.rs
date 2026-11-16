@@ -371,13 +371,11 @@ fn finish(
     let archive = find_archive(&link.exe_dir, link.runtime_archive.as_deref(), platform)
         .map_err(CompileError::Link)?;
     let linux = cfg!(target_os = "linux");
-    let script = tmp.with_extension("ld");
-    if linux {
-        std::fs::write(&script, link::HOT_TEXT_AOT).map_err(|e| io_err(&script, e))?;
-    }
+    let script_path = tmp.with_extension("ld");
+    let script =
+        link::write_layout_script(&script_path, linux).map_err(|e| io_err(&script_path, e))?;
     let mut cmd = link_command(platform, &tmp, &archive, out, link.linker.as_deref());
-    cmd.args
-        .extend(link::layout_args(linux.then_some(script.as_path()), linux));
+    cmd.args.extend(link::layout_args(script, linux));
     cmd.args.extend(link::gc_section_args(
         cfg!(target_os = "linux"),
         cfg!(target_os = "macos"),
@@ -389,7 +387,7 @@ fn finish(
     attempts.push(cmd);
     let linked = link::run_link_first(&attempts).map_err(CompileError::Link);
     let _removed = std::fs::remove_file(&tmp);
-    let _removed = std::fs::remove_file(&script);
+    let _removed = script.map(std::fs::remove_file);
     linked
 }
 

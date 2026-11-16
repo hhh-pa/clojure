@@ -126,6 +126,16 @@ pub fn layout_args(script: Option<&Path>, linux: bool) -> Vec<String> {
     args
 }
 
+/// Write [`HOT_TEXT_AOT`] to `path` for a Linux link, returning the
+/// script to pass to [`layout_args`]; `None` (nothing written) elsewhere.
+pub fn write_layout_script(path: &Path, linux: bool) -> std::io::Result<Option<&Path>> {
+    if !linux {
+        return Ok(None);
+    }
+    std::fs::write(path, HOT_TEXT_AOT)?;
+    Ok(Some(path))
+}
+
 /// The Linux static-link flags (#271): a static non-PIE binary maps no
 /// dynamic loader or shared libraries and applies no load-time
 /// relocations (the startup floor drops by half, RSS by ~1.5 MB).
@@ -330,6 +340,29 @@ mod tests {
 
     fn tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("clj-aot-link-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn layout_script_written_only_for_linux() {
+        let dir = std::env::temp_dir().join(format!("clj-aot-layout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("prog.ld");
+        assert_eq!(
+            super::write_layout_script(&path, false).expect("no-op"),
+            None
+        );
+        assert!(!path.exists());
+        assert_eq!(
+            super::write_layout_script(&path, true).expect("written"),
+            Some(path.as_path())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            super::HOT_TEXT_AOT
+        );
+        let missing = dir.join("no-such-dir").join("prog.ld");
+        assert!(super::write_layout_script(&missing, true).is_err());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
