@@ -807,6 +807,12 @@ fn native_emit_ir_selects_lite_vs_full_boot() {
     );
     assert!(lite_text.contains("@rt_n_ns_lite("), "{lite_text}");
     assert!(lite_text.contains("@rt_n_main_lite("), "{lite_text}");
+    // The Linux static link's `--wrap` targets ride in every module (#271).
+    assert!(
+        lite_text.contains("@__wrap___register_frame_info(ptr")
+            && lite_text.contains("@__wrap___deregister_frame_info(ptr"),
+        "{lite_text}"
+    );
 
     let lite_ext_ir = tmp("boot-lite-ext.ll");
     let lite_ext_report = clj_aot::build_str(

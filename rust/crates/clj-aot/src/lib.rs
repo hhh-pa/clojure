@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use clj_eval::{plan_mixed, plan_source};
 use inkwell::context::Context;
 
-use link::{LinkError, current_platform, find_archive, link_command, run_link};
+use link::{LinkError, current_platform, find_archive, link_command};
 
 /// Emit options: `--emit-ir` / `--emit-obj` paths (either one skips
 /// linking; both write and skip).
@@ -377,7 +377,14 @@ fn finish(
         cfg!(target_os = "linux"),
         cfg!(target_os = "macos"),
     ));
-    let linked = run_link(&cmd).map_err(CompileError::Link);
+    // Linux tries the static link first (see `link::static_args`); the
+    // plain command stays the fallback (and the only attempt elsewhere).
+    let mut attempts = vec![cmd.clone()];
+    attempts[0]
+        .args
+        .extend(link::static_args(cfg!(target_os = "linux")));
+    attempts.push(cmd);
+    let linked = link::run_link_first(&attempts).map_err(CompileError::Link);
     let _removed = std::fs::remove_file(&tmp);
     linked
 }

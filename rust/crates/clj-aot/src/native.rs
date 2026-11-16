@@ -224,6 +224,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let init = self.lower_const_init();
         self.lower_main(path, init, &tops);
+        self.lower_frame_registry_wraps();
         crate::lower::verify_module(&self.module).map_err(Unsupported)?;
         Ok(self.module)
     }
@@ -4043,6 +4044,36 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let result = self.slot(&mut f);
         self.end_fn(f, result)
+    }
+
+    /// No-op targets for the Linux static link's `--wrap` of crtbeginT's
+    /// `.eh_frame` registration (#271): GCC 13+'s `__register_frame_info`
+    /// classifies every FDE eagerly (hundreds of thousands of instructions
+    /// and the whole `.eh_frame` faulted in at startup), while unwinding
+    /// finds FDEs through `--eh-frame-hdr` + `dl_iterate_phdr` without it.
+    /// Unreferenced (and dead-stripped) everywhere else.
+    fn lower_frame_registry_wraps(&self) {
+        let ptr = self.ptr;
+        let register = self.module.add_function(
+            "__wrap___register_frame_info",
+            self.ctx
+                .void_type()
+                .fn_type(&[ptr.into(), ptr.into()], false),
+            None,
+        );
+        self.builder
+            .position_at_end(self.ctx.append_basic_block(register, "entry"));
+        self.builder.build_return(None).expect("ret");
+        let deregister = self.module.add_function(
+            "__wrap___deregister_frame_info",
+            ptr.fn_type(&[ptr.into()], false),
+            None,
+        );
+        self.builder
+            .position_at_end(self.ctx.append_basic_block(deregister, "entry"));
+        self.builder
+            .build_return(Some(&ptr.const_null()))
+            .expect("ret");
     }
 
     fn lower_main(&mut self, path: &str, init: FunctionValue<'ctx>, tops: &[FunctionValue<'ctx>]) {

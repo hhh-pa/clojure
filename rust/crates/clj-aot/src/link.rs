@@ -118,6 +118,28 @@ pub fn layout_args(archive: &Path, linux: bool) -> Vec<String> {
     args
 }
 
+/// The Linux static-link flags (#271): a static non-PIE binary maps no
+/// dynamic loader or shared libraries and applies no load-time
+/// relocations (the startup floor drops by half, RSS by ~1.5 MB).
+/// crtbeginT's `.eh_frame` registration — GCC 13+ classifies every FDE
+/// eagerly at startup — is wrapped to the compiler-emitted no-ops, and
+/// `--eh-frame-hdr` keeps unwinding on the `dl_iterate_phdr` path that
+/// dynamic executables use. Empty elsewhere.
+#[must_use]
+pub fn static_args(linux: bool) -> Vec<String> {
+    if !linux {
+        return Vec::new();
+    }
+    [
+        "-static",
+        "-Wl,--eh-frame-hdr",
+        "-Wl,--wrap=__register_frame_info",
+        "-Wl,--wrap=__deregister_frame_info",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
 /// Dead-strip unreferenced sections when linking a native binary (`--gc-sections`
 /// on Linux, `-dead_strip` on macOS) so unused archive tables stay unlinked.
 #[must_use]
@@ -259,6 +281,20 @@ fn link_failure_text(linker: &str, out: &std::process::Output) -> String {
     }
 }
 
+/// Run each link command in turn until one succeeds (the static link
+/// falls back to the dynamic one where the static C libraries are
+/// missing); when every attempt fails, the last failure reports.
+pub fn run_link_first(cmds: &[LinkCommand]) -> Result<(), LinkError> {
+    let mut last = Err(LinkError::LinkFailed("no link command".to_owned()));
+    for cmd in cmds {
+        last = run_link(cmd);
+        if last.is_ok() {
+            break;
+        }
+    }
+    last
+}
+
 /// Run the link command (success is exit 0; a missing linker
 /// program reports as not-found, never as a crash; linker chatter
 /// is captured — failures carry it, successes stay silent).
@@ -281,7 +317,7 @@ pub fn run_link(cmd: &LinkCommand) -> Result<(), LinkError> {
 #[cfg(test)]
 mod tests {
     use super::{LinkCommand, LinkError};
-    use super::{Platform, find_archive, link_command, run_link};
+    use super::{Platform, find_archive, link_command, run_link, run_link_first};
     use std::path::PathBuf;
 
     fn tmp(name: &str) -> PathBuf {
@@ -302,6 +338,20 @@ mod tests {
             ["-no-pie".to_owned(), format!("-Wl,-T,{}", script.display())]
         );
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn static_args_only_on_linux() {
+        assert!(super::static_args(false).is_empty());
+        assert_eq!(
+            super::static_args(true),
+            [
+                "-static",
+                "-Wl,--eh-frame-hdr",
+                "-Wl,--wrap=__register_frame_info",
+                "-Wl,--wrap=__deregister_frame_info",
+            ]
+        );
     }
 
     #[test]
@@ -454,6 +504,17 @@ mod tests {
             },
         );
         assert_eq!(run_link(&ok), Ok(()));
+        // `run_link_first`: the first success wins (a failed static attempt
+        // falls back to the next command), and when every attempt fails
+        // the last failure reports.
+        assert_eq!(run_link_first(&[bad.clone(), ok.clone()]), Ok(()));
+        assert_eq!(run_link_first(&[ok.clone(), bad.clone()]), Ok(()));
+        assert_eq!(
+            run_link_first(&[ok.clone(), bad.clone(), bad.clone()]),
+            Ok(())
+        );
+        assert_eq!(run_link_first(&[bad.clone(), bad.clone()]), run_link(&bad));
+        assert!(run_link_first(&[]).is_err());
         let text = format!("{}", run_link(&bad).expect_err("failing linker"));
         assert!(
             text.starts_with(&format!("{} exited with ", bad.linker)),
