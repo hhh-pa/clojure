@@ -311,12 +311,6 @@ pub(crate) fn check_arity(
     }
 }
 
-/// A qualified symbol's var id, without the alias step (the target
-/// is already resolved).
-fn id_of(reg: &SharedRegistry, q: &Symbol) -> Option<u64> {
-    reg.lookup_in_ns(q.namespace()?, q)
-}
-
 /// The ISeq coercion error (probe36 `req-string`).
 fn iseq_err(v: &Value) -> NativeError {
     NativeError::new(
@@ -1267,7 +1261,7 @@ pub(crate) fn core_var_handle(id: u64, name: &str) -> Var {
 }
 
 pub(crate) fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
-    id_of(&eval.registry, &Symbol::new(Some("clojure.core"), name))
+    eval.registry.lookup_str("clojure.core", name)
 }
 
 /// Push a thread binding for `clojure.core/<name>` if that core var exists.

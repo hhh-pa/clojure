@@ -200,6 +200,15 @@ impl Namespace {
         self.id
     }
 
+    /// Look up this namespace's own `name` without building a `Symbol`
+    /// (the borrowed [`SymKey`] probe [`lookup`](Self::lookup) uses).
+    #[must_use]
+    pub fn lookup_str(&self, name: &str) -> Option<u64> {
+        self.ids
+            .get(&(Some(self.name.as_str()), name) as &dyn SymKey)
+            .copied()
+    }
+
     /// Look up a var id by symbol (unqualified resolves here).
     #[must_use]
     pub fn lookup(&self, sym: &Symbol) -> Option<u64> {
@@ -1263,6 +1272,13 @@ impl SharedRegistry {
     #[must_use]
     pub fn lookup_in_ns(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
         self.lock().registry.get(ns_name)?.lookup(sym)
+    }
+
+    /// [`lookup_in_ns`](Self::lookup_in_ns) for `ns_name/name` without
+    /// building a `Symbol` (boot installs probe every core name).
+    #[must_use]
+    pub fn lookup_str(&self, ns_name: &str, name: &str) -> Option<u64> {
+        self.lock().registry.get(ns_name)?.lookup_str(name)
     }
 
     /// Look up a var id directly in a live or removed namespace's
