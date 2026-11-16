@@ -17,3 +17,4 @@
 (println (twice [1 2]) (reduce (fn [acc [k v]] (assoc acc k v)) {} [[:x 1] [:y 2]]))
 (println (step [[] [] [] [] []] 7) (keep-orig shared 1) shared)
 (println (try (reduce (fn [acc] acc) [] [1]) (catch clojure.lang.ArityException e (str "arity: " (.getName (class e))))))
+(println (try (reduce (fn [acc x] (quot acc x)) 10 [2 0]) (catch ArithmeticException e (.getMessage e))))
