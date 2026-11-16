@@ -129,6 +129,25 @@ const LITE_CAP_CORE_GROUPS: &[(LiteCaps, &[LiteNativeSlice])] = &[
     (LiteCaps::HOST, LITE_CAP_HOST),
 ];
 
+/// `def`-name metadata keys only var-metadata readers observe (no
+/// runtime path consults them): a Lite program without such readers
+/// ([`needs_var_meta`]) drops them at compile time, so a `defn` name
+/// pools as a plain symbol instead of a read-back form (#271).
+pub const LITE_INERT_DEF_META: &[&str] = &["arglists", "doc", "line", "column", "file"];
+
+/// The `clojure.core` capability groups a compiled binary registers, each
+/// with its hint id (its [`LITE_CAP_CORE_GROUPS`] position, which
+/// [`lite_native_hint`] encodes).
+pub const LITE_CORE_IO: LiteCoreGroup = (0, LITE_CAP_IO);
+/// See [`LITE_CORE_IO`].
+pub const LITE_CORE_CORE: LiteCoreGroup = (1, LITE_CAP_CORE);
+/// See [`LITE_CORE_IO`].
+pub const LITE_CORE_SEQ: LiteCoreGroup = (2, LITE_CAP_SEQ);
+/// See [`LITE_CORE_IO`].
+pub const LITE_CORE_RE: LiteCoreGroup = (3, LITE_CAP_RE);
+/// See [`LITE_CORE_IO`].
+pub const LITE_CORE_HOST: LiteCoreGroup = (4, LITE_CAP_HOST);
+
 /// Pure core helper functions looked up internally by seq/coll/xform/jdkio
 /// natives via `deref_core` (kept resident in Lite even when user code does
 /// not reference them directly).
@@ -178,8 +197,104 @@ fn find_native(tables: &[LiteNativeSlice], name: &str) -> Option<NativeFnPtr> {
 }
 
 /// Look up `name` across active `core` capability slices.
-fn find_native_in_groups(groups: &[&[LiteNativeSlice]], name: &str) -> Option<NativeFnPtr> {
-    groups.iter().find_map(|g| find_native(g, name))
+fn find_native_in_groups(groups: &[LiteCoreGroup], name: &str) -> Option<NativeFnPtr> {
+    groups.iter().find_map(|&(_, g)| find_native(g, name))
+}
+
+/// One registered `clojure.core` capability group: its hint id (the
+/// `LITE_CAP_CORE_GROUPS` position) and its native slices.
+pub type LiteCoreGroup = (u32, &'static [LiteNativeSlice]);
+
+/// "No native" for [`lite_native_hint`] (decodes to no group, so a
+/// var without one takes the name scan).
+pub const NO_LITE_HINT: u32 = u32::MAX;
+
+/// The hint group of `clojure.string`'s natives (after the core groups).
+const STRING_HINT_GROUP: u32 = 5;
+
+/// Where the Lite native behind `ns/name` sits — `group << 24 | table <<
+/// 16 | entry`, in the first-match order the runtime scan uses — so a
+/// compiled binary installs it without scanning the capability tables
+/// (#271); [`NO_LITE_HINT`] when there is none. Compiler-side only.
+#[must_use]
+pub fn lite_native_hint(ns: &str, name: &str) -> u32 {
+    match ns {
+        "clojure.core" => core_groups_hint(LITE_CAP_CORE_GROUPS, name),
+        "clojure.string" => {
+            core_groups_hint(&[(LiteCaps::STRING, LITE_CAP_STRING)], name)
+                | (STRING_HINT_GROUP << 24)
+        }
+        _ => NO_LITE_HINT,
+    }
+}
+
+/// `a == b`, usable in constants.
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The first `name` entry across `groups` as `group << 24 | table << 16 |
+/// entry` ([`NO_LITE_HINT`] when absent) — const, so the internal helpers'
+/// hints resolve at compile time without linking the tables.
+const fn core_groups_hint(groups: &[(LiteCaps, &[LiteNativeSlice])], name: &str) -> u32 {
+    let mut g = 0;
+    while g < groups.len() {
+        let tables = groups[g].1;
+        let mut t = 0;
+        while t < tables.len() {
+            let mut e = 0;
+            while e < tables[t].len() {
+                if const_str_eq(tables[t][e].0, name) {
+                    return ((g as u32) << 24) | ((t as u32) << 16) | e as u32;
+                }
+                e += 1;
+            }
+            t += 1;
+        }
+        g += 1;
+    }
+    NO_LITE_HINT
+}
+
+/// [`LITE_INTERNAL_HELPERS`]' hints, resolved at compile time.
+const LITE_HELPER_HINTS: [u32; LITE_INTERNAL_HELPERS.len()] = {
+    let mut out = [NO_LITE_HINT; LITE_INTERNAL_HELPERS.len()];
+    let mut i = 0;
+    while i < out.len() {
+        out[i] = core_groups_hint(LITE_CAP_CORE_GROUPS, LITE_INTERNAL_HELPERS[i]);
+        i += 1;
+    }
+    out
+};
+
+/// The native a compiler [`lite_native_hint`] points at in the registered
+/// tables — `lib`'s (a `clojure.string` var) or the core groups' —
+/// when that entry still names `name` (a hint of the other kind, or a
+/// runtime archive from another build, falls back to the scan).
+fn hinted_native(
+    hint: u32,
+    name: &str,
+    core_groups: &[LiteCoreGroup],
+    lib: Option<&[LiteNativeSlice]>,
+) -> Option<NativeFnPtr> {
+    let (group, table, entry) = (hint >> 24, (hint >> 16) & 0xff, hint & 0xffff);
+    let tables = match lib {
+        Some(lib) => (group == STRING_HINT_GROUP).then_some(lib)?,
+        None => core_groups.iter().find(|&&(id, _)| id == group)?.1,
+    };
+    let &(k, f) = tables.get(table as usize)?.get(entry as usize)?;
+    (k == name).then_some(f)
 }
 
 /// Look up a pure runtime `clojure.core` native compatible with `Lite` boot.
@@ -250,12 +365,15 @@ pub fn is_lite_stdin_var(ns: &str, name: &str) -> bool {
 /// Install a dynamic `clojure.core` var with root `val`, adding
 /// `:dynamic true` to its metadata when `dynamic_meta`.
 fn install_core_dynamic(eval: &mut Evaluator, name: &str, val: Value, dynamic_meta: bool) {
+    // (The `:dynamic` stamp, like every var's metadata, only matters
+    // to a program that can read it.)
+    let bare = eval.skip_var_meta;
     let q = Symbol::new(Some("clojure.core"), name);
     let id = eval.registry.intern(&q);
     eval.registry.with_state_mut(id, |st| {
         st.root = Some(val);
         st.dynamic = true;
-        if dynamic_meta {
+        if dynamic_meta && !bare {
             let meta: Map = st.meta.clone().unwrap_or_else(new_map).insert(
                 Value::Keyword(Keyword::new(None, "dynamic")),
                 Value::Bool(true),
@@ -267,19 +385,19 @@ fn install_core_dynamic(eval: &mut Evaluator, name: &str, val: Value, dynamic_me
 
 /// Install one Lite native from the active capability slices if not already
 /// present.
-fn install_lite_var(
-    eval: &mut Evaluator,
-    ns: &str,
-    name: &str,
-    core_groups: &[&[LiteNativeSlice]],
-    owned_groups: &[LiteOwnedSlice],
-    lib_tables: &[(&str, &[LiteNativeSlice])],
-) {
+fn install_lite_var(eval: &mut Evaluator, (ns, name, hint): (&str, &str, u32), tables: LiteTables) {
+    let LiteTables {
+        core_groups,
+        owned_groups,
+        lib_tables,
+    } = tables;
     if ns == "clojure.core" {
         if is_lite_dynamic(name) || core_var(eval, name).is_some() {
             return;
         }
-        if let Some(f) = find_native_in_groups(core_groups, name) {
+        let found = hinted_native(hint, name, core_groups, None)
+            .or_else(|| find_native_in_groups(core_groups, name));
+        if let Some(f) = found {
             let owned = owned_groups
                 .iter()
                 .find_map(|entries| owned_entry_in(entries, name));
@@ -292,7 +410,9 @@ fn install_lite_var(
         if eval.registry.lookup_in_live_or_removed(ns, &sym).is_some() {
             return;
         }
-        if let Some(f) = find_native(tables, name) {
+        let found = hinted_native(hint, name, core_groups, Some(tables))
+            .or_else(|| find_native(tables, name));
+        if let Some(f) = found {
             let owned = owned_groups
                 .iter()
                 .find_map(|entries| owned_entry_in(entries, name));
@@ -305,21 +425,30 @@ fn install_lite_var(
 /// capability group enabled.
 #[must_use]
 pub fn boot_lite(vars: &[(&str, &str)], need_stdin: bool) -> Evaluator {
-    boot_lite_impl(
-        vars,
-        need_stdin,
-        &[
-            LITE_CAP_IO,
-            LITE_CAP_CORE,
-            LITE_CAP_SEQ,
-            LITE_CAP_RE,
-            LITE_CAP_HOST,
+    let tables = LiteTables {
+        core_groups: &[
+            LITE_CORE_IO,
+            LITE_CORE_CORE,
+            LITE_CORE_SEQ,
+            LITE_CORE_RE,
+            LITE_CORE_HOST,
         ],
-        &[LITE_OWNED_CORE, LITE_OWNED_SEQ, LITE_OWNED_STRING],
-        &[("clojure.string", LITE_CAP_STRING)],
-        true,
-        true,
-    )
+        owned_groups: &[LITE_OWNED_CORE, LITE_OWNED_SEQ, LITE_OWNED_STRING],
+        lib_tables: &[("clojure.string", LITE_CAP_STRING)],
+    };
+    boot_lite_impl(vars, &[], need_stdin, tables, true, true)
+}
+
+/// The capability tables a Lite boot installs natives from (the ones
+/// the compiled binary registered).
+#[derive(Clone, Copy)]
+pub struct LiteTables<'a> {
+    /// `clojure.core` groups, with their hint ids.
+    pub core_groups: &'a [LiteCoreGroup],
+    /// Owned-argument entries of the registered natives.
+    pub owned_groups: &'a [LiteOwnedSlice],
+    /// Library namespaces' natives (`clojure.string`).
+    pub lib_tables: &'a [(&'a str, &'a [LiteNativeSlice])],
 }
 
 /// Construct a minimal evaluator for AOT `BootMode::Lite` programs using only
@@ -329,21 +458,12 @@ pub fn boot_lite(vars: &[(&str, &str)], need_stdin: bool) -> Evaluator {
 #[must_use]
 pub fn boot_lite_with_caps(
     vars: &[(&str, &str)],
+    hints: &[u32],
     need_stdin: bool,
-    core_groups: &[&[LiteNativeSlice]],
-    owned_groups: &[LiteOwnedSlice],
-    lib_tables: &[(&str, &[LiteNativeSlice])],
+    tables: LiteTables,
     seq_helpers: bool,
 ) -> Evaluator {
-    boot_lite_impl(
-        vars,
-        need_stdin,
-        core_groups,
-        owned_groups,
-        lib_tables,
-        seq_helpers,
-        false,
-    )
+    boot_lite_impl(vars, hints, need_stdin, tables, seq_helpers, false)
 }
 
 fn has_core_ref(vars: &[(&str, &str)], name: &str) -> bool {
@@ -381,7 +501,11 @@ fn needs_stdout_dynamics(vars: &[(&str, &str)]) -> bool {
     })
 }
 
-fn needs_var_meta(vars: &[(&str, &str)]) -> bool {
+/// Whether a Lite program can observe var metadata (it references a
+/// reader of it). When it cannot, `def`s keep no metadata at all, and
+/// the compiler drops [`LITE_INERT_DEF_META`] from `def` names.
+#[must_use]
+pub fn needs_var_meta(vars: &[(&str, &str)]) -> bool {
     vars.iter().any(|&(ns, name)| {
         ns == "clojure.core"
             && matches!(
@@ -448,16 +572,16 @@ fn install_optional_dynamics(eval: &mut Evaluator, vars: &[(&str, &str)], need_a
 
 fn boot_lite_impl(
     vars: &[(&str, &str)],
+    hints: &[u32],
     need_stdin: bool,
-    core_groups: &[&[LiteNativeSlice]],
-    owned_groups: &[LiteOwnedSlice],
-    lib_tables: &[(&str, &[LiteNativeSlice])],
+    tables: LiteTables,
     seq_helpers: bool,
     all_dynamics: bool,
 ) -> Evaluator {
     let mut eval = Evaluator::new_bare("user");
     eval.print_defaults_only = true;
     eval.skip_var_meta = !all_dynamics && !needs_var_meta(vars);
+    eval.registry.set_bare_vars(eval.skip_var_meta);
     eval.registry.ensure_ns("clojure.core");
     let user_id = eval.registry.ensure_ns("user");
     let user_handle = ns_value("user", user_id);
@@ -505,19 +629,14 @@ fn boot_lite_impl(
     eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
 
     if seq_helpers {
-        for &name in LITE_INTERNAL_HELPERS {
-            install_lite_var(
-                &mut eval,
-                "clojure.core",
-                name,
-                core_groups,
-                owned_groups,
-                lib_tables,
-            );
+        for (&name, &hint) in LITE_INTERNAL_HELPERS.iter().zip(&LITE_HELPER_HINTS) {
+            let var = ("clojure.core", name, hint);
+            install_lite_var(&mut eval, var, tables);
         }
     }
-    for &(ns, name) in vars {
-        install_lite_var(&mut eval, ns, name, core_groups, owned_groups, lib_tables);
+    for (i, &(ns, name)) in vars.iter().enumerate() {
+        let hint = hints.get(i).copied().unwrap_or(NO_LITE_HINT);
+        install_lite_var(&mut eval, (ns, name, hint), tables);
     }
 
     eval.registry.set_current("user");
@@ -588,6 +707,99 @@ mod tests {
     use super::*;
     use crate::ns::deref_core;
     use clj_value::Vector;
+
+    /// A native's address (fn pointers compare by address only).
+    fn addr(f: Option<NativeFnPtr>) -> Option<usize> {
+        f.map(|f| f as usize)
+    }
+
+    #[test]
+    fn lite_native_hints_point_at_the_scan_result() {
+        let all = [
+            LITE_CORE_IO,
+            LITE_CORE_CORE,
+            LITE_CORE_SEQ,
+            LITE_CORE_RE,
+            LITE_CORE_HOST,
+        ];
+        // The registered ids are the hint encoding's group positions.
+        for (i, (&(id, tables), &(_, compiler))) in all.iter().zip(LITE_CAP_CORE_GROUPS).enumerate()
+        {
+            assert_eq!(id as usize, i);
+            assert!(std::ptr::eq(tables, compiler));
+        }
+        let inc = lite_native_hint("clojure.core", "inc");
+        assert!(inc >> 24 < STRING_HINT_GROUP);
+        assert_eq!(
+            addr(hinted_native(inc, "inc", &all, None)),
+            addr(find_native_in_groups(&all, "inc"))
+        );
+        let trim = lite_native_hint("clojure.string", "trim");
+        assert_eq!(trim >> 24, STRING_HINT_GROUP);
+        assert_eq!(
+            addr(hinted_native(trim, "trim", &all, Some(LITE_CAP_STRING))),
+            addr(find_native(LITE_CAP_STRING, "trim"))
+        );
+        // Unknown names and namespaces have no hint.
+        assert_eq!(lite_native_hint("clojure.core", "no-such"), NO_LITE_HINT);
+        assert_eq!(lite_native_hint("clojure.string", "no-such"), NO_LITE_HINT);
+        assert_eq!(lite_native_hint("user", "inc"), NO_LITE_HINT);
+        // Every mismatch falls back to the scan (`None`): another name,
+        // an unregistered group, a hint of the other kind, and entries
+        // past the tables.
+        assert!(hinted_native(inc, "dec", &all, None).is_none());
+        assert!(hinted_native(inc, "inc", &all[..1], None).is_none());
+        assert!(hinted_native(inc, "inc", &all, Some(LITE_CAP_STRING)).is_none());
+        assert!(hinted_native(trim, "trim", &all, None).is_none());
+        assert!(hinted_native(NO_LITE_HINT, "inc", &all, None).is_none());
+        let past_tables = (inc & 0xff00_0000) | (0xff << 16);
+        assert!(hinted_native(past_tables, "inc", &all, None).is_none());
+        assert!(hinted_native(inc | 0xffff, "inc", &all, None).is_none());
+        // The internal helpers' compile-time hints are the same encoding.
+        for (&name, &hint) in LITE_INTERNAL_HELPERS.iter().zip(&LITE_HELPER_HINTS) {
+            assert_eq!(hint, lite_native_hint("clojure.core", name), "{name}");
+        }
+    }
+
+    #[test]
+    fn hinted_boot_installs_and_falls_back_on_stale_hints() {
+        let vars = [
+            ("clojure.core", "inc"),
+            ("clojure.string", "trim"),
+            ("clojure.core", "dec"),
+            ("clojure.string", "join"),
+        ];
+        // `dec` and `join` carry stale hints (another entry's):
+        // the name check rejects them and the scan installs them.
+        let hints = [
+            lite_native_hint("clojure.core", "inc"),
+            lite_native_hint("clojure.string", "trim"),
+            lite_native_hint("clojure.core", "inc"),
+            lite_native_hint("clojure.string", "trim"),
+        ];
+        let eval = boot_lite_with_caps(
+            &vars,
+            &hints,
+            false,
+            LiteTables {
+                core_groups: &[LITE_CORE_CORE],
+                owned_groups: &[],
+                lib_tables: &[("clojure.string", LITE_CAP_STRING)],
+            },
+            false,
+        );
+        assert!(core_var(&eval, "inc").is_some());
+        assert!(core_var(&eval, "dec").is_some());
+        for name in ["trim", "join"] {
+            let sym = Symbol::new(Some("clojure.string"), name);
+            assert!(
+                eval.registry
+                    .lookup_in_live_or_removed("clojure.string", &sym)
+                    .is_some(),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn lite_queries_classify_core_string_and_stdin_vars() {
@@ -875,10 +1087,13 @@ mod tests {
                 ("clojure.core", "unknown-core"),
                 ("clojure.string", "unknown-str"),
             ],
+            &[],
             false,
-            &[LITE_CAP_IO],
-            &[],
-            &[],
+            LiteTables {
+                core_groups: &[LITE_CORE_IO],
+                owned_groups: &[],
+                lib_tables: &[],
+            },
             false,
         );
         assert!(core_var(&io_only, "println").is_some());
@@ -890,10 +1105,13 @@ mod tests {
                 ("clojure.core", "inc"),
                 ("clojure.string", "no-such-native"),
             ],
-            false,
-            &[LITE_CAP_CORE],
             &[],
-            &[("clojure.string", LITE_CAP_STRING)],
+            false,
+            LiteTables {
+                core_groups: &[LITE_CORE_CORE],
+                owned_groups: &[],
+                lib_tables: &[("clojure.string", LITE_CAP_STRING)],
+            },
             false,
         );
         assert!(core_var(&quiet, "inc").is_some());

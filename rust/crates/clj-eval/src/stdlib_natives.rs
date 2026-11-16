@@ -126,7 +126,10 @@ fn native_split(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 /// `(split-lines s)`: `(split s #"\r?\n")`.
 fn native_split_lines(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     match args {
-        [Value::Str(s)] => crate::re::pattern_split(s, "\r?\n", 0),
+        // The escaped source (as `string.clj` spells it), so the split
+        // takes the regex-free `\r?\n` byte cut instead of compiling a
+        // pattern of literal CR/LF characters (#271).
+        [Value::Str(s)] => crate::re::pattern_split(s, r"\r?\n", 0),
         _ => upstream(eval, "split-lines", args, |e| lite_split_lines(e, args)),
     }
 }

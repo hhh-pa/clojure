@@ -226,31 +226,34 @@ impl Namespace {
 
     /// Intern (find or create) a var in this namespace (the symbol
     /// must already name it). Creation stamps the `:ns`/`:name`
-    /// meta (JVM `Var.intern`) and drops any refer or import of the
-    /// same name (`def`/`intern` silently replace refers and imports,
-    /// like `Namespace.reference` minus its `*err*` warning, which
-    /// waits for S5D). Ids come from the registry counter.
-    pub fn intern(&mut self, sym: &Symbol, next_id: &mut u64) -> u64 {
+    /// meta (JVM `Var.intern`; `stamp` false — a program that cannot
+    /// read var metadata — leaves none) and drops any refer or import
+    /// of the same name (`def`/`intern` silently replace refers and
+    /// imports, like `Namespace.reference` minus its `*err*` warning,
+    /// which waits for S5D). Ids come from the registry counter.
+    pub fn intern(&mut self, sym: &Symbol, next_id: &mut u64, stamp: bool) -> u64 {
         if let Some(id) = self.ids.get(sym) {
             return *id;
         }
         let id = *next_id;
         *next_id += 1;
         let mut state = VarState::fresh();
-        let ns_val: Arc<dyn clj_value::ExtensionValue> = self.handle.clone();
-        static KEYS: std::sync::LazyLock<[Value; 2]> = std::sync::LazyLock::new(|| {
-            [
-                Value::Keyword(clj_value::static_keyword!("ns")),
-                Value::Keyword(clj_value::static_keyword!("name")),
-            ]
-        });
-        state.meta = Some(Map::from_distinct_keywords(
-            &*KEYS,
-            vec![
-                Value::Extension(ns_val),
-                Value::Symbol(Symbol::from_shared(None, Arc::clone(sym.name_arc()))),
-            ],
-        ));
+        if stamp {
+            let ns_val: Arc<dyn clj_value::ExtensionValue> = self.handle.clone();
+            static KEYS: std::sync::LazyLock<[Value; 2]> = std::sync::LazyLock::new(|| {
+                [
+                    Value::Keyword(clj_value::static_keyword!("ns")),
+                    Value::Keyword(clj_value::static_keyword!("name")),
+                ]
+            });
+            state.meta = Some(Map::from_distinct_keywords(
+                &*KEYS,
+                vec![
+                    Value::Extension(ns_val),
+                    Value::Symbol(Symbol::from_shared(None, Arc::clone(sym.name_arc()))),
+                ],
+            ));
+        }
         self.vars.insert(id, state);
         self.ids.insert(sym.clone(), id);
         self.publics_table = None;
@@ -478,6 +481,9 @@ pub struct NamespaceRegistry {
     /// [`state`](Self::state)/[`state_mut`](Self::state_mut)
     /// answer from here when `by_id` misses.
     anon: FxHashMap<u64, VarState>,
+    /// Intern vars without the `:ns`/`:name` stamp (a Lite program
+    /// that references no var-metadata reader, #271).
+    bare_vars: bool,
 }
 
 impl NamespaceRegistry {
@@ -766,12 +772,13 @@ impl NamespaceRegistry {
             next_ns_id,
             by_id,
             current,
+            bare_vars,
             ..
         } = self;
         let ns_name = q.namespace().unwrap_or(current.as_str());
         let ns = ensure_ns_in(namespaces, next_ns_id, ns_name);
         let before = *next_id;
-        let id = ns.intern(&q, next_id);
+        let id = ns.intern(&q, next_id, !*bare_vars);
         // Only a fresh var needs its home recorded (re-interns hit).
         if *next_id != before {
             by_id.insert(id, Arc::clone(&ns.handle.name));
@@ -789,12 +796,13 @@ impl NamespaceRegistry {
             next_ns_id,
             by_id,
             current,
+            bare_vars,
             ..
         } = self;
         let ns_name = q.namespace().unwrap_or(current.as_str());
         let ns = ensure_ns_in(namespaces, next_ns_id, ns_name);
         let before = *next_id;
-        let id = ns.intern(q, next_id);
+        let id = ns.intern(q, next_id, !*bare_vars);
         if *next_id != before {
             by_id.insert(id, Arc::clone(&ns.handle.name));
         }
@@ -837,12 +845,13 @@ impl NamespaceRegistry {
             removed,
             next_id,
             by_id,
+            bare_vars,
             ..
         } = self;
         let ns = namespaces
             .get_mut(ns_name)
             .or_else(|| removed.get_mut(ns_name))?;
-        let id = ns.intern(sym, next_id);
+        let id = ns.intern(sym, next_id, !*bare_vars);
         by_id.insert(id, Arc::clone(&ns.handle.name));
         Some(id)
     }
@@ -862,6 +871,7 @@ impl NamespaceRegistry {
             removed,
             next_id,
             by_id,
+            bare_vars,
             ..
         } = self;
         let ns = match namespaces.get_mut(ns_name) {
@@ -869,7 +879,7 @@ impl NamespaceRegistry {
             _ => removed.get_mut(ns_name).filter(|ns| ns.id() == expected)?,
         };
         let home = ns.id();
-        let id = ns.intern(sym, next_id);
+        let id = ns.intern(sym, next_id, !*bare_vars);
         by_id.insert(id, Arc::clone(&ns.handle.name));
         Some((id, home))
     }
@@ -1416,6 +1426,12 @@ impl SharedRegistry {
     /// [`NamespaceRegistry::reserve_vars`]).
     pub(crate) fn reserve_vars(&self, ns_name: &str, additional: usize) {
         self.lock().registry.reserve_vars(ns_name, additional);
+    }
+
+    /// Intern later vars without the `:ns`/`:name` metadata stamp (see
+    /// [`Namespace::intern`]).
+    pub(crate) fn set_bare_vars(&self, bare: bool) {
+        self.lock().registry.bare_vars = bare;
     }
 
     /// Allocate an anonymous dynamic var (see

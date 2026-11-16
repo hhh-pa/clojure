@@ -49,10 +49,12 @@ pub(crate) struct FnDesc {
     pub(crate) arities: Arc<[ArityDesc]>,
 }
 
-/// One declared var: its qualified name, interned on first use.
+/// One declared var: its qualified name (interned on first use) and
+/// the compiler's Lite native hint for it.
 pub(crate) struct VarSlot {
-    ns: String,
-    name: String,
+    ns: Arc<str>,
+    name: Arc<str>,
+    hint: u32,
     var: OnceLock<Var>,
     core: OnceLock<Option<native_abi::CoreEntry>>,
 }
@@ -63,7 +65,7 @@ struct Building {
     vars: Vec<VarSlot>,
     consts: Vec<Value>,
     fns: Vec<Option<FnDesc>>,
-    lite_core_caps: Vec<&'static [clj_eval::aot_boot::LiteNativeSlice]>,
+    lite_core_caps: Vec<clj_eval::aot_boot::LiteCoreGroup>,
     lite_owned_caps: Vec<clj_eval::aot_boot::LiteOwnedSlice>,
     lite_libs: Vec<(&'static str, &'static [clj_eval::aot_boot::LiteNativeSlice])>,
     lite_seq_helpers: bool,
@@ -172,34 +174,40 @@ pub(crate) fn settle(step: Step) -> (i32, Value) {
     }
 }
 
-/// Declare var `k` (`ns/name`).
-pub(crate) fn declare_var(k: usize, ns: String, name: String) {
-    building(|b| {
-        if b.vars.len() <= k {
-            b.vars.resize_with(k + 1, || VarSlot {
-                ns: String::new(),
-                name: String::new(),
-                var: OnceLock::new(),
-                core: OnceLock::new(),
-            });
-        }
-        b.vars[k] = VarSlot {
-            ns,
-            name,
+/// Declare the program's vars — `(ns, name, Lite native hint)` in
+/// index order — in one step (one table, each namespace name shared).
+pub(crate) fn declare_vars<S: AsRef<str>>(decls: impl ExactSizeIterator<Item = (S, S, u32)>) {
+    let mut homes: Vec<Arc<str>> = Vec::new();
+    let mut vars = Vec::with_capacity(decls.len());
+    for (ns, name, hint) in decls {
+        let ns = ns.as_ref();
+        let home = match homes.iter().find(|h| ***h == *ns) {
+            Some(h) => Arc::clone(h),
+            None => {
+                let h: Arc<str> = Arc::from(ns);
+                homes.push(Arc::clone(&h));
+                h
+            }
+        };
+        vars.push(VarSlot {
+            ns: home,
+            name: Arc::from(name.as_ref()),
+            hint,
             var: OnceLock::new(),
             core: OnceLock::new(),
-        };
-    });
+        });
+    }
+    building(|b| b.vars = vars);
 }
 
 /// Register one `BootMode::Lite` core native capability group.
 pub(crate) fn declare_lite_core_cap(
-    caps: &'static [clj_eval::aot_boot::LiteNativeSlice],
+    group: clj_eval::aot_boot::LiteCoreGroup,
     owned: Option<clj_eval::aot_boot::LiteOwnedSlice>,
     seq_helpers: bool,
 ) {
     building(|b| {
-        b.lite_core_caps.push(caps);
+        b.lite_core_caps.push(group);
         if let Some(o) = owned {
             b.lite_owned_caps.push(o);
         }
@@ -556,10 +564,10 @@ pub(crate) fn run_main_lite(
 ) -> i32 {
     reset_thread_caches();
     let (declared, core_caps, owned_caps, lib_caps, seq_helpers) = building(|b| {
-        let declared: Vec<(String, String)> = b
+        let declared: Vec<(Arc<str>, Arc<str>, u32)> = b
             .vars
             .iter()
-            .map(|v| (v.ns.clone(), v.name.clone()))
+            .map(|v| (Arc::clone(&v.ns), Arc::clone(&v.name), v.hint))
             .collect();
         (
             declared,
@@ -571,14 +579,18 @@ pub(crate) fn run_main_lite(
     });
     let refs: Vec<(&str, &str)> = declared
         .iter()
-        .map(|(ns, name)| (ns.as_str(), name.as_str()))
+        .map(|(ns, name, _)| (&**ns, &**name))
         .collect();
+    let hints: Vec<u32> = declared.iter().map(|&(_, _, hint)| hint).collect();
     let mut eval = clj_eval::aot_boot::boot_lite_with_caps(
         &refs,
+        &hints,
         need_stdin,
-        &core_caps,
-        &owned_caps,
-        &lib_caps,
+        clj_eval::aot_boot::LiteTables {
+            core_groups: &core_caps,
+            owned_groups: &owned_caps,
+            lib_tables: &lib_caps,
+        },
         seq_helpers,
     );
     let code = clj_eval::aot_boot::run_with_cli_frame(&mut eval, path, args, move |eval| {
@@ -828,10 +840,17 @@ mod tests {
         let mut eval = clj_eval::boot();
         eval.eval_source("(def plain (fn [x] (* 2 x)))")
             .expect("def");
-        // Declaring past the end fills the gap; declaring inside it
-        // overwrites the placeholder.
-        declare_var(1, "user".to_owned(), "plain".to_owned());
-        declare_var(0, "clojure.core".to_owned(), "inc".to_owned());
+        // Index order; the repeated namespace shares its name.
+        let none = clj_eval::aot_boot::NO_LITE_HINT;
+        declare_vars(
+            [
+                ("clojure.core", "inc", none),
+                ("user", "plain", none),
+                ("clojure.core", "dec", none),
+            ]
+            .into_iter(),
+        );
+        building(|b| assert!(Arc::ptr_eq(&b.vars[0].ns, &b.vars[2].ns)));
         extern "C" fn stub_code(_: *mut Value, _: *const Value, _: usize, _: *const Value) -> i32 {
             0
         }

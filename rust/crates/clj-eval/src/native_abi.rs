@@ -38,8 +38,8 @@ pub fn invoke(eval: &mut Evaluator, f: &Value, args: &[Value]) -> Step {
 
 /// The runtime var for a fully qualified symbol (interned like the
 /// analyzer does when it resolves a def target or a global).
-pub fn intern_var(eval: &mut Evaluator, ns: &str, name: &str) -> Var {
-    let sym = Symbol::new(Some(ns), name);
+pub fn intern_var(eval: &mut Evaluator, ns: &Arc<str>, name: &Arc<str>) -> Var {
+    let sym = Symbol::from_shared(Some(Arc::clone(ns)), Arc::clone(name));
     let id = eval.registry.intern(&sym);
     Var { id, sym }
 }

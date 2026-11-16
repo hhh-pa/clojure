@@ -280,6 +280,10 @@ pub struct Evaluator {
     /// Skip synthesizing default var metadata maps in [`def_finish`]
     /// when `BootMode::Lite` verified no metadata readers exist (#271).
     pub(crate) skip_var_meta: bool,
+    /// The namespace name [`install_native_inner`](Self::install_native_inner)
+    /// last qualified a native with (boot installs whole namespaces in
+    /// a row: their symbols share it instead of copying it).
+    install_home: Option<Arc<str>>,
     /// Optional `core_lazy`/interpreter dispatch hooks (`None` in Lite AOT boot).
     pub(crate) lazy_hooks: Option<&'static LazyHooks>,
 }
@@ -376,6 +380,7 @@ impl Evaluator {
             recur_pool: Vec::new(),
             eager_tier: false,
             skip_var_meta: false,
+            install_home: None,
             lazy_hooks: None,
         }
     }
@@ -437,6 +442,7 @@ impl Evaluator {
             recur_pool: Vec::new(),
             eager_tier: self.eager_tier,
             skip_var_meta: self.skip_var_meta,
+            install_home: None,
             lazy_hooks: self.lazy_hooks,
         }
     }
@@ -1110,16 +1116,15 @@ impl Evaluator {
         owned: Option<Arc<crate::ext::OwnedNativeImpl>>,
     ) -> Value {
         let id = self.next_id();
-        let sym = Symbol::new(Some(ns), name);
-        // Built by hand: boot installs ~700 of these, and `format!`
-        // costs several times the copy.
-        let mut display = String::with_capacity(ns.len() + 1 + name.len());
-        display.push_str(ns);
-        display.push('/');
-        display.push_str(name);
+        let home = match self.install_home.take() {
+            Some(home) if *home == *ns => home,
+            _ => Arc::from(ns),
+        };
+        let sym = Symbol::from_shared(Some(Arc::clone(&home)), Arc::from(name));
+        self.install_home = Some(home);
         let native = Value::Extension(Arc::new(NativeFn {
             id,
-            display: Arc::from(display),
+            display: qualified_display(ns, name),
             func,
             owned,
             meta: None,
@@ -4172,9 +4177,37 @@ fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
     dm
 }
 
+/// `ns/name` as one shared string, built in a stack buffer (boot
+/// qualifies every native it installs: the heap `String` a `format!`
+/// would copy from is a second allocation).
+fn qualified_display(ns: &str, name: &str) -> Arc<str> {
+    let mut buf = [0u8; 128];
+    let len = ns.len() + 1 + name.len();
+    match buf.get_mut(..len) {
+        Some(out) => {
+            let (head, tail) = out.split_at_mut(ns.len());
+            head.copy_from_slice(ns.as_bytes());
+            tail[0] = b'/';
+            tail[1..].copy_from_slice(name.as_bytes());
+            Arc::from(std::str::from_utf8(out).unwrap_or_default())
+        }
+        None => Arc::from(format!("{ns}/{name}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualified_display_joins_short_and_long_names() {
+        assert_eq!(
+            &*qualified_display("clojure.core", "inc"),
+            "clojure.core/inc"
+        );
+        let long = "x".repeat(200);
+        assert_eq!(&*qualified_display("user", &long), format!("user/{long}"));
+    }
 
     #[test]
     fn elapsed_millis_digits_match_jvm() {

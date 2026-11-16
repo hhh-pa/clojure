@@ -2172,10 +2172,18 @@ type StaticCache<T> = std::collections::HashMap<&'static str, T>;
 /// supertype — and a scan of the 325 rows cost each lookup hundreds
 /// of string compares. The first row of a name wins, as the scan did.
 fn static_row(name: &str) -> Option<&'static StaticRow> {
-    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, &'static StaticRow>> =
+    // Fx-hashed and pre-sized: a program's first class lookup builds
+    // the whole index (SipHash made that ~200K instructions, #271).
+    // Reversed insertion keeps the first row of a repeated name.
+    static INDEX: std::sync::OnceLock<crate::env::FxHashMap<&'static str, &'static StaticRow>> =
         std::sync::OnceLock::new();
     INDEX
-        .get_or_init(|| STATIC_LATTICE.iter().rev().map(|r| (r.name, r)).collect())
+        .get_or_init(|| {
+            let mut index = crate::env::FxHashMap::default();
+            index.reserve(STATIC_LATTICE.len());
+            index.extend(STATIC_LATTICE.iter().rev().map(|r| (r.name, r)));
+            index
+        })
         .get(name)
         .copied()
 }

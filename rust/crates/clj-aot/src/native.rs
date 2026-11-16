@@ -142,10 +142,16 @@ pub struct Lowerer<'ctx> {
     var_index: HashMap<(String, String), usize>,
     fns: Vec<FnInfo<'ctx>>,
     strings: HashMap<String, PointerValue<'ctx>>,
+    byte_strings: HashMap<String, PointerValue<'ctx>>,
     fn_seq: usize,
     /// Inline the analyzer's `FastArith` int ops (off when the program
     /// can rebind vars, so core arithmetic always means the native).
     inline_arith: bool,
+    /// Whether `def`s keep their whole name metadata: always under the
+    /// full boot; in a Lite program only when it references a reader of
+    /// var metadata ([`program_reads_var_meta`]) — otherwise the
+    /// runtime keeps no `def` metadata it could see (#271).
+    var_meta: bool,
     /// Boot the compiled binary via `rt_n_main_lite` / `rt_n_ns_lite` (no
     /// embedded stdlib `core_lazy` evaluation) when the program uses only
     /// Lite-safe core/string natives and user-defined vars.
@@ -198,8 +204,10 @@ impl<'ctx> Lowerer<'ctx> {
             var_index: HashMap::new(),
             fns: Vec::new(),
             strings: HashMap::new(),
+            byte_strings: HashMap::new(),
             fn_seq: 0,
             inline_arith: true,
+            var_meta: true,
             lite: false,
             use_bitcode,
             fast_vars,
@@ -217,9 +225,14 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> Result<Module<'ctx>, Unsupported> {
         self.inline_arith = !front.units.iter().any(|u| mentions_rebinding(&u.expr));
         self.lite = can_lite_program(front);
+        self.var_meta = !self.lite || program_reads_var_meta(front);
         self.reserve_defns(front);
         let mut tops = Vec::with_capacity(front.units.len());
-        for (i, unit) in front.units.iter().enumerate() {
+        for unit in &front.units {
+            if self.drops(&unit.expr) {
+                continue;
+            }
+            let i = tops.len();
             tops.push(self.lower_thunk(&format!("cljtop_{i}"), &unit.expr, i == 0)?);
         }
         let init = self.lower_const_init();
@@ -419,11 +432,30 @@ impl<'ctx> Lowerer<'ctx> {
         if let Some(p) = self.strings.get(text) {
             return *p;
         }
-        let value = self.ctx.const_string(text.as_bytes(), false);
-        let bytes = self.const_global(&value, "cljs");
+        let bytes = self.str_bytes(text);
         let p = self.const_slice(bytes, text.len() as u64);
         self.strings.insert(text.to_owned(), p);
         p
+    }
+
+    /// A private constant global holding `text`'s bytes (cached).
+    fn str_bytes(&mut self, text: &str) -> PointerValue<'ctx> {
+        if let Some(p) = self.byte_strings.get(text) {
+            return *p;
+        }
+        let value = self.ctx.const_string(text.as_bytes(), false);
+        let bytes = self.const_global(&value, "cljs");
+        self.byte_strings.insert(text.to_owned(), bytes);
+        bytes
+    }
+
+    /// A `CSlice<u8>` header value (not a global) over `text`.
+    fn str_slice_value(&mut self, text: &str) -> inkwell::values::StructValue<'ctx> {
+        let bytes = self.str_bytes(text);
+        self.slice_ty().const_named_struct(&[
+            bytes.into(),
+            self.i64t.const_int(text.len() as u64, false).into(),
+        ])
     }
 
     fn constant(&mut self, c: Const) -> u64 {
@@ -443,17 +475,7 @@ impl<'ctx> Lowerer<'ctx> {
     fn value_const(&mut self, v: &Value) -> Result<u64, Unsupported> {
         let c = match scalar_const(v) {
             Some(c) => c,
-            None => {
-                let text = native_abi::print_constant(v);
-                match native_abi::read_constant(&text) {
-                    Ok(back) if back == *v => Const::Read(text),
-                    _ => {
-                        return Err(Unsupported(format!(
-                            "constant without a readable form: {text}"
-                        )));
-                    }
-                }
-            }
+            None => Const::Read(readable_text(v)?),
         };
         Ok(self.constant(c))
     }
@@ -1337,9 +1359,19 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(());
         };
         for e in init {
+            if self.drops(e) {
+                continue;
+            }
             self.lower_discard(f, e)?;
         }
         self.lower(f, last, dest)
+    }
+
+    /// Whether a discarded statement can go unlowered: an inert
+    /// metadata write ([`is_inert_meta_statement`]) in a program that
+    /// never reads var metadata.
+    fn drops(&self, e: &Expr) -> bool {
+        !self.var_meta && is_inert_meta_statement(e)
     }
 
     fn bc_fx_call<'a>(
@@ -3899,6 +3931,13 @@ impl<'ctx> Lowerer<'ctx> {
         span: clj_reader::Span,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
+        let inert_free;
+        let (sym, meta) = if self.var_meta {
+            (sym, meta)
+        } else {
+            inert_free = without_inert_def_meta(sym, meta);
+            (&inert_free.0, inert_free.1.as_deref())
+        };
         let sk = self.value_const(&Value::Symbol(sym.clone()))?;
         let dk = match doc {
             Some(d) => self.constant(Const::Str(d.to_owned())),
@@ -4168,16 +4207,27 @@ impl<'ctx> Lowerer<'ctx> {
         let main = self.module.add_function("main", ty, None);
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
+        // One `clj_rt::nabi::VarDecl` table: `ns/name` and the Lite
+        // native hint of every var, in index order.
+        let slice_ty = self.slice_ty();
+        let decl_ty = self
+            .ctx
+            .struct_type(&[slice_ty.into(), slice_ty.into(), self.i32t.into()], false);
         let vars = self.vars.clone();
-        for (k, (ns, name)) in vars.iter().enumerate() {
-            let np = self.str_ptr(ns);
-            let p = self.str_ptr(name);
-            self.call(
-                "rt_n_declare_var",
-                None,
-                &[self.u64c(k as u64), np.into(), p.into()],
-            );
+        let mut decls = Vec::with_capacity(vars.len());
+        for (ns, name) in &vars {
+            let ns_slice = self.str_slice_value(ns);
+            let name_slice = self.str_slice_value(name);
+            let hint = clj_eval::aot_boot::lite_native_hint(ns, name);
+            decls.push(decl_ty.const_named_struct(&[
+                ns_slice.into(),
+                name_slice.into(),
+                self.i32t.const_int(u64::from(hint), false).into(),
+            ]));
         }
+        let table = self.const_global(&decl_ty.const_array(&decls), "cljv");
+        let decls_ref = self.const_slice(table, vars.len() as u64);
+        self.call("rt_n_declare_vars", None, &[decls_ref.into()]);
         let fns: Vec<(String, Vec<ArityCode>)> = self
             .fns
             .iter()
@@ -4468,6 +4518,18 @@ fn fast_op(fast: clj_eval::ext::FastArith, n: usize) -> Option<clj_eval::ext::Fa
 
 /// A value with a direct constant builder (`None`: the reader
 /// fallback).
+/// `v`'s printed form, checked to read back equal (the
+/// `rt_n_read` constant path).
+fn readable_text(v: &Value) -> Result<String, Unsupported> {
+    let text = native_abi::print_constant(v);
+    match native_abi::read_constant(&text) {
+        Ok(back) if back == *v => Ok(text),
+        _ => Err(Unsupported(format!(
+            "constant without a readable form: {text}"
+        ))),
+    }
+}
+
 fn scalar_const(v: &Value) -> Option<Const> {
     Some(match v {
         Value::Str(s) => Const::Str(s.to_string()),
@@ -5142,6 +5204,137 @@ fn sym_key(sym: &Symbol) -> (String, String) {
         sym.namespace().unwrap_or("user").to_owned(),
         sym.name().to_owned(),
     )
+}
+
+/// Whether a program references a reader of var metadata
+/// ([`clj_eval::aot_boot::needs_var_meta`] over every var it names).
+fn program_reads_var_meta(front: &FrontEnd) -> bool {
+    let mut refs = Vec::new();
+    for u in front
+        .units
+        .iter()
+        .filter(|u| !is_inert_meta_statement(&u.expr))
+    {
+        collect_var_refs(&u.expr, &mut refs);
+    }
+    let refs: Vec<(&str, &str)> = refs
+        .iter()
+        .map(|(ns, name)| (ns.as_str(), name.as_str()))
+        .collect();
+    clj_eval::aot_boot::needs_var_meta(&refs)
+}
+
+fn collect_var_refs(e: &Expr, out: &mut Vec<(String, String)>) {
+    match e {
+        // Discarded inert metadata writes are what this decides on
+        // dropping (they are no reader).
+        Expr::Do(body) => {
+            let last = body.len().saturating_sub(1);
+            let kept = body
+                .iter()
+                .enumerate()
+                .filter(|&(i, s)| i == last || !is_inert_meta_statement(s));
+            for (_, s) in kept {
+                collect_var_refs(s, out);
+            }
+            return;
+        }
+        // (`binding` / `set!` name only dynamic vars, never a reader.)
+        Expr::Global(v) | Expr::VarRef(v) => out.push(sym_key(&v.sym)),
+        Expr::DirectNative(call) => out.push(sym_key(&call.var.sym)),
+        _ => {}
+    }
+    for_each_child(e, &mut |c| collect_var_refs(c, out));
+}
+
+/// Whether `sym` is `clojure.core/name`.
+fn is_core_sym(sym: &Symbol, name: &str) -> bool {
+    sym.namespace() == Some("clojure.core") && sym.name() == name
+}
+
+/// `defn`'s discarded `(alter-meta! (var name) assoc :arglists '…)`
+/// (and a `merge` of a constant map): a write of
+/// [`clj_eval::aot_boot::LITE_INERT_DEF_META`] keys only, with constant
+/// values — nothing but a var-metadata reader can tell it ran.
+fn is_inert_meta_statement(e: &Expr) -> bool {
+    let Some((head, args)) = global_call(e) else {
+        return false;
+    };
+    let [Expr::VarRef(_), Expr::Global(f), rest @ ..] = args else {
+        return false;
+    };
+    if !is_core_sym(head, "alter-meta!") {
+        return false;
+    }
+    if is_core_sym(&f.sym, "assoc") {
+        return is_inert_assoc(rest);
+    }
+    is_core_sym(&f.sym, "merge") && is_inert_merge(rest)
+}
+
+/// The head var's symbol and the arguments of a call to a global.
+fn global_call(e: &Expr) -> Option<(&Symbol, &[Expr])> {
+    match e {
+        Expr::DirectNative(call) => Some((&call.var.sym, call.args.as_slice())),
+        Expr::Invoke { head, args, .. } => match &**head {
+            Expr::Global(v) => Some((&v.sym, args.as_slice())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `assoc`'s `k v …` arguments: inert keys with constant values only.
+fn is_inert_assoc(kvs: &[Expr]) -> bool {
+    !kvs.is_empty()
+        && kvs.len().is_multiple_of(2)
+        && kvs.chunks(2).all(|kv| is_inert_meta_pair(&kv[0], &kv[1]))
+}
+
+/// `merge`'s argument: one constant map of inert keys.
+fn is_inert_merge(args: &[Expr]) -> bool {
+    match args {
+        [Expr::Literal(Value::Map(m)) | Expr::Quote(Value::Map(m))] => {
+            m.iter().all(|(k, _)| is_inert_def_meta_key(k))
+        }
+        _ => false,
+    }
+}
+
+/// A metadata `key value` pair with an inert key and a constant value.
+fn is_inert_meta_pair(k: &Expr, v: &Expr) -> bool {
+    matches!(k, Expr::Literal(key) if is_inert_def_meta_key(key))
+        && matches!(v, Expr::Literal(_) | Expr::Quote(_))
+}
+
+/// Whether `key` names a [`clj_eval::aot_boot::LITE_INERT_DEF_META`] key.
+fn is_inert_def_meta_key(key: &Value) -> bool {
+    matches!(key, Value::Keyword(k) if k.namespace().is_none()
+        && clj_eval::aot_boot::LITE_INERT_DEF_META.contains(&k.name()))
+}
+
+/// A `def` name and its evaluated metadata pairs without the keys no
+/// runtime path of a program that never reads var metadata can see
+/// (only side-effect-free pairs drop; an emptied map goes away).
+fn without_inert_def_meta(
+    sym: &Symbol,
+    pairs: Option<&[(Expr, Expr)]>,
+) -> (Symbol, Option<Vec<(Expr, Expr)>>) {
+    let meta = sym.meta().map(|m| {
+        m.iter()
+            .map(|(k, _)| k.clone())
+            .filter(is_inert_def_meta_key)
+            .fold(m.clone(), |m, k| m.without(&k))
+    });
+    let sym = sym.clone().with_meta(meta.filter(|m| !m.is_empty()));
+    let pairs = pairs.map(|pairs| {
+        pairs
+            .iter()
+            .filter(|(k, v)| !is_inert_meta_pair(k, v))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    (sym, pairs.filter(|p| !p.is_empty()))
 }
 
 fn collect_lite_defs(e: &Expr, defined: &mut BTreeSet<(String, String)>) {

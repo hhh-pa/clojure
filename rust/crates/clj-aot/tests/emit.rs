@@ -556,7 +556,7 @@ fn native_emit_ir_lowers_units_constants_and_main_259() {
     std::fs::remove_file(&ir).expect("cleanup");
     for needle in [
         "@rt_n_main_lite(",
-        "@rt_n_declare_var(",
+        "@rt_n_declare_vars(",
         "@rt_n_declare_fn(",
         "@rt_n_set_const(",
         "@cljconst_init",

@@ -132,13 +132,23 @@ fn argv_strings(argv: &CSlice<*const c_char>) -> Vec<String> {
 
 // ---- program tables --------------------------------------------------
 
-/// Declare var `k` as `ns/name`.
+/// One declared var as the compiler lays it out: `ns/name` and its
+/// Lite native hint (`clj_eval::aot_boot::lite_native_hint`).
+#[repr(C)]
+pub struct VarDecl {
+    ns: CSlice<u8>,
+    name: CSlice<u8>,
+    hint: u32,
+}
+
+/// Declare the program's vars, in index order.
 #[unsafe(no_mangle)]
-pub extern "C" fn rt_n_declare_var(k: u64, ns: &CSlice<u8>, name: &CSlice<u8>) {
-    native::declare_var(
-        k as usize,
-        ns.as_str().into_owned(),
-        name.as_str().into_owned(),
+pub extern "C" fn rt_n_declare_vars(decls: &CSlice<VarDecl>) {
+    native::declare_vars(
+        decls
+            .get()
+            .iter()
+            .map(|d| (d.ns.as_str(), d.name.as_str(), d.hint)),
     );
 }
 
@@ -613,14 +623,14 @@ pub extern "C" fn rt_n_ns_lite(out: &mut Value, name: &CSlice<u8>) {
 /// Register `BootMode::Lite` I/O capability natives (`println`, `slurp`, …).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_cap_io() {
-    native::declare_lite_core_cap(clj_eval::aot_boot::LITE_CAP_IO, None, false);
+    native::declare_lite_core_cap(clj_eval::aot_boot::LITE_CORE_IO, None, false);
 }
 
 /// Register `BootMode::Lite` core capability natives.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_cap_core() {
     native::declare_lite_core_cap(
-        clj_eval::aot_boot::LITE_CAP_CORE,
+        clj_eval::aot_boot::LITE_CORE_CORE,
         Some(clj_eval::aot_boot::LITE_OWNED_CORE),
         false,
     );
@@ -630,7 +640,7 @@ pub extern "C" fn rt_n_cap_core() {
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_cap_seq() {
     native::declare_lite_core_cap(
-        clj_eval::aot_boot::LITE_CAP_SEQ,
+        clj_eval::aot_boot::LITE_CORE_SEQ,
         Some(clj_eval::aot_boot::LITE_OWNED_SEQ),
         true,
     );
@@ -639,13 +649,13 @@ pub extern "C" fn rt_n_cap_seq() {
 /// Register `BootMode::Lite` regex capability natives.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_cap_re() {
-    native::declare_lite_core_cap(clj_eval::aot_boot::LITE_CAP_RE, None, false);
+    native::declare_lite_core_cap(clj_eval::aot_boot::LITE_CORE_RE, None, false);
 }
 
 /// Register `BootMode::Lite` host/concurrency/STM/protocol capability natives.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_cap_host() {
-    native::declare_lite_core_cap(clj_eval::aot_boot::LITE_CAP_HOST, None, false);
+    native::declare_lite_core_cap(clj_eval::aot_boot::LITE_CORE_HOST, None, false);
 }
 
 /// Register `BootMode::Lite` `clojure.string` capability natives.
@@ -988,7 +998,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         ($($f:ident),* $(,)?) => { vec![$((stringify!($f), $f as *const () as usize)),*] };
     }
     syms![
-        rt_n_declare_var,
+        rt_n_declare_vars,
         rt_n_declare_fn,
         rt_n_set_const,
         rt_n_main,
