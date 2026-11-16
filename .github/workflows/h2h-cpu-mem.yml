@@ -25,11 +25,13 @@
 # --script-extension .ml): identical discovery, grouping and shard rule
 # on every leg, so each shard covers exactly the same algorithms
 # everywhere by construction. The h2h-compare job unions the shards per
-# leg and gates on per-case medians across four comparisons:
+# leg and gates on per-case medians across five comparisons:
 #   - recipes      (`python` vs `rs-from`)
 #   - recipes-rsrs (`rs-to` vs `rs-from`)
 #   - aot-rsrs     (`aot-to` vs `aot-from`)
 #   - aot-ocaml    (`OCAML` vs `AOT`, allowing Clojure-only scripts)
+#   - aot-run      (`run` vs `AOT`: `rs-from` vs `aot-from`, the same
+#                   revision interpreted vs compiled)
 # Any loss fails the PR unless waived.
 #
 # Triggering (rust.yml is the prerequisite): this gate runs on
@@ -56,8 +58,8 @@
 # This is a gate, not a tracker: it reports no Bencher history.
 # Triage mode: dispatch with report_only=true, tag '[waive-h2h]' in PR
 # title or commit message, or add PR label 'waive-h2h' (or 'waive-recipes'
-# for CPython only, 'waive-ocaml' for AOT vs OCaml only) and click
-# "Re-run failed jobs" on the compare step.
+# for CPython only, 'waive-ocaml' for AOT vs OCaml only, 'waive-aot-run'
+# for AOT vs run only) and click "Re-run failed jobs" on the compare step.
 #
 # Session recipe: the flags below encode the workstation h2h sweep
 # (PR225 test plan): --repeat 3 --no-alloc --no-perf --jobs 3, GNU
@@ -688,6 +690,7 @@ jobs:
           waive_all=false
           waive_recipes=false
           waive_ocaml=false
+          waive_aot_run=false
 
           if [ "$REPORT_ONLY" = "true" ]; then
             waive_all=true
@@ -707,6 +710,9 @@ jobs:
           if echo "$tags" | grep -Eq '\[(waive-ocaml|waive ocaml)\]'; then
             waive_ocaml=true
           fi
+          if echo "$tags" | grep -Eq '\[(waive-aot-run|waive aot-run)\]'; then
+            waive_aot_run=true
+          fi
 
           # Inspect event payload labels
           if echo "$EVENT_LABELS" | grep -Eq '(waive-h2h|waive-gate|report-only)'; then
@@ -717,6 +723,9 @@ jobs:
           fi
           if echo "$EVENT_LABELS" | grep -Eq 'waive-ocaml'; then
             waive_ocaml=true
+          fi
+          if echo "$EVENT_LABELS" | grep -Eq 'waive-aot-run'; then
+            waive_aot_run=true
           fi
 
           # Inspect live PR labels (works even when clicking "Re-run failed jobs")
@@ -731,18 +740,23 @@ jobs:
             if echo "$labels" | grep -Eq '^waive-ocaml$'; then
               waive_ocaml=true
             fi
+            if echo "$labels" | grep -Eq '^waive-aot-run$'; then
+              waive_aot_run=true
+            fi
           fi
 
           recipes_flag=""
           rsrs_flag=""
           aot_rsrs_flag=""
           aot_ocaml_flag=""
+          aot_run_flag=""
           if [ "$waive_all" = "true" ]; then
             echo "::notice::H2H gate fully waived (report-only mode enabled)."
             recipes_flag="--report-only"
             rsrs_flag="--report-only"
             aot_rsrs_flag="--report-only"
             aot_ocaml_flag="--report-only"
+            aot_run_flag="--report-only"
           else
             if [ "$waive_recipes" = "true" ]; then
               echo "::notice::H2H recipes (CPython baseline) gate waived (report-only mode enabled)."
@@ -752,12 +766,16 @@ jobs:
               echo "::notice::H2H aot-ocaml (OCaml baseline) gate waived (report-only mode enabled)."
               aot_ocaml_flag="--report-only"
             fi
+            if [ "$waive_aot_run" = "true" ]; then
+              echo "::notice::H2H aot-run (AOT vs run) gate waived (report-only mode enabled)."
+              aot_run_flag="--report-only"
+            fi
           fi
 
           rc=0
-          # Four comparisons, all verdict tables in the summary; any
+          # Five comparisons, all verdict tables in the summary; any
           # can fail the job unless triage mode waives that comparison.
-          # All four gate instruction counts + RSS only (15% margin):
+          # All five gate instruction counts + RSS only (15% margin):
           # cpu_s is collected but never compared.
           $compare \
             --label recipes \
@@ -796,6 +814,17 @@ jobs:
             --merged-rs h2h-recipes-aot-from-merged.json \
             --metrics mem,ins --margin 0.15 \
             --summary-file "$GITHUB_STEP_SUMMARY" $aot_ocaml_flag || rc=$?
+          # AOT vs run: the same revision compiled (`clojure-rs build`)
+          # vs interpreted (`clojure-rs run`), case for case.
+          $compare \
+            --label aot-run \
+            --base-name run --challenger-name AOT \
+            --jvm h2h-recipes-rs-from-shard-*/h2h-recipes-rs-from-shard-*.json \
+            --rs h2h-recipes-aot-from-shard-*/h2h-recipes-aot-from-shard-*.json \
+            --merged-jvm h2h-recipes-rs-from-merged.json \
+            --merged-rs h2h-recipes-aot-from-merged.json \
+            --metrics mem,ins --margin 0.15 \
+            --summary-file "$GITHUB_STEP_SUMMARY" $aot_run_flag || rc=$?
           exit $rc
 
       - name: Upload merged leg JSONs
