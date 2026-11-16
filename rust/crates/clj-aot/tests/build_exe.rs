@@ -494,21 +494,31 @@ fn native_binary_exercises_lite_ns_stdin_and_full_cli() {
         ("[aa aa [2 3] 7]\n", "", 0)
     );
 
-    let full_src = "\
-(ns demo.full (:require [clojure.set :as s]))
-(println (s/subset? #{1} #{1 2}) (vec *command-line-args*))
+    let lite_str_src = "\
+(ns demo.str (:require [clojure.string :as s]))
+(println (s/blank? \" \") (vec *command-line-args*))
 ";
-    let (stdout, stderr, code, _report) = build_mode_and_run("full-ns-cli", full_src, &["a"]);
+    let (stdout, stderr, code, _report) = build_mode_and_run("lite-str-cli", lite_str_src, &["a"]);
     assert_eq!(
         (stdout.as_str(), stderr.as_str(), code),
         ("true [a]\n", "", 0)
     );
 
-    let full_err_src = "(run! (fn [_] (nth [1] 5)) [1])";
+    let full_src = "\
+(ns demo.full (:require [clojure.walk :as w]))
+(println (w/postwalk identity [1 2]) (vec *command-line-args*))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("full-ns-cli", full_src, &["a"]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[1 2] [a]\n", "", 0)
+    );
+
+    let full_err_src = "(println (eval '(/ 1 0)))";
     let (stdout, stderr, code, _report) = build_mode_and_run("full-err", full_err_src, &[]);
     assert_eq!(stdout, "");
     assert_eq!(code, 1);
-    assert!(stderr.contains("IndexOutOfBoundsException"), "{stderr}");
+    assert!(stderr.contains("ArithmeticException"), "{stderr}");
 
     let scalar_src = "\
 (defn step [x] (+ x 1))

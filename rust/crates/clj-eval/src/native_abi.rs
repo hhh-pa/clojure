@@ -621,6 +621,18 @@ pub fn bind_counts() -> Arc<BindCounts> {
     crate::env::bind_counts()
 }
 
+/// Parse a JVM `Long/parseLong` base-10 string (`None` on malformed or out-of-range).
+#[must_use]
+pub fn parse_long_str(s: &str) -> Option<i64> {
+    crate::core::parse_long_str(s)
+}
+
+/// Parse a JVM `Double/parseDouble` string (`None` on malformed input).
+#[must_use]
+pub fn parse_double_str(s: &str) -> Option<f64> {
+    crate::core::parse_double_str(s)
+}
+
 /// Call `callee` (a cached var root) with `args` by value: a native
 /// runs its entry directly (an owned-args entry gets them moved in —
 /// no per-arg clone/drop, and head-releasing loopers can free as they

@@ -1013,10 +1013,9 @@ pub struct SharedRegistry {
     /// The next throwable/closure/native identity (lock-free: closure
     /// creation draws one per evaluation — #226).
     ids: Arc<AtomicU64>,
-    /// Deferred vars (see `core_lazy`): boot's `core.clj` segment,
-    /// then one per lazily loaded library — a lock-free membership
-    /// test on every analyzer resolution.
-    lazy: Arc<[OnceLock<LazyIndex>; LAZY_SEGMENTS]>,
+    /// Deferred vars (see `core_lazy`): allocated lazily on the first
+    /// deferred library install so `BootMode::Lite` pays zero allocation.
+    lazy: Arc<OnceLock<Box<[OnceLock<LazyIndex>; LAZY_SEGMENTS]>>>,
     /// Serializes lazy forcing (reentrant: a forced form may force
     /// another), so no thread observes a var mid-force as unbound.
     lazy_force: Arc<VarAlterLock>,
@@ -1131,7 +1130,7 @@ impl Default for SharedRegistry {
             })),
             epoch: Arc::new(AtomicU64::new(0)),
             ids: Arc::new(AtomicU64::new(1)),
-            lazy: Arc::new(std::array::from_fn(|_| OnceLock::new())),
+            lazy: Arc::new(OnceLock::new()),
             lazy_force: Arc::new(VarAlterLock::new()),
         }
     }
@@ -1500,14 +1499,15 @@ impl SharedRegistry {
     /// Whether `id` is an unforced deferred var (lock-free).
     pub(crate) fn is_lazy(&self, id: u64) -> bool {
         self.lazy
-            .iter()
-            .map_while(OnceLock::get)
-            .any(|ix| ix.test(id))
+            .get()
+            .is_some_and(|segs| segs.iter().map_while(OnceLock::get).any(|ix| ix.test(id)))
     }
 
     /// Whether a lazy index segment is still free.
     pub(crate) fn lazy_room(&self) -> bool {
-        self.lazy.iter().any(|seg| seg.get().is_none())
+        self.lazy
+            .get()
+            .is_none_or(|segs| segs.iter().any(|seg| seg.get().is_none()))
     }
 
     /// Install one file's deferred groups in the next free segment
@@ -1526,8 +1526,10 @@ impl SharedRegistry {
         // Under the registry lock, so concurrent loads claim
         // distinct segments.
         let index = LazyIndex::new(&ids);
-        self.lazy
-            .iter()
+        let segs = self
+            .lazy
+            .get_or_init(|| Box::new(std::array::from_fn(|_| OnceLock::new())));
+        segs.iter()
             .find(|seg| seg.get().is_none())
             .is_some_and(|seg| seg.set(index).is_ok())
     }
@@ -1584,9 +1586,11 @@ impl SharedRegistry {
 
     /// Publish a forced group: its vars stop testing lazy.
     pub(crate) fn finish_lazy(&self, group: &LazyGroup) {
-        for ix in self.lazy.iter().map_while(OnceLock::get) {
-            for &id in &group.ids {
-                ix.clear(id);
+        if let Some(segs) = self.lazy.get() {
+            for ix in segs.iter().map_while(OnceLock::get) {
+                for &id in &group.ids {
+                    ix.clear(id);
+                }
             }
         }
     }

@@ -317,12 +317,23 @@ impl<'ctx> Lowerer<'ctx> {
             .iter()
             .map(|a| match a {
                 BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
-                // Pointers (slots, headers, code); no other kind is passed.
+                BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
                 _ => self.ptr.into(),
             })
             .collect();
         let f = self.helper(name, ret, &params);
         self.builder.build_call(f, args, "").expect("call")
+    }
+
+    fn call_f64(
+        &self,
+        name: &str,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> inkwell::values::FloatValue<'ctx> {
+        self.call_raw(name, Some(self.ctx.f64_type().into()), args)
+            .try_as_basic_value()
+            .expect_basic("f64")
+            .into_float_value()
     }
 
     fn call(
@@ -615,46 +626,78 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("store");
     }
 
+    fn is_numeric(&self, slot: PointerValue<'ctx>) -> IntValue<'ctx> {
+        let t = self.tag(slot);
+        let shifted = self
+            .builder
+            .build_int_sub(t, self.i8t.const_int(2, false), "t2")
+            .expect("sub");
+        self.builder
+            .build_int_compare(
+                IntPredicate::ULE,
+                shifted,
+                self.i8t.const_int(1, false),
+                "num",
+            )
+            .expect("cmp")
+    }
+
+    /// Continue in a fresh block when every slot is `Int` (`2`) or `Double` (`3`),
+    /// else branch to `slow`.
+    fn when_numeric(&self, f: &FnCtx<'ctx>, elems: &[PointerValue<'ctx>], slow: BasicBlock<'ctx>) {
+        let mut numeric = self.ctx.bool_type().const_int(1, false);
+        for e in elems {
+            let ok = self.is_numeric(*e);
+            numeric = self.builder.build_and(numeric, ok, "nums").expect("and");
+        }
+        let go = self.ctx.append_basic_block(f.func, "num_fast");
+        self.builder
+            .build_conditional_branch(numeric, go, slow)
+            .expect("br");
+        self.builder.position_at_end(go);
+    }
+
+    /// `true` iff `a` (and `b` when present) hold `TAG_INT`.
+    fn both_ints(&self, a: PointerValue<'ctx>, b: Option<PointerValue<'ctx>>) -> IntValue<'ctx> {
+        let two = self.i8t.const_int(2, false);
+        let a_int = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, self.tag(a), two, "a_int")
+            .expect("cmp");
+        match b {
+            Some(rhs) => {
+                let b_int = self
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, self.tag(rhs), two, "b_int")
+                    .expect("cmp");
+                self.builder.build_and(a_int, b_int, "ints").expect("and")
+            }
+            None => a_int,
+        }
+    }
+
     /// `FastArith` over numeric (int/double) args when not all ints:
     /// computes in `f64` (at least one arg is a double), else `slow`.
-    /// Branch to `go` (and return loaded numeric `f64` operands) when all `elems`
-    /// are ints or floats; else branch to `slow`.
     fn lower_float_operands(
         &self,
         f: &FnCtx<'ctx>,
-        elems: &[PointerValue<'ctx>],
+        lhs: PointerValue<'ctx>,
+        rhs: Option<PointerValue<'ctx>>,
         slow: BasicBlock<'ctx>,
     ) -> (
         inkwell::values::FloatValue<'ctx>,
         inkwell::values::FloatValue<'ctx>,
     ) {
-        let mut numeric = self.ctx.bool_type().const_int(1, false);
-        for e in elems {
-            let t = self.tag(*e);
-            let ok = self
-                .builder
-                .build_int_compare(
-                    IntPredicate::ULE,
-                    self.builder
-                        .build_int_sub(t, self.i8t.const_int(2, false), "t2")
-                        .expect("sub"),
-                    self.i8t.const_int(1, false),
-                    "num",
-                )
-                .expect("cmp");
-            numeric = self.builder.build_and(numeric, ok, "nums").expect("and");
-        }
-        let go = self.ctx.append_basic_block(f.func, "dbl_fast");
-        self.builder
-            .build_conditional_branch(numeric, go, slow)
-            .expect("br");
-        self.builder.position_at_end(go);
-        let x = self.num_as_f64(elems[0]);
-        let one = self.ctx.f64_type().const_float(1.0);
-        let y = if elems.len() == 2 {
-            self.num_as_f64(elems[1])
+        if let Some(r) = rhs {
+            self.when_numeric(f, &[lhs, r], slow);
         } else {
-            one
+            self.when_numeric(f, &[lhs], slow);
+        }
+        let x = self.num_as_f64(lhs);
+        let one = self.ctx.f64_type().const_float(1.0);
+        let y = match rhs {
+            Some(r) => self.num_as_f64(r),
+            None => one,
         };
         (x, y)
     }
@@ -663,13 +706,14 @@ impl<'ctx> Lowerer<'ctx> {
         &self,
         f: &FnCtx<'ctx>,
         op: clj_eval::ext::FastArith,
-        elems: &[PointerValue<'ctx>],
+        lhs: PointerValue<'ctx>,
+        rhs: PointerValue<'ctx>,
         sink: &BoolSink<'ctx>,
         slow: BasicBlock<'ctx>,
     ) {
         use clj_eval::ext::FastArith;
         use inkwell::FloatPredicate;
-        let (x, y) = self.lower_float_operands(f, elems, slow);
+        let (x, y) = self.lower_float_operands(f, lhs, Some(rhs), slow);
         let pred = match op {
             FastArith::Lt => FloatPredicate::OLT,
             FastArith::Lte => FloatPredicate::OLE,
@@ -683,22 +727,25 @@ impl<'ctx> Lowerer<'ctx> {
         self.finish_bool(f.func, sink, r);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_double_arith(
         &self,
         f: &FnCtx<'ctx>,
         op: clj_eval::ext::FastArith,
-        elems: &[PointerValue<'ctx>],
+        lhs: PointerValue<'ctx>,
+        rhs: Option<PointerValue<'ctx>>,
         dest: PointerValue<'ctx>,
         slow: BasicBlock<'ctx>,
         done: BasicBlock<'ctx>,
     ) {
         use clj_eval::ext::FastArith;
-        let (x, y) = self.lower_float_operands(f, elems, slow);
+        let (x, y) = self.lower_float_operands(f, lhs, rhs, slow);
         let b = &self.builder;
         let r = match op {
             FastArith::Add | FastArith::Inc => b.build_float_add(x, y, "fa"),
             FastArith::Sub | FastArith::Dec => b.build_float_sub(x, y, "fs"),
-            _ => b.build_float_mul(x, y, "fm"),
+            FastArith::Mul => b.build_float_mul(x, y, "fm"),
+            _ => b.build_float_div(x, y, "fd"),
         }
         .expect("fop");
         self.write_double(f.func, dest, r);
@@ -1864,6 +1911,9 @@ impl<'ctx> Lowerer<'ctx> {
         if self.direct_target(head, args.len()).is_some() {
             return self.lower_direct_invoke(f, head, args, dest);
         }
+        if self.try_lower_static(f, head, args, dest)? {
+            return Ok(());
+        }
         let h = self.slot(f);
         self.lower(f, head, h)?;
         let (arr, elems) = self.slot_array(f, args.len());
@@ -1882,6 +1932,257 @@ impl<'ctx> Lowerer<'ctx> {
         self.drop_v(f.func, h);
         self.write_tag(h, 0);
         self.drop_and_nil_slots(f.func, &elems);
+        Ok(())
+    }
+
+    fn try_lower_static(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        head: &Expr,
+        args: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if !self.inline_arith {
+            return Ok(false);
+        }
+        let Expr::Global(v) = head else {
+            return Ok(false);
+        };
+        if v.sym.namespace() != Some("clojure.core") || v.sym.name() != "__static*" {
+            return Ok(false);
+        }
+        let [fqn_e, mem_e, rest @ ..] = args else {
+            return Ok(false);
+        };
+        let (Some(fqn), Some(mem)) = (expr_str_lit(fqn_e), expr_str_lit(mem_e)) else {
+            return Ok(false);
+        };
+        let Some(op) = static_op_spec(fqn, mem, rest.len()) else {
+            return Ok(false);
+        };
+        let (refs, temps, moved) = self.arg_refs(f, rest, dest)?;
+        let slow = self.ctx.append_basic_block(f.func, "static_slow");
+        let done = self.ctx.append_basic_block(f.func, "static_done");
+        self.emit_static_fast(f, op, &refs, dest, slow, done);
+        self.emit_static_invoke_slow(f, head, args, &refs, dest, slow, done)?;
+        self.builder.position_at_end(done);
+        self.drop_and_nil_slots(f.func, &temps);
+        self.drop_and_nil_slots(f.func, &moved);
+        Ok(true)
+    }
+
+    fn emit_static_fast(
+        &self,
+        f: &FnCtx<'ctx>,
+        op: StaticOp,
+        refs: &[PointerValue<'ctx>],
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        match op {
+            StaticOp::Parse(shim) => self.lower_static_parse(shim, refs[0], dest, slow, done),
+            StaticOp::RemUnsigned => self.lower_static_urem(f, refs[0], refs[1], dest, slow, done),
+            StaticOp::MathAbs => self.lower_static_math_abs(f, refs[0], dest, slow, done),
+            StaticOp::MathSqrt => self.lower_static_math_sqrt(f, refs[0], dest, slow, done),
+            StaticOp::MathUnary(shim) => {
+                self.when_numeric(f, &[refs[0]], slow);
+                let x = self.num_as_f64(refs[0]);
+                let r = self.call_f64(shim, &[x.into()]);
+                self.write_double(f.func, dest, r);
+                self.builder.build_unconditional_branch(done).expect("br");
+            }
+            StaticOp::MathBinary(shim) => {
+                self.when_numeric(f, &[refs[0], refs[1]], slow);
+                let (x, y) = (self.num_as_f64(refs[0]), self.num_as_f64(refs[1]));
+                let r = self.call_f64(shim, &[x.into(), y.into()]);
+                self.write_double(f.func, dest, r);
+                self.builder.build_unconditional_branch(done).expect("br");
+            }
+        }
+    }
+
+    fn lower_static_parse(
+        &self,
+        shim: &str,
+        arg: PointerValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let hit = self
+            .call(shim, Some(self.i8t), &[dest.into(), arg.into()])
+            .expect("hit");
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, hit, self.i8t.const_zero(), "parse_ok")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(ok, done, slow)
+            .expect("br");
+    }
+
+    fn lower_static_urem(
+        &self,
+        f: &FnCtx<'ctx>,
+        lhs: PointerValue<'ctx>,
+        rhs: PointerValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let ints = self.both_ints(lhs, Some(rhs));
+        let int_bb = self.ctx.append_basic_block(f.func, "urem_int");
+        self.builder
+            .build_conditional_branch(ints, int_bb, slow)
+            .expect("br");
+        self.builder.position_at_end(int_bb);
+        let (x, y) = (self.int_payload(lhs), self.int_payload(rhs));
+        let nz = self
+            .builder
+            .build_int_compare(IntPredicate::NE, y, self.i64t.const_zero(), "nz")
+            .expect("cmp");
+        let go_bb = self.ctx.append_basic_block(f.func, "urem_go");
+        self.builder
+            .build_conditional_branch(nz, go_bb, slow)
+            .expect("br");
+        self.builder.position_at_end(go_bb);
+        let r = self
+            .builder
+            .build_int_unsigned_rem(x, y, "urem")
+            .expect("urem");
+        self.write_int(f.func, dest, r);
+        self.builder.build_unconditional_branch(done).expect("br");
+    }
+
+    fn lower_static_math_abs(
+        &self,
+        f: &FnCtx<'ctx>,
+        arg: PointerValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let tag = self.tag(arg);
+        let is_int = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, tag, self.i8t.const_int(2, false), "abs_i")
+            .expect("cmp");
+        let int_bb = self.ctx.append_basic_block(f.func, "abs_int");
+        let chk_dbl = self.ctx.append_basic_block(f.func, "abs_chk_dbl");
+        self.builder
+            .build_conditional_branch(is_int, int_bb, chk_dbl)
+            .expect("br");
+
+        self.builder.position_at_end(int_bb);
+        let x = self.int_payload(arg);
+        let intr = inkwell::intrinsics::Intrinsic::find("llvm.abs").expect("llvm.abs");
+        let decl = intr
+            .get_declaration(&self.module, &[self.i64t.into()])
+            .expect("decl");
+        let false_bit = self.ctx.bool_type().const_zero();
+        let abs_i = self
+            .builder
+            .build_call(decl, &[x.into(), false_bit.into()], "iabs")
+            .expect("call")
+            .try_as_basic_value()
+            .expect_basic("iabs")
+            .into_int_value();
+        self.write_int(f.func, dest, abs_i);
+        self.builder.build_unconditional_branch(done).expect("br");
+
+        self.builder.position_at_end(chk_dbl);
+        let is_dbl = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, tag, self.i8t.const_int(3, false), "abs_d")
+            .expect("cmp");
+        let dbl_bb = self.ctx.append_basic_block(f.func, "abs_dbl");
+        self.builder
+            .build_conditional_branch(is_dbl, dbl_bb, slow)
+            .expect("br");
+
+        self.builder.position_at_end(dbl_bb);
+        let f64t = self.ctx.f64_type();
+        let d = self
+            .builder
+            .build_load(f64t, self.byte_at(arg, 8), "d")
+            .expect("load")
+            .into_float_value();
+        let fintr = inkwell::intrinsics::Intrinsic::find("llvm.fabs").expect("llvm.fabs");
+        let fdecl = fintr
+            .get_declaration(&self.module, &[f64t.into()])
+            .expect("decl");
+        let abs_d = self
+            .builder
+            .build_call(fdecl, &[d.into()], "fabs")
+            .expect("call")
+            .try_as_basic_value()
+            .expect_basic("fabs")
+            .into_float_value();
+        self.write_double(f.func, dest, abs_d);
+        self.builder.build_unconditional_branch(done).expect("br");
+    }
+
+    fn lower_static_math_sqrt(
+        &self,
+        f: &FnCtx<'ctx>,
+        arg: PointerValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        self.when_numeric(f, &[arg], slow);
+        let x = self.num_as_f64(arg);
+        let f64t = self.ctx.f64_type();
+        let intr = inkwell::intrinsics::Intrinsic::find("llvm.sqrt").expect("llvm.sqrt");
+        let decl = intr
+            .get_declaration(&self.module, &[f64t.into()])
+            .expect("decl");
+        let r = self
+            .builder
+            .build_call(decl, &[x.into()], "sqrt")
+            .expect("call")
+            .try_as_basic_value()
+            .expect_basic("sqrt")
+            .into_float_value();
+        self.write_double(f.func, dest, r);
+        self.builder.build_unconditional_branch(done).expect("br");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_static_invoke_slow(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        head: &Expr,
+        args: &[Expr],
+        refs: &[PointerValue<'ctx>],
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) -> Result<(), Unsupported> {
+        self.builder.position_at_end(slow);
+        let h = self.slot(f);
+        self.lower(f, head, h)?;
+        let (arr, elems) = self.slot_array(f, args.len());
+        self.lower(f, &args[0], elems[0])?;
+        self.lower(f, &args[1], elems[1])?;
+        for (i, r) in refs.iter().enumerate() {
+            self.copy_bits(elems[2 + i], *r);
+        }
+        let aref = self.slots_ref(f, arr, args.len());
+        let st = self
+            .call(
+                "rt_n_invoke",
+                Some(self.i32t),
+                &[dest.into(), h.into(), aref.into()],
+            )
+            .expect("st");
+        self.clear_aliases(&elems[2..]);
+        self.check(f, st);
+        self.drop_v(f.func, h);
+        self.write_tag(h, 0);
+        self.drop_and_nil_slots(f.func, &elems[..2]);
+        self.builder.build_unconditional_branch(done).expect("br");
         Ok(())
     }
 
@@ -2075,7 +2376,7 @@ impl<'ctx> Lowerer<'ctx> {
     #[allow(clippy::too_many_arguments)]
     fn emit_direct_inline(
         &mut self,
-        f: &FnCtx<'ctx>,
+        f: &mut FnCtx<'ctx>,
         fast: Option<clj_eval::ext::FastArith>,
         core_name: Option<&str>,
         bc_override: Option<&'static str>,
@@ -2356,12 +2657,12 @@ impl<'ctx> Lowerer<'ctx> {
         self.slots_ref(f, base, refs.len())
     }
 
-    /// The analyzer's `FastArith` op inline: all-int args compute in
-    /// `i64` (overflow takes `slow`), numeric mixes in `f64`, anything
-    /// else takes `slow`.
+    /// The analyzer's `FastArith` op inline: variadic folds over 2..=8 args
+    /// step pairwise through a scratch POD slot so mixed int/double or late
+    /// overflow falls back cleanly to `slow` with original `elems` intact.
     fn lower_fast_arith(
         &mut self,
-        f: &FnCtx<'ctx>,
+        f: &mut FnCtx<'ctx>,
         op: clj_eval::ext::FastArith,
         elems: &[PointerValue<'ctx>],
         dest: PointerValue<'ctx>,
@@ -2376,19 +2677,40 @@ impl<'ctx> Lowerer<'ctx> {
             self.lower_cmp_arith(f, op, elems, &BoolSink::Slot { dest, done }, slow);
             return;
         }
-        let n = elems.len();
-        let two = self.i8t.const_int(2, false);
-        let mut ints = self
-            .builder
-            .build_int_compare(IntPredicate::EQ, self.tag(elems[0]), two, "a_int")
-            .expect("cmp");
-        if n == 2 {
-            let b_int = self
-                .builder
-                .build_int_compare(IntPredicate::EQ, self.tag(elems[1]), two, "b_int")
-                .expect("cmp");
-            ints = self.builder.build_and(ints, b_int, "ints").expect("and");
+        if elems.len() <= 2 {
+            self.lower_fast_arith_step(f, op, elems[0], elems.get(1).copied(), dest, slow, done);
+            return;
         }
+        let acc = self.slot(f);
+        for i in 1..elems.len() {
+            let lhs = if i == 1 { elems[0] } else { acc };
+            let last = i + 1 == elems.len();
+            let out = if last { dest } else { acc };
+            let step_done = if last {
+                done
+            } else {
+                self.ctx.append_basic_block(f.func, "arith_step")
+            };
+            self.lower_fast_arith_step(f, op, lhs, Some(elems[i]), out, slow, step_done);
+            if !last {
+                self.builder.position_at_end(step_done);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_fast_arith_step(
+        &self,
+        f: &FnCtx<'ctx>,
+        op: clj_eval::ext::FastArith,
+        lhs: PointerValue<'ctx>,
+        rhs: Option<PointerValue<'ctx>>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        use clj_eval::ext::FastArith;
+        let ints = self.both_ints(lhs, rhs);
         let fastb = self.ctx.append_basic_block(f.func, "native_fast");
         let dbl_check = self.ctx.append_basic_block(f.func, "native_dbl_check");
         self.builder
@@ -2396,14 +2718,17 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("br");
         // Doubles (and int/double mixes): f64 math like the native.
         self.builder.position_at_end(dbl_check);
-        self.lower_double_arith(f, op, elems, dest, slow, done);
+        self.lower_double_arith(f, op, lhs, rhs, dest, slow, done);
         self.builder.position_at_end(fastb);
-        let a = self.int_payload(elems[0]);
-        let b = if n == 2 {
-            self.int_payload(elems[1])
-        } else {
-            self.i64t.const_int(1, false)
+        let a = self.int_payload(lhs);
+        let b = match rhs {
+            Some(r) => self.int_payload(r),
+            None => self.i64t.const_int(1, false),
         };
+        if op == FastArith::Div {
+            self.lower_int_div_exact(f, a, b, dest, slow, done);
+            return;
+        }
         let name = match op {
             FastArith::Add | FastArith::Inc => "llvm.sadd.with.overflow",
             FastArith::Sub | FastArith::Dec => "llvm.ssub.with.overflow",
@@ -2436,6 +2761,51 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("br");
         self.builder.position_at_end(okb);
         self.write_int(f.func, dest, r);
+        self.builder.build_unconditional_branch(done).expect("br");
+    }
+
+    fn lower_int_div_exact(
+        &self,
+        f: &FnCtx<'ctx>,
+        x: IntValue<'ctx>,
+        y: IntValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let bb = &self.builder;
+        let y0 = bb
+            .build_int_compare(IntPredicate::EQ, y, self.i64t.const_zero(), "y0")
+            .expect("cmp");
+        let min_v = self.i64t.const_int(i64::MIN as u64, true);
+        let xmin = bb
+            .build_int_compare(IntPredicate::EQ, x, min_v, "xmin")
+            .expect("cmp");
+        let ymin = bb
+            .build_int_compare(IntPredicate::EQ, y, min_v, "ymin")
+            .expect("cmp");
+        let edge = bb
+            .build_or(
+                y0,
+                bb.build_or(xmin, ymin, "anymin").expect("or"),
+                "div_edge",
+            )
+            .expect("or");
+        let safe_bb = self.ctx.append_basic_block(f.func, "div_safe");
+        bb.build_conditional_branch(edge, slow, safe_bb)
+            .expect("br");
+        self.builder.position_at_end(safe_bb);
+        let bb = &self.builder;
+        let rem = bb.build_int_signed_rem(x, y, "rem").expect("rem");
+        let exact = bb
+            .build_int_compare(IntPredicate::EQ, rem, self.i64t.const_zero(), "exact")
+            .expect("cmp");
+        let exact_bb = self.ctx.append_basic_block(f.func, "div_exact");
+        bb.build_conditional_branch(exact, exact_bb, slow)
+            .expect("br");
+        self.builder.position_at_end(exact_bb);
+        let q = self.builder.build_int_signed_div(x, y, "q").expect("div");
+        self.write_int(f.func, dest, q);
         self.builder.build_unconditional_branch(done).expect("br");
     }
 
@@ -2719,16 +3089,54 @@ impl<'ctx> Lowerer<'ctx> {
         sink: &BoolSink<'ctx>,
         slow: BasicBlock<'ctx>,
     ) {
-        let two = self.i8t.const_int(2, false);
-        let a_int = self
-            .builder
-            .build_int_compare(IntPredicate::EQ, self.tag(elems[0]), two, "a_int")
-            .expect("cmp");
-        let b_int = self
-            .builder
-            .build_int_compare(IntPredicate::EQ, self.tag(elems[1]), two, "b_int")
-            .expect("cmp");
-        let ints = self.builder.build_and(a_int, b_int, "ints").expect("and");
+        if elems.len() == 2 {
+            self.lower_cmp_pair(f, op, elems[0], elems[1], sink, slow);
+            return;
+        }
+        let false_bb = self.ctx.append_basic_block(f.func, "cmp_false");
+        for i in 0..elems.len() - 1 {
+            if i + 2 == elems.len() {
+                self.lower_cmp_pair(f, op, elems[i], elems[i + 1], sink, slow);
+                break;
+            }
+            let here = self.builder.get_insert_block().expect("bb");
+            let step_join = self.ctx.append_basic_block(f.func, "cmp_step");
+            self.builder.position_at_end(step_join);
+            let phi = self
+                .builder
+                .build_phi(self.ctx.bool_type(), "step_cmp")
+                .expect("phi");
+            self.builder.position_at_end(here);
+            let next_bb = self.ctx.append_basic_block(f.func, "cmp_next");
+            let step_sink = BoolSink::Jump {
+                join: step_join,
+                phi,
+            };
+            self.lower_cmp_pair(f, op, elems[i], elems[i + 1], &step_sink, slow);
+            self.builder.position_at_end(step_join);
+            self.builder
+                .build_conditional_branch(phi.as_basic_value().into_int_value(), next_bb, false_bb)
+                .expect("br");
+            self.builder.position_at_end(next_bb);
+        }
+        let saved = self.builder.get_insert_block();
+        self.builder.position_at_end(false_bb);
+        self.finish_bool(f.func, sink, self.ctx.bool_type().const_zero());
+        if let Some(bb) = saved {
+            self.builder.position_at_end(bb);
+        }
+    }
+
+    fn lower_cmp_pair(
+        &self,
+        f: &FnCtx<'ctx>,
+        op: clj_eval::ext::FastArith,
+        lhs: PointerValue<'ctx>,
+        rhs: PointerValue<'ctx>,
+        sink: &BoolSink<'ctx>,
+        slow: BasicBlock<'ctx>,
+    ) {
+        let ints = self.both_ints(lhs, Some(rhs));
         let fastb = self.ctx.append_basic_block(f.func, "cmp_fast");
         let dbl_check = self.ctx.append_basic_block(f.func, "cmp_dbl_check");
         self.builder
@@ -2736,20 +3144,14 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("br");
         // Doubles (and int/double mixes): f64 math like the native.
         self.builder.position_at_end(dbl_check);
-        self.lower_double_cmp(f, op, elems, sink, slow);
+        self.lower_double_cmp(f, op, lhs, rhs, sink, slow);
         self.builder.position_at_end(fastb);
-        self.emit_int_cmp(
-            f,
-            op,
-            self.int_payload(elems[0]),
-            self.int_payload(elems[1]),
-            sink,
-        );
+        self.emit_int_cmp(f, op, self.int_payload(lhs), self.int_payload(rhs), sink);
     }
 
     fn lower_intrinsic(
         &mut self,
-        f: &FnCtx<'ctx>,
+        f: &mut FnCtx<'ctx>,
         name: &str,
         a: &[PointerValue<'ctx>],
         dest: PointerValue<'ctx>,
@@ -2773,7 +3175,11 @@ impl<'ctx> Lowerer<'ctx> {
                     .expect("zext");
                 self.write_int(f.func, dest, n);
             }
-            ("quot" | "rem" | "mod" | "max" | "min", 2)
+            ("max" | "min", 2..=8) => {
+                self.lower_minmax(f, name == "max", a, dest, slow, done);
+                return true;
+            }
+            ("quot" | "rem" | "mod", 2)
             | (
                 "bit-and"
                 | "bit-or"
@@ -2792,6 +3198,106 @@ impl<'ctx> Lowerer<'ctx> {
         }
         self.builder.build_unconditional_branch(done).expect("br");
         true
+    }
+
+    fn lower_minmax(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        is_max: bool,
+        elems: &[PointerValue<'ctx>],
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        if elems.len() == 2 {
+            self.lower_minmax_step(f, is_max, elems[0], elems[1], dest, slow, done);
+            return;
+        }
+        let acc = self.slot(f);
+        for i in 1..elems.len() {
+            let lhs = if i == 1 { elems[0] } else { acc };
+            let last = i + 1 == elems.len();
+            let out = if last { dest } else { acc };
+            let step_done = if last {
+                done
+            } else {
+                self.ctx.append_basic_block(f.func, "mm_step")
+            };
+            self.lower_minmax_step(f, is_max, lhs, elems[i], out, slow, step_done);
+            if !last {
+                self.builder.position_at_end(step_done);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_minmax_step(
+        &self,
+        f: &FnCtx<'ctx>,
+        is_max: bool,
+        lhs: PointerValue<'ctx>,
+        rhs: PointerValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        use inkwell::FloatPredicate;
+        self.when_numeric(f, &[lhs, rhs], slow);
+        let ints = self.both_ints(lhs, Some(rhs));
+        let int_bb = self.ctx.append_basic_block(f.func, "mm_int");
+        let dbl_bb = self.ctx.append_basic_block(f.func, "mm_dbl");
+        self.builder
+            .build_conditional_branch(ints, int_bb, dbl_bb)
+            .expect("br");
+
+        self.builder.position_at_end(int_bb);
+        let (ix, iy) = (self.int_payload(lhs), self.int_payload(rhs));
+        let pred = if is_max {
+            IntPredicate::SGT
+        } else {
+            IntPredicate::SLT
+        };
+        let ipick = self
+            .builder
+            .build_int_compare(pred, ix, iy, "ipick")
+            .expect("cmp");
+        let iwin = self
+            .builder
+            .build_select(ipick, ix, iy, "iwin")
+            .expect("sel")
+            .into_int_value();
+        self.write_int(f.func, dest, iwin);
+        self.builder.build_unconditional_branch(done).expect("br");
+
+        self.builder.position_at_end(dbl_bb);
+        let (fx, fy) = (self.num_as_f64(lhs), self.num_as_f64(rhs));
+        // Mirror core::minmax: strict winner keeps incumbent, NaN incumbent wins.
+        let x_nan = self
+            .builder
+            .build_float_compare(FloatPredicate::UNO, fx, fx, "xnan")
+            .expect("fcmp");
+        let fpred = if is_max {
+            FloatPredicate::OGT
+        } else {
+            FloatPredicate::OLT
+        };
+        let fcmp = self
+            .builder
+            .build_float_compare(fpred, fx, fy, "fcmp")
+            .expect("fcmp");
+        let fpick = self.builder.build_or(x_nan, fcmp, "fpick").expect("or");
+        let win_ptr = self
+            .builder
+            .build_select(fpick, lhs, rhs, "winp")
+            .expect("sel")
+            .into_pointer_value();
+        let win_bits = self
+            .builder
+            .build_load(self.slot_ty, win_ptr, "winv")
+            .expect("load");
+        self.drop_v(f.func, dest);
+        self.builder.build_store(dest, win_bits).expect("store");
+        self.builder.build_unconditional_branch(done).expect("br");
     }
 
     fn lower_const(
@@ -2993,11 +3499,10 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(true);
         }
         let fast = fast_op(call.fast, n);
-        let is_cmp = n == 2
-            && matches!(
-                fast,
-                Some(FastArith::Lt | FastArith::Lte | FastArith::Gt | FastArith::Gte)
-            );
+        let is_cmp = matches!(
+            fast,
+            Some(FastArith::Lt | FastArith::Lte | FastArith::Gt | FastArith::Gte)
+        );
         let is_pred = matches!(
             (name, n),
             (
@@ -3673,14 +4178,174 @@ impl<'ctx> Lowerer<'ctx> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum StaticOp {
+    Parse(&'static str),
+    RemUnsigned,
+    MathAbs,
+    MathSqrt,
+    MathUnary(&'static str),
+    MathBinary(&'static str),
+}
+
+fn expr_str_lit(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Quote(Value::Str(s)) | Expr::Literal(Value::Str(s)) => Some(s.as_ref()),
+        _ => None,
+    }
+}
+
+fn static_op_spec(fqn: &str, member: &str, n_args: usize) -> Option<StaticOp> {
+    const TABLE: &[(&str, &str, usize, StaticOp)] = &[
+        (
+            "java.lang.Long",
+            "parseLong",
+            1,
+            StaticOp::Parse("rt_n_parse_long"),
+        ),
+        (
+            "java.lang.Integer",
+            "parseInt",
+            1,
+            StaticOp::Parse("rt_n_parse_int"),
+        ),
+        (
+            "java.lang.Double",
+            "parseDouble",
+            1,
+            StaticOp::Parse("rt_n_parse_double"),
+        ),
+        (
+            "java.lang.Long",
+            "remainderUnsigned",
+            2,
+            StaticOp::RemUnsigned,
+        ),
+        ("java.lang.Math", "abs", 1, StaticOp::MathAbs),
+        ("java.lang.Math", "sqrt", 1, StaticOp::MathSqrt),
+        (
+            "java.lang.Math",
+            "exp",
+            1,
+            StaticOp::MathUnary("rt_n_math_exp"),
+        ),
+        (
+            "java.lang.Math",
+            "log",
+            1,
+            StaticOp::MathUnary("rt_n_math_log"),
+        ),
+        (
+            "java.lang.Math",
+            "log10",
+            1,
+            StaticOp::MathUnary("rt_n_math_log10"),
+        ),
+        (
+            "java.lang.Math",
+            "ceil",
+            1,
+            StaticOp::MathUnary("rt_n_math_ceil"),
+        ),
+        (
+            "java.lang.Math",
+            "floor",
+            1,
+            StaticOp::MathUnary("rt_n_math_floor"),
+        ),
+        (
+            "java.lang.Math",
+            "sin",
+            1,
+            StaticOp::MathUnary("rt_n_math_sin"),
+        ),
+        (
+            "java.lang.Math",
+            "cos",
+            1,
+            StaticOp::MathUnary("rt_n_math_cos"),
+        ),
+        (
+            "java.lang.Math",
+            "tan",
+            1,
+            StaticOp::MathUnary("rt_n_math_tan"),
+        ),
+        (
+            "java.lang.Math",
+            "asin",
+            1,
+            StaticOp::MathUnary("rt_n_math_asin"),
+        ),
+        (
+            "java.lang.Math",
+            "acos",
+            1,
+            StaticOp::MathUnary("rt_n_math_acos"),
+        ),
+        (
+            "java.lang.Math",
+            "atan",
+            1,
+            StaticOp::MathUnary("rt_n_math_atan"),
+        ),
+        (
+            "java.lang.Math",
+            "sinh",
+            1,
+            StaticOp::MathUnary("rt_n_math_sinh"),
+        ),
+        (
+            "java.lang.Math",
+            "cosh",
+            1,
+            StaticOp::MathUnary("rt_n_math_cosh"),
+        ),
+        (
+            "java.lang.Math",
+            "tanh",
+            1,
+            StaticOp::MathUnary("rt_n_math_tanh"),
+        ),
+        (
+            "java.lang.Math",
+            "cbrt",
+            1,
+            StaticOp::MathUnary("rt_n_math_cbrt"),
+        ),
+        (
+            "java.lang.Math",
+            "pow",
+            2,
+            StaticOp::MathBinary("rt_n_math_pow"),
+        ),
+        (
+            "java.lang.Math",
+            "atan2",
+            2,
+            StaticOp::MathBinary("rt_n_math_atan2"),
+        ),
+        (
+            "java.lang.Math",
+            "hypot",
+            2,
+            StaticOp::MathBinary("rt_n_math_hypot"),
+        ),
+    ];
+    TABLE
+        .iter()
+        .find(|&&(c, m, n, _)| c == fqn && m == member && n == n_args)
+        .map(|r| r.3)
+}
+
 /// The `FastArith` op a direct call inlines (`inc`/`dec` take one
-/// arg, the rest two).
+/// arg, binary/variadic ops fold up to 8 args).
 fn fast_op(fast: clj_eval::ext::FastArith, n: usize) -> Option<clj_eval::ext::FastArith> {
     use clj_eval::ext::FastArith;
     match (fast, n) {
         (FastArith::Inc | FastArith::Dec, 1) => Some(fast),
         (FastArith::None | FastArith::Inc | FastArith::Dec, _) => None,
-        (other, 2) => Some(other),
+        (other, 2..=8) => Some(other),
         _ => None,
     }
 }

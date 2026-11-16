@@ -556,6 +556,147 @@ fn reduce_step(
     }
 }
 
+fn reduce_kv_step(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &mut Value,
+    k: Value,
+    v: Value,
+) -> Result<bool, NativeError> {
+    let mut step_args = SmallVec::new();
+    step_args.push(std::mem::replace(acc, Value::Nil));
+    step_args.push(k);
+    step_args.push(v);
+    // `core.clj`'s `(f acc k v)` is a plain invoke: a non-fn `f` raises
+    // the interpreter's own invoke error, never the `IFn` pre-check's.
+    let next = eval.call_owned(f, step_args).map_err(signal_to_native)?;
+    if let Some(inner) = as_reduced(&next) {
+        *acc = inner.clone();
+        return Ok(true);
+    }
+    *acc = next;
+    Ok(false)
+}
+
+fn native_reduce_kv(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    native_reduce_kv_owned(eval, args.iter().cloned().collect())
+}
+
+fn reduce_kv_vector(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &mut Value,
+    v: &Vector,
+) -> Result<(), NativeError> {
+    for i in 0..v.len() {
+        let Some(elem) = v.get(i) else {
+            break;
+        };
+        if reduce_kv_step(eval, f, acc, Value::Int(i as i64), elem)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// `core.clj`'s index loop for every other `vector?` (subvecs and
+/// `vector-of` vectors): `(f acc i (nth coll i))` for `i` below `(count coll)`.
+fn reduce_kv_indexed(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &mut Value,
+    coll: &Value,
+) -> Result<(), NativeError> {
+    let n = crate::coll::count_of(eval, coll)?;
+    for i in 0..n {
+        let elem = crate::coll::native_nth(eval, &[coll.clone(), Value::Int(i)])?;
+        if reduce_kv_step(eval, f, acc, Value::Int(i), elem)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// `core.clj`'s `:else` arm: `(reduce (fn [acc e] (f acc (key e) (val e)))
+/// init coll)` over the coll's seq (records, entries, lists, sorted maps,
+/// and non-colls alike — each head must be a real map entry).
+fn reduce_kv_seq(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &mut Value,
+    coll: Value,
+) -> Result<(), NativeError> {
+    walk_seq(eval, coll, |eval, head| {
+        let k = crate::coll::entry_key(head)?;
+        let v = crate::coll::entry_val(head)?;
+        if reduce_kv_step(eval, f, acc, k, v)? {
+            return Ok(Walk::Stop);
+        }
+        Ok(Walk::Continue)
+    })
+}
+
+pub(crate) fn native_reduce_kv_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/reduce-kv", &args, &[3])?;
+    let f = args[0].clone();
+    let mut acc = std::mem::replace(&mut args[1], Value::Nil);
+    let coll = take_walk_coll(&mut args, 2);
+    match &coll {
+        Value::Nil => Ok(acc),
+        Value::Vector(v) => {
+            reduce_kv_vector(eval, &f, &mut acc, v)?;
+            Ok(acc)
+        }
+        Value::Map(m) => {
+            for (k, v) in m.iter() {
+                if reduce_kv_step(eval, &f, &mut acc, k.clone(), v.clone())? {
+                    break;
+                }
+            }
+            Ok(acc)
+        }
+        c if crate::core::is_vector(c) && !matches!(c, Value::MapEntry { .. }) => {
+            reduce_kv_indexed(eval, &f, &mut acc, c)?;
+            Ok(acc)
+        }
+        _ => {
+            reduce_kv_seq(eval, &f, &mut acc, coll)?;
+            Ok(acc)
+        }
+    }
+}
+
+fn native_run_bang(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    native_run_bang_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_run_bang_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/run!", &args, &[2])?;
+    let f = args[0].clone();
+    let coll = take_walk_coll(&mut args, 1);
+    let prepared = crate::vm::Prepared::of(&f, 1);
+    walk_seq(eval, coll, |eval, head| {
+        let res = match prepared.as_ref() {
+            Some(p) => p.call1(eval, head.clone()).map_err(signal_to_native)?,
+            // `#(proc %2)` invokes `proc` directly (see `reduce_kv_step`).
+            None => eval
+                .call(&f, std::slice::from_ref(head))
+                .map_err(signal_to_native)?,
+        };
+        if as_reduced(&res).is_some() {
+            return Ok(Walk::Stop);
+        }
+        Ok(Walk::Continue)
+    })?;
+    Ok(Value::Nil)
+}
+
 fn native_take_last(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     // Borrow-path compat shim (see [`OwnedNativeImpl`]).
     native_take_last_owned(eval, args.iter().cloned().collect())
@@ -1787,7 +1928,9 @@ pub(crate) const SEQS_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("keys", native_keys),
     ("vals", native_vals),
     ("reduce", native_reduce),
+    ("reduce-kv", native_reduce_kv),
     ("reverse", native_reverse),
+    ("run!", native_run_bang),
     ("rseq", native_rseq),
     ("sort", native_sort),
     ("sort-by", native_sort_by),

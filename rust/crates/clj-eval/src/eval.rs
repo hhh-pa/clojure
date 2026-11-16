@@ -277,6 +277,9 @@ pub struct Evaluator {
     /// its first entry rather than once it runs hot (see
     /// [`set_eager_tier`](Self::set_eager_tier)).
     pub(crate) eager_tier: bool,
+    /// Skip synthesizing default var metadata maps in [`def_finish`]
+    /// when `BootMode::Lite` verified no metadata readers exist (#271).
+    pub(crate) skip_var_meta: bool,
     /// Optional `core_lazy`/interpreter dispatch hooks (`None` in Lite AOT boot).
     pub(crate) lazy_hooks: Option<&'static LazyHooks>,
 }
@@ -372,6 +375,7 @@ impl Evaluator {
             call_depth: 0,
             recur_pool: Vec::new(),
             eager_tier: false,
+            skip_var_meta: false,
             lazy_hooks: None,
         }
     }
@@ -432,6 +436,7 @@ impl Evaluator {
             // cross threads).
             recur_pool: Vec::new(),
             eager_tier: self.eager_tier,
+            skip_var_meta: self.skip_var_meta,
             lazy_hooks: self.lazy_hooks,
         }
     }
@@ -2308,12 +2313,18 @@ impl Evaluator {
         span: Span,
     ) -> Value {
         let dynamic = Self::dynamic_of(sym);
-        let meta = self.def_var_meta(sym, name_meta.as_ref(), doc, span);
+        let meta = if self.skip_var_meta && name_meta.is_none() {
+            None
+        } else {
+            Some(self.def_var_meta(sym, name_meta.as_ref(), doc, span))
+        };
         self.registry.with_state_mut(id, |state| {
             if let Some(v) = value {
                 state.root = Some(v);
             }
-            state.meta = Some(meta);
+            if let Some(m) = meta {
+                state.meta = Some(m);
+            }
             state.dynamic = dynamic;
         });
         Value::Var(Var {
@@ -2768,6 +2779,13 @@ impl Evaluator {
             FastArith::Add => x.checked_add(y).map(Value::Int),
             FastArith::Sub => x.checked_sub(y).map(Value::Int),
             FastArith::Mul => x.checked_mul(y).map(Value::Int),
+            FastArith::Div => {
+                if y != 0 && x != i64::MIN && y != i64::MIN && x % y == 0 {
+                    Some(Value::Int(x / y))
+                } else {
+                    None
+                }
+            }
             FastArith::Lt => Some(Value::Bool(x < y)),
             FastArith::Lte => Some(Value::Bool(x <= y)),
             FastArith::Gt => Some(Value::Bool(x > y)),
@@ -4395,10 +4413,15 @@ mod tests {
 
     #[test]
     fn fast_int2_rows() {
-        use FastArith::{Add, Dec, Gt, Gte, Inc, Lt, Lte, Mul, Sub};
+        use FastArith::{Add, Dec, Div, Gt, Gte, Inc, Lt, Lte, Mul, Sub};
         assert_eq!(Evaluator::fast_int2(Add, 1, 2), Some(Value::Int(3)));
         assert_eq!(Evaluator::fast_int2(Sub, 5, 3), Some(Value::Int(2)));
         assert_eq!(Evaluator::fast_int2(Mul, 4, -3), Some(Value::Int(-12)));
+        assert_eq!(Evaluator::fast_int2(Div, 6, -2), Some(Value::Int(-3)));
+        assert_eq!(Evaluator::fast_int2(Div, 5, 2), None);
+        assert_eq!(Evaluator::fast_int2(Div, 5, 0), None);
+        assert_eq!(Evaluator::fast_int2(Div, i64::MIN, 2), None);
+        assert_eq!(Evaluator::fast_int2(Div, 2, i64::MIN), None);
         assert_eq!(Evaluator::fast_int2(Lt, 1, 2), Some(Value::Bool(true)));
         assert_eq!(Evaluator::fast_int2(Lt, 2, 2), Some(Value::Bool(false)));
         assert_eq!(Evaluator::fast_int2(Lte, 2, 2), Some(Value::Bool(true)));

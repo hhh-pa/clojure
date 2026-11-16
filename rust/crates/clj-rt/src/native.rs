@@ -65,7 +65,7 @@ struct Building {
     fns: Vec<Option<FnDesc>>,
     lite_core_caps: Vec<&'static [clj_eval::aot_boot::LiteNativeSlice]>,
     lite_owned_caps: Vec<clj_eval::aot_boot::LiteOwnedSlice>,
-    lite_string: Option<&'static [clj_eval::aot_boot::LiteNativeSlice]>,
+    lite_libs: Vec<(&'static str, &'static [clj_eval::aot_boot::LiteNativeSlice])>,
     lite_seq_helpers: bool,
 }
 
@@ -207,14 +207,18 @@ pub(crate) fn declare_lite_core_cap(
     });
 }
 
-/// Register the `BootMode::Lite` `clojure.string` native capability group.
-pub(crate) fn declare_lite_string_cap(
+/// Register a `BootMode::Lite` library native capability group (e.g.
+/// `clojure.string`).
+pub(crate) fn declare_lite_lib_cap(
+    ns: &'static str,
     caps: &'static [clj_eval::aot_boot::LiteNativeSlice],
-    owned: clj_eval::aot_boot::LiteOwnedSlice,
+    owned: Option<clj_eval::aot_boot::LiteOwnedSlice>,
 ) {
     building(|b| {
-        b.lite_string = Some(caps);
-        b.lite_owned_caps.push(owned);
+        b.lite_libs.push((ns, caps));
+        if let Some(o) = owned {
+            b.lite_owned_caps.push(o);
+        }
     });
 }
 
@@ -508,7 +512,7 @@ pub(crate) fn run_main_lite(
     need_stdin: bool,
 ) -> i32 {
     reset_thread_caches();
-    let (declared, core_caps, owned_caps, string_cap, seq_helpers) = building(|b| {
+    let (declared, core_caps, owned_caps, lib_caps, seq_helpers) = building(|b| {
         let declared: Vec<(String, String)> = b
             .vars
             .iter()
@@ -518,7 +522,7 @@ pub(crate) fn run_main_lite(
             declared,
             std::mem::take(&mut b.lite_core_caps),
             std::mem::take(&mut b.lite_owned_caps),
-            std::mem::take(&mut b.lite_string),
+            std::mem::take(&mut b.lite_libs),
             std::mem::take(&mut b.lite_seq_helpers),
         )
     });
@@ -531,7 +535,7 @@ pub(crate) fn run_main_lite(
         need_stdin,
         &core_caps,
         &owned_caps,
-        string_cap.unwrap_or(&[]),
+        &lib_caps,
         seq_helpers,
     );
     let code = clj_eval::aot_boot::run_with_cli_frame(&mut eval, path, args, move |eval| {

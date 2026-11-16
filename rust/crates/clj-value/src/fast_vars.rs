@@ -25,10 +25,15 @@ const EXACT_BIND_SLOTS: usize = 4096;
 const OVERFLOW_BIND_SLOTS: usize = 1024;
 const TOTAL_BIND_SLOTS: usize = EXACT_BIND_SLOTS + OVERFLOW_BIND_SLOTS;
 
+/// One binding-refcount table: a fixed-size array, so `slot_index`'s
+/// masked indices need no bounds check (the bitcode helpers inline these
+/// reads and must not reference `core`'s panic machinery, #260).
+type BindSlots = [AtomicUsize; TOTAL_BIND_SLOTS];
+
 /// Process-wide atomic refcounts of active thread bindings per `var_id`.
 #[derive(Debug)]
 pub struct BindCounts {
-    slots: Box<[AtomicUsize; TOTAL_BIND_SLOTS]>,
+    slots: OnceLock<Box<BindSlots>>,
 }
 
 impl Default for BindCounts {
@@ -38,12 +43,18 @@ impl Default for BindCounts {
 }
 
 impl BindCounts {
-    /// Allocate a zeroed binding-refcount table.
+    /// Allocate an empty binding-refcount table; the 40 KB slot array is
+    /// materialized lazily on the first dynamic binding push.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            slots: Box::new([const { AtomicUsize::new(0) }; TOTAL_BIND_SLOTS]),
+            slots: OnceLock::new(),
         }
+    }
+
+    #[cold]
+    fn alloc_slots() -> Box<BindSlots> {
+        Box::new([const { AtomicUsize::new(0) }; TOTAL_BIND_SLOTS])
     }
 
     #[inline]
@@ -60,19 +71,31 @@ impl BindCounts {
     #[inline]
     #[must_use]
     pub fn is_bound(&self, var_id: u64) -> bool {
-        self.slots[Self::slot_index(var_id)].load(Ordering::Acquire) != 0
+        let Some(slots) = self.slots.get() else {
+            return false;
+        };
+        slots[Self::slot_index(var_id)].load(Ordering::Acquire) != 0
     }
 
     /// Record `n` added binding entries for `var_id`.
     #[inline]
     pub fn add(&self, var_id: u64, n: usize) {
-        self.slots[Self::slot_index(var_id)].fetch_add(n, Ordering::AcqRel);
+        if n == 0 {
+            return;
+        }
+        let slots = self.slots.get_or_init(Self::alloc_slots);
+        slots[Self::slot_index(var_id)].fetch_add(n, Ordering::AcqRel);
     }
 
     /// Release `n` removed binding entries for `var_id`.
     #[inline]
     pub fn sub(&self, var_id: u64, n: usize) {
-        self.slots[Self::slot_index(var_id)].fetch_sub(n, Ordering::Release);
+        if n == 0 {
+            return;
+        }
+        if let Some(slots) = self.slots.get() {
+            slots[Self::slot_index(var_id)].fetch_sub(n, Ordering::Release);
+        }
     }
 }
 
@@ -237,5 +260,20 @@ mod tests {
         assert!(bind_counts.is_bound(large_id));
         bind_counts.sub(large_id, 1);
         assert!(!bind_counts.is_bound(large_id));
+    }
+
+    #[test]
+    fn bind_counts_lazy_and_noop_guards() {
+        let bind_counts = BindCounts::new();
+        // Zero-count and uninitialized sub are harmless no-ops that keep the
+        // 40 KB table unallocated.
+        bind_counts.add(3, 0);
+        bind_counts.sub(3, 0);
+        bind_counts.sub(3, 1);
+        assert!(!bind_counts.is_bound(3));
+        bind_counts.add(3, 2);
+        assert!(bind_counts.is_bound(3));
+        bind_counts.sub(3, 2);
+        assert!(!bind_counts.is_bound(3));
     }
 }

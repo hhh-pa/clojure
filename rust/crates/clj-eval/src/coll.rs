@@ -2873,11 +2873,9 @@ fn native_distinctp(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 /// entry-shaped inputs work, anything else fails exactly like the
 /// same `nth`. (On the JVM, non-entries fail the `Map$Entry` cast
 /// instead — the one observable edge of the missing type.)
-fn native_key(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/key", args, &[1])?;
-    // Only real entries answer (`key-vec`, `key-nil`): 2-vectors
-    // are NOT entries on the JVM.
-    match &args[0] {
+/// Extract the key from a `MapEntry`, or raise the JVM's `Map$Entry` error.
+pub(crate) fn entry_key(v: &Value) -> Result<Value, NativeError> {
+    match v {
         Value::MapEntry { key, .. } => Ok((**key).clone()),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
@@ -2887,9 +2885,9 @@ fn native_key(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     }
 }
 
-fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/val", args, &[1])?;
-    match &args[0] {
+/// Extract the value from a `MapEntry`, or raise the JVM's `Map$Entry` error.
+pub(crate) fn entry_val(v: &Value) -> Result<Value, NativeError> {
+    match v {
         Value::MapEntry { val, .. } => Ok((**val).clone()),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
@@ -2897,6 +2895,18 @@ fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         )),
         other => Err(cce_err(other, "java.util.Map$Entry")),
     }
+}
+
+fn native_key(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/key", args, &[1])?;
+    // Only real entries answer (`key-vec`, `key-nil`): 2-vectors
+    // are NOT entries on the JVM.
+    entry_key(&args[0])
+}
+
+fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/val", args, &[1])?;
+    entry_val(&args[0])
 }
 
 /// The S5D collection natives installed into `clojure.core` by

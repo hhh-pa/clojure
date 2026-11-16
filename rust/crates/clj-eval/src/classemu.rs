@@ -3991,7 +3991,7 @@ fn static_identity_hashcode(args: &[Value]) -> Result<Value, NativeError> {
 /// U+202F), plus the controls U+001C–U+001F. Out-of-range ints
 /// and lone surrogates read false; anything else is the
 /// `Character` cast failure.
-fn static_character_is_whitespace(args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn static_character_is_whitespace(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
         1 => Ok(Value::Bool(match &args[0] {
             Value::Char(c) => java_is_whitespace(*c),

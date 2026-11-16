@@ -1083,12 +1083,12 @@ fn dec_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
     }
 }
 
-fn native_inc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_inc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/inc", args, &[1])?;
     inc_one(eval, as_num(&args[0])?)
 }
 
-fn native_dec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_dec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/dec", args, &[1])?;
     dec_one(eval, as_num(&args[0])?)
 }
@@ -1277,7 +1277,7 @@ fn tower_sign(n: &Num, want: num_bigint::Sign) -> bool {
     num_sign(n) == want
 }
 
-fn native_zero(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_zero(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/zero?", args, &[1])?;
     Ok(Value::Bool(match as_num(&args[0])? {
         Num::Int(x) => x == 0,
@@ -1698,7 +1698,7 @@ pub(crate) fn is_counted(v: &Value) -> bool {
 fn is_list(v: &Value) -> bool {
     matches!(v, Value::List(_))
 }
-fn is_vector(v: &Value) -> bool {
+pub(crate) fn is_vector(v: &Value) -> bool {
     matches!(
         v,
         Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
@@ -5038,6 +5038,7 @@ const FAST_ARITH_TABLE: &[(NativeFnPtr, FastArith)] = &[
     (native_add, FastArith::Add),
     (native_sub, FastArith::Sub),
     (native_mul, FastArith::Mul),
+    (native_div, FastArith::Div),
     (native_lt, FastArith::Lt),
     (native_lte, FastArith::Lte),
     (native_gt, FastArith::Gt),
@@ -5533,6 +5534,7 @@ mod tests {
         assert_eq!(fast_arith_for(native_add), FastArith::Add);
         assert_eq!(fast_arith_for(native_sub), FastArith::Sub);
         assert_eq!(fast_arith_for(native_mul), FastArith::Mul);
+        assert_eq!(fast_arith_for(native_div), FastArith::Div);
         assert_eq!(fast_arith_for(native_lt), FastArith::Lt);
         assert_eq!(fast_arith_for(native_lte), FastArith::Lte);
         assert_eq!(fast_arith_for(native_gt), FastArith::Gt);

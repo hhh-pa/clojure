@@ -4226,10 +4226,32 @@ fn realize_deep_set(eval: &mut Evaluator, s: &Set) -> Result<Value, Signal> {
     Ok(Value::Set(out.with_meta(s.meta().cloned())))
 }
 
+/// Scalars that can never hold a pending seq (no spine, no fields):
+/// [`realize_deep`] returns them as-is without the unbounded-seq and
+/// record probes (every other variant — records and structs included —
+/// takes the full walk).
+#[inline]
+fn is_atomic(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Nil
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Double(_)
+            | Value::Char(_)
+            | Value::Str(_)
+            | Value::Keyword(_)
+            | Value::Symbol(_)
+    )
+}
+
 /// Deep-realize pending seqs into realized ones (for printing,
 /// `str`, and `=`); realized seqs rebuild with realized items and
 /// preserved metadata.
 pub(crate) fn realize_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    if is_atomic(v) {
+        return Ok(v.clone());
+    }
     // Unbounded seqs are preserved, never expanded: expanding them
     // hangs, `hash`'s post-check (like the JVM's `hasheq` overrides)
     // must SEE them to throw `UnsupportedOperationException`, and

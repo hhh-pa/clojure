@@ -2641,15 +2641,15 @@ const TAP_LOOP_NAME: &str = "clojure.core/tap-loop";
 /// (daemon), so tap tests never block suite exit.
 pub struct TapSystem {
     inner: Mutex<TapInner>,
-    tx: mpsc::SyncSender<Value>,
+    tx: std::sync::OnceLock<mpsc::SyncSender<Value>>,
 }
 
 struct TapInner {
     /// The registry set (`=` dedup — fns compare by identity, like
     /// the JVM's set over `.equals`-less fns).
     taps: Vec<Value>,
-    /// The queue's receiver (taken by the dispatcher thread once it
-    /// starts).
+    /// The queue's receiver (allocated on first `add-tap`/`tap>`, then taken
+    /// by the dispatcher thread once it starts).
     rx: Option<mpsc::Receiver<Value>>,
     /// Whether the dispatcher is spawned (flipped before the spawn,
     /// so concurrent starters spawn exactly one thread; reset when
@@ -2658,17 +2658,16 @@ struct TapInner {
 }
 
 impl TapSystem {
-    /// An unstarted system (the dispatcher spawns on the first
-    /// `add-tap`/`tap>`, like the JVM's forced `tap-loop` delay).
+    /// An unstarted system (the queue and dispatcher spawn arrive on the first
+    /// `add-tap`/`tap>`, keeping Lite/short runs free of a 1024-slot allocation).
     pub(crate) fn new() -> Self {
-        let (tx, rx) = mpsc::sync_channel(TAP_QUEUE_CAPACITY);
         Self {
             inner: Mutex::new(TapInner {
                 taps: Vec::new(),
-                rx: Some(rx),
+                rx: None,
                 started: false,
             }),
-            tx,
+            tx: std::sync::OnceLock::new(),
         }
     }
 
@@ -2682,6 +2681,11 @@ impl TapSystem {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if inner.started {
                 return Ok(());
+            }
+            if self.tx.get().is_none() {
+                let (tx, rx) = mpsc::sync_channel(TAP_QUEUE_CAPACITY);
+                let _ = self.tx.set(tx);
+                inner.rx = Some(rx);
             }
             inner.started = true;
         }
@@ -2744,7 +2748,10 @@ impl TapSystem {
     /// a first-class queue item).
     pub(crate) fn offer(self: &Arc<Self>, eval: &Evaluator, x: Value) -> Result<bool, NativeError> {
         self.ensure_started(eval)?;
-        match self.tx.try_send(x) {
+        let Some(tx) = self.tx.get() else {
+            return Ok(false);
+        };
+        match tx.try_send(x) {
             Ok(()) => Ok(true),
             // Past capacity the item drops (`false`, never
             // blocking); disconnection drops it all the same

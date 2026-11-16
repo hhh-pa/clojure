@@ -67,9 +67,10 @@ impl<T> CSlice<T> {
 }
 
 impl CSlice<u8> {
-    /// The bytes as (lossy) UTF-8 text.
-    fn text(&self) -> String {
-        String::from_utf8_lossy(self.get()).into_owned()
+    /// The bytes borrowed as UTF-8 when valid, avoiding heap allocation on
+    /// AOT string/symbol/keyword literals.
+    fn as_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(self.get())
     }
 }
 
@@ -134,7 +135,11 @@ fn argv_strings(argv: &CSlice<*const c_char>) -> Vec<String> {
 /// Declare var `k` as `ns/name`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_declare_var(k: u64, ns: &CSlice<u8>, name: &CSlice<u8>) {
-    native::declare_var(k as usize, ns.text(), name.text());
+    native::declare_var(
+        k as usize,
+        ns.as_str().into_owned(),
+        name.as_str().into_owned(),
+    );
 }
 
 /// Declare compiled fn `k`: its display name and arities.
@@ -152,7 +157,7 @@ pub extern "C" fn rt_n_declare_fn(k: u64, display: &CSlice<u8>, arities: &CSlice
     native::declare_fn(
         k as usize,
         FnDesc {
-            display: std::sync::Arc::from(display.text()),
+            display: std::sync::Arc::from(display.as_str().as_ref()),
             arities: arities.into(),
         },
     );
@@ -172,7 +177,12 @@ pub extern "C" fn rt_n_main(
     init: Code,
     tops: &CSlice<Code>,
 ) -> i32 {
-    native::run_main(&path.text(), &argv_strings(argv), init, tops.get().to_vec())
+    native::run_main(
+        &path.as_str(),
+        &argv_strings(argv),
+        init,
+        tops.get().to_vec(),
+    )
 }
 
 /// Run the program under `BootMode::Lite` (`need_stdin != 0` initializes `*in*`).
@@ -185,7 +195,7 @@ pub extern "C" fn rt_n_main_lite(
     need_stdin: u8,
 ) -> i32 {
     native::run_main_lite(
-        &path.text(),
+        &path.as_str(),
         &argv_strings(argv),
         init,
         tops.get().to_vec(),
@@ -198,39 +208,39 @@ pub extern "C" fn rt_n_main_lite(
 /// `out = "…"`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_str(out: &mut Value, s: &CSlice<u8>) {
-    *out = Value::Str(std::sync::Arc::from(s.text().as_str()));
+    *out = Value::Str(std::sync::Arc::from(s.as_str().as_ref()));
 }
 
 /// `out = :ns/name` (`ns` null: no namespace).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_kw(out: &mut Value, ns: Option<&CSlice<u8>>, name: &CSlice<u8>) {
-    let ns = ns.map(CSlice::text);
-    *out = Value::Keyword(Keyword::new(ns.as_deref(), &name.text()));
+    let ns = ns.map(CSlice::as_str);
+    *out = Value::Keyword(Keyword::new(ns.as_deref(), &name.as_str()));
 }
 
 /// `out = 'ns/name` (no metadata; `ns` null: no namespace).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_sym(out: &mut Value, ns: Option<&CSlice<u8>>, name: &CSlice<u8>) {
-    let ns = ns.map(CSlice::text);
-    *out = Value::Symbol(Symbol::new(ns.as_deref(), &name.text()));
+    let ns = ns.map(CSlice::as_str);
+    *out = Value::Symbol(Symbol::new(ns.as_deref(), &name.as_str()));
 }
 
 /// `out = #"…"` (the pattern source).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_regex(out: &mut Value, s: &CSlice<u8>) {
-    *out = Value::Regex(std::sync::Arc::from(s.text().as_str()));
+    *out = Value::Regex(std::sync::Arc::from(s.as_str().as_ref()));
 }
 
 /// `out =` static field `class/field` (nil when unknown).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_static_field(out: &mut Value, class: &CSlice<u8>, field: &CSlice<u8>) {
-    *out = native_abi::static_field(&class.text(), &field.text()).unwrap_or(Value::Nil);
+    *out = native_abi::static_field(&class.as_str(), &field.as_str()).unwrap_or(Value::Nil);
 }
 
 /// `out =` the class named `name` (folded class constants).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_class(out: &mut Value, name: &CSlice<u8>) {
-    let name = name.text();
+    let name = name.as_str();
     *out = with_active(|eval| native_abi::class_named(eval, &name));
 }
 
@@ -238,7 +248,7 @@ pub extern "C" fn rt_n_class(out: &mut Value, name: &CSlice<u8>) {
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_read(out: &mut Value, src: &CSlice<u8>) {
     // The build checked every such constant reads back to itself.
-    *out = native_abi::read_constant(&src.text()).expect("pooled constants read back");
+    *out = native_abi::read_constant(&src.as_str()).expect("pooled constants read back");
 }
 
 // ---- values ------------------------------------------------------------
@@ -595,7 +605,7 @@ pub extern "C" fn rt_n_ns(out: &mut Value, ns_k: u64) -> i32 {
 /// Lightweight `(ns name …)` transition in `BootMode::Lite`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_ns_lite(out: &mut Value, name: &CSlice<u8>) {
-    let ns = name.text();
+    let ns = name.as_str();
     with_active(|eval| clj_eval::aot_boot::ensure_ns_lite(eval, &ns));
     *out = Value::Nil;
 }
@@ -641,9 +651,10 @@ pub extern "C" fn rt_n_cap_host() {
 /// Register `BootMode::Lite` `clojure.string` capability natives.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_cap_string() {
-    native::declare_lite_string_cap(
+    native::declare_lite_lib_cap(
+        "clojure.string",
         clj_eval::aot_boot::LITE_CAP_STRING,
-        clj_eval::aot_boot::LITE_OWNED_STRING,
+        Some(clj_eval::aot_boot::LITE_OWNED_STRING),
     );
 }
 
@@ -651,8 +662,8 @@ pub extern "C" fn rt_n_cap_string() {
 /// in `BootMode::Lite`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_require_string_lite(out: &mut Value, alias: &CSlice<u8>) {
-    let text = alias.text();
-    let alias_opt = (!text.is_empty()).then_some(text.as_str());
+    let text = alias.as_str();
+    let alias_opt = (!text.is_empty()).then_some(text.as_ref());
     with_active(|eval| clj_eval::aot_boot::require_string_lite(eval, alias_opt));
     *out = Value::Nil;
 }
@@ -874,9 +885,6 @@ pub extern "C" fn rt_n_conj_bang_fx(a: &Value, b: &Value) -> u8 {
     u8::from(native_abi::conj_bang_fx(a, b))
 }
 
-/// Every `rt_n_*` shim by symbol name (the in-process JIT maps a
-/// native module's declarations to these).
-#[must_use]
 /// Fast C-ABI ASCII predicate for long strings called from `clj-bc` (`1` = ASCII).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_str_ascii(v: &Value) -> u8 {
@@ -886,6 +894,95 @@ pub extern "C" fn rt_n_str_ascii(v: &Value) -> u8 {
     }
 }
 
+fn parse_str_into<T>(
+    out: &mut Value,
+    v: &Value,
+    parse: fn(&str) -> Option<T>,
+    wrap: fn(T) -> Value,
+) -> u8 {
+    let Value::Str(s) = v else {
+        return 0;
+    };
+    let Some(val) = parse(s) else {
+        return 0;
+    };
+    *out = wrap(val);
+    1
+}
+
+fn parse_int32_str(s: &str) -> Option<i64> {
+    native_abi::parse_long_str(s)
+        .and_then(|n| i32::try_from(n).ok())
+        .map(i64::from)
+}
+
+/// Fast C-ABI `Long/parseLong` over a `String` (`1` = parsed, `0` = fall back to `__static*`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_parse_long(out: &mut Value, v: &Value) -> u8 {
+    parse_str_into(out, v, native_abi::parse_long_str, Value::Int)
+}
+
+/// Fast C-ABI `Integer/parseInt` over a `String` (`1` = parsed, `0` = fall back to `__static*`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_parse_int(out: &mut Value, v: &Value) -> u8 {
+    parse_str_into(out, v, parse_int32_str, Value::Int)
+}
+
+/// Fast C-ABI `Double/parseDouble` over a `String` (`1` = parsed, `0` = fall back to `__static*`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_parse_double(out: &mut Value, v: &Value) -> u8 {
+    parse_str_into(out, v, native_abi::parse_double_str, Value::Double)
+}
+
+macro_rules! def_math_unary {
+    ($($fn_name:ident => $method:ident),* $(,)?) => {
+        $(
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $fn_name(x: f64) -> f64 {
+                x.$method()
+            }
+        )*
+    };
+}
+
+macro_rules! def_math_binary {
+    ($($fn_name:ident => $method:ident),* $(,)?) => {
+        $(
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $fn_name(x: f64, y: f64) -> f64 {
+                x.$method(y)
+            }
+        )*
+    };
+}
+
+def_math_unary! {
+    rt_n_math_exp => exp,
+    rt_n_math_log => ln,
+    rt_n_math_log10 => log10,
+    rt_n_math_ceil => ceil,
+    rt_n_math_floor => floor,
+    rt_n_math_sin => sin,
+    rt_n_math_cos => cos,
+    rt_n_math_tan => tan,
+    rt_n_math_asin => asin,
+    rt_n_math_acos => acos,
+    rt_n_math_atan => atan,
+    rt_n_math_sinh => sinh,
+    rt_n_math_cosh => cosh,
+    rt_n_math_tanh => tanh,
+    rt_n_math_cbrt => cbrt,
+}
+
+def_math_binary! {
+    rt_n_math_pow => powf,
+    rt_n_math_atan2 => atan2,
+    rt_n_math_hypot => hypot,
+}
+
+/// Every `rt_n_*` shim by symbol name (the in-process JIT maps a
+/// native module's declarations to these).
+#[must_use]
 pub fn native_symbols() -> Vec<(&'static str, usize)> {
     macro_rules! syms {
         ($($f:ident),* $(,)?) => { vec![$((stringify!($f), $f as *const () as usize)),*] };
@@ -964,6 +1061,27 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_assoc_conj,
         rt_n_conj_bang_fx,
         rt_n_str_ascii,
+        rt_n_parse_long,
+        rt_n_parse_int,
+        rt_n_parse_double,
+        rt_n_math_exp,
+        rt_n_math_log,
+        rt_n_math_log10,
+        rt_n_math_ceil,
+        rt_n_math_floor,
+        rt_n_math_sin,
+        rt_n_math_cos,
+        rt_n_math_tan,
+        rt_n_math_asin,
+        rt_n_math_acos,
+        rt_n_math_atan,
+        rt_n_math_sinh,
+        rt_n_math_cosh,
+        rt_n_math_tanh,
+        rt_n_math_cbrt,
+        rt_n_math_pow,
+        rt_n_math_atan2,
+        rt_n_math_hypot,
     ]
 }
 
@@ -988,5 +1106,48 @@ mod tests {
             len: ptrs.len(),
         };
         assert_eq!(argv_strings(&slice), vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn parse_and_math_shims_cover_hits_and_misses() {
+        let mut out = Value::Nil;
+        let s42 = Value::Str("42".into());
+        let big = Value::Str("5000000000".into());
+        let bad = Value::Str("nope".into());
+        let dbl = Value::Str("1.5".into());
+
+        assert_eq!(rt_n_parse_long(&mut out, &s42), 1);
+        assert_eq!(out, Value::Int(42));
+        assert_eq!(rt_n_parse_long(&mut out, &bad), 0);
+        assert_eq!(rt_n_parse_long(&mut out, &Value::Nil), 0);
+
+        assert_eq!(rt_n_parse_int(&mut out, &s42), 1);
+        assert_eq!(out, Value::Int(42));
+        assert_eq!(rt_n_parse_int(&mut out, &big), 0);
+        assert_eq!(rt_n_parse_int(&mut out, &Value::Nil), 0);
+
+        assert_eq!(rt_n_parse_double(&mut out, &dbl), 1);
+        assert_eq!(out, Value::Double(1.5));
+        assert_eq!(rt_n_parse_double(&mut out, &bad), 0);
+        assert_eq!(rt_n_parse_double(&mut out, &Value::Nil), 0);
+
+        assert!((rt_n_math_exp(0.0) - 1.0).abs() < 1e-12);
+        assert!((rt_n_math_log(1.0)).abs() < 1e-12);
+        assert!((rt_n_math_log10(10.0) - 1.0).abs() < 1e-12);
+        assert_eq!(rt_n_math_ceil(1.2), 2.0);
+        assert_eq!(rt_n_math_floor(1.8), 1.0);
+        assert!((rt_n_math_sin(0.0)).abs() < 1e-12);
+        assert!((rt_n_math_cos(0.0) - 1.0).abs() < 1e-12);
+        assert!((rt_n_math_tan(0.0)).abs() < 1e-12);
+        assert!((rt_n_math_asin(0.0)).abs() < 1e-12);
+        assert!((rt_n_math_acos(1.0)).abs() < 1e-12);
+        assert!((rt_n_math_atan(0.0)).abs() < 1e-12);
+        assert!((rt_n_math_sinh(0.0)).abs() < 1e-12);
+        assert!((rt_n_math_cosh(0.0) - 1.0).abs() < 1e-12);
+        assert!((rt_n_math_tanh(0.0)).abs() < 1e-12);
+        assert!((rt_n_math_cbrt(8.0) - 2.0).abs() < 1e-12);
+        assert!((rt_n_math_pow(2.0, 3.0) - 8.0).abs() < 1e-12);
+        assert!((rt_n_math_atan2(0.0, 1.0)).abs() < 1e-12);
+        assert!((rt_n_math_hypot(3.0, 4.0) - 5.0).abs() < 1e-12);
     }
 }

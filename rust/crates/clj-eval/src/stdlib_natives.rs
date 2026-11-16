@@ -24,7 +24,7 @@ use clj_value::{Symbol, ThrowClass, Value};
 use crate::error::NativeError;
 use crate::eval::Evaluator;
 use crate::lazy::{StepUnit, is_seqable, seq_value, step_unit};
-use crate::ns::signal_to_native;
+use crate::ns::{check_arity, signal_to_native};
 
 type Native = fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError>;
 
@@ -47,19 +47,29 @@ pub(crate) const STRING_NATIVES: &[(&str, Native)] = &[
 /// `ns-unmap`ped name has no definition left to run.
 /// Fallback to the interpreted `clojure.string` definition (or direct Lite
 /// handling when `lazy_hooks` is absent in `BootMode::Lite`).
-fn upstream(eval: &mut Evaluator, name: &str, args: &[Value]) -> Result<Value, NativeError> {
+/// The `string.clj` definition behind a native's slow path. `run` (full
+/// boot) calls the interpreted source itself; `BootMode::Lite` keeps no
+/// source resident and runs `lite`, that definition's literal
+/// transcription through the same interop entry points (pinned to `run`
+/// input by input by the `lite_parity` suite, #271).
+fn upstream(
+    eval: &mut Evaluator,
+    name: &str,
+    args: &[Value],
+    lite: impl FnOnce(&mut Evaluator) -> Result<Value, NativeError>,
+) -> Result<Value, NativeError> {
+    if eval.lazy_hooks.is_none() {
+        return lite(eval);
+    }
     let sym = Symbol::new(Some("clojure.string"), name);
     let f = eval
         .registry
         .lookup_in_live_or_removed("clojure.string", &sym)
         .and_then(|id| eval.lazy_interpreted(id));
-    if f.is_none() && eval.lazy_hooks.is_none() {
-        return lite_string_fallback(eval, name, args);
-    }
     match f {
         Some(f) => eval.call(&f, args).map_err(signal_to_native),
         None => Err(NativeError::new(
-            clj_value::ThrowClass::IllegalStateException,
+            ThrowClass::IllegalStateException,
             format!("No definition behind clojure.string/{name}"),
         )),
     }
@@ -73,7 +83,11 @@ fn native_split(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     let (s, re, limit) = match args {
         [s, re] => (s, re, None),
         [s, re, limit] => (s, re, Some(limit)),
-        _ => return upstream(eval, "split", args),
+        _ => {
+            return upstream(eval, "split", args, |_| {
+                check_arity("clojure.string/split", args, &[2, 3]).map(|()| Value::Nil)
+            });
+        }
     };
     if !matches!(re, Value::Regex(_) | Value::Nil) {
         return Err(crate::core::cce_err(re, "java.util.regex.Pattern"));
@@ -113,7 +127,7 @@ fn native_split(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 fn native_split_lines(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     match args {
         [Value::Str(s)] => crate::re::pattern_split(s, "\r?\n", 0),
-        _ => upstream(eval, "split-lines", args),
+        _ => upstream(eval, "split-lines", args, |e| lite_split_lines(e, args)),
     }
 }
 
@@ -125,7 +139,7 @@ fn native_trim(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         [Value::Str(s)] => Ok(Value::Str(Arc::from(
             s.trim_matches(crate::classemu::java_is_whitespace),
         ))),
-        _ => upstream(eval, "trim", args),
+        _ => upstream(eval, "trim", args, |e| lite_trim(e, args)),
     }
 }
 
@@ -136,7 +150,7 @@ fn native_blank(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         [Value::Str(s)] => Ok(Value::Bool(
             s.chars().all(crate::classemu::java_is_whitespace),
         )),
-        _ => upstream(eval, "blank?", args),
+        _ => upstream(eval, "blank?", args, |e| lite_blank(e, args)),
     }
 }
 
@@ -147,7 +161,9 @@ fn native_blank(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
 fn native_starts_with(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     match args {
         [Value::Str(s), Value::Str(p)] => Ok(Value::Bool(s.starts_with(p.as_ref()))),
-        _ => upstream(eval, "starts-with?", args),
+        _ => upstream(eval, "starts-with?", args, |e| {
+            lite_to_string_member(e, "starts-with?", "startsWith", args)
+        }),
     }
 }
 
@@ -155,7 +171,9 @@ fn native_starts_with(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 fn native_ends_with(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     match args {
         [Value::Str(s), Value::Str(p)] => Ok(Value::Bool(s.ends_with(p.as_ref()))),
-        _ => upstream(eval, "ends-with?", args),
+        _ => upstream(eval, "ends-with?", args, |e| {
+            lite_to_string_member(e, "ends-with?", "endsWith", args)
+        }),
     }
 }
 
@@ -163,7 +181,9 @@ fn native_ends_with(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 fn native_includes(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     match args {
         [Value::Str(s), Value::Str(p)] => Ok(Value::Bool(s.contains(p.as_ref()))),
-        _ => upstream(eval, "includes?", args),
+        _ => upstream(eval, "includes?", args, |e| {
+            lite_to_string_member(e, "includes?", "contains", args)
+        }),
     }
 }
 
@@ -249,13 +269,13 @@ fn join_seq(eval: &mut Evaluator, sep: &str, coll: &Value) -> Result<Value, Nati
 /// unseqable coll takes the upstream path.
 fn native_join(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     let [sep, coll] = args else {
-        return upstream(eval, "join", args);
+        return upstream(eval, "join", args, |e| lite_join(e, args));
     };
     let Some(sep) = fast_join_sep(sep) else {
-        return upstream(eval, "join", args);
+        return upstream(eval, "join", args, |e| lite_join(e, args));
     };
     if !is_seqable(coll) {
-        return upstream(eval, "join", args);
+        return upstream(eval, "join", args, |e| lite_join(e, args));
     }
     if let Value::Vector(v) = coll {
         return Ok(Value::Str(Arc::from(join_vector_buf(eval, &sep, v)?)));
@@ -284,36 +304,101 @@ pub(crate) fn native_join_owned(
     native_join(eval, &args)
 }
 
-/// Fallback for `BootMode::Lite` (no `core_lazy` embedded sources):
-/// supports 1-arg / arbitrary-sep `join` directly and surfaces Clojure-shaped
-/// arity / null / cast errors on invalid calls to `STRING_NATIVES`.
-fn lite_string_fallback(
+/// `(.member target args…)` through `__meth*`, the reflector path every
+/// interpreted `string.clj` body takes (misses, NPEs, and casts read
+/// exactly as under `run`).
+fn meth(
     eval: &mut Evaluator,
-    name: &str,
+    member: &str,
+    target: &Value,
     args: &[Value],
 ) -> Result<Value, NativeError> {
-    if name == "join" {
-        crate::ns::check_arity("clojure.string/join", args, &[1, 2])?;
-        if args.len() == 1 {
-            return join_seq(eval, "", &args[0]);
+    let mut full = Vec::with_capacity(args.len() + 2);
+    full.push(Value::Str(Arc::from(member)));
+    full.push(target.clone());
+    full.extend_from_slice(args);
+    crate::types::native_meth(eval, &full)
+}
+
+/// `(Character/isWhitespace (.charAt s i))`.
+fn char_at_whitespace(eval: &mut Evaluator, s: &Value, i: &Value) -> Result<bool, NativeError> {
+    let c = meth(eval, "charAt", s, std::slice::from_ref(i))?;
+    let ws = crate::classemu::static_character_is_whitespace(&[c])?;
+    Ok(matches!(ws, Value::Bool(true)))
+}
+
+/// Lite `trim`: `(.length s)`, the right-hand `charAt` scan down to
+/// `zero?`, the left-hand scan, then `(.. s (subSequence l r) toString)`.
+fn lite_trim(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.string/trim", args, &[1])?;
+    let s = &args[0];
+    let mut rindex = meth(eval, "length", s, &[])?;
+    loop {
+        let zero = crate::core::native_zero(eval, std::slice::from_ref(&rindex))?;
+        if matches!(zero, Value::Bool(true)) {
+            return Ok(Value::Str(Arc::from("")));
         }
-        let mut sep = String::new();
-        crate::core::str_push(&mut sep, eval, &args[0])?;
-        return join_seq(eval, &sep, &args[1]);
+        let prev = crate::core::native_dec(eval, std::slice::from_ref(&rindex))?;
+        if !char_at_whitespace(eval, s, &prev)? {
+            break;
+        }
+        rindex = prev;
     }
-    let expected: &[usize] = match name {
-        "split" => &[2, 3],
-        "starts-with?" | "ends-with?" | "includes?" => &[2],
-        _ => &[1],
-    };
-    crate::ns::check_arity(&format!("clojure.string/{name}"), args, expected)?;
-    if args.iter().any(|v| matches!(v, Value::Nil)) {
-        return Err(NativeError::new(
-            ThrowClass::NullPointerException,
-            format!("Null argument in clojure.string/{name}"),
-        ));
+    let mut lindex = Value::Int(0);
+    while char_at_whitespace(eval, s, &lindex)? {
+        lindex = crate::core::native_inc(eval, std::slice::from_ref(&lindex))?;
     }
-    Err(crate::core::cce_err(&args[0], "java.lang.CharSequence"))
+    let sub = meth(eval, "subSequence", s, &[lindex, rindex])?;
+    meth(eval, "toString", &sub, &[])
+}
+
+/// Lite `blank?` (nil and false answer on the fast path): each step
+/// compares `(.length s)` with the index, then tests that `charAt`.
+fn lite_blank(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.string/blank?", args, &[1])?;
+    let s = &args[0];
+    let mut index = Value::Int(0);
+    loop {
+        if meth(eval, "length", s, &[])? == index {
+            return Ok(Value::Bool(true));
+        }
+        if !char_at_whitespace(eval, s, &index)? {
+            return Ok(Value::Bool(false));
+        }
+        index = crate::core::native_inc(eval, std::slice::from_ref(&index))?;
+    }
+}
+
+/// Lite `split-lines`: `(split s #"\r?\n")` through the `split` native.
+fn lite_split_lines(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.string/split-lines", args, &[1])?;
+    native_split(eval, &[args[0].clone(), Value::Regex(Arc::from(r"\r?\n"))])
+}
+
+/// Lite `starts-with?` / `ends-with?` / `includes?`:
+/// `(.member (.toString s) substr)`.
+fn lite_to_string_member(
+    eval: &mut Evaluator,
+    name: &str,
+    member: &str,
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    check_arity(&format!("clojure.string/{name}"), args, &[2])?;
+    let s = meth(eval, "toString", &args[0], &[])?;
+    meth(eval, member, &s, std::slice::from_ref(&args[1]))
+}
+
+/// Lite `join`: `(apply str coll)`, or `(str sep)` between each item's
+/// `str` (the seq walk raises `seq`'s own errors; `str` runs no user
+/// code under Lite, so stringifying the separator first is unobservable).
+fn lite_join(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.string/join", args, &[1, 2])?;
+    if args.len() == 1 {
+        return join_seq(eval, "", &args[0]);
+    }
+    let mut sep = String::new();
+    crate::core::str_push(&mut sep, eval, &args[0])?;
+    join_seq(eval, &sep, &args[1])
 }
 
 #[cfg(test)]

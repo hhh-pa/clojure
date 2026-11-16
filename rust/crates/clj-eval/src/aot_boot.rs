@@ -247,19 +247,22 @@ pub fn is_lite_stdin_var(ns: &str, name: &str) -> bool {
     ns == "clojure.core" && matches!(name, "*in*" | "read-line")
 }
 
-/// Install a dynamic `clojure.core` var with root `val` and optional
+/// Install a dynamic `clojure.core` var with root `val` and optional shared
 /// `:dynamic true` metadata.
-fn install_core_dynamic(eval: &mut Evaluator, name: &str, val: Value, dynamic_meta: bool) {
+fn install_core_dynamic(eval: &mut Evaluator, name: &str, val: Value, dyn_meta: Option<&Map>) {
     let q = Symbol::new(Some("clojure.core"), name);
     let id = eval.registry.intern(&q);
     eval.registry.with_state_mut(id, |st| {
         st.root = Some(val);
         st.dynamic = true;
-        if dynamic_meta {
-            let meta: Map = st.meta.clone().unwrap_or_else(new_map).insert(
-                Value::Keyword(Keyword::new(None, "dynamic")),
-                Value::Bool(true),
-            );
+        if let Some(m) = dyn_meta {
+            let meta = match st.meta.clone() {
+                Some(existing) => existing.insert(
+                    Value::Keyword(Keyword::new(None, "dynamic")),
+                    Value::Bool(true),
+                ),
+                None => m.clone(),
+            };
             st.meta = Some(meta);
         }
     });
@@ -273,7 +276,7 @@ fn install_lite_var(
     name: &str,
     core_groups: &[&[LiteNativeSlice]],
     owned_groups: &[LiteOwnedSlice],
-    string_tables: &[LiteNativeSlice],
+    lib_tables: &[(&str, &[LiteNativeSlice])],
 ) {
     if ns == "clojure.core" {
         if is_lite_dynamic(name) || core_var(eval, name).is_some() {
@@ -287,12 +290,12 @@ fn install_lite_var(
         }
         return;
     }
-    if ns == "clojure.string" {
+    if let Some((_, tables)) = lib_tables.iter().find(|&&(lib_ns, _)| lib_ns == ns) {
         let sym = Symbol::new(Some(ns), name);
         if eval.registry.lookup_in_live_or_removed(ns, &sym).is_some() {
             return;
         }
-        if let Some(f) = find_native(string_tables, name) {
+        if let Some(f) = find_native(tables, name) {
             let owned = owned_groups
                 .iter()
                 .find_map(|entries| owned_entry_in(entries, name));
@@ -305,7 +308,7 @@ fn install_lite_var(
 /// capability group enabled.
 #[must_use]
 pub fn boot_lite(vars: &[(&str, &str)], need_stdin: bool) -> Evaluator {
-    boot_lite_with_caps(
+    boot_lite_impl(
         vars,
         need_stdin,
         &[
@@ -316,7 +319,8 @@ pub fn boot_lite(vars: &[(&str, &str)], need_stdin: bool) -> Evaluator {
             LITE_CAP_HOST,
         ],
         &[LITE_OWNED_CORE, LITE_OWNED_SEQ, LITE_OWNED_STRING],
-        LITE_CAP_STRING,
+        &[("clojure.string", LITE_CAP_STRING)],
+        true,
         true,
     )
 }
@@ -331,58 +335,188 @@ pub fn boot_lite_with_caps(
     need_stdin: bool,
     core_groups: &[&[LiteNativeSlice]],
     owned_groups: &[LiteOwnedSlice],
-    string_tables: &[LiteNativeSlice],
+    lib_tables: &[(&str, &[LiteNativeSlice])],
     seq_helpers: bool,
+) -> Evaluator {
+    boot_lite_impl(
+        vars,
+        need_stdin,
+        core_groups,
+        owned_groups,
+        lib_tables,
+        seq_helpers,
+        false,
+    )
+}
+
+fn has_core_ref(vars: &[(&str, &str)], name: &str) -> bool {
+    vars.iter()
+        .any(|&(vn, vname)| vn == "clojure.core" && vname == name)
+}
+
+fn needs_stdout_dynamics(vars: &[(&str, &str)]) -> bool {
+    vars.iter().any(|&(ns, name)| {
+        ns == "clojure.core"
+            && matches!(
+                name,
+                "*out*"
+                    | "*flush-on-newline*"
+                    | "*print-readably*"
+                    | "*print-namespace-maps*"
+                    | "*print-length*"
+                    | "*print-level*"
+                    | "*print-meta*"
+                    | "*print-dup*"
+                    | "println"
+                    | "print"
+                    | "pr"
+                    | "prn"
+                    | "pr-str"
+                    | "prn-str"
+                    | "print-str"
+                    | "newline"
+                    | "flush"
+                    | "with-out-str"
+                    | "format"
+                    | "printf"
+                    | "time"
+            )
+    })
+}
+
+fn needs_var_meta(vars: &[(&str, &str)]) -> bool {
+    vars.iter().any(|&(ns, name)| {
+        ns == "clojure.core"
+            && matches!(
+                name,
+                "meta"
+                    | "doc"
+                    | "alter-meta!"
+                    | "reset-meta!"
+                    | "vary-meta"
+                    | "macro?"
+                    | "resolve"
+                    | "ns-resolve"
+                    | "ns-publics"
+                    | "ns-interns"
+                    | "ns-refers"
+            )
+    })
+}
+
+enum DynInit {
+    Nil,
+    Bool(bool),
+    NoSource,
+}
+
+impl DynInit {
+    fn into_value(self) -> Value {
+        match self {
+            Self::Nil => Value::Nil,
+            Self::Bool(b) => Value::Bool(b),
+            Self::NoSource => Value::Str(Arc::from("NO_SOURCE_PATH")),
+        }
+    }
+}
+
+fn install_optional_dynamics(
+    eval: &mut Evaluator,
+    vars: &[(&str, &str)],
+    need_all: bool,
+    dyn_meta: Option<&Map>,
+) {
+    let entries: &[(&str, DynInit, bool)] = &[
+        ("*print-length*", DynInit::Nil, true),
+        ("*print-level*", DynInit::Nil, true),
+        ("*print-meta*", DynInit::Bool(false), false),
+        ("*print-dup*", DynInit::Bool(false), false),
+        ("*verbose-defrecords*", DynInit::Bool(false), true),
+        ("*command-line-args*", DynInit::Nil, true),
+        ("*file*", DynInit::NoSource, true),
+        ("*source-path*", DynInit::NoSource, false),
+    ];
+    for (name, init, has_meta) in entries {
+        if need_all || has_core_ref(vars, name) {
+            let v = match init {
+                DynInit::Nil => DynInit::Nil.into_value(),
+                DynInit::Bool(b) => DynInit::Bool(*b).into_value(),
+                DynInit::NoSource => DynInit::NoSource.into_value(),
+            };
+            install_core_dynamic(eval, name, v, has_meta.then_some(dyn_meta).flatten());
+        }
+    }
+    let read_needed = ["*read-eval*", "read", "read-string"]
+        .iter()
+        .any(|n| has_core_ref(vars, n));
+    if need_all || read_needed {
+        install_core_dynamic(eval, "*read-eval*", Value::Bool(true), None);
+    }
+}
+
+fn boot_lite_impl(
+    vars: &[(&str, &str)],
+    need_stdin: bool,
+    core_groups: &[&[LiteNativeSlice]],
+    owned_groups: &[LiteOwnedSlice],
+    lib_tables: &[(&str, &[LiteNativeSlice])],
+    seq_helpers: bool,
+    all_dynamics: bool,
 ) -> Evaluator {
     let mut eval = Evaluator::new_bare("user");
     eval.print_defaults_only = true;
+    eval.skip_var_meta = !all_dynamics && !needs_var_meta(vars);
     eval.registry.ensure_ns("clojure.core");
     let user_id = eval.registry.ensure_ns("user");
     let user_handle = ns_value("user", user_id);
-    let helper_cap = if seq_helpers {
-        LITE_INTERNAL_HELPERS.len()
-    } else {
-        0
-    };
+    let helper_cap = usize::from(seq_helpers) * LITE_INTERNAL_HELPERS.len();
+    let need_all = all_dynamics
+        || ["resolve", "ns-resolve", "find-var", "var-get", "intern"]
+            .iter()
+            .any(|n| has_core_ref(vars, n));
     eval.registry.reserve_vars(
         "clojure.core",
-        LITE_DYNAMIC_NAMES.len() + helper_cap + vars.len(),
+        helper_cap
+            + vars.len()
+            + if need_all {
+                LITE_DYNAMIC_NAMES.len()
+            } else {
+                6
+            },
     );
 
-    let out = crate::io::stdout_writer(&mut eval);
-    let err = crate::io::stderr_writer(&mut eval);
-    let stdin = if need_stdin {
-        crate::reader::stdin_reader(&mut eval)
-    } else {
-        Value::Nil
-    };
+    let shared_dyn = new_map().insert(
+        Value::Keyword(Keyword::new(None, "dynamic")),
+        Value::Bool(true),
+    );
+    let dyn_meta = Some(&shared_dyn);
 
-    install_core_dynamic(&mut eval, "*ns*", user_handle.clone(), true);
-    install_core_dynamic(&mut eval, "*out*", out, false);
-    install_core_dynamic(&mut eval, "*err*", err, false);
-    install_core_dynamic(&mut eval, "*in*", stdin, false);
-    install_core_dynamic(&mut eval, "*flush-on-newline*", Value::Bool(true), false);
-    install_core_dynamic(&mut eval, "*print-length*", Value::Nil, true);
-    install_core_dynamic(&mut eval, "*print-level*", Value::Nil, true);
-    install_core_dynamic(&mut eval, "*print-namespace-maps*", Value::Bool(true), true);
-    install_core_dynamic(&mut eval, "*print-readably*", Value::Bool(true), false);
-    install_core_dynamic(&mut eval, "*print-meta*", Value::Bool(false), false);
-    install_core_dynamic(&mut eval, "*print-dup*", Value::Bool(false), false);
-    install_core_dynamic(&mut eval, "*verbose-defrecords*", Value::Bool(false), true);
-    install_core_dynamic(&mut eval, "*command-line-args*", Value::Nil, true);
-    install_core_dynamic(
-        &mut eval,
-        "*file*",
-        Value::Str(Arc::from("NO_SOURCE_PATH")),
-        true,
-    );
-    install_core_dynamic(
-        &mut eval,
-        "*source-path*",
-        Value::Str(Arc::from("NO_SOURCE_PATH")),
-        false,
-    );
-    install_core_dynamic(&mut eval, "*read-eval*", Value::Bool(true), false);
+    install_core_dynamic(&mut eval, "*ns*", user_handle.clone(), dyn_meta);
+    if need_all || needs_stdout_dynamics(vars) {
+        let out = crate::io::stdout_writer(&mut eval);
+        install_core_dynamic(&mut eval, "*out*", out, None);
+        install_core_dynamic(&mut eval, "*flush-on-newline*", Value::Bool(true), None);
+        install_core_dynamic(&mut eval, "*print-readably*", Value::Bool(true), None);
+        install_core_dynamic(
+            &mut eval,
+            "*print-namespace-maps*",
+            Value::Bool(true),
+            dyn_meta,
+        );
+    }
+    if need_all || has_core_ref(vars, "*err*") {
+        let err = crate::io::stderr_writer(&mut eval);
+        install_core_dynamic(&mut eval, "*err*", err, None);
+    }
+    if need_all || need_stdin {
+        let stdin = if need_stdin {
+            crate::reader::stdin_reader(&mut eval)
+        } else {
+            Value::Nil
+        };
+        install_core_dynamic(&mut eval, "*in*", stdin, None);
+    }
+    install_optional_dynamics(&mut eval, vars, need_all, dyn_meta);
 
     // Base thread-local `*ns*` binding frame (mirrors full `boot`: `in-ns`
     // mutates the frame rather than the root).
@@ -397,19 +531,12 @@ pub fn boot_lite_with_caps(
                 name,
                 core_groups,
                 owned_groups,
-                string_tables,
+                lib_tables,
             );
         }
     }
     for &(ns, name) in vars {
-        install_lite_var(
-            &mut eval,
-            ns,
-            name,
-            core_groups,
-            owned_groups,
-            string_tables,
-        );
+        install_lite_var(&mut eval, ns, name, core_groups, owned_groups, lib_tables);
     }
 
     eval.registry.set_current("user");
@@ -493,11 +620,14 @@ mod tests {
         assert!(is_lite_core_var("read-line"));
         assert!(!is_lite_core_var("eval"));
         assert!(!is_lite_core_var("read-string"));
-        assert!(!is_lite_core_var("run!"));
+        assert!(is_lite_core_var("run!"));
+        assert!(is_lite_core_var("reduce-kv"));
+        assert!(is_lite_core_var("fnil"));
 
         assert!(is_lite_string_var("split"));
         assert!(is_lite_string_var("join"));
         assert!(!is_lite_string_var("replace"));
+        assert!(!is_lite_string_var("no-such-string-fn"));
 
         assert!(is_lite_stdin_var("clojure.core", "*in*"));
         assert!(is_lite_stdin_var("clojure.core", "read-line"));
@@ -750,6 +880,7 @@ mod tests {
         assert_eq!(
             lite_caps_for(&[
                 ("clojure.string", "trim"),
+                ("clojure.set", "union"),
                 ("clojure.core", "re-find"),
                 ("clojure.core", "atom"),
             ]),

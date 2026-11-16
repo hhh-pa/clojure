@@ -808,6 +808,36 @@ fn native_emit_ir_selects_lite_vs_full_boot() {
     assert!(lite_text.contains("@rt_n_ns_lite("), "{lite_text}");
     assert!(lite_text.contains("@rt_n_main_lite("), "{lite_text}");
 
+    let lite_ext_ir = tmp("boot-lite-ext.ll");
+    let lite_ext_report = clj_aot::build_str(
+        "(ns demo.s (:require [clojure.string :as str])) \
+         (require '[clojure.string :as sq]) \
+         (run! println [(sq/trim \" 1 \") ((fnil inc 0) nil) (reduce-kv (fn [a k v] (+ a v)) 0 {:a 1}) (str/join \",\" [1 2])])",
+        "e.clj",
+        &tmp("nope-lite-ext"),
+        &EmitOptions {
+            emit_ir: Some(lite_ext_ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("lite ext native");
+    let lite_ext_text = std::fs::read_to_string(&lite_ext_ir).expect("ir");
+    std::fs::remove_file(&lite_ext_ir).expect("cleanup");
+    assert!(
+        lite_ext_report.starts_with("aot: native "),
+        "{lite_ext_report}"
+    );
+    assert!(
+        lite_ext_text.contains("@rt_n_main_lite("),
+        "{lite_ext_text}"
+    );
+    assert!(
+        lite_ext_text.contains("@rt_n_require_string_lite("),
+        "{lite_ext_text}"
+    );
+
     for (tag, full_src) in [
         ("macro", "(defmacro m [x] x) (println (m 1))"),
         ("ns-use", "(ns demo.u (:use clojure.string)) (println 1)"),
@@ -816,13 +846,13 @@ fn native_emit_ir_selects_lite_vs_full_boot() {
             "(ns demo.i (:import [java.util Locale])) (println Locale/US)",
         ),
         (
-            "ns-set",
-            "(ns demo.s (:require [clojure.set :as s])) (println (s/union #{1} #{2}))",
+            "ns-walk",
+            "(ns demo.w (:require [clojure.walk :as w])) (println (w/postwalk identity [1]))",
         ),
-        ("top-req-other", "(require 'clojure.set) (println 1)"),
+        ("top-req-other", "(require 'clojure.walk) (println 1)"),
         ("top-req-dyn", "(let [x 'clojure.string] (require x))"),
         ("top-req-empty", "(defn f [] (require)) (println 1)"),
-        ("core-lazy", "(run! println [1])"),
+        ("core-eval", "(println (eval '(+ 1 2)))"),
         ("redef", "(with-redefs [inc dec] (println (inc 1)))"),
     ] {
         let ir = tmp(&format!("boot-full-{tag}.ll"));

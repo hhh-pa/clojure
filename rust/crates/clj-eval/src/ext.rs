@@ -207,13 +207,16 @@ pub enum FastArith {
     /// No inline op (the general snapshot call).
     #[default]
     None,
-    /// `+`/`-`/`*` (2-arg checked `Int` op; overflow falls back
+    /// `+`/`-`/`*` (2+ arg checked `Int` op; overflow falls back
     /// to the native, so `long overflow` and `*unchecked-math*`
     /// stay the native's).
     Add,
     Sub,
     Mul,
-    /// `<`/`<=`/`>`/`>=` (2-arg `Int` compare).
+    /// `/` (2+ arg exact `Int` or `f64` divide; non-divisible
+    /// integer ratios and `/ by zero` fall back to the native).
+    Div,
+    /// `<`/`<=`/`>`/`>=` (2+ arg numeric compare).
     Lt,
     Lte,
     Gt,
