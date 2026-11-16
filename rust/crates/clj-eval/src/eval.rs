@@ -1092,6 +1092,27 @@ impl Evaluator {
         self.install_native_ptr_with_owned(ns, name, f, owned)
     }
 
+    /// Install a namespace's table-driven natives in one registry pass
+    /// (Lite boot: the namespace resolves once and the registry takes one
+    /// mutation for the batch, instead of per native).
+    pub(crate) fn install_native_rows(&mut self, ns: &str, rows: Vec<NativeRow>) {
+        let home: Arc<str> = Arc::from(ns);
+        let mut roots = Vec::with_capacity(rows.len());
+        for (name, f, owned) in rows {
+            let native = Value::Extension(Arc::new(NativeFn {
+                id: self.next_id(),
+                display: qualified_display(ns, name),
+                func: Arc::new(f),
+                owned,
+                meta: None,
+                fast: crate::core::fast_arith_for(f),
+            }));
+            let sym = Symbol::from_shared(Some(Arc::clone(&home)), Arc::from(name));
+            roots.push((sym, native));
+        }
+        self.registry.intern_roots(ns, roots);
+    }
+
     /// Install a table-driven `fn`-pointer native with an explicit owned-args
     /// handler (`None` for borrow-only or stripped `Lite` builds).
     pub(crate) fn install_native_ptr_with_owned(
@@ -4176,6 +4197,13 @@ fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
     }
     dm
 }
+
+/// One table-driven native to install: name, entry, owned-args entry.
+pub(crate) type NativeRow<'a> = (
+    &'a str,
+    crate::ns::NativeFnPtr,
+    Option<Arc<crate::ext::OwnedNativeImpl>>,
+);
 
 /// `ns/name` as one shared string, built in a stack buffer (boot
 /// qualifies every native it installs: the heap `String` a `format!`

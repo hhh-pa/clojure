@@ -24,7 +24,7 @@ use clj_value::{
 use smallvec::SmallVec;
 
 use crate::core::{cce_err, cce_message, is_counted, jvm_compare, nth_index};
-use crate::error::{NativeError, jvm_class_of, simple_name_of};
+use crate::error::{NativeError, Signal, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
 use crate::ext::as_native;
 use crate::lazy::{
@@ -2196,19 +2196,65 @@ fn native_zipmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     check_arity("clojure.core/zipmap", args, &[2])?;
     let mut ks = seq_value(eval, &args[0]).map_err(signal_to_native)?;
     let mut vs = seq_value(eval, &args[1]).map_err(signal_to_native)?;
-    let mut out = new_map();
-    loop {
-        if matches!(ks, Value::Nil) || matches!(vs, Value::Nil) {
-            return Ok(Value::Map(out));
+    let mut out = ZipmapBuild::default();
+    while let Some((k, v)) = zipmap_next(eval, &mut ks, &mut vs).map_err(signal_to_native)? {
+        out.push(k, v);
+    }
+    Ok(Value::Map(out.finish()))
+}
+
+/// `zipmap`'s next pair, forcing like `core.clj`'s loop: both heads,
+/// then both tails (`None` once either side runs out).
+fn zipmap_next(
+    eval: &mut Evaluator,
+    ks: &mut Value,
+    vs: &mut Value,
+) -> Result<Option<(Value, Value)>, Signal> {
+    if matches!(ks, Value::Nil) || matches!(vs, Value::Nil) {
+        return Ok(None);
+    }
+    let k = first_value(eval, ks)?;
+    let v = first_value(eval, vs)?;
+    let k = crate::lazy::realize_key(eval, &k)?;
+    *ks = next_value(eval, ks)?;
+    *vs = next_value(eval, vs)?;
+    Ok(Some((k, v)))
+}
+
+/// `zipmap`'s result under construction: pairs first and one build
+/// after (the `assoc` chain's exact map — a small result interns its
+/// key shape once instead of once per key; `(zipmap "0123456789"
+/// (range))` opens most snippets), in-place inserts past
+/// [`ZIPMAP_BULK`] pairs.
+#[derive(Default)]
+struct ZipmapBuild {
+    pairs: Vec<(Value, Value)>,
+    map: Option<Map>,
+}
+
+impl ZipmapBuild {
+    fn push(&mut self, k: Value, v: Value) {
+        match &mut self.map {
+            Some(map) => map.insert_mut(k, v),
+            None if self.pairs.len() < ZIPMAP_BULK => self.pairs.push((k, v)),
+            None => {
+                let mut map = Map::from_kvs_last_wins(std::mem::take(&mut self.pairs));
+                map.insert_mut(k, v);
+                self.map = Some(map);
+            }
         }
-        let k = first_value(eval, &ks).map_err(signal_to_native)?;
-        let v = first_value(eval, &vs).map_err(signal_to_native)?;
-        let k = crate::lazy::realize_key(eval, &k).map_err(signal_to_native)?;
-        out = out.insert(k, v);
-        ks = next_value(eval, &ks).map_err(signal_to_native)?;
-        vs = next_value(eval, &vs).map_err(signal_to_native)?;
+    }
+
+    fn finish(self) -> Map {
+        self.map
+            .unwrap_or_else(|| Map::from_kvs_last_wins(self.pairs))
     }
 }
+
+/// The pairs [`ZipmapBuild`] builds in one step (the shaped-map
+/// ceiling: `from_kvs_last_wins` dedupes by scanning, fine this
+/// small); longer inputs continue with in-place inserts.
+const ZIPMAP_BULK: usize = 64;
 
 fn native_array_map(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.len() % 2 == 1 {
@@ -3406,6 +3452,29 @@ pub(crate) const COLL_NATIVES: &[(&str, NativeFnPtr)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zipmap_builds_small_maps_at_once_and_grows_past_the_bulk() {
+        let mut eval = crate::boot();
+        let show = |eval: &mut Evaluator, src: &str| {
+            let out = eval.eval_source(src).expect(src);
+            clj_value::pr_to_string(out.last().expect("a form"), &clj_value::PrintOpts::pr())
+        };
+        assert_eq!(
+            show(&mut eval, "(zipmap [:a :b :a] [1 2 3])"),
+            "{:a 3, :b 2}"
+        );
+        assert_eq!(show(&mut eval, "(zipmap [] [])"), "{}");
+        // Past the bulk: in-place inserts, a key repeated after it wins.
+        assert_eq!(
+            show(&mut eval, "(count (zipmap (range 100) (range)))"),
+            "100"
+        );
+        assert_eq!(
+            show(&mut eval, "((zipmap (concat (range 70) [3]) (range)) 3)"),
+            "70"
+        );
+    }
 
     #[test]
     fn str_scan_global_cache_answers_memo_evictions() {

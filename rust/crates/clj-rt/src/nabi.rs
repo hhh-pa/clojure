@@ -68,9 +68,13 @@ impl<T> CSlice<T> {
 
 impl CSlice<u8> {
     /// The bytes borrowed as UTF-8 when valid, avoiding heap allocation on
-    /// AOT string/symbol/keyword literals.
+    /// AOT string/symbol/keyword literals (the compiler emits only valid
+    /// UTF-8: `from_utf8`'s word-at-a-time ASCII check is several times
+    /// cheaper than the lossy decoder, which stays the fallback).
     fn as_str(&self) -> std::borrow::Cow<'_, str> {
-        String::from_utf8_lossy(self.get())
+        let bytes = self.get();
+        let lossy = |_| String::from_utf8_lossy(bytes);
+        std::str::from_utf8(bytes).map_or_else(lossy, std::borrow::Cow::Borrowed)
     }
 }
 

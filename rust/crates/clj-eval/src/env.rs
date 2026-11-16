@@ -812,6 +812,30 @@ impl NamespaceRegistry {
         id
     }
 
+    /// Intern each `(symbol, root)` into `ns_name` with its root set
+    /// (boot's batched native installs: the namespace resolves once,
+    /// and the var-home table grows once).
+    pub(crate) fn intern_roots(&mut self, ns_name: &str, roots: Vec<(Symbol, Value)>) {
+        let Self {
+            namespaces,
+            next_id,
+            next_ns_id,
+            by_id,
+            bare_vars,
+            ..
+        } = self;
+        let ns = ensure_ns_in(namespaces, next_ns_id, ns_name);
+        by_id.reserve(roots.len());
+        for (sym, root) in roots {
+            let before = *next_id;
+            let id = ns.intern(&sym, next_id, !*bare_vars);
+            if *next_id != before {
+                by_id.insert(id, Arc::clone(&ns.handle.name));
+            }
+            ns.state_mut(id).expect("interned var has state").root = Some(root);
+        }
+    }
+
     /// Pre-size a namespace's var tables (boot knows its native
     /// count).
     pub(crate) fn reserve_vars(&mut self, ns_name: &str, additional: usize) {
@@ -1420,6 +1444,14 @@ impl SharedRegistry {
         let mut inner = self.lock();
         let _epoch = self.begin_mutation();
         inner.registry.intern_with_root(sym, root)
+    }
+
+    /// [`NamespaceRegistry::intern_roots`] under one lock and one
+    /// mutation epoch.
+    pub(crate) fn intern_roots(&self, ns_name: &str, roots: Vec<(Symbol, Value)>) {
+        let mut inner = self.lock();
+        let _epoch = self.begin_mutation();
+        inner.registry.intern_roots(ns_name, roots);
     }
 
     /// Pre-size a namespace's var tables (see
@@ -2205,6 +2237,20 @@ impl Env {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interned_roots_replace_existing_roots() {
+        let mut reg = NamespaceRegistry::new();
+        let sym = Symbol::new(Some("lib"), "f");
+        reg.intern_roots("lib", vec![(sym.clone(), Value::Int(1))]);
+        let id = reg.intern(&sym);
+        reg.intern_roots("lib", vec![(sym.clone(), Value::Int(2))]);
+        assert_eq!(reg.intern(&sym), id);
+        assert_eq!(
+            reg.state(id).and_then(|st| st.root.clone()),
+            Some(Value::Int(2))
+        );
+    }
 
     fn sym(ns: Option<&str>, name: &str) -> Symbol {
         Symbol::new(ns, name)

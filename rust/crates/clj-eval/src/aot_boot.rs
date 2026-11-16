@@ -209,13 +209,23 @@ pub type LiteCoreGroup = (u32, &'static [LiteNativeSlice]);
 /// var without one takes the name scan).
 pub const NO_LITE_HINT: u32 = u32::MAX;
 
+/// Hint bit: the name has an owned-args entry (boot searches the owned
+/// tables only then; a stale bit only costs the fast path, never
+/// correctness).
+const OWNED_HINT_BIT: u32 = 1 << 15;
+
+/// The owned-args tables [`OWNED_HINT_BIT`] is computed against (every
+/// owned group a binary can register).
+const LITE_OWNED_ALL: [LiteOwnedSlice; 3] = [LITE_OWNED_CORE, LITE_OWNED_SEQ, LITE_OWNED_STRING];
+
 /// The hint group of `clojure.string`'s natives (after the core groups).
 const STRING_HINT_GROUP: u32 = 5;
 
 /// Where the Lite native behind `ns/name` sits — `group << 24 | table <<
-/// 16 | entry`, in the first-match order the runtime scan uses — so a
-/// compiled binary installs it without scanning the capability tables
-/// (#271); [`NO_LITE_HINT`] when there is none. Compiler-side only.
+/// 16 | entry`, in the first-match order the runtime scan uses, plus
+/// [`OWNED_HINT_BIT`] — so a compiled binary installs it without
+/// scanning the capability tables (#271); [`NO_LITE_HINT`] when there
+/// is none. Compiler-side only.
 #[must_use]
 pub fn lite_native_hint(ns: &str, name: &str) -> u32 {
     match ns {
@@ -256,7 +266,12 @@ const fn core_groups_hint(groups: &[(LiteCaps, &[LiteNativeSlice])], name: &str)
             let mut e = 0;
             while e < tables[t].len() {
                 if const_str_eq(tables[t][e].0, name) {
-                    return ((g as u32) << 24) | ((t as u32) << 16) | e as u32;
+                    let owned = if has_owned_entry(name) {
+                        OWNED_HINT_BIT
+                    } else {
+                        0
+                    };
+                    return ((g as u32) << 24) | ((t as u32) << 16) | owned | e as u32;
                 }
                 e += 1;
             }
@@ -265,6 +280,23 @@ const fn core_groups_hint(groups: &[(LiteCaps, &[LiteNativeSlice])], name: &str)
         g += 1;
     }
     NO_LITE_HINT
+}
+
+/// Whether any owned-args table has an entry for `name`.
+const fn has_owned_entry(name: &str) -> bool {
+    let mut g = 0;
+    while g < LITE_OWNED_ALL.len() {
+        let entries = LITE_OWNED_ALL[g];
+        let mut e = 0;
+        while e < entries.len() {
+            if const_str_eq(entries[e].0, name) {
+                return true;
+            }
+            e += 1;
+        }
+        g += 1;
+    }
+    false
 }
 
 /// [`LITE_INTERNAL_HELPERS`]' hints, resolved at compile time.
@@ -288,7 +320,7 @@ fn hinted_native(
     core_groups: &[LiteCoreGroup],
     lib: Option<&[LiteNativeSlice]>,
 ) -> Option<NativeFnPtr> {
-    let (group, table, entry) = (hint >> 24, (hint >> 16) & 0xff, hint & 0xffff);
+    let (group, table, entry) = (hint >> 24, (hint >> 16) & 0xff, hint & 0x7fff);
     let tables = match lib {
         Some(lib) => (group == STRING_HINT_GROUP).then_some(lib)?,
         None => core_groups.iter().find(|&&(id, _)| id == group)?.1,
@@ -383,42 +415,36 @@ fn install_core_dynamic(eval: &mut Evaluator, name: &str, val: Value, dynamic_me
     });
 }
 
-/// Install one Lite native from the active capability slices if not already
-/// present.
-fn install_lite_var(eval: &mut Evaluator, (ns, name, hint): (&str, &str, u32), tables: LiteTables) {
-    let LiteTables {
-        core_groups,
-        owned_groups,
-        lib_tables,
-    } = tables;
-    if ns == "clojure.core" {
-        if is_lite_dynamic(name) || core_var(eval, name).is_some() {
-            return;
+/// The native a declared Lite var installs — `None` for a dynamic
+/// (installed apart) or a name the registered tables lack — with its
+/// owned-args entry (searched only when the hint says one exists).
+fn lite_row<'n>(
+    (ns, name, hint): (&str, &'n str, u32),
+    tables: LiteTables,
+) -> Option<crate::eval::NativeRow<'n>> {
+    let f = if ns == "clojure.core" {
+        if name.starts_with('*') && is_lite_dynamic(name) {
+            return None;
         }
-        let found = hinted_native(hint, name, core_groups, None)
-            .or_else(|| find_native_in_groups(core_groups, name));
-        if let Some(f) = found {
-            let owned = owned_groups
+        hinted_native(hint, name, tables.core_groups, None)
+            .or_else(|| find_native_in_groups(tables.core_groups, name))?
+    } else {
+        let &(_, lib) = tables
+            .lib_tables
+            .iter()
+            .find(|&&(lib_ns, _)| lib_ns == ns)?;
+        hinted_native(hint, name, tables.core_groups, Some(lib))
+            .or_else(|| find_native(lib, name))?
+    };
+    let owned = (hint & OWNED_HINT_BIT != 0)
+        .then(|| {
+            tables
+                .owned_groups
                 .iter()
-                .find_map(|entries| owned_entry_in(entries, name));
-            eval.install_native_ptr_with_owned("clojure.core", name, f, owned);
-        }
-        return;
-    }
-    if let Some((_, tables)) = lib_tables.iter().find(|&&(lib_ns, _)| lib_ns == ns) {
-        let sym = Symbol::new(Some(ns), name);
-        if eval.registry.lookup_in_live_or_removed(ns, &sym).is_some() {
-            return;
-        }
-        let found = hinted_native(hint, name, core_groups, Some(tables))
-            .or_else(|| find_native(tables, name));
-        if let Some(f) = found {
-            let owned = owned_groups
-                .iter()
-                .find_map(|entries| owned_entry_in(entries, name));
-            eval.install_native_ptr_with_owned(ns, name, f, owned);
-        }
-    }
+                .find_map(|entries| owned_entry_in(entries, name))
+        })
+        .flatten();
+    Some((name, f, owned))
 }
 
 /// Construct a minimal evaluator for AOT `BootMode::Lite` programs with every
@@ -570,6 +596,41 @@ fn install_optional_dynamics(eval: &mut Evaluator, vars: &[(&str, &str)], need_a
     }
 }
 
+/// Install the declared vars' natives (the compiler's list is
+/// distinct), one batch per namespace; then the internal helpers the
+/// program did not declare.
+fn install_declared(
+    eval: &mut Evaluator,
+    vars: &[(&str, &str)],
+    hints: &[u32],
+    tables: LiteTables,
+    seq_helpers: bool,
+) {
+    let mut batches: Vec<(&str, Vec<crate::eval::NativeRow>)> = Vec::new();
+    for (i, &(ns, name)) in vars.iter().enumerate() {
+        let hint = hints.get(i).copied().unwrap_or(NO_LITE_HINT);
+        let Some(row) = lite_row((ns, name, hint), tables) else {
+            continue;
+        };
+        match batches.iter_mut().find(|(b, _)| *b == ns) {
+            Some((_, rows)) => rows.push(row),
+            None => batches.push((ns, vec![row])),
+        }
+    }
+    for (ns, rows) in batches {
+        eval.install_native_rows(ns, rows);
+    }
+    if seq_helpers {
+        let helpers = LITE_INTERNAL_HELPERS
+            .iter()
+            .zip(&LITE_HELPER_HINTS)
+            .filter(|&(&name, _)| core_var(eval, name).is_none())
+            .filter_map(|(&name, &hint)| lite_row(("clojure.core", name, hint), tables))
+            .collect();
+        eval.install_native_rows("clojure.core", helpers);
+    }
+}
+
 fn boot_lite_impl(
     vars: &[(&str, &str)],
     hints: &[u32],
@@ -628,16 +689,7 @@ fn boot_lite_impl(
     let id = core_var(&eval, "*ns*").expect("*ns* installed");
     eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
 
-    if seq_helpers {
-        for (&name, &hint) in LITE_INTERNAL_HELPERS.iter().zip(&LITE_HELPER_HINTS) {
-            let var = ("clojure.core", name, hint);
-            install_lite_var(&mut eval, var, tables);
-        }
-    }
-    for (i, &(ns, name)) in vars.iter().enumerate() {
-        let hint = hints.get(i).copied().unwrap_or(NO_LITE_HINT);
-        install_lite_var(&mut eval, (ns, name, hint), tables);
-    }
+    install_declared(&mut eval, vars, hints, tables, seq_helpers);
 
     eval.registry.set_current("user");
     eval.reset_gensym();
@@ -758,6 +810,59 @@ mod tests {
         // The internal helpers' compile-time hints are the same encoding.
         for (&name, &hint) in LITE_INTERNAL_HELPERS.iter().zip(&LITE_HELPER_HINTS) {
             assert_eq!(hint, lite_native_hint("clojure.core", name), "{name}");
+        }
+    }
+
+    /// Whether `ns/name`'s installed native carries an owned-args entry.
+    fn installed_owned(eval: &Evaluator, ns: &str, name: &str) -> bool {
+        let sym = Symbol::new(Some(ns), name);
+        let id = eval
+            .registry
+            .lookup_in_live_or_removed(ns, &sym)
+            .expect("installed");
+        let root = eval.deref_var_unforced(id, &sym);
+        crate::ext::as_native(&root)
+            .expect("a native root")
+            .owned
+            .is_some()
+    }
+
+    #[test]
+    fn owned_hint_bits_steer_the_owned_search() {
+        for (ns, name, owned) in [
+            ("clojure.core", "assoc", true),
+            ("clojure.core", "inc", false),
+            ("clojure.string", "join", true),
+            ("clojure.string", "trim", false),
+        ] {
+            let hint = lite_native_hint(ns, name);
+            assert_eq!(hint & OWNED_HINT_BIT != 0, owned, "{ns}/{name}");
+        }
+        let vars = [
+            ("clojure.core", "assoc"),
+            ("clojure.core", "inc"),
+            ("clojure.core", "conj"),
+            ("clojure.string", "join"),
+            ("clojure.core", "*out*"),
+        ];
+        let tables = LiteTables {
+            core_groups: &[LITE_CORE_CORE, LITE_CORE_SEQ],
+            owned_groups: &[LITE_OWNED_CORE, LITE_OWNED_SEQ, LITE_OWNED_STRING],
+            lib_tables: &[("clojure.string", LITE_CAP_STRING)],
+        };
+        let hints: Vec<u32> = vars
+            .iter()
+            .map(|&(ns, n)| lite_native_hint(ns, n))
+            .collect();
+        // Hinted and scanned (no hints) boots install the same entries;
+        // `conj` is declared and an internal helper (installed once).
+        for hints in [&hints[..], &[]] {
+            let eval = boot_lite_with_caps(&vars, hints, true, tables, true);
+            assert!(installed_owned(&eval, "clojure.core", "assoc"));
+            assert!(!installed_owned(&eval, "clojure.core", "inc"));
+            assert!(installed_owned(&eval, "clojure.core", "conj"));
+            assert!(installed_owned(&eval, "clojure.string", "join"));
+            assert!(core_var(&eval, "persistent!").is_some());
         }
     }
 
