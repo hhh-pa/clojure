@@ -212,13 +212,11 @@ pub(crate) fn declare_lite_core_cap(
 pub(crate) fn declare_lite_lib_cap(
     ns: &'static str,
     caps: &'static [clj_eval::aot_boot::LiteNativeSlice],
-    owned: Option<clj_eval::aot_boot::LiteOwnedSlice>,
+    owned: clj_eval::aot_boot::LiteOwnedSlice,
 ) {
     building(|b| {
         b.lite_libs.push((ns, caps));
-        if let Some(o) = owned {
-            b.lite_owned_caps.push(o);
-        }
+        b.lite_owned_caps.push(owned);
     });
 }
 

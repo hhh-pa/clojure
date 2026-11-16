@@ -247,22 +247,19 @@ pub fn is_lite_stdin_var(ns: &str, name: &str) -> bool {
     ns == "clojure.core" && matches!(name, "*in*" | "read-line")
 }
 
-/// Install a dynamic `clojure.core` var with root `val` and optional shared
-/// `:dynamic true` metadata.
-fn install_core_dynamic(eval: &mut Evaluator, name: &str, val: Value, dyn_meta: Option<&Map>) {
+/// Install a dynamic `clojure.core` var with root `val`, adding
+/// `:dynamic true` to its metadata when `dynamic_meta`.
+fn install_core_dynamic(eval: &mut Evaluator, name: &str, val: Value, dynamic_meta: bool) {
     let q = Symbol::new(Some("clojure.core"), name);
     let id = eval.registry.intern(&q);
     eval.registry.with_state_mut(id, |st| {
         st.root = Some(val);
         st.dynamic = true;
-        if let Some(m) = dyn_meta {
-            let meta = match st.meta.clone() {
-                Some(existing) => existing.insert(
-                    Value::Keyword(Keyword::new(None, "dynamic")),
-                    Value::Bool(true),
-                ),
-                None => m.clone(),
-            };
+        if dynamic_meta {
+            let meta: Map = st.meta.clone().unwrap_or_else(new_map).insert(
+                Value::Keyword(Keyword::new(None, "dynamic")),
+                Value::Bool(true),
+            );
             st.meta = Some(meta);
         }
     });
@@ -420,12 +417,7 @@ impl DynInit {
     }
 }
 
-fn install_optional_dynamics(
-    eval: &mut Evaluator,
-    vars: &[(&str, &str)],
-    need_all: bool,
-    dyn_meta: Option<&Map>,
-) {
+fn install_optional_dynamics(eval: &mut Evaluator, vars: &[(&str, &str)], need_all: bool) {
     let entries: &[(&str, DynInit, bool)] = &[
         ("*print-length*", DynInit::Nil, true),
         ("*print-level*", DynInit::Nil, true),
@@ -443,14 +435,14 @@ fn install_optional_dynamics(
                 DynInit::Bool(b) => DynInit::Bool(*b).into_value(),
                 DynInit::NoSource => DynInit::NoSource.into_value(),
             };
-            install_core_dynamic(eval, name, v, has_meta.then_some(dyn_meta).flatten());
+            install_core_dynamic(eval, name, v, *has_meta);
         }
     }
     let read_needed = ["*read-eval*", "read", "read-string"]
         .iter()
         .any(|n| has_core_ref(vars, n));
     if need_all || read_needed {
-        install_core_dynamic(eval, "*read-eval*", Value::Bool(true), None);
+        install_core_dynamic(eval, "*read-eval*", Value::Bool(true), false);
     }
 }
 
@@ -485,28 +477,17 @@ fn boot_lite_impl(
             },
     );
 
-    let shared_dyn = new_map().insert(
-        Value::Keyword(Keyword::new(None, "dynamic")),
-        Value::Bool(true),
-    );
-    let dyn_meta = Some(&shared_dyn);
-
-    install_core_dynamic(&mut eval, "*ns*", user_handle.clone(), dyn_meta);
+    install_core_dynamic(&mut eval, "*ns*", user_handle.clone(), true);
     if need_all || needs_stdout_dynamics(vars) {
         let out = crate::io::stdout_writer(&mut eval);
-        install_core_dynamic(&mut eval, "*out*", out, None);
-        install_core_dynamic(&mut eval, "*flush-on-newline*", Value::Bool(true), None);
-        install_core_dynamic(&mut eval, "*print-readably*", Value::Bool(true), None);
-        install_core_dynamic(
-            &mut eval,
-            "*print-namespace-maps*",
-            Value::Bool(true),
-            dyn_meta,
-        );
+        install_core_dynamic(&mut eval, "*out*", out, false);
+        install_core_dynamic(&mut eval, "*flush-on-newline*", Value::Bool(true), false);
+        install_core_dynamic(&mut eval, "*print-readably*", Value::Bool(true), false);
+        install_core_dynamic(&mut eval, "*print-namespace-maps*", Value::Bool(true), true);
     }
     if need_all || has_core_ref(vars, "*err*") {
         let err = crate::io::stderr_writer(&mut eval);
-        install_core_dynamic(&mut eval, "*err*", err, None);
+        install_core_dynamic(&mut eval, "*err*", err, false);
     }
     if need_all || need_stdin {
         let stdin = if need_stdin {
@@ -514,9 +495,9 @@ fn boot_lite_impl(
         } else {
             Value::Nil
         };
-        install_core_dynamic(&mut eval, "*in*", stdin, None);
+        install_core_dynamic(&mut eval, "*in*", stdin, false);
     }
-    install_optional_dynamics(&mut eval, vars, need_all, dyn_meta);
+    install_optional_dynamics(&mut eval, vars, need_all);
 
     // Base thread-local `*ns*` binding frame (mirrors full `boot`: `in-ns`
     // mutates the frame rather than the root).
@@ -902,5 +883,27 @@ mod tests {
         );
         assert!(core_var(&io_only, "println").is_some());
         assert!(core_var(&io_only, "conj").is_none());
+        // A program that never prints installs no stdout dynamics, and a
+        // `clojure.string` name with no native stays uninterned.
+        let quiet = boot_lite_with_caps(
+            &[
+                ("clojure.core", "inc"),
+                ("clojure.string", "no-such-native"),
+            ],
+            false,
+            &[LITE_CAP_CORE],
+            &[],
+            &[("clojure.string", LITE_CAP_STRING)],
+            false,
+        );
+        assert!(core_var(&quiet, "inc").is_some());
+        assert!(core_var(&quiet, "*out*").is_none());
+        let missing = Symbol::new(Some("clojure.string"), "no-such-native");
+        assert!(
+            quiet
+                .registry
+                .lookup_in_live_or_removed("clojure.string", &missing)
+                .is_none()
+        );
     }
 }

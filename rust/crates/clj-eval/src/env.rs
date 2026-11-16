@@ -1586,11 +1586,10 @@ impl SharedRegistry {
 
     /// Publish a forced group: its vars stop testing lazy.
     pub(crate) fn finish_lazy(&self, group: &LazyGroup) {
-        if let Some(segs) = self.lazy.get() {
-            for ix in segs.iter().map_while(OnceLock::get) {
-                for &id in &group.ids {
-                    ix.clear(id);
-                }
+        let segs = self.lazy.get().into_iter().flat_map(|segs| segs.iter());
+        for ix in segs.map_while(OnceLock::get) {
+            for &id in &group.ids {
+                ix.clear(id);
             }
         }
     }

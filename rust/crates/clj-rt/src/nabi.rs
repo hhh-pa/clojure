@@ -654,7 +654,7 @@ pub extern "C" fn rt_n_cap_string() {
     native::declare_lite_lib_cap(
         "clojure.string",
         clj_eval::aot_boot::LITE_CAP_STRING,
-        Some(clj_eval::aot_boot::LITE_OWNED_STRING),
+        clj_eval::aot_boot::LITE_OWNED_STRING,
     );
 }
 
@@ -1106,48 +1106,5 @@ mod tests {
             len: ptrs.len(),
         };
         assert_eq!(argv_strings(&slice), vec!["alpha", "beta"]);
-    }
-
-    #[test]
-    fn parse_and_math_shims_cover_hits_and_misses() {
-        let mut out = Value::Nil;
-        let s42 = Value::Str("42".into());
-        let big = Value::Str("5000000000".into());
-        let bad = Value::Str("nope".into());
-        let dbl = Value::Str("1.5".into());
-
-        assert_eq!(rt_n_parse_long(&mut out, &s42), 1);
-        assert_eq!(out, Value::Int(42));
-        assert_eq!(rt_n_parse_long(&mut out, &bad), 0);
-        assert_eq!(rt_n_parse_long(&mut out, &Value::Nil), 0);
-
-        assert_eq!(rt_n_parse_int(&mut out, &s42), 1);
-        assert_eq!(out, Value::Int(42));
-        assert_eq!(rt_n_parse_int(&mut out, &big), 0);
-        assert_eq!(rt_n_parse_int(&mut out, &Value::Nil), 0);
-
-        assert_eq!(rt_n_parse_double(&mut out, &dbl), 1);
-        assert_eq!(out, Value::Double(1.5));
-        assert_eq!(rt_n_parse_double(&mut out, &bad), 0);
-        assert_eq!(rt_n_parse_double(&mut out, &Value::Nil), 0);
-
-        assert!((rt_n_math_exp(0.0) - 1.0).abs() < 1e-12);
-        assert!((rt_n_math_log(1.0)).abs() < 1e-12);
-        assert!((rt_n_math_log10(10.0) - 1.0).abs() < 1e-12);
-        assert_eq!(rt_n_math_ceil(1.2), 2.0);
-        assert_eq!(rt_n_math_floor(1.8), 1.0);
-        assert!((rt_n_math_sin(0.0)).abs() < 1e-12);
-        assert!((rt_n_math_cos(0.0) - 1.0).abs() < 1e-12);
-        assert!((rt_n_math_tan(0.0)).abs() < 1e-12);
-        assert!((rt_n_math_asin(0.0)).abs() < 1e-12);
-        assert!((rt_n_math_acos(1.0)).abs() < 1e-12);
-        assert!((rt_n_math_atan(0.0)).abs() < 1e-12);
-        assert!((rt_n_math_sinh(0.0)).abs() < 1e-12);
-        assert!((rt_n_math_cosh(0.0) - 1.0).abs() < 1e-12);
-        assert!((rt_n_math_tanh(0.0)).abs() < 1e-12);
-        assert!((rt_n_math_cbrt(8.0) - 2.0).abs() < 1e-12);
-        assert!((rt_n_math_pow(2.0, 3.0) - 8.0).abs() < 1e-12);
-        assert!((rt_n_math_atan2(0.0, 1.0)).abs() < 1e-12);
-        assert!((rt_n_math_hypot(3.0, 4.0) - 5.0).abs() < 1e-12);
     }
 }

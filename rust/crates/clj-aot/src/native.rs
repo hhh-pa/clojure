@@ -1951,13 +1951,7 @@ impl<'ctx> Lowerer<'ctx> {
         if v.sym.namespace() != Some("clojure.core") || v.sym.name() != "__static*" {
             return Ok(false);
         }
-        let [fqn_e, mem_e, rest @ ..] = args else {
-            return Ok(false);
-        };
-        let (Some(fqn), Some(mem)) = (expr_str_lit(fqn_e), expr_str_lit(mem_e)) else {
-            return Ok(false);
-        };
-        let Some(op) = static_op_spec(fqn, mem, rest.len()) else {
+        let Some((op, rest)) = static_call_op(args) else {
             return Ok(false);
         };
         let (refs, temps, moved) = self.arg_refs(f, rest, dest)?;
@@ -4186,6 +4180,14 @@ enum StaticOp {
     MathSqrt,
     MathUnary(&'static str),
     MathBinary(&'static str),
+}
+
+/// The inline fast path of a literal `(__static* "Cls" "member" args…)`
+/// call plus its tail args (`None`: the generic `__static*` invoke).
+fn static_call_op(args: &[Expr]) -> Option<(StaticOp, &[Expr])> {
+    let ([fqn, mem], rest) = args.split_first_chunk::<2>()?;
+    let op = static_op_spec(expr_str_lit(fqn)?, expr_str_lit(mem)?, rest.len())?;
+    Some((op, rest))
 }
 
 fn expr_str_lit(e: &Expr) -> Option<&str> {

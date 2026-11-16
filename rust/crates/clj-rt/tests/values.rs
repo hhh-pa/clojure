@@ -12,6 +12,7 @@
 mod support;
 
 use clj_value::Value;
+use cljrt::nabi;
 use cljrt::{
     rt_argv, rt_bool, rt_clone, rt_double, rt_drop, rt_int, rt_is_truthy, rt_keyword, rt_nil,
     rt_str, rt_vec_new, rt_vec_push,
@@ -158,4 +159,49 @@ fn nabi_assoc_conj_fallbacks() {
     cljrt::nabi::rt_n_cell_set(&Value::Nil, &Value::Int(1));
     cljrt::nabi::rt_n_cell_get(&mut cell_out, &Value::Nil);
     assert_eq!(cell_out, Value::Int(99));
+}
+
+#[test]
+fn parse_and_math_shims_cover_hits_and_misses() {
+    // `nabi` compiles only outside the lib's own test build, so its
+    // shims are pinned here, through the linked rlib.
+    let mut out = Value::Nil;
+    let s42 = Value::Str("42".into());
+    let big = Value::Str("5000000000".into());
+    let bad = Value::Str("nope".into());
+    let dbl = Value::Str("1.5".into());
+
+    assert_eq!(nabi::rt_n_parse_long(&mut out, &s42), 1);
+    assert_eq!(out, Value::Int(42));
+    assert_eq!(nabi::rt_n_parse_long(&mut out, &bad), 0);
+    assert_eq!(nabi::rt_n_parse_long(&mut out, &Value::Nil), 0);
+
+    assert_eq!(nabi::rt_n_parse_int(&mut out, &s42), 1);
+    assert_eq!(out, Value::Int(42));
+    assert_eq!(nabi::rt_n_parse_int(&mut out, &big), 0);
+    assert_eq!(nabi::rt_n_parse_int(&mut out, &Value::Nil), 0);
+
+    assert_eq!(nabi::rt_n_parse_double(&mut out, &dbl), 1);
+    assert_eq!(out, Value::Double(1.5));
+    assert_eq!(nabi::rt_n_parse_double(&mut out, &bad), 0);
+    assert_eq!(nabi::rt_n_parse_double(&mut out, &Value::Nil), 0);
+
+    assert!((nabi::rt_n_math_exp(0.0) - 1.0).abs() < 1e-12);
+    assert!((nabi::rt_n_math_log(1.0)).abs() < 1e-12);
+    assert!((nabi::rt_n_math_log10(10.0) - 1.0).abs() < 1e-12);
+    assert_eq!(nabi::rt_n_math_ceil(1.2), 2.0);
+    assert_eq!(nabi::rt_n_math_floor(1.8), 1.0);
+    assert!((nabi::rt_n_math_sin(0.0)).abs() < 1e-12);
+    assert!((nabi::rt_n_math_cos(0.0) - 1.0).abs() < 1e-12);
+    assert!((nabi::rt_n_math_tan(0.0)).abs() < 1e-12);
+    assert!((nabi::rt_n_math_asin(0.0)).abs() < 1e-12);
+    assert!((nabi::rt_n_math_acos(1.0)).abs() < 1e-12);
+    assert!((nabi::rt_n_math_atan(0.0)).abs() < 1e-12);
+    assert!((nabi::rt_n_math_sinh(0.0)).abs() < 1e-12);
+    assert!((nabi::rt_n_math_cosh(0.0) - 1.0).abs() < 1e-12);
+    assert!((nabi::rt_n_math_tanh(0.0)).abs() < 1e-12);
+    assert!((nabi::rt_n_math_cbrt(8.0) - 2.0).abs() < 1e-12);
+    assert!((nabi::rt_n_math_pow(2.0, 3.0) - 8.0).abs() < 1e-12);
+    assert!((nabi::rt_n_math_atan2(0.0, 1.0)).abs() < 1e-12);
+    assert!((nabi::rt_n_math_hypot(3.0, 4.0) - 5.0).abs() < 1e-12);
 }

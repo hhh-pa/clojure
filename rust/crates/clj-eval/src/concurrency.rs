@@ -2682,11 +2682,14 @@ impl TapSystem {
             if inner.started {
                 return Ok(());
             }
-            if self.tx.get().is_none() {
+            // The first start allocates the queue (runs that never tap
+            // skip the 1024-slot channel); a retry after a failed spawn
+            // keeps the pair (its receiver is still parked in `rx`).
+            self.tx.get_or_init(|| {
                 let (tx, rx) = mpsc::sync_channel(TAP_QUEUE_CAPACITY);
-                let _ = self.tx.set(tx);
                 inner.rx = Some(rx);
-            }
+                tx
+            });
             inner.started = true;
         }
         let child = eval.fork_for_thread(eval.clone_bindings());
@@ -2748,17 +2751,11 @@ impl TapSystem {
     /// a first-class queue item).
     pub(crate) fn offer(self: &Arc<Self>, eval: &Evaluator, x: Value) -> Result<bool, NativeError> {
         self.ensure_started(eval)?;
-        let Some(tx) = self.tx.get() else {
-            return Ok(false);
-        };
-        match tx.try_send(x) {
-            Ok(()) => Ok(true),
-            // Past capacity the item drops (`false`, never
-            // blocking); disconnection drops it all the same
-            // (unreachable — the receiver lives on the dispatcher
-            // thread, which loops forever).
-            Err(_) => Ok(false),
-        }
+        // `ensure_started` allocated the queue. Past capacity the item
+        // drops (`false`, never blocking); disconnection drops it all
+        // the same (unreachable — the receiver lives on the dispatcher
+        // thread, which loops forever).
+        Ok(self.tx.get().is_some_and(|tx| tx.try_send(x).is_ok()))
     }
 }
 

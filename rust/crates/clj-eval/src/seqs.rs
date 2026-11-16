@@ -588,10 +588,7 @@ fn reduce_kv_vector(
     acc: &mut Value,
     v: &Vector,
 ) -> Result<(), NativeError> {
-    for i in 0..v.len() {
-        let Some(elem) = v.get(i) else {
-            break;
-        };
+    for (i, elem) in v.iter().enumerate() {
         if reduce_kv_step(eval, f, acc, Value::Int(i as i64), elem)? {
             break;
         }

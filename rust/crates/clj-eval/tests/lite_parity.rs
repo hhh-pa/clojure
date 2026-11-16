@@ -57,6 +57,8 @@ const LITE_VARS: &[(&str, &str)] = &[
     ("clojure.core", "vector-of"),
     ("clojure.core", "transient"),
     ("clojure.core", "__new*"),
+    ("clojure.core", "comp"),
+    ("clojure.core", "apply"),
 ];
 
 /// Strip evaluator-specific gensym counters (`eval16`, `fn--4`) from
@@ -254,6 +256,7 @@ fn lite_reduce_kv_and_run_bang_match_run() {
         "inc",
         "(partial vector :p)",
         "(partial reduced)",
+        "(comp reduced vector)",
     ];
     let one_fns = [
         "identity",
@@ -276,6 +279,9 @@ fn lite_reduce_kv_and_run_bang_match_run() {
         cases.push(format!(
             "(let* [a (atom [])] [(run! (partial swap! a conj) {c}) (deref a)])"
         ));
+        // `apply` hands the natives a borrowed arg slice (the non-owned entry).
+        cases.push(format!("(apply reduce-kv [assoc {{}} {c}])"));
+        cases.push(format!("(apply run! [identity {c}])"));
     }
     cases.push("(reduce-kv assoc 0)".to_owned());
     cases.push("(run! identity)".to_owned());

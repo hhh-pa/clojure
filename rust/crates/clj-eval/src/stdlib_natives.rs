@@ -403,7 +403,10 @@ fn lite_join(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError>
 
 #[cfg(test)]
 mod tests {
-    use super::{native_includes, native_join, native_join_owned};
+    use super::{
+        lite_blank, lite_trim, native_blank, native_includes, native_join, native_join_owned,
+        native_trim,
+    };
     use clj_value::{Value, Vector};
     use smallvec::SmallVec;
     use std::sync::Arc;
@@ -458,5 +461,23 @@ mod tests {
 
         let out_one = native_join_owned(&mut eval, SmallVec::from_iter([small])).unwrap();
         assert_eq!(out_one, Value::Str(Arc::from("12")));
+    }
+
+    #[test]
+    fn lite_transcriptions_agree_with_the_fast_paths_on_strings() {
+        // The Lite slow paths replay `string.clj` through `__meth*`. No
+        // non-String receiver gets past `.charAt` today (`StringBuilder`
+        // and `File` answer `.length` only), but on a String every interop
+        // step answers, so the transcriptions run end to end here and must
+        // agree with the native fast paths, Java whitespace included
+        // (U+2003 trims, NBSP does not).
+        let mut eval = crate::aot_boot::boot_lite(&[], false);
+        for s in ["", "   ", " a b ", "\t\nx\u{2003}", "abc", "\u{a0}a\u{a0}"] {
+            let arg = [Value::Str(Arc::from(s))];
+            let (lite, fast) = (lite_trim(&mut eval, &arg), native_trim(&mut eval, &arg));
+            assert_eq!(lite.ok(), fast.ok(), "trim {s:?}");
+            let (lite, fast) = (lite_blank(&mut eval, &arg), native_blank(&mut eval, &arg));
+            assert_eq!(lite.ok(), fast.ok(), "blank? {s:?}");
+        }
     }
 }
