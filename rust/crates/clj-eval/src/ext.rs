@@ -184,6 +184,9 @@ impl ExtensionValue for Closure {
 /// stamps the identity when throwing).
 pub type NativeImpl = dyn Fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError> + Send + Sync;
 
+/// An owned-args native's argument buffer (moved into the call).
+pub type OwnedArgs = smallvec::SmallVec<[Value; 4]>;
+
 /// The owned-args entry of a head-releasing looping native
 /// (`reduce`, `into`, ...): taking the arg buffer by value lets
 /// the walk nil out the coll slot after seqing, so memoized seq
@@ -191,9 +194,8 @@ pub type NativeImpl = dyn Fn(&mut Evaluator, &[Value]) -> Result<Value, NativeEr
 /// instead of accumulating behind the head held in `args` (#221).
 /// Borrow-path callers (`apply`, direct `func` users) run the
 /// compat `func` shim (correct, retaining).
-pub type OwnedNativeImpl = dyn Fn(&mut Evaluator, smallvec::SmallVec<[Value; 4]>) -> Result<Value, NativeError>
-    + Send
-    + Sync;
+pub type OwnedNativeImpl =
+    dyn Fn(&mut Evaluator, OwnedArgs) -> Result<Value, NativeError> + Send + Sync;
 
 /// An inline-able integer operation for direct-threaded calls
 /// (#226): when a validated direct call site targets one of these

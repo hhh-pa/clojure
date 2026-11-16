@@ -621,6 +621,13 @@ pub fn bind_counts() -> Arc<BindCounts> {
     crate::env::bind_counts()
 }
 
+/// The argument-count bit a caller of compiled code sets when it hands
+/// its argument array over (`call_owned`): the callee may then take a
+/// param it consumes (moving it out, leaving nil) instead of cloning it,
+/// so e.g. `reduce`'s accumulator reaches `assoc` uniquely owned (#271).
+/// The count itself is the low bits.
+pub const TAKE_ARGS: u64 = 1 << 62;
+
 /// Parse a JVM `Long/parseLong` base-10 string (`None` on malformed or out-of-range).
 #[must_use]
 pub fn parse_long_str(s: &str) -> Option<i64> {

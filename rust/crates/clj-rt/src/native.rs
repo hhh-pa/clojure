@@ -329,6 +329,21 @@ pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> V
         [a] if !a.variadic => Some((a.fixed, a.code)),
         _ => None,
     };
+    // Owned calls (`reduce`'s step, …) hand the argument array over, so
+    // the code may take the params it consumes (`native_abi::TAKE_ARGS`).
+    let owned = single.map(|(fixed, code)| {
+        let (captured, desc) = (Arc::clone(&captured), desc.clone());
+        Arc::new(
+            move |eval: &mut Evaluator, args: clj_eval::ext::OwnedArgs| {
+                if args.len() == fixed {
+                    call_code_owned(eval, code, &captured, args)
+                } else {
+                    call_compiled(eval, &desc, &captured, &args)
+                }
+                .map_err(native_abi::signal_to_native)
+            },
+        ) as Arc<clj_eval::ext::OwnedNativeImpl>
+    });
     let func: Arc<clj_eval::ext::NativeImpl> = match single {
         Some((fixed, code)) => Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
             if args.len() == fixed {
@@ -346,7 +361,7 @@ pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> V
         id: eval.next_id(),
         display,
         func,
-        owned: None,
+        owned,
         meta: None,
         fast: Default::default(),
     });
@@ -442,6 +457,36 @@ fn call_code(eval: &mut Evaluator, code: Code, captured: &[Value], argv: &[Value
             let _active = ActiveScope::enter(eval);
             code(&mut ret, argv.as_ptr(), argv.len(), captured.as_ptr())
         };
+        if status == 0 {
+            Ok(ret)
+        } else {
+            Err(take_pending())
+        }
+    })
+}
+
+/// [`call_code`] taking the argument array over: the code may move any
+/// param it consumes out of its slot (leaving nil) instead of cloning it
+/// (`native_abi::TAKE_ARGS`); whatever it leaves drops here.
+fn call_code_owned(
+    eval: &mut Evaluator,
+    code: Code,
+    captured: &[Value],
+    mut argv: clj_eval::ext::OwnedArgs,
+) -> Step {
+    native_abi::guarded(eval, |eval| {
+        let mut ret = Value::Nil;
+        let status = {
+            let _active = ActiveScope::enter(eval);
+            let n = argv.len() | native_abi::TAKE_ARGS as usize;
+            code(
+                &mut ret,
+                argv.as_mut_ptr().cast_const(),
+                n,
+                captured.as_ptr(),
+            )
+        };
+        drop(argv);
         if status == 0 {
             Ok(ret)
         } else {

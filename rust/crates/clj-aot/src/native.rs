@@ -1016,7 +1016,7 @@ impl<'ctx> Lowerer<'ctx> {
             let fv = self.call_ptr("rt_n_fast_vars", &[]);
             self.builder.build_store(gv, fv).expect("store");
         }
-        f.moves = collect_body_moves(std::slice::from_ref(expr), 0, &f.env);
+        f.moves = collect_body_moves(std::slice::from_ref(expr), 0, &f.env, &[]);
         let result = self.slot(&mut f);
         self.lower(&mut f, expr, result)?;
         Ok(self.end_fn(f, result))
@@ -1114,7 +1114,17 @@ impl<'ctx> Lowerer<'ctx> {
             targets.push(((*pat).clone(), slots));
         }
         let min_slot = if owned { captures_end } else { f.env.len() };
-        f.moves = collect_body_moves(&arity.body, min_slot, &f.env);
+        let taken = if owned {
+            Vec::new()
+        } else {
+            self.own_consumed_params(&mut f, &arity.body, captures_end, &pats, &mut targets)
+        };
+        let min_slot = if taken.is_empty() {
+            min_slot
+        } else {
+            captures_end
+        };
+        f.moves = collect_body_moves(&arity.body, min_slot, &f.env, &taken);
         let header = self.ctx.append_basic_block(f.func, "body");
         self.builder.build_unconditional_branch(header).expect("br");
         self.builder.position_at_end(header);
@@ -1125,6 +1135,81 @@ impl<'ctx> Lowerer<'ctx> {
         let result = self.slot(&mut f);
         self.lower_body(&mut f, &arity.body, result)?;
         Ok(self.end_fn(f, result))
+    }
+
+    /// Give each symbol param the body consumes (a last use it would move)
+    /// an owned slot: taken from the caller's array when the call handed
+    /// it over (`native_abi::TAKE_ARGS` in the count — e.g. `reduce`'s
+    /// step, so its accumulator reaches `assoc` uniquely owned), cloned
+    /// otherwise (the clone the use itself made before). Params the body
+    /// never consumes keep reading the caller's array in place. Returns
+    /// the owned params' env indices.
+    fn own_consumed_params(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        body: &[Expr],
+        captures_end: usize,
+        pats: &[&Pattern],
+        targets: &mut [(Pattern, Vec<PointerValue<'ctx>>)],
+    ) -> Vec<usize> {
+        let symbols: Vec<usize> = pats
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| matches!(p, Pattern::Symbol(_)))
+            .map(|(i, _)| captures_end + i)
+            .collect();
+        let probe = collect_body_moves(body, captures_end, &f.env, &symbols);
+        let taken: Vec<usize> = symbols
+            .into_iter()
+            .filter(|i| probe.iter().any(|m| m.1 == *i))
+            .collect();
+        if taken.is_empty() {
+            return taken;
+        }
+        let n = f.func.get_nth_param(2).expect("n").into_int_value();
+        let bit = self
+            .builder
+            .build_and(
+                n,
+                self.i64t.const_int(clj_eval::native_abi::TAKE_ARGS, false),
+                "take_bit",
+            )
+            .expect("and");
+        let take = self
+            .builder
+            .build_int_compare(IntPredicate::NE, bit, self.i64t.const_zero(), "take")
+            .expect("cmp");
+        for &i in &taken {
+            let arg = self.local_slot(f, i).expect("param slot");
+            let s = self.slot(f);
+            self.take_or_clone(f, s, arg, take);
+            f.env[i] = Some(LocalRef::Slot(s));
+            targets[i - captures_end].1 = vec![s];
+        }
+        taken
+    }
+
+    /// `dest = take ? move(src) : clone(src)`.
+    fn take_or_clone(
+        &self,
+        f: &FnCtx<'ctx>,
+        dest: PointerValue<'ctx>,
+        src: PointerValue<'ctx>,
+        take: IntValue<'ctx>,
+    ) {
+        let take_bb = self.ctx.append_basic_block(f.func, "param_take");
+        let clone_bb = self.ctx.append_basic_block(f.func, "param_clone");
+        let join = self.ctx.append_basic_block(f.func, "param_ready");
+        self.builder
+            .build_conditional_branch(take, take_bb, clone_bb)
+            .expect("br");
+        self.builder.position_at_end(take_bb);
+        self.move_v(f.func, dest, src);
+        self.builder.build_unconditional_branch(join).expect("br");
+        self.builder.position_at_end(clone_bb);
+        self.clone_v(f.func, dest, src);
+        self.builder.build_unconditional_branch(join).expect("br");
+        self.builder.position_at_end(join);
     }
 
     // ---- patterns ----------------------------------------------------------
@@ -4711,8 +4796,12 @@ fn collect_body_moves(
     body: &[Expr],
     min_slot: usize,
     env: &[Option<LocalRef<'_>>],
+    owned_params: &[usize],
 ) -> Vec<(usize, usize)> {
     let mut slots = vec![false; env.len().max(min_slot)];
+    for &i in owned_params {
+        slots[i] = true;
+    }
     let mut later = BTreeSet::new();
     let mut out = Vec::new();
     for e in body.iter().rev() {
