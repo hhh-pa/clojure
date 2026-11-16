@@ -1367,11 +1367,13 @@ impl<'ctx> Lowerer<'ctx> {
         self.lower(f, last, dest)
     }
 
-    /// Whether a discarded statement can go unlowered: an inert
-    /// metadata write ([`is_inert_meta_statement`]) in a program that
-    /// never reads var metadata.
+    /// Whether a discarded statement can go unlowered: a value with no
+    /// effect (`defn`'s trailing `(var name)`, a literal, a quote), or an
+    /// inert metadata write ([`is_inert_meta_statement`]) in a program
+    /// that never reads var metadata.
     fn drops(&self, e: &Expr) -> bool {
-        !self.var_meta && is_inert_meta_statement(e)
+        matches!(e, Expr::VarRef(_) | Expr::Literal(_) | Expr::Quote(_))
+            || (!self.var_meta && is_inert_meta_statement(e))
     }
 
     fn bc_fx_call<'a>(
@@ -3938,13 +3940,27 @@ impl<'ctx> Lowerer<'ctx> {
             inert_free = without_inert_def_meta(sym, meta);
             (&inert_free.0, inert_free.1.as_deref())
         };
-        let sk = self.value_const(&Value::Symbol(sym.clone()))?;
+        // A plain qualified name targets its declared var slot (no
+        // symbol constant, no second intern); a name with metadata keeps
+        // its symbol (`:dynamic`, `:private`, … live on it).
+        let (begin, finish, key) = match (sym.namespace(), sym.meta()) {
+            (Some(ns), None) => (
+                "rt_n_def_begin_var",
+                "rt_n_def_finish_var",
+                self.var(ns, sym.name()),
+            ),
+            _ => (
+                "rt_n_def_begin",
+                "rt_n_def_finish",
+                self.value_const(&Value::Symbol(sym.clone()))?,
+            ),
+        };
         let dk = match doc {
             Some(d) => self.constant(Const::Str(d.to_owned())),
             None => NONE,
         };
         let id = self
-            .call("rt_n_def_begin", Some(self.i64t), &[self.u64c(sk)])
+            .call(begin, Some(self.i64t), &[self.u64c(key)])
             .expect("id");
         let value = match init {
             Some(e) => {
@@ -3967,12 +3983,12 @@ impl<'ctx> Lowerer<'ctx> {
         };
         let st = self
             .call(
-                "rt_n_def_finish",
+                finish,
                 Some(self.i32t),
                 &[
                     dest.into(),
                     id.into(),
-                    self.u64c(sk),
+                    self.u64c(key),
                     self.u64c(dk),
                     value.into(),
                     mref.into(),

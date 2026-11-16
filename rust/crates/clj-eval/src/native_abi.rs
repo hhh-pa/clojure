@@ -56,6 +56,12 @@ pub fn def_begin(eval: &mut Evaluator, sym: &Symbol) -> u64 {
     eval.def_begin(sym)
 }
 
+/// [`def_begin`] for a target var already interned (a compiled plain
+/// def's var slot: no symbol constant, no second intern).
+pub fn def_begin_var(eval: &mut Evaluator, id: u64) -> u64 {
+    eval.def_begin_id(id)
+}
+
 /// `(def sym …)` second half: root, metadata, dynamic flag; returns
 /// the var.
 #[allow(clippy::too_many_arguments)]

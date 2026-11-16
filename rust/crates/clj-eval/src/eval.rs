@@ -2322,6 +2322,13 @@ impl Evaluator {
     /// reason).
     pub(crate) fn def_begin(&mut self, sym: &Symbol) -> u64 {
         let id = self.registry.intern_def_target(sym);
+        self.def_begin_id(id)
+    }
+
+    /// [`def_begin`](Self::def_begin) past the intern (a compiled plain
+    /// def's target is its already-interned var slot): a lazily
+    /// installed root forced, pending metadata taken.
+    pub(crate) fn def_begin_id(&mut self, id: u64) -> u64 {
         self.force_lazy(id);
         self.registry.take_meta_lazy(id);
         id

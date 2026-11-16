@@ -22,6 +22,7 @@
 //! Fallible shims return 0 on success and 1 with the throw pending
 //! ([`crate::native`]).
 
+use std::borrow::Cow;
 use std::ffi::{CStr, c_char};
 
 use clj_eval::native_abi;
@@ -71,10 +72,9 @@ impl CSlice<u8> {
     /// AOT string/symbol/keyword literals (the compiler emits only valid
     /// UTF-8: `from_utf8`'s word-at-a-time ASCII check is several times
     /// cheaper than the lossy decoder, which stays the fallback).
-    fn as_str(&self) -> std::borrow::Cow<'_, str> {
+    fn as_str(&self) -> Cow<'_, str> {
         let bytes = self.get();
-        let lossy = |_| String::from_utf8_lossy(bytes);
-        std::str::from_utf8(bytes).map_or_else(lossy, std::borrow::Cow::Borrowed)
+        std::str::from_utf8(bytes).map_or_else(|_| String::from_utf8_lossy(bytes), Cow::Borrowed)
     }
 }
 
@@ -491,7 +491,45 @@ pub extern "C" fn rt_n_def_finish(
     line: u32,
     col: u32,
 ) -> i32 {
-    let sym = sym_const(sym_k);
+    def_finish_named(out, id, &sym_const(sym_k), doc_k, value, meta, (line, col))
+}
+
+/// `(def …)` first half for a plain qualified name: its declared var
+/// slot `var_k` is the target (no symbol constant, no second intern).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_def_begin_var(var_k: u64) -> u64 {
+    let var = native::var(var_k as usize);
+    with_active(|eval| native_abi::def_begin_var(eval, var.id))
+}
+
+/// [`rt_n_def_finish`] for a [`rt_n_def_begin_var`] target (named by
+/// its var slot).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_def_finish_var(
+    out: &mut Value,
+    id: u64,
+    var_k: u64,
+    doc_k: u64,
+    value: Option<&Value>,
+    meta: Option<&CSlice<Value>>,
+    line: u32,
+    col: u32,
+) -> i32 {
+    let sym = &native::var(var_k as usize).sym;
+    def_finish_named(out, id, sym, doc_k, value, meta, (line, col))
+}
+
+/// The shared `(def …)` second half: the root, the name's metadata
+/// (evaluated pairs, else the symbol's own), the doc, the span.
+fn def_finish_named(
+    out: &mut Value,
+    id: u64,
+    sym: &Symbol,
+    doc_k: u64,
+    value: Option<&Value>,
+    meta: Option<&CSlice<Value>>,
+    (line, col): (u32, u32),
+) -> i32 {
     let doc = (doc_k != NONE).then(|| str_const(doc_k));
     let value = value.cloned();
     let step = with_active(|eval| {
@@ -500,7 +538,7 @@ pub extern "C" fn rt_n_def_finish(
             None => sym.meta().cloned(),
         };
         Ok(native_abi::def_finish(
-            eval, id, &sym, doc, value, name_meta, line, col,
+            eval, id, sym, doc, value, name_meta, line, col,
         ))
     });
     finish(out, step)
@@ -1003,6 +1041,8 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
     }
     syms![
         rt_n_declare_vars,
+        rt_n_def_begin_var,
+        rt_n_def_finish_var,
         rt_n_declare_fn,
         rt_n_set_const,
         rt_n_main,
