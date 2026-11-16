@@ -370,9 +370,14 @@ fn finish(
     let platform = current_platform();
     let archive = find_archive(&link.exe_dir, link.runtime_archive.as_deref(), platform)
         .map_err(CompileError::Link)?;
+    let linux = cfg!(target_os = "linux");
+    let script = tmp.with_extension("ld");
+    if linux {
+        std::fs::write(&script, link::HOT_TEXT_AOT).map_err(|e| io_err(&script, e))?;
+    }
     let mut cmd = link_command(platform, &tmp, &archive, out, link.linker.as_deref());
     cmd.args
-        .extend(link::layout_args(&archive, cfg!(target_os = "linux")));
+        .extend(link::layout_args(linux.then_some(script.as_path()), linux));
     cmd.args.extend(link::gc_section_args(
         cfg!(target_os = "linux"),
         cfg!(target_os = "macos"),
@@ -380,12 +385,11 @@ fn finish(
     // Linux tries the static link first (see `link::static_args`); the
     // plain command stays the fallback (and the only attempt elsewhere).
     let mut attempts = vec![cmd.clone()];
-    attempts[0]
-        .args
-        .extend(link::static_args(cfg!(target_os = "linux")));
+    attempts[0].args.extend(link::static_args(linux));
     attempts.push(cmd);
     let linked = link::run_link_first(&attempts).map_err(CompileError::Link);
     let _removed = std::fs::remove_file(&tmp);
+    let _removed = std::fs::remove_file(&script);
     linked
 }
 
