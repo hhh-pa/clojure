@@ -542,12 +542,16 @@ fn native_binary_exercises_lite_ns_stdin_and_full_cli() {
              (if (< k (count pairs))
                (let [[a b] (nth pairs k)]
                  (recur (+ k 1) (+ pacc a b)))
-               pacc))])))))
+               pacc))
+           (loop [m 0 hi 0 lo 1000]
+             (if (< m 20)
+               (recur (+ m 1) (max hi (rem (* m 37) 101)) (min lo (rem (* m 53) 97)))
+               (+ hi lo)))])))))
 (println (run-scalar \"aba\" \"aé\" [[3 4] [5 6]]))
 ";
     let (stdout, stderr, code, _report) = build_mode_and_run("scalar-271", scalar_src, &[]);
     assert_eq!(
         (stdout.as_str(), stderr.as_str(), code),
-        ("[13 19 11 18]\n", "", 0)
+        ("[13 19 11 18 97]\n", "", 0)
     );
 }

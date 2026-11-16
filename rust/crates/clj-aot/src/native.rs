@@ -3113,12 +3113,10 @@ impl<'ctx> Lowerer<'ctx> {
                 .expect("br");
             self.builder.position_at_end(next_bb);
         }
-        let saved = self.builder.get_insert_block();
+        let saved = self.builder.get_insert_block().expect("chain block");
         self.builder.position_at_end(false_bb);
         self.finish_bool(f.func, sink, self.ctx.bool_type().const_zero());
-        if let Some(bb) = saved {
-            self.builder.position_at_end(bb);
-        }
+        self.builder.position_at_end(saved);
     }
 
     fn lower_cmp_pair(
@@ -5133,6 +5131,30 @@ fn expr_lite_ok(e: &Expr, defined: &BTreeSet<(String, String)>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_call_op_needs_literal_class_and_member() {
+        // The analyzer always synthesizes `__static*` with literal strings;
+        // anything else (or a short arg list) takes the generic invoke.
+        let lit = |s: &str| Expr::Quote(Value::Str(std::sync::Arc::from(s)));
+        let abs = [
+            lit("java.lang.Math"),
+            lit("abs"),
+            Expr::Literal(Value::Int(-5)),
+        ];
+        assert!(matches!(
+            static_call_op(&abs),
+            Some((StaticOp::MathAbs, [_]))
+        ));
+        assert!(static_call_op(&abs[..1]).is_none());
+        let computed = [
+            Expr::Literal(Value::Nil),
+            lit("abs"),
+            Expr::Literal(Value::Int(-5)),
+        ];
+        assert!(static_call_op(&computed).is_none());
+        assert!(static_call_op(&[lit("java.lang.Math"), lit("signum"), lit("x")]).is_none());
+    }
 
     #[test]
     #[should_panic(expected = "lower_tail_form partition")]

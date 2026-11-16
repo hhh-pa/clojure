@@ -49,4 +49,11 @@
              (+ acc (Math/abs (- i 50)) (Long/remainderUnsigned i 7)))
       [hi lo acc])))
 (show :typed-loop #(typed-loop 200))
+;; A pure Int loop the scalar tier plans unboxed (min/max as int ops).
+(defn minmax-loop [n]
+  (loop [i 0 hi 0 lo 1000]
+    (if (< i n)
+      (recur (inc i) (max hi (rem (* i 37) 101)) (min lo (rem (* i 53) 97)))
+      (+ hi lo))))
+(show :minmax-loop #(minmax-loop 200))
 (show :loop-ovf #(loop [i 0 acc (- Long/MAX_VALUE 1)] (if (< i 3) (recur (inc i) (+ acc i)) acc)))
