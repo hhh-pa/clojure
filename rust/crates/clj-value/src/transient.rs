@@ -898,13 +898,21 @@ static TRANSIENT_ID: AtomicU64 = AtomicU64::new(1);
 /// A fast spinlock cell for single-threaded transient operations.
 /// Transients are thread-confined by Clojure specification; this lock
 /// satisfies `Send + Sync` with minimal atomic overhead instead of
-/// OS-level mutex primitives.
+/// OS-level mutex primitives. (`std::sync::Mutex` is not an option:
+/// the clj-bc bitcode helpers inline this lock into compiled programs,
+/// and std's poison check and contended path are out-of-line symbols
+/// an AOT link cannot resolve — #191.)
 pub struct TransientLock {
     locked: AtomicBool,
     data: UnsafeCell<TransientKind>,
 }
 
-unsafe impl Send for TransientLock {}
+// SAFETY: `data` is only reached through a `TransientGuard`, which
+// exists only while `locked` is held (Acquire on lock, Release on
+// unlock), so threads access the buffer one at a time — `Mutex<T>`'s
+// `Sync` condition, which needs `TransientKind: Send` (it is: buffers
+// of `Send` values). (`Send` is automatic: `UnsafeCell<T>` is `Send`
+// for `T: Send`.)
 unsafe impl Sync for TransientLock {}
 
 impl fmt::Debug for TransientLock {
@@ -933,13 +941,20 @@ impl TransientLock {
                 std::hint::spin_loop();
             }
         }
-        TransientGuard { lock: self }
+        let data = self.data.get();
+        // SAFETY: the lock is held from here until the guard drops, so
+        // this is the only live reference to the buffer for the
+        // guard's lifetime (the one place the cell is dereferenced).
+        let data = unsafe { &mut *data };
+        TransientGuard { lock: self, data }
     }
 }
 
-/// RAII lock guard for [`TransientLock`].
+/// RAII lock guard for [`TransientLock`]: exclusive access to the
+/// buffer until it drops (which releases the lock).
 pub struct TransientGuard<'a> {
     lock: &'a TransientLock,
+    data: &'a mut TransientKind,
 }
 
 impl Deref for TransientGuard<'_> {
@@ -947,14 +962,14 @@ impl Deref for TransientGuard<'_> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.lock.data.get() }
+        self.data
     }
 }
 
 impl DerefMut for TransientGuard<'_> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.lock.data.get() }
+        self.data
     }
 }
 
