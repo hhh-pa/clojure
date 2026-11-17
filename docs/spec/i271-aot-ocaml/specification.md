@@ -6,7 +6,7 @@ Baseline: `ca27a18e` (`master`, post-#259/#260)
 
 ## 1. Goal
 
-Make native binaries produced by `clojure-rs build` match or outperform native OCaml (`ocamlopt -O2`) on the Linux `h2h-cpu-mem` workflow across the shared snippet suite: **zero instruction-count losses and zero peak-RSS losses at the 1.15x margin (`--margin 0.15`, `--metrics mem,ins`)**.
+**Requirement: AOT performance must outperform OCaml** (issue #271, updated 2026-11-17). On the Linux `h2h-cpu-mem` workflow, native binaries produced by `clojure-rs build` must beat native OCaml (`ocamlopt -O2`) across the shared snippet suite. On every compared case, AOT's median Pin instruction count and median peak RSS must both be strictly below OCaml's: every `aot-ocaml` case is a win in `h2h-compare`'s terms, with no losses and no ties (`--metrics mem,ins`). Staying within the 1.15x margin (parity) is not enough. Enforcing this needs an opt-in `h2h-compare` mode that fails on ties as well as losses; the other gates keep their loss-only rule.
 
 To establish the authoritative Linux baseline and enforce every subsequent PR, first extend `.github/workflows/h2h-cpu-mem.yml` and `scripts/ci/go/cmd/h2h-compare` to measure `AOT from`, `AOT to`, and `OCAML`, and add the `AOT from` vs `AOT to` (`aot-rsrs`) and `AOT` vs `OCAML` (`aot-ocaml`) quality gates.
 
@@ -110,7 +110,7 @@ Once Slice 1 yields authoritative Linux Pin (`pin_instructions`) and RSS (`maxrs
 2. Ship focused, well-tested slices, each verified against:
    - `rust.yml` full gate suite (100.00% line & patch coverage, MSRV, `--no-default-features`, complexity, geiger),
    - `h2h-cpu-mem.yml` showing measurable progress on `aot-ocaml` and zero regressions (`0 MEM`, `0 INS`) on `aot-rsrs`, `recipes`, and `recipes-rsrs`.
-3. Remove `[waive-ocaml]` usage once unwaived `aot-ocaml` reports `0 MEM` and `0 INS` losses across all compared cases.
+3. Remove `[waive-ocaml]` usage once unwaived `aot-ocaml` shows AOT outperforming OCaml on every compared case (wins only on MEM and INS: no losses, no ties).
 
 ### 6.1 `BootMode::Lite` semantic parity contract
 
@@ -168,5 +168,5 @@ The full boot costs ~14M instructions per run (Linux Pin), against OCaml's ~0.6M
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
 - [ ] `.github/workflows/h2h-cpu-mem.yml` measures `AOT from`, `AOT to`, and `OCAML` and runs `aot-rsrs` and `aot-ocaml`.
 - [ ] Slice 1 CI run completes cleanly and captures Linux Pin `AOT` vs `OCAML` baseline artifacts.
-- [ ] Unwaived `h2h-cpu-mem.yml` passes `recipes`, `recipes-rsrs`, `aot-rsrs`, `aot-ocaml`, and `aot-run` with 0 MEM and 0 INS losses at `--margin 0.15`.
+- [ ] Unwaived `h2h-cpu-mem.yml` passes `recipes`, `recipes-rsrs`, `aot-rsrs`, and `aot-run` with 0 MEM and 0 INS losses at `--margin 0.15`, and `aot-ocaml` shows AOT outperforming OCaml on every compared case (wins only on MEM and INS).
 - [ ] All CI quality gates in `rust.yml` remain green at 100.00% coverage.
