@@ -167,6 +167,22 @@ const LITE_INTERNAL_HELPERS: &[&str] = &[
     "+",
 ];
 
+/// `clojure.core` names natives resolve by name (`deref_core` /
+/// `core_var`) besides [`LITE_INTERNAL_HELPERS`]: a compiled program that
+/// declares one installs it at boot, while every other declared native
+/// installs when compiled code first resolves its var ([`install_lazy`]:
+/// about half of the declared natives never run for a given input).
+/// `by_name_lookups_are_eager` pins this list against the sources.
+pub const LITE_BY_NAME: &[&str] = &[
+    "assoc",
+    "commute",
+    "default-data-readers",
+    "global-hierarchy",
+    "print-dup",
+    "print-method",
+    "print-simple",
+];
+
 /// Dynamic core var names installed by [`boot_lite`].
 const LITE_DYNAMIC_NAMES: &[&str] = &[
     "*ns*",
@@ -415,6 +431,20 @@ fn install_core_dynamic(eval: &mut Evaluator, name: &str, val: Value, dynamic_me
     });
 }
 
+/// Install a declared var's Lite native when compiled code first
+/// resolves it (the boot installed only [`LITE_BY_NAME`] and the
+/// helpers): a no-op for other namespaces, an installed var, or a name
+/// with no native in the registered tables.
+pub fn install_lazy(eval: &mut Evaluator, (ns, name, hint): (&str, &str, u32), tables: LiteTables) {
+    let native_ns = ns == "clojure.core" || tables.lib_tables.iter().any(|&(lib, _)| lib == ns);
+    if !native_ns || eval.registry.lookup_str(ns, name).is_some() {
+        return;
+    }
+    if let Some(row) = lite_row((ns, name, hint), tables) {
+        eval.install_native_rows(ns, vec![row]);
+    }
+}
+
 /// The native a declared Lite var installs — `None` for a dynamic
 /// (installed apart) or a name the registered tables lack — with its
 /// owned-args entry (searched only when the hint says one exists).
@@ -597,17 +627,21 @@ fn install_optional_dynamics(eval: &mut Evaluator, vars: &[(&str, &str)], need_a
 }
 
 /// Install the declared vars' natives (the compiler's list is
-/// distinct), one batch per namespace; then the internal helpers the
-/// program did not declare.
+/// distinct), one batch per namespace — under `lazy` (compiled
+/// binaries) only the [`LITE_BY_NAME`] ones, the rest on first use —
+/// then the internal helpers the program did not declare.
 fn install_declared(
     eval: &mut Evaluator,
     vars: &[(&str, &str)],
     hints: &[u32],
     tables: LiteTables,
-    seq_helpers: bool,
+    (seq_helpers, lazy): (bool, bool),
 ) {
     let mut batches: Vec<(&str, Vec<crate::eval::NativeRow>)> = Vec::new();
     for (i, &(ns, name)) in vars.iter().enumerate() {
+        if lazy && !(ns == "clojure.core" && LITE_BY_NAME.contains(&name)) {
+            continue;
+        }
         let hint = hints.get(i).copied().unwrap_or(NO_LITE_HINT);
         let Some(row) = lite_row((ns, name, hint), tables) else {
             continue;
@@ -689,7 +723,9 @@ fn boot_lite_impl(
     let id = core_var(&eval, "*ns*").expect("*ns* installed");
     eval.push_binding(core_var_handle(id, "*ns*"), user_handle);
 
-    install_declared(&mut eval, vars, hints, tables, seq_helpers);
+    // Compiled binaries (`boot_lite_with_caps`) install on first use; the
+    // interpreter-side `boot_lite` resolves names, so it installs all.
+    install_declared(&mut eval, vars, hints, tables, (seq_helpers, !all_dynamics));
 
     eval.registry.set_current("user");
     eval.reset_gensym();
@@ -827,6 +863,80 @@ mod tests {
             .is_some()
     }
 
+    /// Resolve every declared var the way compiled code does on first
+    /// use ([`install_lazy`]).
+    fn resolve_all(eval: &mut Evaluator, vars: &[(&str, &str)], hints: &[u32], tables: LiteTables) {
+        for (i, &(ns, name)) in vars.iter().enumerate() {
+            let hint = hints.get(i).copied().unwrap_or(NO_LITE_HINT);
+            install_lazy(eval, (ns, name, hint), tables);
+        }
+    }
+
+    /// Lite binaries install a declared native only when compiled code
+    /// first resolves its var, so every name a native resolves by name
+    /// must be installed eagerly: a helper, a dynamic (installed apart),
+    /// or [`LITE_BY_NAME`].
+    #[test]
+    fn by_name_lookups_are_eager() {
+        let call = regex::Regex::new(r#"(?:deref_core|core_var)\(\s*&?[a-z_.]+\s*,\s*"([^"]+)""#)
+            .expect("pattern");
+        let mut dirs = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src"
+        ))];
+        let mut names = std::collections::BTreeSet::new();
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("read");
+                    let body = text
+                        .split("#[cfg(test)]\nmod tests")
+                        .next()
+                        .unwrap_or_default();
+                    names.extend(call.captures_iter(body).map(|c| c[1].to_owned()));
+                }
+            }
+        }
+        assert!(
+            names.contains("assoc") && names.contains("conj"),
+            "{names:?}"
+        );
+        let lazy: Vec<&String> = names
+            .iter()
+            .filter(|n| {
+                !n.starts_with('*')
+                    && !LITE_INTERNAL_HELPERS.contains(&n.as_str())
+                    && !LITE_BY_NAME.contains(&n.as_str())
+            })
+            .collect();
+        assert!(
+            lazy.is_empty(),
+            "resolved by name but installed lazily: {lazy:?}"
+        );
+    }
+
+    #[test]
+    fn lazy_installs_skip_installed_foreign_and_unknown_names() {
+        let tables = LiteTables {
+            core_groups: &[LITE_CORE_CORE],
+            owned_groups: &[],
+            lib_tables: &[("clojure.string", LITE_CAP_STRING)],
+        };
+        let mut eval = boot_lite_with_caps(&[("clojure.core", "inc")], &[], false, tables, false);
+        assert!(core_var(&eval, "inc").is_none(), "installed on first use");
+        install_lazy(&mut eval, ("clojure.core", "inc", NO_LITE_HINT), tables);
+        let id = core_var(&eval, "inc").expect("installed");
+        install_lazy(&mut eval, ("clojure.core", "inc", NO_LITE_HINT), tables);
+        assert_eq!(core_var(&eval, "inc"), Some(id), "installed once");
+        install_lazy(&mut eval, ("user", "inc", NO_LITE_HINT), tables);
+        assert!(eval.registry.lookup_str("user", "inc").is_none());
+        install_lazy(&mut eval, ("clojure.core", "no-such", NO_LITE_HINT), tables);
+        assert!(core_var(&eval, "no-such").is_none());
+    }
+
     #[test]
     fn owned_hint_bits_steer_the_owned_search() {
         for (ns, name, owned) in [
@@ -857,8 +967,12 @@ mod tests {
         // Hinted and scanned (no hints) boots install the same entries;
         // `conj` is declared and an internal helper (installed once).
         for hints in [&hints[..], &[]] {
-            let eval = boot_lite_with_caps(&vars, hints, true, tables, true);
+            let mut eval = boot_lite_with_caps(&vars, hints, true, tables, true);
+            // Boot installs the by-name `assoc` and the helpers; `inc`
+            // and `join` wait for first use.
+            assert!(core_var(&eval, "inc").is_none());
             assert!(installed_owned(&eval, "clojure.core", "assoc"));
+            resolve_all(&mut eval, &vars, hints, tables);
             assert!(!installed_owned(&eval, "clojure.core", "inc"));
             assert!(installed_owned(&eval, "clojure.core", "conj"));
             assert!(installed_owned(&eval, "clojure.string", "join"));
@@ -882,17 +996,13 @@ mod tests {
             lite_native_hint("clojure.core", "inc"),
             lite_native_hint("clojure.string", "trim"),
         ];
-        let eval = boot_lite_with_caps(
-            &vars,
-            &hints,
-            false,
-            LiteTables {
-                core_groups: &[LITE_CORE_CORE],
-                owned_groups: &[],
-                lib_tables: &[("clojure.string", LITE_CAP_STRING)],
-            },
-            false,
-        );
+        let tables = LiteTables {
+            core_groups: &[LITE_CORE_CORE],
+            owned_groups: &[],
+            lib_tables: &[("clojure.string", LITE_CAP_STRING)],
+        };
+        let mut eval = boot_lite_with_caps(&vars, &hints, false, tables, false);
+        resolve_all(&mut eval, &vars, &hints, tables);
         assert!(core_var(&eval, "inc").is_some());
         assert!(core_var(&eval, "dec").is_some());
         for name in ["trim", "join"] {
@@ -1186,39 +1296,33 @@ mod tests {
         );
         // Booting with `seq_helpers = false` omits `LITE_INTERNAL_HELPERS` (`conj`),
         // and unknown core/string names stay uninterned cleanly.
-        let io_only = boot_lite_with_caps(
-            &[
-                ("clojure.core", "println"),
-                ("clojure.core", "unknown-core"),
-                ("clojure.string", "unknown-str"),
-            ],
-            &[],
-            false,
-            LiteTables {
-                core_groups: &[LITE_CORE_IO],
-                owned_groups: &[],
-                lib_tables: &[],
-            },
-            false,
-        );
+        let io_vars = [
+            ("clojure.core", "println"),
+            ("clojure.core", "unknown-core"),
+            ("clojure.string", "unknown-str"),
+        ];
+        let io_tables = LiteTables {
+            core_groups: &[LITE_CORE_IO],
+            owned_groups: &[],
+            lib_tables: &[],
+        };
+        let mut io_only = boot_lite_with_caps(&io_vars, &[], false, io_tables, false);
+        resolve_all(&mut io_only, &io_vars, &[], io_tables);
         assert!(core_var(&io_only, "println").is_some());
         assert!(core_var(&io_only, "conj").is_none());
         // A program that never prints installs no stdout dynamics, and a
         // `clojure.string` name with no native stays uninterned.
-        let quiet = boot_lite_with_caps(
-            &[
-                ("clojure.core", "inc"),
-                ("clojure.string", "no-such-native"),
-            ],
-            &[],
-            false,
-            LiteTables {
-                core_groups: &[LITE_CORE_CORE],
-                owned_groups: &[],
-                lib_tables: &[("clojure.string", LITE_CAP_STRING)],
-            },
-            false,
-        );
+        let quiet_vars = [
+            ("clojure.core", "inc"),
+            ("clojure.string", "no-such-native"),
+        ];
+        let quiet_tables = LiteTables {
+            core_groups: &[LITE_CORE_CORE],
+            owned_groups: &[],
+            lib_tables: &[("clojure.string", LITE_CAP_STRING)],
+        };
+        let mut quiet = boot_lite_with_caps(&quiet_vars, &[], false, quiet_tables, false);
+        resolve_all(&mut quiet, &quiet_vars, &[], quiet_tables);
         assert!(core_var(&quiet, "inc").is_some());
         assert!(core_var(&quiet, "*out*").is_none());
         let missing = Symbol::new(Some("clojure.string"), "no-such-native");

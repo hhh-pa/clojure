@@ -59,6 +59,25 @@ pub(crate) struct VarSlot {
     core: OnceLock<Option<native_abi::CoreEntry>>,
 }
 
+/// A Lite program's registered capability tables, kept past boot for
+/// the natives that install on first use (`aot_boot::install_lazy`).
+#[derive(Default)]
+struct LiteSet {
+    core: Vec<clj_eval::aot_boot::LiteCoreGroup>,
+    owned: Vec<clj_eval::aot_boot::LiteOwnedSlice>,
+    libs: Vec<(&'static str, &'static [clj_eval::aot_boot::LiteNativeSlice])>,
+}
+
+impl LiteSet {
+    fn tables(&self) -> clj_eval::aot_boot::LiteTables<'_> {
+        clj_eval::aot_boot::LiteTables {
+            core_groups: &self.core,
+            owned_groups: &self.owned,
+            lib_tables: &self.libs,
+        }
+    }
+}
+
 /// Tables under construction (startup only).
 #[derive(Default)]
 struct Building {
@@ -69,12 +88,17 @@ struct Building {
     lite_owned_caps: Vec<clj_eval::aot_boot::LiteOwnedSlice>,
     lite_libs: Vec<(&'static str, &'static [clj_eval::aot_boot::LiteNativeSlice])>,
     lite_seq_helpers: bool,
+    /// Set by a Lite run: freezing keeps the tables above as a [`LiteSet`].
+    lite: bool,
 }
 
 static BUILDING: Mutex<Option<Building>> = Mutex::new(None);
 
 /// The frozen program tables.
 pub(crate) struct Tables {
+    /// A Lite run's capability tables (its declared natives install on
+    /// first use); `None` under the full boot.
+    lite: Option<LiteSet>,
     vars: Box<[VarSlot]>,
     consts: Box<[Value]>,
     fns: Box<[FnDesc]>,
@@ -257,7 +281,13 @@ pub(crate) fn freeze(reg_epoch: Arc<AtomicU64>) {
         .map(|d| d.expect("every declared fn index is filled"))
         .collect();
     let fast_vars = FastVars::new(reg_epoch, native_abi::bind_counts(), b.vars.len());
+    let lite = b.lite.then_some(LiteSet {
+        core: b.lite_core_caps,
+        owned: b.lite_owned_caps,
+        libs: b.lite_libs,
+    });
     let tables: &'static Tables = Box::leak(Box::new(Tables {
+        lite,
         vars: b.vars.into_boxed_slice(),
         consts: b.consts.into_boxed_slice(),
         fns: fns.into_boxed_slice(),
@@ -280,9 +310,17 @@ pub(crate) fn constant(k: usize) -> &'static Value {
 
 /// Var `k`, interned on first use (in the then-current registry).
 pub(crate) fn var(k: usize) -> &'static Var {
-    let slot = &tables().vars[k];
-    slot.var
-        .get_or_init(|| with_active(|eval| native_abi::intern_var(eval, &slot.ns, &slot.name)))
+    let t = tables();
+    let slot = &t.vars[k];
+    slot.var.get_or_init(|| {
+        with_active(|eval| {
+            if let Some(lite) = &t.lite {
+                let decl = (&*slot.ns, &*slot.name, slot.hint);
+                clj_eval::aot_boot::install_lazy(eval, decl, lite.tables());
+            }
+            native_abi::intern_var(eval, &slot.ns, &slot.name)
+        })
+    })
 }
 
 /// A var-cache validity key: (registry epoch, binding version).
@@ -564,6 +602,7 @@ pub(crate) fn run_main_lite(
 ) -> i32 {
     reset_thread_caches();
     let (declared, core_caps, owned_caps, lib_caps, seq_helpers) = building(|b| {
+        b.lite = true;
         let declared: Vec<(Arc<str>, Arc<str>, u32)> = b
             .vars
             .iter()
@@ -571,10 +610,10 @@ pub(crate) fn run_main_lite(
             .collect();
         (
             declared,
-            std::mem::take(&mut b.lite_core_caps),
-            std::mem::take(&mut b.lite_owned_caps),
-            std::mem::take(&mut b.lite_libs),
-            std::mem::take(&mut b.lite_seq_helpers),
+            b.lite_core_caps.clone(),
+            b.lite_owned_caps.clone(),
+            b.lite_libs.clone(),
+            b.lite_seq_helpers,
         )
     });
     let refs: Vec<(&str, &str)> = declared
