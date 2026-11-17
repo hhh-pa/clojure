@@ -1321,7 +1321,7 @@ impl<'ctx> Lowerer<'ctx> {
         let probe = collect_body_moves(body, captures_end, &f.env, &symbols);
         let taken: Vec<usize> = symbols
             .into_iter()
-            .filter(|i| probe.iter().any(|m| m.1 == *i))
+            .filter(|i| probe.iter().any(|m| m.1 == *i) && !borrow_only(body, *i))
             .collect();
         if taken.is_empty() {
             return taken;
@@ -2541,13 +2541,20 @@ impl<'ctx> Lowerer<'ctx> {
                 temps.push(*e);
             }
         }
-        let ok = self
-            .call(
+        // A stable `defn`'s root is its compiled fn once the `def` has
+        // run, and a direct call can run no earlier from its own unit (the
+        // init is the `fn` itself) or any later one: only the call depth
+        // needs checking there (#271).
+        let entered = if self.stable_of(&var).is_some_and(|sr| self.unit >= sr.unit) {
+            self.call("rt_n_enter", Some(self.i8t), &[])
+        } else {
+            self.call(
                 "rt_n_enter_fn",
                 Some(self.i8t),
                 &[self.u64c(vk), self.u64c(k as u64)],
             )
-            .expect("ok");
+        };
+        let ok = entered.expect("ok");
         let go = self
             .builder
             .build_int_compare(IntPredicate::NE, ok, self.i8t.const_zero(), "go")
@@ -5163,6 +5170,31 @@ fn self_recurs(body: &[Expr]) -> bool {
 
 /// Whether a direct call has an owned-args entry that can reuse moved
 /// (`Arc::strong_count == 1`) collections or release consumed inputs early.
+/// Whether every use of local `i` in `body` is a read-only call operand
+/// (#271): an argument of a core call outside the owned-move ops, or of
+/// an invoke. A param used only so keeps reading the caller's argument
+/// array: an owned copy at entry buys no in-place update.
+fn borrow_only(body: &[Expr], i: usize) -> bool {
+    fn walk(e: &Expr, i: usize) -> bool {
+        let operand = |a: &Expr| matches!(a, Expr::Local(j) if *j == i) || walk(a, i);
+        match e {
+            Expr::Local(j) => *j != i,
+            Expr::DirectNative(c)
+                if !is_owned_move_op(c.var.sym.namespace(), c.var.sym.name(), c.args.len()) =>
+            {
+                c.args.iter().all(operand)
+            }
+            Expr::Invoke { head, args, .. } => walk(head, i) && args.iter().all(operand),
+            _ => {
+                let mut ok = true;
+                for_each_child(e, &mut |c| ok = ok && walk(c, i));
+                ok
+            }
+        }
+    }
+    body.iter().all(|e| walk(e, i))
+}
+
 fn is_owned_move_op(ns: Option<&str>, name: &str, argc: usize) -> bool {
     match (ns, name) {
         (Some("clojure.string"), "join") => argc == 2,

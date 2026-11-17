@@ -174,6 +174,14 @@ Per-operation costs, not startup, separate AOT from OCaml on most remaining case
 5. **Keyword equality is pointer equality.** Every keyword is interned (`Keyword::new` is the only constructor, and the table keeps each entry for the life of the process), so `Keyword::eq` no longer falls back to comparing strings when the pointers differ. `Hash` is unchanged, because hash-trie iteration order depends on it.
 6. **Effect (Linux callgrind, per iteration):** a vector `nth` through a global drops from 271 to about 170 instructions. On macOS, `(:b rec)` falls from 661 to 139, `contains?` on a global set from 485 to 361, and `get` on a global map from 560 to 440. Snippet output is unchanged (corpus `stable_vars.clj`: forward references, dynamic, re-`def`ed, nested, and `#'`-taken vars, and every keyword-invoke shape).
 
+### 6.7 Slice 4b: cheaper direct calls
+
+A direct call of a compiled `defn` cost about 290 instructions on macOS beyond its body. `rt_n_enter_fn` checked that the var still held that fn (thread-local caches, the registry epoch) and the call depth. The callee also cloned every parameter whose last use the move analysis recorded, even when that use only read it.
+
+1. **No root check for stable `defn`s.** A direct-call target's `def` init is its `fn` literal, so a call site in that `def`'s own unit (the body, including recursion) or a later unit can only run once the root is the compiled fn. If the var is stable (§6.6), such a site calls `rt_n_enter`, which only checks call depth (the `MAX_CALL_DEPTH` / stack red-zone fallback is unchanged). Forward calls through `declare` keep `rt_n_enter_fn`.
+2. **Borrowed parameters.** A parameter whose every use is an operand of a core call outside the owned-move ops, or of an invoke, keeps reading the caller's argument array. An owned copy at entry can buy no in-place update for it. Parameters reaching an owned-move op, a `let`, `recur`, or the result still take or clone their value as before, including `reduce`'s handed-over accumulator.
+3. **Effect (macOS, per iteration):** `(defn pick [w i] (nth w i))` called in a loop falls from 422 to 231 instructions (call overhead about 290 → 96). Corpus `direct_calls.clj` covers recursion at depth 20,000, forward calls, and every parameter shape.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

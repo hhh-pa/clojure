@@ -491,7 +491,15 @@ pub extern "C" fn rt_n_enter_fn(k: u64, desc: u64) -> u8 {
     })
 }
 
-/// Leave a call entered by [`rt_n_enter_fn`].
+/// Enter a direct call to a stable `defn` (#271): [`rt_n_enter_fn`]'s
+/// call-depth check without its root check (the var holds that fn for
+/// the rest of the run). 1 = call the code, 0 = take the general invoke.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_enter() -> u8 {
+    with_active(|eval| u8::from(native_abi::enter_call(eval)))
+}
+
+/// Leave a call entered by [`rt_n_enter_fn`] or [`rt_n_enter`].
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_leave() {
     with_active(native_abi::leave_call);
@@ -1082,6 +1090,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_meta_sym,
         rt_n_coll,
         rt_n_consts_base,
+        rt_n_enter,
         rt_n_regex,
         rt_n_static_field,
         rt_n_class,

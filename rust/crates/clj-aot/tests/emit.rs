@@ -1126,6 +1126,25 @@ fn native_emit_ir_caches_stable_var_roots_271() {
     // `#'`-taken vars are not.
     assert!(text.contains("@clj_root7 = "), "{text}");
     assert!(!text.contains("@clj_root8 = "), "{text}");
+    // Direct calls (#271 Slice 4b): a stable `defn` called from its own
+    // unit or a later one skips the root check; a forward call keeps it.
+    // Params only read as call operands keep reading the caller's array.
+    let text = emit(
+        "\
+(declare later)
+(defn first-of [w i] (nth w i))
+(defn relay [w] (first-of w 0))
+(defn grow [w x] (conj w x))
+(defn kept [w] (let [v w] (count v)))
+(defn ahead [x] (if (pos? x) (later (dec x)) 0))
+(defn later [x] (+ x (ahead x)))
+(println (relay [1 2]) (grow [1] 2) (kept [3]) (later 2))
+",
+        "calls.ll",
+    );
+    for needle in ["@rt_n_enter()", "@rt_n_enter_fn("] {
+        assert!(text.contains(needle), "missing {needle}:\n{text}");
+    }
     // Any var-rooting call anywhere disables the caches.
     let text = emit(
         "(def a [1]) (defn f [] (nth a 0)) (alter-var-root #'a conj 2) (println (f))",
