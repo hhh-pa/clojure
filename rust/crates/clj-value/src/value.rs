@@ -56,6 +56,11 @@ type RpdsList = rpds::ListSync<Value>;
 type RpdsVector = crate::trie::PVec;
 type RpdsMap = rpds::HashTrieMapSync<Value, Value, FxBuildHasher>;
 type RpdsSet = rpds::HashTrieSetSync<Value, FxBuildHasher>;
+/// A set's live members, each mapped to its slot in the order sidecar.
+type RpdsIndex = rpds::HashTrieMapSync<Value, usize, FxBuildHasher>;
+/// A set's order sidecar: one slot per member added since the last
+/// compaction; a removed member's slot is a hole (`None`).
+type SetSlots = crate::trie::PVec<Option<Value>>;
 
 /// Identity counters for `identical?` (S16): every freshly
 /// constructed [`List`]/[`Vector`]/[`Set`] mints an id from its
@@ -722,9 +727,17 @@ pub enum SortSpec {
 /// old struct copy.
 #[derive(Clone)]
 struct SetData {
-    inner: RpdsSet,
+    /// Live members, each mapped to its slot in `members`.
+    inner: RpdsIndex,
     meta: Option<Arc<Map>>,
-    members: Arc<RpdsVector>,
+    /// Insertion order (comparator order when sorted). `disj` leaves a
+    /// hole in its member's slot (O(log n), no shifting); the sidecar
+    /// compacts once holes outnumber members (amortized O(1)).
+    members: Arc<SetSlots>,
+    /// How many slots are holes, and the first slot that can be live
+    /// (every slot before it is a hole: `first`/`disj` pops stay O(1)).
+    holes: usize,
+    head: usize,
     /// Boxed (like [`Map`]'s): sorted sets are rare.
     sort: Option<Box<SortSpec>>,
     id: u64,
@@ -1923,65 +1936,54 @@ impl Set {
     /// a present member is a no-op (keeps the original object).
     #[must_use]
     pub fn insert(mut self, v: Value) -> Self {
-        if self.0.inner.contains(&v) {
-            self
-        } else {
-            let mut members = self.0.members.clone();
-            Arc::make_mut(&mut members).push_back_mut(v.clone());
-            let data = Arc::make_mut(&mut self.0);
-            data.inner.insert_mut(v);
-            Self(Arc::new(SetData {
-                inner: data.inner.clone(),
-                meta: data.meta.clone(),
-                members,
-                sort: data.sort.clone(),
-                id: next_set_id(),
-            }))
+        if self.0.inner.contains_key(&v) {
+            return self;
         }
+        let data = Arc::make_mut(&mut self.0);
+        let slot = data.members.len();
+        Arc::make_mut(&mut data.members).push_back_mut(Some(v.clone()));
+        data.inner.insert_mut(v, slot);
+        data.id = next_set_id();
+        self
     }
 
     /// Whether a value is present.
     #[must_use]
     pub fn contains(&self, v: &Value) -> bool {
         if self.0.members.len() <= 4 {
-            return self.0.members.iter().any(|m| m == v);
+            return self.0.members.iter().any(|m| m.as_ref() == Some(v));
         }
-        self.0.inner.contains(v)
+        self.0.inner.contains_key(v)
     }
 
     /// The stored member equal to `v`, if present (`get` on a set
     /// returns the member, not the key).
     #[must_use]
     pub fn get(&self, v: &Value) -> Option<&Value> {
-        if !self.0.inner.contains(v) {
-            return None;
-        }
-        self.0.members.iter().find(|m| *m == v)
+        self.0.inner.get_key_value(v).map(|(member, _)| member)
     }
 
     /// Remove a value (`disj` one item). A missing value is a no-op;
-    /// otherwise both the entries and the insertion-order sidecar
-    /// drop it, and later positions shift down.
+    /// otherwise its slot in the insertion-order sidecar becomes a
+    /// hole (the other members keep their order).
     #[must_use]
     pub fn without(mut self, v: &Value) -> Self {
-        if !self.0.inner.contains(v) {
+        let Some(&slot) = self.0.inner.get(v) else {
             return self;
-        }
-        let mut members = RpdsVector::new_sync();
-        for m in self.0.members.iter() {
-            if m != v {
-                members.push_back_mut(m.clone());
-            }
-        }
+        };
         let data = Arc::make_mut(&mut self.0);
         data.inner.remove_mut(v);
-        Self(Arc::new(SetData {
-            inner: data.inner.clone(),
-            meta: data.meta.clone(),
-            members: Arc::new(members),
-            sort: data.sort.clone(),
-            id: next_set_id(),
-        }))
+        let members = Arc::make_mut(&mut data.members);
+        members.set_mut(slot, None);
+        data.holes += 1;
+        while members.get(data.head).is_some_and(Option::is_none) {
+            data.head += 1;
+        }
+        if data.holes * 2 > members.len() {
+            data.compact();
+        }
+        data.id = next_set_id();
+        self
     }
 
     /// The element count.
@@ -2000,7 +2002,7 @@ impl Set {
     /// Iterate members in insertion order (the JVM small-set seq
     /// order; see the `members` sidecar).
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
-        self.0.members.iter()
+        self.0.members.iter_from(self.0.head).flatten()
     }
 
     /// Whether this is a sorted set (FT6 `sorted-set` family).
@@ -2028,24 +2030,20 @@ impl Set {
     /// linear) snapshot the persistent sidecar.
     #[must_use]
     pub fn ordered_members(&self) -> Vec<Value> {
-        self.0.members.iter().cloned().collect()
+        self.iter().cloned().collect()
     }
 
     /// Rebuild from explicitly ordered members, preserving metadata
     /// and the sort order (sorted `conj` positions through here).
     #[must_use]
     pub fn with_ordered_members(self, members: Vec<Value>) -> Self {
-        let mut inner = RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default());
-        let mut kept = RpdsVector::new_sync();
-        for v in &members {
-            kept.push_back_mut(v.clone());
-            inner.insert_mut(v.clone());
-        }
-        let members = Arc::new(kept);
+        let (inner, members) = slots_of(members);
         Self(Arc::new(SetData {
             inner,
             meta: self.0.meta.clone(),
-            members,
+            members: Arc::new(members),
+            holes: 0,
+            head: 0,
             sort: self.0.sort.clone(),
             id: next_set_id(),
         }))
@@ -2167,12 +2165,42 @@ pub fn new_map() -> Map {
 #[must_use]
 pub fn new_set() -> Set {
     Set(Arc::new(SetData {
-        inner: RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default()),
+        inner: RpdsIndex::new_with_hasher_and_ptr_kind(FxBuildHasher::default()),
         meta: None,
-        members: Arc::new(RpdsVector::new_sync()),
+        members: Arc::new(SetSlots::new_sync()),
+        holes: 0,
+        head: 0,
         sort: None,
         id: next_set_id(),
     }))
+}
+
+/// A hole-free index and order sidecar over `members` (in order).
+fn slots_of(members: Vec<Value>) -> (RpdsIndex, SetSlots) {
+    let mut inner = RpdsIndex::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
+    let mut slots = SetSlots::new_sync();
+    for v in members {
+        inner.insert_mut(v.clone(), slots.len());
+        slots.push_back_mut(Some(v));
+    }
+    (inner, slots)
+}
+
+impl SetData {
+    /// Drop the order sidecar's holes (the members keep their order).
+    fn compact(&mut self) {
+        let live = self
+            .members
+            .iter_from(self.head)
+            .flatten()
+            .cloned()
+            .collect();
+        let (inner, members) = slots_of(live);
+        self.inner = inner;
+        self.members = Arc::new(members);
+        self.holes = 0;
+        self.head = 0;
+    }
 }
 
 /// A map entry from a key and a value (FX2: `find`, map seqs, and
@@ -3458,6 +3486,9 @@ mod tests {
             unsafe { std::mem::transmute_copy::<Value, [u8; 32]>(v) }
         }
         assert_eq!(std::mem::size_of::<Value>(), 32);
+        // A set's order sidecar slot (`None` = a `disj` hole) costs no
+        // more than the member itself.
+        assert_eq!(std::mem::size_of::<Option<Value>>(), 32);
         assert_eq!(std::mem::align_of::<Value>(), 8);
         assert_eq!(bytes(&Value::Nil)[0], 0);
         let t = bytes(&Value::Bool(true));
@@ -4120,6 +4151,45 @@ mod tests {
             s_rebuilt.ordered_members(),
             vec![Value::Int(3), Value::Int(1)]
         );
+    }
+
+    #[test]
+    fn set_disj_holes_keep_insertion_order() {
+        let ints = |s: &super::Set| s.iter().cloned().collect::<Vec<_>>();
+        let mut s = super::new_set();
+        for i in 0..10 {
+            s = s.insert(Value::Int(i));
+        }
+        // Front pops advance past the holes; inner holes keep order.
+        let popped = s.clone().without(&Value::Int(0)).without(&Value::Int(1));
+        assert_eq!(popped.size(), 8);
+        assert_eq!(ints(&popped)[0], Value::Int(2));
+        let holed = s.clone().without(&Value::Int(4)).without(&Value::Int(6));
+        assert_eq!(
+            ints(&holed),
+            [0, 1, 2, 3, 5, 7, 8, 9].map(Value::Int).to_vec()
+        );
+        // A re-added member goes to the back; `get` answers the stored
+        // member, a removed one nothing.
+        let back = holed.clone().insert(Value::Int(4));
+        assert_eq!(ints(&back).last(), Some(&Value::Int(4)));
+        assert_eq!(back.get(&Value::Int(4)), Some(&Value::Int(4)));
+        assert_eq!(holed.get(&Value::Int(4)), None);
+        assert!(!holed.contains(&Value::Int(6)));
+        // Removing most members compacts (order kept); the original is
+        // untouched.
+        let few = (0..8).fold(s.clone(), |acc, i| acc.without(&Value::Int(i * 7 % 10)));
+        assert_eq!(ints(&few), [3, 6].map(Value::Int).to_vec());
+        assert_eq!(ints(&s), (0..10).map(Value::Int).collect::<Vec<_>>());
+        let gone = (0..10).fold(s.clone(), |acc, i| acc.without(&Value::Int(i)));
+        assert!(gone.is_empty());
+        assert_eq!(ints(&gone.insert(Value::Int(3))), [Value::Int(3)]);
+        // Small sets scan their slots, holes included.
+        let small = super::new_set()
+            .insert(Value::Int(1))
+            .insert(Value::Int(2))
+            .without(&Value::Int(1));
+        assert!(small.contains(&Value::Int(2)) && !small.contains(&Value::Int(1)));
     }
 
     #[test]
