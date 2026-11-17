@@ -42,13 +42,27 @@ use crate::ns::{NativeFnPtr, check_arity, signal_to_native};
 pub(crate) enum LazyKind {
     LazySeq,
     ChunkedCons,
+    /// A `LazySeq` whose body conses one item per step (`take`,
+    /// `interpose`) but forces a realized run of them at once (no
+    /// user code runs between the items): its rests stay `LazySeq`s,
+    /// never `ChunkedCons`, as the JVM's per-item cells do.
+    ConsRun,
 }
 
 impl LazyKind {
     fn jvm_name(self) -> &'static str {
         match self {
-            LazyKind::LazySeq => "clojure.lang.LazySeq",
+            LazyKind::LazySeq | LazyKind::ConsRun => "clojure.lang.LazySeq",
             LazyKind::ChunkedCons => "clojure.lang.ChunkedCons",
+        }
+    }
+
+    /// The kind of a forced chunk's `rest` cell: a `ChunkedCons` (the
+    /// JVM's `more` of a chunk), except within a cons run.
+    fn rest_kind(self) -> LazyKind {
+        match self {
+            LazyKind::ConsRun => LazyKind::ConsRun,
+            LazyKind::LazySeq | LazyKind::ChunkedCons => LazyKind::ChunkedCons,
         }
     }
 }
@@ -359,6 +373,11 @@ impl PendingSeq {
     /// `chunk-cons`).
     pub(crate) fn pending_chunked_cons(thunk: Thunk) -> Value {
         Self::pending_kind(thunk, LazyKind::ChunkedCons)
+    }
+
+    /// A cons-run pending seq (see [`LazyKind::ConsRun`]).
+    fn pending_cons_run(thunk: Thunk) -> Value {
+        Self::pending_kind(thunk, LazyKind::ConsRun)
     }
 
     /// A metadata-carrying clone with a FRESH memo cell (like the
@@ -1848,19 +1867,33 @@ fn step_filter(
 
 /// `take`: one step consumes the head of the current unit.
 fn step_take(eval: &mut Evaluator, n: &Value, input: Value) -> Result<Forced, Signal> {
-    // `(pos? n)` per step (the count re-validates every force);
-    // one item per step (the body `cons`es).
+    // `(pos? n)` per step (the count re-validates every force); the
+    // input steps by unit (one item, or a whole realized chunk — no
+    // user code runs here, so taking a realized unit at once forces
+    // exactly what stepping the input forces).
     let n = crate::core::take_count(n).map_err(|e| eval.throw(e))?;
     if n <= 0 {
         return Ok(Forced::Empty);
     }
-    let Some((head, tail)) = step_head(eval, &input)? else {
-        return Ok(Forced::Empty);
+    let (items, tail): (Arc<[Value]>, Value) = match step_unit(eval, &input)? {
+        StepUnit::Empty => return Ok(Forced::Empty),
+        StepUnit::One { head, tail } => (Arc::from([head]), tail),
+        StepUnit::Chunk { items, tail } => (items, tail),
     };
+    let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
+    if len >= n {
+        // The count ends inside this unit: the input's tail is never
+        // touched again.
+        let cut = usize::try_from(n).unwrap_or(usize::MAX);
+        return Ok(Forced::Chunk {
+            items: Arc::from(&items[..cut]),
+            tail: Value::Nil,
+        });
+    }
     Ok(Forced::Chunk {
-        items: Arc::from(vec![head]),
-        tail: PendingSeq::pending(Thunk::Take {
-            n: Value::Int(n - 1),
+        items,
+        tail: PendingSeq::pending_cons_run(Thunk::Take {
+            n: Value::Int(n - len),
             input: tail,
         }),
     })
@@ -2149,37 +2182,35 @@ fn step_interleave(
     })
 }
 
-/// `interpose`: the head alone first, then one item per step
-/// (a separator, then its head — no trailing separator).
+/// `interpose`: the input steps by unit (one item, or a whole realized
+/// chunk) and each unit comes out with its separators (none before the
+/// first item, none trailing). No user code runs here, so emitting a
+/// realized unit at once forces exactly what stepping the input forces.
 fn step_interpose(
     eval: &mut Evaluator,
     sep: Value,
     input: Value,
     first: bool,
 ) -> Result<Forced, Signal> {
-    let Some((head, tail)) = step_head(eval, &input)? else {
-        return Ok(Forced::Empty);
+    let (items, tail) = match step_unit(eval, &input)? {
+        StepUnit::Empty => return Ok(Forced::Empty),
+        StepUnit::One { head, tail } => (vec![head], tail),
+        StepUnit::Chunk { items, tail } => (items.to_vec(), tail),
     };
-    if first {
-        return Ok(Forced::Chunk {
-            items: Arc::from(vec![head]),
-            tail: PendingSeq::pending(Thunk::Interpose {
-                sep,
-                input: tail,
-                first: false,
-            }),
-        });
+    let mut out = Vec::with_capacity(items.len() * 2);
+    for (i, item) in items.into_iter().enumerate() {
+        if i > 0 || !first {
+            out.push(sep.clone());
+        }
+        out.push(item);
     }
     Ok(Forced::Chunk {
-        items: Arc::from(vec![sep.clone()]),
-        tail: chain_tail(
-            std::slice::from_ref(&head),
-            &PendingSeq::pending(Thunk::Interpose {
-                sep,
-                input: tail,
-                first: false,
-            }),
-        ),
+        items: Arc::from(out),
+        tail: PendingSeq::pending_cons_run(Thunk::Interpose {
+            sep,
+            input: tail,
+            first: false,
+        }),
     })
 }
 
@@ -2361,7 +2392,7 @@ fn step_partition_collect(
         let Some(pad) = pad else {
             return Ok(Forced::Empty);
         };
-        let padded = PendingSeq::pending(Thunk::Take {
+        let padded = PendingSeq::pending_cons_run(Thunk::Take {
             n: n.clone(),
             input: PendingSeq::pending(Thunk::Concat {
                 cur: lazy_window(eval, window)?,
@@ -3525,35 +3556,57 @@ fn rest_pending_chunk(
 }
 
 /// `rest` of a pending seq (a memoized chunk rests by advancing
-/// its cursor — a new cell sharing the items, like the JVM's
-/// `ChunkedCons`, with no per-element chunk copy; anything else
-/// forces one step).
+/// its cursor; anything else forces one step — a cons run then
+/// rests from its new memo).
 fn rest_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Value, Signal> {
-    {
-        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let SeqState::Chunk { items, pos, tail } = &*state {
-            if *pos + 1 < items.len() {
-                // `ChunkedCons` class, like the forcing path below
-                // (JVM `more()`; pinned by `lazy_chunked_cons_*`).
-                return Ok(Value::Extension(Arc::new(PendingSeq {
-                    state: Mutex::new(SeqState::Chunk {
-                        items: Arc::clone(items),
-                        pos: *pos + 1,
-                        tail: tail.clone(),
-                    }),
-                    meta: p.meta.clone(),
-                    kind: LazyKind::ChunkedCons,
-                })));
-            }
-            let tail = tail.clone();
-            drop(state);
-            return rest_chunk_tail(eval, &tail);
-        }
+    if let Some(rest) = rest_memoized(eval, p)? {
+        return Ok(rest);
     }
     match force_pending(eval, p)? {
         Forced::Empty => Ok(empty_list_value()),
+        Forced::Chunk { .. } if p.kind == LazyKind::ConsRun => {
+            Ok(rest_memoized(eval, p)?.expect("a forced run is memoized"))
+        }
         Forced::Chunk { items, tail } => rest_pending_chunk(eval, &items, tail),
     }
+}
+
+/// `rest` of a pending seq's memoized chunk (`None` while unforced):
+/// a cursor advance — a new cell sharing the items, like the JVM's
+/// `ChunkedCons`, with no per-element chunk copy. A cons run links
+/// its head to that cell instead, so every `rest` (and `next`)
+/// answers the same cell, like the JVM's per-item conses.
+fn rest_memoized(eval: &mut Evaluator, p: &PendingSeq) -> Result<Option<Value>, Signal> {
+    let mut state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+    let SeqState::Chunk { items, pos, tail } = &*state else {
+        return Ok(None);
+    };
+    if *pos + 1 < items.len() {
+        // `ChunkedCons` class (a cons run keeps its own), like
+        // `rest_pending_chunk` (JVM `more()`; pinned by
+        // `lazy_chunked_cons_*`).
+        let cell = Value::Extension(Arc::new(PendingSeq {
+            state: Mutex::new(SeqState::Chunk {
+                items: Arc::clone(items),
+                pos: *pos + 1,
+                tail: tail.clone(),
+            }),
+            meta: p.meta.clone(),
+            kind: p.kind.rest_kind(),
+        }));
+        if p.kind == LazyKind::ConsRun {
+            let head = items[*pos].clone();
+            *state = SeqState::Chunk {
+                items: Arc::from([head]),
+                pos: 0,
+                tail: cell.clone(),
+            };
+        }
+        return Ok(Some(cell));
+    }
+    let tail = tail.clone();
+    drop(state);
+    rest_chunk_tail(eval, &tail).map(Some)
 }
 
 /// `rest` of a realized seq (shifting, preserving kind; `StringSeq`
@@ -4341,7 +4394,7 @@ pub(crate) fn filter_thunk(f: Value, input: Value, invert: bool) -> Value {
 /// A `Thunk::Take` tail value (the count stays raw — invalid
 /// counts fail when forced, like the JVM's lazy `pos?`).
 pub(crate) fn take_thunk(n: Value, input: Value) -> Value {
-    pending_value(Thunk::Take { n, input })
+    PendingSeq::pending_cons_run(Thunk::Take { n, input })
 }
 
 /// A `Thunk::Concat` tail value.
@@ -4618,7 +4671,7 @@ pub(crate) fn keys_thunk(eval: &mut Evaluator, input: Value, keys: bool) -> Resu
 
 /// A `Thunk::Interpose` tail value.
 pub(crate) fn interpose_thunk(sep: Value, input: Value) -> Value {
-    pending_value(Thunk::Interpose {
+    PendingSeq::pending_cons_run(Thunk::Interpose {
         sep,
         input,
         first: true,
