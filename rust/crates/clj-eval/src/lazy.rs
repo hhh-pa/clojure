@@ -1749,18 +1749,30 @@ fn step_map_one(eval: &mut Evaluator, f: &Value, input: Value) -> Result<Forced,
         StepUnit::One { head, tail } => (Arc::from([head]), tail),
         StepUnit::Chunk { items, tail } => (items, tail),
     };
+    let out = map_unit(eval, f, &items)?;
+    Ok(Forced::Chunk {
+        items: Arc::from(out),
+        tail: PendingSeq::pending(Thunk::Map {
+            f: f.clone(),
+            inputs: vec![tail],
+        }),
+    })
+}
+
+/// Apply single-input `map`'s `f` to one stepped unit, in order.
+fn map_unit(eval: &mut Evaluator, f: &Value, items: &[Value]) -> Result<Vec<Value>, Signal> {
     crate::core::check_ifn(eval, f)?;
     let mut out = Vec::with_capacity(items.len());
     // The fn resolves once per chunk (#226): a VM fn takes each item
     // straight into its register, a native runs its entry.
     match crate::vm::Prepared::of(f, 1) {
         Some(p) => {
-            for item in items.iter() {
+            for item in items {
                 out.push(p.call1(eval, crate::vm::clone_value(item))?);
             }
         }
         None => {
-            for item in items.iter() {
+            for item in items {
                 let slice = std::slice::from_ref(item);
                 let val = match crate::vm::invoke_lookup(f, slice) {
                     Some(v) => v,
@@ -1770,13 +1782,111 @@ fn step_map_one(eval: &mut Evaluator, f: &Value, input: Value) -> Result<Forced,
             }
         }
     }
-    Ok(Forced::Chunk {
-        items: Arc::from(out),
-        tail: PendingSeq::pending(Thunk::Map {
-            f: f.clone(),
-            inputs: vec![tail],
-        }),
+    Ok(out)
+}
+
+/// Walk an unforced `map` seq that `coll` alone holds (#271) without
+/// building its lazy cells: nothing else can see them, and every step
+/// runs exactly what forcing it would — a single input maps one
+/// stepped unit (`f` over the whole unit, then its items visit), and
+/// vector inputs step one item per call, as multi-input `map` forces.
+/// `visit` answers whether to go on. `None`: not such a seq (other
+/// inputs force through the seq itself).
+pub(crate) fn walk_sole_map(
+    eval: &mut Evaluator,
+    coll: &Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Option<Result<(), Signal>> {
+    Some(match sole_map_parts(coll)? {
+        SoleMap::One(f, input) => walk_map_one(eval, &f, input, visit),
+        SoleMap::Vectors(f, inputs) => walk_map_vectors(eval, &f, &inputs, visit),
     })
+}
+
+/// A sole unforced `map` seq's fn and inputs ([`walk_sole_map`]).
+enum SoleMap {
+    One(Value, Value),
+    Vectors(Value, Vec<Vector>),
+}
+
+/// `coll`'s map fn and inputs when it is an unforced `map` seq with no
+/// other handle (and, past one input, vector inputs only).
+fn sole_map_parts(coll: &Value) -> Option<SoleMap> {
+    let Value::Extension(e) = coll else {
+        return None;
+    };
+    let p = as_pending(coll)?;
+    if Arc::strong_count(e) != 1 {
+        return None;
+    }
+    let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+    let SeqState::Pending(thunk) = &*state else {
+        return None;
+    };
+    let Thunk::Map { f, inputs } = &**thunk else {
+        return None;
+    };
+    if let [input] = &inputs[..] {
+        return Some(SoleMap::One(f.clone(), input.clone()));
+    }
+    let vectors = inputs
+        .iter()
+        .map(|v| match v {
+            Value::Vector(x) => Some(x.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(SoleMap::Vectors(f.clone(), vectors))
+}
+
+/// [`walk_sole_map`] over one input: unit by unit, like `step_map_one`.
+fn walk_map_one(
+    eval: &mut Evaluator,
+    f: &Value,
+    mut cur: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<(), Signal> {
+    loop {
+        let out = match step_unit(eval, &cur)? {
+            StepUnit::Empty => return Ok(()),
+            StepUnit::One { head, tail } => {
+                cur = tail;
+                map_unit(eval, f, std::slice::from_ref(&head))?
+            }
+            StepUnit::Chunk { items, tail } => {
+                cur = tail;
+                map_unit(eval, f, &items)?
+            }
+        };
+        for item in out {
+            if !visit(eval, item)? {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// [`walk_sole_map`] over vector inputs: one call per item (the
+/// shortest input bounds the walk), like multi-input `step_map`.
+fn walk_map_vectors(
+    eval: &mut Evaluator,
+    f: &Value,
+    inputs: &[Vector],
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<(), Signal> {
+    let n = inputs.iter().map(Vector::len).min().unwrap_or(0);
+    let mut iters: Vec<_> = inputs.iter().map(Vector::iter).collect();
+    let mut heads = Vec::with_capacity(iters.len());
+    for _ in 0..n {
+        heads.clear();
+        heads.extend(iters.iter_mut().map(|it| it.next().unwrap_or(Value::Nil)));
+        crate::core::check_ifn(eval, f)?;
+        let out = eval.call(f, &heads)?;
+        if !visit(eval, out)? {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Re-chain an unconsumed remainder ahead of its tail.
@@ -3864,6 +3974,14 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, S
         return Ok(direct);
     }
     let mut tv = TransientVector::new();
+    let mut push = |_: &mut Evaluator, item: Value| {
+        tv.conj(item).expect("fresh transient accepts conj");
+        Ok(true)
+    };
+    if let Some(done) = walk_sole_map(eval, &v, &mut push) {
+        done?;
+        return Ok(tv.persistent().expect("fresh transient is valid at freeze"));
+    }
     // Owned: the walk advances `cur` off the head (owned callers
     // nilled the arg slot, so memoized chunks free as it walks).
     let mut cur = v;

@@ -2476,7 +2476,8 @@ impl<'ctx> Lowerer<'ctx> {
         let moving = bc_sym.is_none()
             && fast.is_none()
             && (has_own_op
-                || (is_owned_move_op(ns, name, n) && call.args.iter().any(|a| is_move(f, a))));
+                || (is_owned_move_op(ns, name, n)
+                    && call.args.iter().any(|a| is_move(f, a) || is_temporary(a))));
         if moving {
             return self.lower_direct_moving(f, call, k, core_name.as_deref(), dest);
         }
@@ -4639,6 +4640,17 @@ fn is_owned_move_op(ns: Option<&str>, name: &str, argc: usize) -> bool {
         ) => argc >= 1,
         _ => false,
     }
+}
+
+/// Whether `e` evaluates into a slot of its own (a call, a constructed
+/// collection — not a local, constant, or var): an owned call takes that
+/// slot over instead of cloning it (#271), so e.g. `reduce` sees a fresh
+/// `(map …)` seq as its only holder.
+fn is_temporary(e: &Expr) -> bool {
+    !matches!(
+        e,
+        Expr::Local(_) | Expr::Literal(_) | Expr::Quote(_) | Expr::Global(_) | Expr::VarRef(_)
+    )
 }
 
 /// Whether `e` is an occurrence the current `recur` args move.
