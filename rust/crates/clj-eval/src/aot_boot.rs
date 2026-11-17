@@ -445,6 +445,20 @@ pub fn install_lazy(eval: &mut Evaluator, (ns, name, hint): (&str, &str, u32), t
     }
 }
 
+/// A declared Lite native's entries (fn and owned-args) without
+/// installing its var — what a direct call needs (`None`: a dynamic, a
+/// foreign namespace, or no native in the registered tables).
+pub(crate) fn lite_entry(
+    decl: (&str, &str, u32),
+    tables: LiteTables,
+) -> Option<(
+    std::sync::Arc<crate::ext::NativeImpl>,
+    Option<std::sync::Arc<crate::ext::OwnedNativeImpl>>,
+)> {
+    let (_, f, owned) = lite_row(decl, tables)?;
+    Some((std::sync::Arc::new(f), owned))
+}
+
 /// The native a declared Lite var installs — `None` for a dynamic
 /// (installed apart) or a name the registered tables lack — with its
 /// owned-args entry (searched only when the hint says one exists).

@@ -444,9 +444,19 @@ thread_local! {
 /// Var `k`'s native entry, resolved once (core vars of a program
 /// that cannot rebind them).
 pub(crate) fn core_entry(eval: &mut Evaluator, k: usize) -> Option<&'static native_abi::CoreEntry> {
-    let slot = &tables().vars[k];
+    let t = tables();
+    let slot = &t.vars[k];
     slot.core
-        .get_or_init(|| native_abi::core_entry(eval, var(k)))
+        .get_or_init(|| {
+            // A Lite native called directly needs no var: its entry comes
+            // from the tables and its install stays lazy (value uses and
+            // `#'f` still install it through `var`).
+            let decl = (&*slot.ns, &*slot.name, slot.hint);
+            t.lite
+                .as_ref()
+                .and_then(|lite| native_abi::lite_core_entry(decl, lite.tables()))
+                .or_else(|| native_abi::core_entry(eval, var(k)))
+        })
         .as_ref()
 }
 

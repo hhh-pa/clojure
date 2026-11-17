@@ -686,6 +686,17 @@ pub struct CoreEntry {
     owned: Option<Arc<crate::ext::OwnedNativeImpl>>,
 }
 
+/// A Lite native's [`CoreEntry`] straight from the registered tables —
+/// compiled code calling it directly needs no var, so its install stays
+/// lazy (`None`: not a Lite native; see `aot_boot::lite_entry`).
+#[must_use]
+pub fn lite_core_entry(
+    decl: (&str, &str, u32),
+    tables: crate::aot_boot::LiteTables,
+) -> Option<CoreEntry> {
+    crate::aot_boot::lite_entry(decl, tables).map(|(func, owned)| CoreEntry { func, owned })
+}
+
 /// Resolve var `var`'s root as a [`CoreEntry`] (`None`: not a native).
 pub fn core_entry(eval: &mut Evaluator, var: &Var) -> Option<CoreEntry> {
     let root = eval.deref_var_cached(var.id, &var.sym);
