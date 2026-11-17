@@ -1726,6 +1726,54 @@ impl Map {
         }
     }
 
+    /// How many keys a sorted map's binary search spans.
+    #[must_use]
+    pub fn sorted_len(&self) -> usize {
+        match &self.0.small {
+            Some(small) => small.vals.len(),
+            None => self.sorted_keys().len(),
+        }
+    }
+
+    /// A sorted map's key at sorted position `i` (0 = first).
+    #[must_use]
+    pub fn sorted_key(&self, i: usize) -> Option<&Value> {
+        match &self.0.small {
+            Some(small) => small.shape.keys.get(i),
+            None => self.sorted_keys().get(i),
+        }
+    }
+
+    /// A sorted map's comparator-order key sidecar (trie arm).
+    fn sorted_keys(&self) -> &RpdsVector {
+        self.0
+            .keys
+            .as_deref()
+            .expect("a sorted map keeps its key order")
+    }
+
+    /// Assoc a new key at sorted position `pos` (the caller's binary
+    /// search found no compare-0 key): shaped maps rebuild (at most
+    /// [`INLINE_MAP_MAX`] entries); larger ones insert into the trie
+    /// (O(log n)) and rebuild only the key sidecar.
+    #[must_use]
+    pub fn insert_sorted_at(mut self, pos: usize, k: Value, v: Value) -> Self {
+        if self.0.small.is_some() {
+            let mut entries: Vec<(Value, Value)> =
+                self.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
+            entries.insert(pos, (k, v));
+            return self.with_ordered_entries(entries);
+        }
+        let keys = self.sorted_keys();
+        let mut ordered = Vec::with_capacity(keys.len() + 1);
+        ordered.extend(keys.iter().take(pos).cloned());
+        ordered.push(k.clone());
+        ordered.extend(keys.iter_from(pos).cloned());
+        self.data_mut().keys = Some(Arc::new(RpdsVector::from_vec(ordered)));
+        self.trie_mut().insert_mut(k, v);
+        self
+    }
+
     /// Rebuild from explicitly ordered entries, preserving metadata
     /// and the sort order (sorted `assoc` positions through here).
     /// The given order sticks for shaped and sorted maps; plain
@@ -1971,6 +2019,15 @@ impl Set {
         let Some(&slot) = self.0.inner.get(v) else {
             return self;
         };
+        if self.0.sort.is_some() {
+            // Sorted sidecars keep no slots (positional inserts would
+            // shift them): find the member's sorted position.
+            let pos = self
+                .iter()
+                .position(|m| m == v)
+                .expect("a member sits in the sidecar");
+            return self.without_sorted_at(pos);
+        }
         let data = Arc::make_mut(&mut self.0);
         data.inner.remove_mut(v);
         let members = Arc::make_mut(&mut data.members);
@@ -2033,8 +2090,72 @@ impl Set {
         self.iter().cloned().collect()
     }
 
+    /// How many members a sorted set's binary search spans (its
+    /// sidecar past `head`, where a sorted sidecar has no holes).
+    #[must_use]
+    pub fn sorted_len(&self) -> usize {
+        self.0.members.len() - self.0.head
+    }
+
+    /// A sorted set's member at sorted position `i` (0 = first).
+    #[must_use]
+    pub fn sorted_member(&self, i: usize) -> Option<&Value> {
+        self.0.members.get(self.0.head + i).and_then(Option::as_ref)
+    }
+
+    /// Insert `v` at sorted position `pos` (the caller's binary search
+    /// found no compare-0 member): the index takes `v` in O(log n) and
+    /// only the sidecar is rebuilt (no trie rebuild).
+    #[must_use]
+    pub fn insert_sorted_at(mut self, pos: usize, v: Value) -> Self {
+        let data = Arc::make_mut(&mut self.0);
+        let start = data.head;
+        let mut members = Vec::with_capacity(data.members.len() - start + 1);
+        members.extend(data.members.iter_from(start).take(pos).cloned());
+        members.push(Some(v.clone()));
+        members.extend(data.members.iter_from(start + pos).cloned());
+        data.members = Arc::new(SetSlots::from_vec(members));
+        data.inner.insert_mut(v, 0);
+        data.holes = 0;
+        data.head = 0;
+        data.id = next_set_id();
+        self
+    }
+
+    /// Remove the member at sorted position `pos` (0 = first): the
+    /// first member pops in O(1) (a hole before `head`); any other
+    /// rebuilds the sidecar (no trie rebuild).
+    #[must_use]
+    pub fn without_sorted_at(mut self, pos: usize) -> Self {
+        let data = Arc::make_mut(&mut self.0);
+        let slot = data.head + pos;
+        let member = data
+            .members
+            .get(slot)
+            .cloned()
+            .flatten()
+            .expect("sorted position in range");
+        data.inner.remove_mut(&member);
+        if pos == 0 {
+            Arc::make_mut(&mut data.members).set_mut(slot, None);
+            data.holes += 1;
+            data.head += 1;
+            if data.holes * 2 > data.members.len() {
+                data.compact();
+            }
+        } else {
+            let kept = data.members.iter_from(data.head).enumerate();
+            let kept = kept.filter(|&(i, _)| i != pos).map(|(_, m)| m.clone());
+            data.members = Arc::new(kept.collect());
+            data.holes = 0;
+            data.head = 0;
+        }
+        data.id = next_set_id();
+        self
+    }
+
     /// Rebuild from explicitly ordered members, preserving metadata
-    /// and the sort order (sorted `conj` positions through here).
+    /// and the sort order.
     #[must_use]
     pub fn with_ordered_members(self, members: Vec<Value>) -> Self {
         let (inner, members) = slots_of(members);
@@ -2189,15 +2310,20 @@ fn slots_of(members: Vec<Value>) -> (RpdsIndex, SetSlots) {
 impl SetData {
     /// Drop the order sidecar's holes (the members keep their order).
     fn compact(&mut self) {
-        let live = self
+        let live: Vec<Value> = self
             .members
             .iter_from(self.head)
             .flatten()
             .cloned()
             .collect();
-        let (inner, members) = slots_of(live);
-        self.inner = inner;
-        self.members = Arc::new(members);
+        if self.sort.is_some() {
+            // Sorted sets keep no slots: only the sidecar rebuilds.
+            self.members = Arc::new(live.into_iter().map(Some).collect());
+        } else {
+            let (inner, members) = slots_of(live);
+            self.inner = inner;
+            self.members = Arc::new(members);
+        }
         self.holes = 0;
         self.head = 0;
     }
@@ -4190,6 +4316,59 @@ mod tests {
             .insert(Value::Int(2))
             .without(&Value::Int(1));
         assert!(small.contains(&Value::Int(2)) && !small.contains(&Value::Int(1)));
+    }
+
+    #[test]
+    fn sorted_positional_set_and_map_updates() {
+        let ints = |s: &super::Set| s.iter().cloned().collect::<Vec<_>>();
+        let sorted = || super::new_set().with_sort(Some(super::SortSpec::Natural));
+        // Positional inserts keep the order; lookups read in place.
+        let mut s = sorted();
+        for (pos, v) in [(0, 5), (0, 1), (1, 3), (3, 9), (3, 7)] {
+            s = s.insert_sorted_at(pos, Value::Int(v));
+        }
+        assert_eq!(ints(&s), [1, 3, 5, 7, 9].map(Value::Int).to_vec());
+        assert_eq!(
+            (s.sorted_len(), s.sorted_member(2)),
+            (5, Some(&Value::Int(5)))
+        );
+        // Front pops leave holes before `head` (then compact); any
+        // other removal rebuilds; the generic `without` finds the
+        // member's position.
+        let popped = s.clone().without_sorted_at(0).without_sorted_at(0);
+        assert_eq!(ints(&popped), [5, 7, 9].map(Value::Int).to_vec());
+        assert_eq!(popped.sorted_member(0), Some(&Value::Int(5)));
+        let drained = popped.clone().without_sorted_at(0).without_sorted_at(0);
+        assert_eq!(
+            (ints(&drained), drained.sorted_len()),
+            (vec![Value::Int(9)], 1)
+        );
+        let mid = s.clone().without_sorted_at(2);
+        assert_eq!(ints(&mid), [1, 3, 7, 9].map(Value::Int).to_vec());
+        let generic = popped
+            .clone()
+            .without(&Value::Int(7))
+            .without(&Value::Int(99));
+        assert_eq!(ints(&generic), [5, 9].map(Value::Int).to_vec());
+        assert!(!generic.contains(&Value::Int(7)) && generic.contains(&Value::Int(9)));
+        assert_eq!(ints(&s), [1, 3, 5, 7, 9].map(Value::Int).to_vec());
+        // Maps: shaped inserts rebuild, trie-backed ones keep the trie.
+        let mut m = super::new_map().with_sort(Some(super::SortSpec::Natural));
+        for i in 0..12 {
+            m = m.insert_sorted_at(0, Value::Int(11 - i), Value::Int(i));
+            assert_eq!(m.sorted_len(), usize::try_from(i + 1).expect("small"));
+        }
+        assert_eq!(m.sorted_key(0), Some(&Value::Int(0)));
+        assert_eq!(m.sorted_key(11), Some(&Value::Int(11)));
+        assert_eq!(m.get(&Value::Int(11)), Some(&Value::Int(0)));
+        let small = super::new_map()
+            .with_sort(Some(super::SortSpec::Natural))
+            .insert_sorted_at(0, Value::Int(2), Value::Int(20))
+            .insert_sorted_at(0, Value::Int(1), Value::Int(10));
+        assert_eq!(
+            (small.sorted_len(), small.sorted_key(1)),
+            (2, Some(&Value::Int(2)))
+        );
     }
 
     #[test]
