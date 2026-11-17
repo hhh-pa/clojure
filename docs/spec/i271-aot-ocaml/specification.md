@@ -144,6 +144,7 @@ Linux callgrind profiles of real snippets run on empty stdin (issue #271 comment
    - `defn`'s discarded `(alter-meta! (var f) assoc :arglists '…)` statements (and `merge`s of constant maps) are not lowered when they only write `aot_boot::LITE_INERT_DEF_META` keys (`:arglists`, `:doc`, `:line`, `:column`, `:file`) with constant values; a reader-free program then references no `alter-meta!` at all;
    - `def` names and their evaluated metadata pairs drop the same inert keys, so names pool as plain symbols instead of read-back forms; every other key (`:private`, `:dynamic`, `:tag`, `:const`, …) stays, since runtime paths (`refer`, `binding`) consult some of them;
    - interned vars carry no `{:ns :name}` stamp and the Lite dynamics no `:dynamic` stamp (binding semantics use the var's own `dynamic` flag).
+   - a `def` whose name carries metadata (`defn-`'s `{:private true}`) keeps exactly that map as the var's metadata, without the `:line` / `:column` / `:file` / `:name` / `:ns` auto keys a reader would see (Slice 3n; `refer` consults `:private`, nothing reads the rest).
 
    A program that references any reader keeps every metadata key exactly as `run` builds it.
 3. **Cheaper installs:** native symbols share their namespace's name and are qualified in one allocation; compiled var slots resolve through symbols built from their shared names.
