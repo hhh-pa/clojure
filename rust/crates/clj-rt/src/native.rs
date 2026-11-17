@@ -367,7 +367,15 @@ pub(crate) fn root(eval: &mut Evaluator, k: usize) -> Value {
 pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> Value {
     let desc = tables().fns[k].clone();
     let display = Arc::clone(&desc.display);
-    let captured: Arc<[Value]> = captured.into();
+    // Capture-free closures (every top-level `defn`, plain lambdas)
+    // share one empty slice instead of allocating their own.
+    static NO_CAPTURES: std::sync::LazyLock<Arc<[Value]>> =
+        std::sync::LazyLock::new(|| Arc::from(Vec::new()));
+    let captured: Arc<[Value]> = if captured.is_empty() {
+        Arc::clone(&NO_CAPTURES)
+    } else {
+        captured.into()
+    };
     // The common shape — one fixed arity — calls its code straight away
     // (no arity search); anything else, wrong counts included, takes
     // the general dispatch.

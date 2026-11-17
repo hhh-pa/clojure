@@ -891,7 +891,10 @@ mod tests {
                 if path.is_dir() {
                     dirs.push(path);
                 } else if path.extension().is_some_and(|e| e == "rs") {
-                    let text = std::fs::read_to_string(&path).expect("read");
+                    // (CRLF checkouts, e.g. Windows, normalized for the marker.)
+                    let text = std::fs::read_to_string(&path)
+                        .expect("read")
+                        .replace("\r\n", "\n");
                     let body = text
                         .split("#[cfg(test)]\nmod tests")
                         .next()

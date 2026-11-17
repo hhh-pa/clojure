@@ -159,7 +159,8 @@ pub extern "C" fn rt_n_declare_vars(decls: &CSlice<VarDecl>) {
 /// Declare compiled fn `k`: its display name and arities.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_declare_fn(k: u64, display: &CSlice<u8>, arities: &CSlice<ArityC>) {
-    let arities: Vec<ArityDesc> = arities
+    // Collected straight into the shared slice (one allocation).
+    let arities: std::sync::Arc<[ArityDesc]> = arities
         .get()
         .iter()
         .map(|a| ArityDesc {
@@ -172,7 +173,7 @@ pub extern "C" fn rt_n_declare_fn(k: u64, display: &CSlice<u8>, arities: &CSlice
         k as usize,
         FnDesc {
             display: std::sync::Arc::from(display.as_str().as_ref()),
-            arities: arities.into(),
+            arities,
         },
     );
 }
