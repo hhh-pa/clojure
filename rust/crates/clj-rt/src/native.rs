@@ -364,18 +364,23 @@ pub(crate) fn root(eval: &mut Evaluator, k: usize) -> Value {
 /// A closure over compiled fn `k` with its captured values: a
 /// `NativeFn` the interpreter calls like any fn (arity dispatch and
 /// errors as for interpreted closures).
-pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> Value {
-    let desc = tables().fns[k].clone();
-    let display = Arc::clone(&desc.display);
-    // Capture-free closures (every top-level `defn`, plain lambdas)
-    // share one empty slice instead of allocating their own.
+/// A closure's captured values as its shared slice: capture-free
+/// closures (every top-level `defn`, plain lambdas) share one empty
+/// slice instead of allocating their own.
+fn captured_slice(captured: Vec<Value>) -> Arc<[Value]> {
     static NO_CAPTURES: std::sync::LazyLock<Arc<[Value]>> =
         std::sync::LazyLock::new(|| Arc::from(Vec::new()));
-    let captured: Arc<[Value]> = if captured.is_empty() {
+    if captured.is_empty() {
         Arc::clone(&NO_CAPTURES)
     } else {
         captured.into()
-    };
+    }
+}
+
+pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> Value {
+    let desc = tables().fns[k].clone();
+    let display = Arc::clone(&desc.display);
+    let captured = captured_slice(captured);
     // The common shape — one fixed arity — calls its code straight away
     // (no arity search); anything else, wrong counts included, takes
     // the general dispatch.
