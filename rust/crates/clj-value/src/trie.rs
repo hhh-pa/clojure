@@ -598,6 +598,13 @@ impl<'a, T: Clone> Iterator for PackedIter<'a, T> {
         }
     }
 
+    fn nth(&mut self, n: usize) -> Option<&'a T> {
+        match self {
+            PackedIter::Flat(it) => it.nth(n),
+            PackedIter::Trie(it) => it.nth(n),
+        }
+    }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             PackedIter::Flat(it) => it.size_hint(),

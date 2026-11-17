@@ -344,6 +344,16 @@ impl Iterator for VectorIter<'_> {
         }
     }
 
+    /// Skips by reference (no clone and drop per skipped item: a walk
+    /// over a `subvec` view starts mid-vector, #271).
+    fn nth(&mut self, n: usize) -> Option<Value> {
+        match &mut self.inner {
+            VectorIterInner::Generic(it) => it.nth(n).cloned(),
+            VectorIterInner::Ints(it) => it.nth(n).map(|n| Value::Int(*n)),
+            VectorIterInner::Chars(it) => it.nth(n).map(|c| Value::Char(*c)),
+        }
+    }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         match &self.inner {
             VectorIterInner::Generic(it) => it.size_hint(),
@@ -3406,6 +3416,37 @@ mod tests {
         new_map, new_set, plain_equals,
     };
     use crate::{HostDef, HostInst, HostKind, HostVal, Keyword, Symbol};
+
+    #[test]
+    fn vector_iter_nth_skips_flat_and_trie_vectors() {
+        // Flat storage (constructed), then trie storage (pushed past
+        // `trie::FLAT_MAX`), for every packing.
+        let generic: Vec<Value> = (0..10)
+            .map(|i| Value::Str(Arc::from(i.to_string())))
+            .collect();
+        let generic = super::Vector::from_vec(generic);
+        let mut it = generic.iter();
+        assert_eq!(it.nth(3), Some(Value::Str(Arc::from("3"))));
+        assert_eq!(it.next(), Some(Value::Str(Arc::from("4"))));
+        let ints = super::Vector::from_ints((0..10).collect());
+        assert_eq!(ints.iter().nth(9), Some(Value::Int(9)));
+        assert_eq!(ints.iter().nth(10), None);
+        let chars = super::Vector::from_chars(vec!['a', 'b', 'c', 'd']);
+        assert_eq!(chars.iter().nth(3), Some(Value::Char('d')));
+        let (mut big_ints, mut big_chars) = (
+            super::Vector::from_ints(Vec::new()),
+            super::Vector::from_chars(Vec::new()),
+        );
+        let mut big = super::Vector::from_vec(Vec::new());
+        for i in 0..2_000i64 {
+            big_ints = big_ints.push_back(Value::Int(i));
+            big_chars = big_chars.push_back(Value::Char(if i % 2 == 0 { 'a' } else { 'b' }));
+            big = big.push_back(Value::Str(Arc::from(i.to_string())));
+        }
+        assert_eq!(big_ints.iter().nth(1_500), Some(Value::Int(1_500)));
+        assert_eq!(big_chars.iter().nth(1_501), Some(Value::Char('b')));
+        assert_eq!(big.iter().nth(1_999), Some(Value::Str(Arc::from("1999"))));
+    }
 
     /// The layout natively compiled code relies on (issue #259).
     #[test]
