@@ -5208,7 +5208,13 @@ fn mentions_rebinding(e: &Expr) -> bool {
         Expr::WithRedefs { .. } => true,
         Expr::Global(v) | Expr::VarRef(v) => core_rebind(v),
         Expr::DirectNative(c) => core_rebind(&c.var),
-        Expr::Def { sym, .. } => matches!(sym.namespace(), Some("clojure.core" | "clojure.string")),
+        // Redefining a `clojure.string` var only conflicts with a Lite
+        // native that serves it (a spliced definition has none, #271).
+        Expr::Def { sym, .. } => match sym.namespace() {
+            Some("clojure.core") => true,
+            Some("clojure.string") => clj_eval::aot_boot::is_lite_string_var(sym.name()),
+            _ => false,
+        },
         _ => false,
     };
     let mut found = hit;
@@ -5426,7 +5432,12 @@ fn var_lite_ok(sym: &Symbol, defined: &BTreeSet<(String, String)>) -> bool {
     let name = sym.name();
     match ns {
         "clojure.core" => clj_eval::aot_boot::is_lite_core_var(name),
-        "clojure.string" => clj_eval::aot_boot::is_lite_string_var(name),
+        // A `clojure.string` var without a Lite native may be spliced
+        // in (#271): defined by the program's own units.
+        "clojure.string" => {
+            clj_eval::aot_boot::is_lite_string_var(name)
+                || defined.contains(&(ns.to_owned(), name.to_owned()))
+        }
         _ => defined.contains(&(ns.to_owned(), name.to_owned())),
     }
 }
