@@ -66,6 +66,13 @@ enum Const {
     StaticField(String, String),
     Class(String),
     Read(String),
+    /// An empty collection literal without metadata (`[]`, `{}`, `#{}`):
+    /// one value per form, as under `run` — built once by its literal
+    /// shim, `site` keeping each form's value its own.
+    EmptyColl {
+        helper: &'static str,
+        site: usize,
+    },
 }
 
 /// One compiled arity: `(fixed, variadic, code)`.
@@ -3459,12 +3466,21 @@ impl<'ctx> Lowerer<'ctx> {
     fn lower_coll(
         &mut self,
         f: &mut FnCtx<'ctx>,
-        helper: &str,
+        helper: &'static str,
         items: &[Expr],
         meta: Option<&Map>,
         dest: PointerValue<'ctx>,
         fallible: bool,
     ) -> Result<(), Unsupported> {
+        if items.is_empty() && meta.is_none() {
+            // One value per form (no allocation per evaluation). (A
+            // literal with reader metadata stays per evaluation: its
+            // metadata is a pool constant the init cannot read yet.)
+            let site = self.consts.len();
+            let k = self.constant(Const::EmptyColl { helper, site });
+            self.call("rt_n_const", None, &[dest.into(), self.u64c(k)]);
+            return Ok(());
+        }
         let mk = self.meta_const(meta)?;
         let arr = self.lower_args(f, items)?;
         let aref = self.slots_ref(f, arr, items.len());
@@ -4178,6 +4194,16 @@ impl<'ctx> Lowerer<'ctx> {
                 Const::Read(text) => {
                     let p = self.str_ptr(text);
                     self.call("rt_n_read", None, &[t.into(), p.into()]);
+                }
+                Const::EmptyColl { helper, .. } => {
+                    let empty = self.const_slice(self.ptr.const_null(), 0);
+                    let args = [t.into(), empty.into(), self.u64c(NONE)];
+                    if *helper == "rt_n_vec_lit" {
+                        self.call(helper, None, &args);
+                    } else {
+                        let st = self.call(helper, Some(self.i32t), &args).expect("st");
+                        self.check(&f, st);
+                    }
                 }
             }
             self.call("rt_n_set_const", None, &[self.u64c(k as u64), t.into()]);
