@@ -307,6 +307,13 @@ pub extern "C" fn rt_n_const(out: &mut Value, k: u64) {
     *out = native::constant(k as usize).clone();
 }
 
+/// The frozen constant table's first slot (#271): generated code borrows
+/// `&consts[k]` in place of cloning constant `k` into a temporary.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_consts_base() -> *const Value {
+    native::consts_base()
+}
+
 /// `out = @var k`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_deref(out: &mut Value, k: u64) {
@@ -1074,6 +1081,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_sym,
         rt_n_meta_sym,
         rt_n_coll,
+        rt_n_consts_base,
         rt_n_regex,
         rt_n_static_field,
         rt_n_class,
