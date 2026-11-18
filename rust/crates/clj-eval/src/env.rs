@@ -1439,7 +1439,19 @@ impl SharedRegistry {
     /// Intern (find or create) a var (see
     /// [`NamespaceRegistry::intern`]).
     pub fn intern(&self, sym: &Symbol) -> u64 {
-        self.lock().registry.intern(sym)
+        let mut inner = self.lock();
+        let before = inner.registry.next_id;
+        let id = inner.registry.intern(sym);
+        self.note_new_vars(before, inner.registry.next_id);
+        id
+    }
+
+    /// A new var is a new name: end the epoch so by-name caches
+    /// (`Evaluator::core_read`, which remembers misses) see it.
+    fn note_new_vars(&self, before: u64, after: u64) {
+        if after != before {
+            drop(self.begin_mutation());
+        }
     }
 
     /// Intern a var and install its root under one lock (native
@@ -1479,13 +1491,21 @@ impl SharedRegistry {
     /// Intern a var into a live or removed namespace (see
     /// [`NamespaceRegistry::intern_in`]).
     pub fn intern_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
-        self.lock().registry.intern_in(ns_name, sym)
+        let mut inner = self.lock();
+        let before = inner.registry.next_id;
+        let id = inner.registry.intern_in(ns_name, sym);
+        self.note_new_vars(before, inner.registry.next_id);
+        id
     }
 
     /// Intern a `def`-family target (see
     /// [`NamespaceRegistry::intern_def_target`]).
     pub fn intern_def_target(&self, sym: &Symbol) -> u64 {
-        self.lock().registry.intern_def_target(sym)
+        let mut inner = self.lock();
+        let before = inner.registry.next_id;
+        let id = inner.registry.intern_def_target(sym);
+        self.note_new_vars(before, inner.registry.next_id);
+        id
     }
 
     /// Intern a var through a handle-pinned id (see
@@ -1496,9 +1516,11 @@ impl SharedRegistry {
         expected: u64,
         sym: &Symbol,
     ) -> Option<(u64, u64)> {
-        self.lock()
-            .registry
-            .intern_in_pinned(ns_name, expected, sym)
+        let mut inner = self.lock();
+        let before = inner.registry.next_id;
+        let pinned = inner.registry.intern_in_pinned(ns_name, expected, sym);
+        self.note_new_vars(before, inner.registry.next_id);
+        pinned
     }
 
     /// The var's state, if interned (an owned copy — mutate through

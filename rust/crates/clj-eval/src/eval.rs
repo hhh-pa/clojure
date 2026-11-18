@@ -195,13 +195,13 @@ pub(crate) struct LazyHooks {
     pub(crate) eval_expr: fn(&mut Evaluator, &Expr, &crate::env::Env) -> Result<Value, Signal>,
 }
 
-/// [`Evaluator::core_read`]'s cache: `(name, var id, root once read)`
-/// per found `clojure.core` name, under the lineage epoch it was filled
-/// in.
+/// [`Evaluator::core_read`]'s cache: `(name, var id or none, root once
+/// read)` per probed `clojure.core` name, under the lineage epoch it
+/// was filled in.
 #[derive(Default)]
 pub(crate) struct CoreReads {
     epoch: u64,
-    vars: Vec<(&'static str, u64, Option<Value>)>,
+    vars: Vec<(&'static str, Option<u64>, Option<Value>)>,
 }
 
 /// The evaluator: shared lineage state (namespace registry plus
@@ -1213,10 +1213,10 @@ impl Evaluator {
     /// to force).
     /// `clojure.core/<name>`'s visible value, unforced, like
     /// [`deref_var_unforced`](Self::deref_var_unforced) over a by-name
-    /// lookup (`Nil` when no such var). Found ids and their roots are
-    /// kept while the lineage epoch holds: every root write and
-    /// namespace mutation bumps it, and ids are never reused. Misses
-    /// always look again, because a later intern does not bump it.
+    /// lookup (`Nil` when no such var). Each name's id (or absence) and
+    /// root are kept while the lineage epoch holds: every root write,
+    /// namespace mutation and new var bumps it, and ids are never
+    /// reused. Names are literals, so most probes match by address.
     pub(crate) fn core_read(&self, name: &'static str) -> Value {
         let epoch = self.registry.epoch();
         let mut reads = self.core_reads.lock().unwrap_or_else(|e| e.into_inner());
@@ -1224,17 +1224,16 @@ impl Evaluator {
             reads.vars.clear();
             reads.epoch = epoch;
         }
-        let slot = match reads.vars.iter().position(|(n, _, _)| *n == name) {
-            Some(i) => i,
-            None => {
-                let Some(id) = self.registry.lookup_str("clojure.core", name) else {
-                    return Value::Nil;
-                };
-                reads.vars.push((name, id, None));
-                reads.vars.len() - 1
-            }
-        };
+        let found = (reads.vars.iter()).position(|(n, _, _)| std::ptr::eq(*n, name) || *n == name);
+        let slot = found.unwrap_or_else(|| {
+            let id = self.registry.lookup_str("clojure.core", name);
+            reads.vars.push((name, id, None));
+            reads.vars.len() - 1
+        });
         let (_, id, root) = &mut reads.vars[slot];
+        let Some(id) = id else {
+            return Value::Nil;
+        };
         if let Some(v) = self.bindings.get(*id) {
             return v.clone();
         }
