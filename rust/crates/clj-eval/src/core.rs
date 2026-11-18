@@ -2800,7 +2800,17 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
 /// `str`: concatenates the per-arg rendering (no spaces).
 /// `str` concatenated (shared by `str` and the `throw-*!` natives).
 fn str_concat(eval: &mut Evaluator, args: &[Value]) -> Result<String, NativeError> {
-    let mut out = String::new();
+    // Sized up front from the pieces (#271): one allocation where the
+    // growing buffer reallocated per piece.
+    let size: usize = args
+        .iter()
+        .map(|a| match a {
+            Value::Str(s) => s.len(),
+            Value::Nil => 0,
+            _ => 20,
+        })
+        .sum();
+    let mut out = String::with_capacity(size);
     for arg in args {
         str_push(&mut out, eval, arg)?;
     }
@@ -2819,14 +2829,31 @@ pub(crate) fn str_push(
         Value::Str(s) => out.push_str(s),
         Value::Char(c) => out.push(*c),
         // A long's `toString` is its decimal digits (the printer's
-        // rendering, without the print machinery).
-        Value::Int(n) => {
-            use std::fmt::Write;
-            write!(out, "{n}").expect("writing to a String cannot fail");
-        }
+        // rendering, without the print or format machinery).
+        Value::Int(n) => push_long(out, *n),
         _ => out.push_str(&str_of_one(eval, v)?),
     }
     Ok(())
+}
+
+/// Append `n`'s decimal digits (a long's `toString`): a digit loop
+/// instead of `core::fmt` (#271: ~200 instructions per long there).
+pub(crate) fn push_long(out: &mut String, n: i64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut rest = n.unsigned_abs();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        out.push('-');
+    }
+    out.push_str(std::str::from_utf8(&digits[at..]).expect("ASCII digits"));
 }
 
 /// `(apply str a … coll)` without spreading `coll` into an argument
@@ -2874,8 +2901,13 @@ pub(crate) fn native_str(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
 
 pub(crate) fn native_str_owned(
     eval: &mut Evaluator,
-    args: SmallVec<[Value; 4]>,
+    mut args: SmallVec<[Value; 4]>,
 ) -> Result<Value, NativeError> {
+    // `(str s)` is `s` itself, as the JVM's `String.toString` returns
+    // `this` (#271: no copy, no allocation).
+    if let [Value::Str(_)] = &args[..] {
+        return Ok(args.swap_remove(0));
+    }
     let s = str_concat(eval, &args)?;
     Ok(Value::Str(Arc::from(s.as_str())))
 }
@@ -5526,6 +5558,17 @@ mod tests {
             "merged root is a map carrying my/tag"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn push_long_writes_decimal_digits() {
+        // The digit loop agrees with `Display` at every sign and width,
+        // including `i64::MIN` (whose magnitude has no positive long).
+        for n in [0, 7, -7, 10, -10, 1_234_567_890, i64::MAX, i64::MIN] {
+            let mut out = String::from("x");
+            push_long(&mut out, n);
+            assert_eq!(out, format!("x{n}"));
+        }
     }
 
     #[test]
