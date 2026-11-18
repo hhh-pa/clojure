@@ -195,6 +195,15 @@ pub(crate) struct LazyHooks {
     pub(crate) eval_expr: fn(&mut Evaluator, &Expr, &crate::env::Env) -> Result<Value, Signal>,
 }
 
+/// [`Evaluator::core_read`]'s cache: `(name, var id, root once read)`
+/// per found `clojure.core` name, under the lineage epoch it was filled
+/// in.
+#[derive(Default)]
+pub(crate) struct CoreReads {
+    epoch: u64,
+    vars: Vec<(&'static str, u64, Option<Value>)>,
+}
+
 /// The evaluator: shared lineage state (namespace registry plus
 /// identity counters), per-thread bindings, load path, spawned
 /// future threads, and the ambient native call span. `Send + Sync`
@@ -251,6 +260,10 @@ pub struct Evaluator {
     root_cache: FxHashMap<u64, Value>,
     /// The lineage epoch [`root_cache`](Self::root_cache) was filled under.
     root_epoch: u64,
+    /// [`core_read`](Self::core_read)'s `clojure.core` names → var ids
+    /// and roots (#271: printing reads ~13 settings vars by name per
+    /// call).
+    core_reads: std::sync::Mutex<CoreReads>,
     /// The VM's per-site caches (`vm` numbers its global reads and
     /// direct calls): a value or a validation verdict, valid while
     /// both the lineage epoch and the bindings version match.
@@ -376,6 +389,7 @@ impl Evaluator {
             vm_sites: Vec::new(),
             vm_direct: Vec::new(),
             root_epoch: 0,
+            core_reads: std::sync::Mutex::default(),
             call_depth: 0,
             recur_pool: Vec::new(),
             eager_tier: false,
@@ -435,6 +449,7 @@ impl Evaluator {
             vm_sites: Vec::new(),
             vm_direct: Vec::new(),
             root_epoch: self.registry.epoch(),
+            core_reads: std::sync::Mutex::default(),
             // A fork starts unwound (its stack is its own).
             call_depth: 0,
             // A fork starts with an empty pool (buffers never
@@ -1196,6 +1211,39 @@ impl Evaluator {
     /// [`deref_var`](Self::deref_var) for shared-borrow readers of
     /// boot-installed vars (never lazy `core.clj` ones, so nothing
     /// to force).
+    /// `clojure.core/<name>`'s visible value, unforced, like
+    /// [`deref_var_unforced`](Self::deref_var_unforced) over a by-name
+    /// lookup (`Nil` when no such var). Found ids and their roots are
+    /// kept while the lineage epoch holds: every root write and
+    /// namespace mutation bumps it, and ids are never reused. Misses
+    /// always look again, because a later intern does not bump it.
+    pub(crate) fn core_read(&self, name: &'static str) -> Value {
+        let epoch = self.registry.epoch();
+        let mut reads = self.core_reads.lock().unwrap_or_else(|e| e.into_inner());
+        if reads.epoch != epoch {
+            reads.vars.clear();
+            reads.epoch = epoch;
+        }
+        let slot = match reads.vars.iter().position(|(n, _, _)| *n == name) {
+            Some(i) => i,
+            None => {
+                let Some(id) = self.registry.lookup_str("clojure.core", name) else {
+                    return Value::Nil;
+                };
+                reads.vars.push((name, id, None));
+                reads.vars.len() - 1
+            }
+        };
+        let (_, id, root) = &mut reads.vars[slot];
+        if let Some(v) = self.bindings.get(*id) {
+            return v.clone();
+        }
+        root.get_or_insert_with(|| {
+            (self.registry).root_or_unbound(*id, &Symbol::new(Some("clojure.core"), name))
+        })
+        .clone()
+    }
+
     pub(crate) fn deref_var_unforced(&self, id: u64, sym: &Symbol) -> Value {
         if let Some(v) = self.bindings.get(id) {
             return v.clone();
