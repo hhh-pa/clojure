@@ -325,6 +325,25 @@ A literal without metadata whose keys are 1 to 8 distinct constant keywords now 
 
 Measured on macOS, instructions per iteration: `(count {:x i :y i})` 2098 → 652 (a two-element vector literal is 609); four keys 3205 → 785; `(:x {:x i :y i})` 2148 → 697.
 
+### 6.19 Slice 4n: `aget` and `aset` as inline ops
+
+`(aget a i)` and `(aset a i v)` went through the generic core call: the arguments were cloned into a buffer, and the native's `Result` plumbing came back. That cost about 740 macOS instructions per element of an `aset` loop. Both are now inline ops (`APPLY2`/`BINARY` "aget", `APPLY3`/`TERNARY` "aset"), so the AOT lowers them to `rt_n_op2`/`rt_n_op3` and the VM to its op steps.
+
+- `aget` reads an in-bounds long index under one lock, with `array_read`'s slot mapping.
+- `aset` stores only the unambiguous cases: an in-bounds long index, with a `long`, `int` (in range), `double`, `boolean` or `char` slot taking its own value type.
+- Every other shape returns `None`, so the native gives its exact answer or error: negative or out-of-bounds indices, coerced indices, `int` overflow, mismatched value types, object and nested arrays, nil.
+
+The corpus file `arrays_inline.clj` pins every case against `run` and against the previous binary.
+
+Measured on macOS, instructions per element:
+
+| Loop | Before | After |
+|---|---|---|
+| `long-array` `aset` loop | 738 | 291 |
+| `double-array` `aset` loop | 746 | 298 |
+| `int-array` sum by `aget` | 644 | 267 |
+| a DP step `(aset a i (+ (aget a (dec i)) i))` | 1331 | 509 |
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

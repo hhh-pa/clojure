@@ -642,6 +642,7 @@ pub(crate) const APPLY2: &[(&str, Apply2)] = &[
     ("dissoc", <Dissoc as Op2>::apply),
     ("contains?", <Contains as Op2>::apply),
     ("conj!", <ConjBang as Op2>::apply),
+    ("aget", <Aget as Op2>::apply),
 ];
 
 /// Specialized regex matcher kept outside [`APPLY2`] so non-regex AOT binaries
@@ -652,6 +653,7 @@ pub(crate) const APPLY3: &[(&str, Apply3)] = &[
     ("assoc!", <AssocBang as Op3>::apply),
     ("nth", <Nth3 as Op3>::apply),
     ("get", <Get3 as Op3>::apply),
+    ("aset", <Aset as Op3>::apply),
 ];
 
 /// The 3+-argument forms over borrowed args for native code (#259):
@@ -682,6 +684,7 @@ const TERNARY: &[Row3] = &[
     ("assoc!", shape3::<AssocBang>),
     ("nth", shape3::<Nth3>),
     ("get", shape3::<Get3>),
+    ("aset", shape3::<Aset>),
 ];
 
 /// The two-argument ops by core name: the value code, and the
@@ -731,6 +734,7 @@ const BINARY: &[Row2] = &[
         Some(shape2::<Contains, AsTest>),
     ),
     ("conj!", shape2::<ConjBang, AsValue>, None),
+    ("aget", shape2::<Aget, AsValue>, None),
     (
         "re-matches",
         shape2::<ReMatches, AsValue>,
@@ -2091,6 +2095,38 @@ impl Op3 for AssocBang {
     fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
         Self::apply_mut(a, b, c)?;
         Some(a.clone())
+    }
+}
+
+/// `(aget a i)` inline (#271): an array read at an in-bounds long
+/// index. Any other shape (a negative or out-of-bounds index, a
+/// coerced index, nil, a non-array) takes the native for its exact
+/// answer or error.
+pub(crate) struct Aget;
+
+impl Op2 for Aget {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        let (Value::Array(arr), Value::Int(i)) = (a, b) else {
+            return None;
+        };
+        crate::arrays::aget_fast(arr, usize::try_from(*i).ok()?)
+    }
+}
+
+/// `(aset a i v)` inline (#271): a primitive slot taking its own value
+/// type at an in-bounds long index (`aset_prim_fast`); the rest takes
+/// the native.
+pub(crate) struct Aset;
+
+impl Op3 for Aset {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        let (Value::Array(arr), Value::Int(i)) = (a, b) else {
+            return None;
+        };
+        let i = usize::try_from(*i).ok()?;
+        crate::arrays::aset_prim_fast(arr, i, c).then(|| c.clone())
     }
 }
 

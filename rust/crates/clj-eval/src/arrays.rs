@@ -811,7 +811,39 @@ fn native_object_array(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Na
 /// narrow numbers collapse to `Int`/`Double`, like the port's
 /// `byte`/`short`/`int`/`float` natives.
 pub(crate) fn array_read(a: &Array, i: usize) -> Value {
-    match &*a.lock() {
+    store_read(&a.lock(), i)
+}
+
+/// `(aget a i)` at an in-bounds index under one lock (#271: the inline
+/// op); `None` past the bounds leaves the error to the native.
+pub(crate) fn aget_fast(a: &Array, i: usize) -> Option<Value> {
+    let store = a.lock();
+    (i < store.len()).then(|| store_read(&store, i))
+}
+
+/// The common `aset` stores (#271: the inline op): an in-bounds long,
+/// int (in range), double, boolean or char slot taking its own value
+/// type, stored as [`aset_direct`] would. `false` (nothing stored)
+/// leaves every other case, coercions and errors to the native.
+pub(crate) fn aset_prim_fast(a: &Array, i: usize, v: &Value) -> bool {
+    let mut store = a.lock();
+    match (&mut *store, v) {
+        (ArrayStore::Longs(s), Value::Int(x)) if i < s.len() => s[i] = *x,
+        (ArrayStore::Doubles(s), Value::Double(x)) if i < s.len() => s[i] = *x,
+        (ArrayStore::Ints(s), Value::Int(x)) if i < s.len() => match i32::try_from(*x) {
+            Ok(x) => s[i] = x,
+            Err(_) => return false,
+        },
+        (ArrayStore::Bools(s), Value::Bool(x)) if i < s.len() => s[i] = *x,
+        (ArrayStore::Chars(s), Value::Char(x)) if i < s.len() => s[i] = *x,
+        _ => return false,
+    }
+    true
+}
+
+/// Slot `i` of a store as its value (caller bounds-checks).
+fn store_read(store: &ArrayStore, i: usize) -> Value {
+    match store {
         ArrayStore::Bools(v) => Value::Bool(v[i]),
         ArrayStore::Bytes(v) => Value::Int(i64::from(v[i])),
         ArrayStore::Chars(v) => Value::Char(v[i]),
@@ -1961,6 +1993,42 @@ fn native_vector_of(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The native `aset` stores each primitive itself (`apply`, a
+    /// higher-order call, a multi-index walk's tail): the inline op only
+    /// short-cuts the same stores (#271).
+    #[test]
+    fn native_aset_stores_every_direct_primitive() {
+        let mut eval = crate::boot();
+        let cases = [
+            (
+                BaseType::Boolean,
+                ArrayStore::Bools(vec![false]),
+                Value::Bool(true),
+            ),
+            (
+                BaseType::Char,
+                ArrayStore::Chars(vec!['a']),
+                Value::Char('z'),
+            ),
+            (
+                BaseType::Double,
+                ArrayStore::Doubles(vec![0.0]),
+                Value::Double(2.5),
+            ),
+            (BaseType::Long, ArrayStore::Longs(vec![0]), Value::Int(7)),
+            (BaseType::Int, ArrayStore::Ints(vec![0]), Value::Int(-3)),
+        ];
+        for (base, store, v) in cases {
+            let a = Value::Array(Array::new(ArrayDesc::flat(base), store));
+            let stored = native_aset(&mut eval, &[a.clone(), Value::Int(0), v.clone()]);
+            assert_eq!(stored.expect("stores"), v);
+            assert_eq!(
+                native_aget(&mut eval, &[a, Value::Int(0)]).expect("reads"),
+                v
+            );
+        }
+    }
 
     /// A descriptor/store shape mismatch panics (production
     /// constructors never build one — the panic is the contract).
