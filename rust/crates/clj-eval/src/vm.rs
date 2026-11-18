@@ -38,7 +38,7 @@ use crate::env::{Env, SharedRegistry};
 use crate::error::{NativeError, Signal};
 use crate::eval::Evaluator;
 use crate::expr::{Arity, CaseTest, Catch, DirectCall, Expr, FunExpr, Pattern, pattern_count};
-use crate::ext::Closure;
+use crate::ext::{Closure, FastArith};
 use clj_reader::Span;
 
 /// Compiled code producing a `T` against the running frame.
@@ -324,7 +324,22 @@ impl<'c> Prepared<'c> {
                 };
                 (hooks.vm_call1)(ev, code, arity, a)
             }
-            Prepared::Native(n) => call_native(ev, n, smallvec::smallvec![a]),
+            Prepared::Native(n) => {
+                // A genuine `inc`/`dec` on a long runs inline, as `call2`
+                // runs the tagged arithmetic (#271); overflow and every
+                // other operand take the native.
+                if let Value::Int(x) = a {
+                    let step = match n.fast {
+                        FastArith::Inc => x.checked_add(1),
+                        FastArith::Dec => x.checked_sub(1),
+                        _ => None,
+                    };
+                    if let Some(v) = step {
+                        return Ok(Value::Int(v));
+                    }
+                }
+                call_native(ev, n, smallvec::smallvec![a])
+            }
         }
     }
 
@@ -2937,6 +2952,23 @@ mod tests {
         assert!(shown.contains("CompiledFun"), "{shown}");
         assert!(shown.contains("named-for-debug"), "{shown}");
         assert!(shown.contains("rec: Some(1)"), "{shown}");
+    }
+
+    #[test]
+    fn prepared_inc_dec_run_inline_and_overflow_through_the_native() {
+        // `mapv` prepares its fn once: a genuine `inc`/`dec` on a long
+        // steps inline, while overflow and other numbers take the native.
+        let mut eval = crate::boot();
+        for src in [
+            "(= (mapv inc [1 2]) [2 3])",
+            "(= (mapv dec [1 2]) [0 1])",
+            "(= (mapv dec [1.5 3N]) [0.5 2N])",
+        ] {
+            let v = eval.eval_source(src).unwrap();
+            assert_eq!(v.last(), Some(&Value::Bool(true)), "{src}");
+        }
+        let overflow = eval.eval_source("(mapv dec [-9223372036854775808])");
+        assert!(overflow.is_err());
     }
 
     #[test]

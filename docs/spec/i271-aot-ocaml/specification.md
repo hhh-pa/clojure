@@ -238,6 +238,13 @@ A core fn the compiler neither inlines nor calls directly goes through `rt_n_cor
 
 A native that takes its arguments borrowed, which is most of them, now gets 1-3 clones in a stack array and writes the result straight to the output slot. A `Signal` is built only on failure, exactly as the general path throws. Owned-args natives (`reduce`, `into`, …) and anything else keep the general path. macOS, per call: `identity` 401 → 304 instructions, `subs` 837 → 737, `name` 608 → 519.
 
+### 6.14 Slice 4i: common callbacks without the native call
+
+Higher-order natives (`mapv`, `filterv`, `reduce`, the lazy `map` / `filter` steps) resolve their fn once (`Prepared`) and call it per item. Two common callbacks paid for a native call that their results did not need:
+
+1. **`seq` as a filter predicate.** `(filterv seq tokens)` drops empty strings after a split, and each call allocated a string seq only to test its truthiness. The lazy `filter` already tests emptiness instead (`filter_pred`: nil, lists, vectors, maps, sets, strings, realized seqs; anything else still calls `seq`), and `filterv` now shares that predicate preparation (`filter_prep`). macOS: 639 → 201 instructions per item.
+2. **`inc` / `dec`.** `Prepared::call1` now steps a long inline when the native carries the `inc`/`dec` arithmetic tag, as `call2` already did for the binary tagged ops. Overflow and every other operand still call the native, so its errors and numeric tower stay exact. macOS: `(mapv inc v)` 404 → 261 instructions per element, the lazy `map` and `reduce` over it alike.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
