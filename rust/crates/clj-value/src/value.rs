@@ -2260,7 +2260,7 @@ impl Hash for Vector {
 
 impl PartialEq for Map {
     fn eq(&self, other: &Self) -> bool {
-        self.size() == other.size() && self.iter().all(|(k, v)| other.get(k) == Some(v))
+        map_value_eq(self, other)
     }
 }
 
@@ -2279,7 +2279,7 @@ impl Hash for Map {
 
 impl PartialEq for Set {
     fn eq(&self, other: &Self) -> bool {
-        self.size() == other.size() && self.iter().all(|v| other.contains(v))
+        set_value_eq(self, other)
     }
 }
 
@@ -2754,8 +2754,8 @@ impl PartialEq for Value {
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::Keyword(a), Value::Keyword(b)) => a == b,
             // Sequential equality crosses List/Vector.
-            (Value::List(a), Value::List(b)) => a.iter().eq(b.iter()),
-            (Value::Vector(a), Value::Vector(b)) => a.iter().eq(b.iter()),
+            (Value::List(a), Value::List(b)) => list_eq(a, b),
+            (Value::Vector(a), Value::Vector(b)) => vector_eq(a, b),
             (Value::List(a), Value::Vector(b)) | (Value::Vector(b), Value::List(a)) => {
                 list_vector_eq(a, b)
             }
@@ -2766,6 +2766,18 @@ impl PartialEq for Value {
             pair => value_eq_mid(pair.0, pair.1),
         }
     }
+}
+
+/// List equality: the same list without a walk, as the JVM's
+/// `Util.equiv` answers `k1 == k2` first (#271: an atom's `swap!`
+/// compares its value with itself on every publish), else item by item.
+fn list_eq(a: &List, b: &List) -> bool {
+    Arc::ptr_eq(&a.0, &b.0) || a.iter().eq(b.iter())
+}
+
+/// Vector equality: the same vector without a walk (see [`list_eq`]).
+fn vector_eq(a: &Vector, b: &Vector) -> bool {
+    Arc::ptr_eq(&a.0, &b.0) || a.iter().eq(b.iter())
 }
 
 /// List/vector cross equality (split for the budget): lists
@@ -2893,12 +2905,15 @@ fn tower_equiv(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Map equality: the same map without a walk (the JVM's `Util.equiv`
+/// identity check; see [`Value`]'s `PartialEq`), else entry by entry.
 fn map_value_eq(a: &Map, b: &Map) -> bool {
-    a.size() == b.size() && a.iter().all(|(k, v)| b.get(k) == Some(v))
+    Arc::ptr_eq(&a.0, &b.0) || (a.size() == b.size() && a.iter().all(|(k, v)| b.get(k) == Some(v)))
 }
 
+/// Set equality: the same set without a walk, else member by member.
 fn set_value_eq(a: &Set, b: &Set) -> bool {
-    a.size() == b.size() && a.iter().all(|v| b.contains(v))
+    Arc::ptr_eq(&a.0, &b.0) || (a.size() == b.size() && a.iter().all(|v| b.contains(v)))
 }
 
 fn tagged_literal_eq(t1: &Symbol, f1: &Value, t2: &Symbol, f2: &Value) -> bool {
@@ -4813,6 +4828,28 @@ mod tests {
         assert!(plain_equals(&host_inst(&rec), &host_inst(&rec)));
         let typ = host_def(HostKind::Type);
         assert!(!plain_equals(&host_inst(&typ), &host_inst(&typ)));
+    }
+
+    #[test]
+    fn identical_collections_are_equal_without_a_walk() {
+        // The same collection is equal to itself even holding a NaN (the
+        // JVM's `Util.equiv` identity check); equal copies still walk.
+        use super::{List, Map, Set, Vector};
+        let nan = Value::Double(f64::NAN);
+        let m = Value::Map(Map::from_kvs_last_wins(vec![(Value::Int(1), nan.clone())]));
+        let v = Value::Vector(Vector::from_vec(vec![nan.clone()]));
+        let l = Value::List(List::from_vec(vec![nan.clone()]));
+        for x in [&m, &v, &l] {
+            assert_eq!(x, &x.clone());
+        }
+        let s = Set::from_items_checked(vec![Value::Int(1)]).expect("distinct");
+        assert_eq!(s, s.clone());
+        let other = Value::Vector(Vector::from_vec(vec![nan]));
+        assert_ne!(v, other);
+        assert_eq!(
+            Value::Vector(Vector::from_vec(vec![Value::Int(1)])),
+            Value::Vector(Vector::from_vec(vec![Value::Int(1)]))
+        );
     }
 
     #[test]

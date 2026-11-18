@@ -344,6 +344,12 @@ Measured on macOS, instructions per element:
 | `int-array` sum by `aget` | 644 | 267 |
 | a DP step `(aset a i (+ (aget a (dec i)) i))` | 1331 | 509 |
 
+### 6.20 Slice 4o: identical collections compare without a walk
+
+Value equality on maps, sets, vectors and lists walked every entry, even when both sides were the same collection. `swap!` publishes only when the atom still holds the value it read (`state.value != old`), so every swap on an atom holding a collection walked the whole collection. The common memo and accumulator pattern `(swap! cache assoc k v)` was quadratic: 2000 swaps into a growing map cost 721M macOS instructions, about 360K per swap at the end.
+
+Equality now answers true first for the same collection (`Arc::ptr_eq`), as the JVM's `Util.equiv` checks `k1 == k2` before anything else. The same 2000 swaps cost 14.5M (500 cost 5.2M: linear). Clojure's `=` goes through its own `equiv` and is unchanged; the shortcut serves internal equality: atom publishes, map keys and set members.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
