@@ -1031,6 +1031,7 @@ pub fn bound_fn(eval: &mut Evaluator, f: Value) -> Value {
         owned: None,
         meta: None,
         fast: crate::ext::FastArith::None,
+        compiled: None,
     }))
 }
 

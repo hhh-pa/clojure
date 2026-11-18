@@ -71,6 +71,7 @@ fn transducer(
         owned: None,
         meta: None,
         fast: FastArith::None,
+        compiled: None,
     }))
 }
 

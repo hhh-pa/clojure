@@ -2059,6 +2059,7 @@ fn default_reader_fn(
         owned: None,
         meta: None,
         fast: FastArith::None,
+        compiled: None,
     }))
 }
 

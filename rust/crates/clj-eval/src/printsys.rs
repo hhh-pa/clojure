@@ -1564,6 +1564,7 @@ fn method_fn_value(eval: &mut Evaluator, display: &str, f: NativeFnPtr) -> Value
         owned: None,
         meta: None,
         fast: FastArith::None,
+        compiled: None,
     }))
 }
 
@@ -1873,6 +1874,7 @@ mod tests {
             owned: None,
             meta: Some(with_type),
             fast: FastArith::None,
+            compiled: None,
         };
         let stripped = strip_type_meta(&Value::Extension(Arc::new(native)));
         assert!(matches!(stripped, Value::Extension(_)));

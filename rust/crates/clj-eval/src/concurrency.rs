@@ -1931,6 +1931,7 @@ fn barrier_fn(eval: &mut Evaluator, tx: mpsc::Sender<()>) -> Value {
         }),
         owned: None,
         fast: FastArith::None,
+        compiled: None,
         meta: None,
     }))
 }

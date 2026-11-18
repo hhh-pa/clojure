@@ -240,6 +240,18 @@ pub struct NativeFn {
     /// The inline integer op (`None` unless installed from a
     /// genuine core arith/compare fn pointer).
     pub fast: FastArith,
+    /// A compiled closure's single fixed-arity entry, for compiled call
+    /// sites to call directly (#271); `None` for every other native.
+    pub compiled: Option<CompiledEntry>,
+}
+
+/// A compiled closure's code (its address in the compiled-code ABI,
+/// opaque here), captured values and parameter count (#271).
+#[derive(Clone)]
+pub struct CompiledEntry {
+    pub code: usize,
+    pub captured: Arc<[Value]>,
+    pub fixed: usize,
 }
 
 impl std::fmt::Debug for NativeFn {
@@ -395,6 +407,7 @@ mod tests {
             owned: None,
             meta: None,
             fast: FastArith::None,
+            compiled: None,
         };
         let s = format!("{f:?}");
         assert!(s.contains("NativeFn"), "{s}");

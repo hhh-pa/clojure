@@ -390,6 +390,33 @@ pub extern "C" fn rt_n_invoke(out: &mut Value, f: &Value, args: &CSlice<Value>) 
     )
 }
 
+/// Enter a call of `f` with `argc` args when `f` is a compiled closure of
+/// exactly that fixed arity (#271): writes its code address and captured
+/// values for the call site to call directly (then `rt_n_leave`), as a
+/// `defn`'s direct call does, and answers 1 past the call-depth check.
+/// 0 (nothing entered) leaves the call to `rt_n_invoke`: other callees,
+/// other arities, and the depth error.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_enter_closure(
+    f: &Value,
+    argc: u64,
+    code: &mut usize,
+    captured: &mut *const Value,
+) -> u8 {
+    let entry = clj_eval::as_native(f)
+        .and_then(|n| n.compiled.as_ref())
+        .filter(|e| e.fixed as u64 == argc);
+    let Some(entry) = entry else {
+        return 0;
+    };
+    if !with_active(native_abi::enter_call) {
+        return 0;
+    }
+    *code = entry.code;
+    *captured = entry.captured.as_ptr();
+    1
+}
+
 /// Move the argument slots out (each left nil).
 fn take_args(args: &mut CSlice<Value>) -> clj_eval::SmallArgs {
     args.get_mut()
@@ -1220,6 +1247,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_fast_vars,
         rt_n_varref,
         rt_n_invoke,
+        rt_n_enter_closure,
         rt_n_native_mv,
         rt_n_core_ref,
         rt_n_core_call,

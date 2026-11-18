@@ -1345,3 +1345,26 @@ fn native_emit_ir_builds_keyword_map_literals_from_a_template_271() {
         assert!(!ir.contains("rt_n_kw_map"), "{name}: {ir}");
     }
 }
+
+#[test]
+fn native_emit_ir_calls_compiled_closures_directly_271() {
+    let ir = tmp("closure-call.ll");
+    clj_aot::build_str(
+        "(defn app [f x] (f x))\n(println (app (fn [y] (* 2 y)) 21))\n",
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    // A call through a value checks for a compiled closure of its arity
+    // (then calls its code), keeping the general invoke for the rest.
+    assert!(text.contains("@rt_n_enter_closure"), "{text}");
+    assert!(text.contains("@rt_n_invoke"), "{text}");
+}

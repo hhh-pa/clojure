@@ -73,6 +73,7 @@ fn native_fn(
         owned: None,
         meta: None,
         fast: FastArith::None,
+        compiled: None,
     }))
 }
 

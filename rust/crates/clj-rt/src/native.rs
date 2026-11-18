@@ -442,6 +442,13 @@ pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> V
             },
         ) as Arc<clj_eval::ext::OwnedNativeImpl>
     });
+    // Compiled call sites call a single fixed arity's code directly
+    // (`rt_n_enter_closure`, #271), as a `defn`'s direct call does.
+    let compiled = single.map(|(fixed, code)| clj_eval::ext::CompiledEntry {
+        code: code as usize,
+        captured: Arc::clone(&captured),
+        fixed,
+    });
     let func: Arc<clj_eval::ext::NativeImpl> = match single {
         Some((fixed, code)) => Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
             if args.len() == fixed {
@@ -462,6 +469,7 @@ pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> V
         owned,
         meta: None,
         fast: Default::default(),
+        compiled,
     });
     CREATED.with(|c| {
         let mut c = c.borrow_mut();

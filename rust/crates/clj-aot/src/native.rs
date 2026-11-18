@@ -2299,19 +2299,100 @@ impl<'ctx> Lowerer<'ctx> {
         for (a, e) in args.iter().zip(&elems) {
             self.lower(f, a, *e)?;
         }
-        let aref = self.slots_ref(f, arr, args.len());
-        let st = self
+        let st = self.emit_value_call(f, h, arr, args.len(), dest);
+        self.check(f, st);
+        self.drop_v(f.func, h);
+        self.write_tag(h, 0);
+        self.drop_and_nil_slots(f.func, &elems);
+        Ok(())
+    }
+
+    /// `dest = (h args…)` for a callee known only at run time (#271): a
+    /// compiled closure of exactly this arity runs its code directly, as
+    /// a `defn`'s direct call does (`rt_n_enter_closure` checks the callee
+    /// and the call depth; `rt_n_leave` closes the call), and any other
+    /// callee goes through `rt_n_invoke`. Answers the call's status.
+    fn emit_value_call(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        h: PointerValue<'ctx>,
+        arr: PointerValue<'ctx>,
+        argc: usize,
+        dest: PointerValue<'ctx>,
+    ) -> IntValue<'ctx> {
+        let (code_p, cap_p) = {
+            let here = self.builder.get_insert_block().expect("positioned");
+            self.builder.position_at_end(f.entry);
+            let code_p = self
+                .builder
+                .build_alloca(self.i64t, "ccode")
+                .expect("alloca");
+            let cap_p = self.builder.build_alloca(self.ptr, "ccap").expect("alloca");
+            self.builder.position_at_end(here);
+            (code_p, cap_p)
+        };
+        let n = self.u64c(argc as u64);
+        let entered = self
+            .call(
+                "rt_n_enter_closure",
+                Some(self.i8t),
+                &[h.into(), n, code_p.into(), cap_p.into()],
+            )
+            .expect("entered");
+        let go = self
+            .builder
+            .build_int_compare(IntPredicate::NE, entered, self.i8t.const_zero(), "go")
+            .expect("cmp");
+        let direct_b = self.ctx.append_basic_block(f.func, "closure_direct");
+        let slow_b = self.ctx.append_basic_block(f.func, "closure_slow");
+        let done = self.ctx.append_basic_block(f.func, "closure_done");
+        self.builder
+            .build_conditional_branch(go, direct_b, slow_b)
+            .expect("br");
+        self.builder.position_at_end(direct_b);
+        let code = self
+            .builder
+            .build_load(self.i64t, code_p, "code")
+            .expect("load")
+            .into_int_value();
+        let code = self
+            .builder
+            .build_int_to_ptr(code, self.ptr, "codefn")
+            .expect("i2p");
+        let cap = self
+            .builder
+            .build_load(self.ptr, cap_p, "cap")
+            .expect("load");
+        let st_direct = self
+            .builder
+            .build_indirect_call(
+                self.code_ty,
+                code,
+                &[dest.into(), arr.into(), n, cap.into()],
+                "st",
+            )
+            .expect("call")
+            .try_as_basic_value()
+            .expect_basic("st")
+            .into_int_value();
+        self.call("rt_n_leave", None, &[]);
+        let direct_end = self.builder.get_insert_block().expect("positioned");
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(slow_b);
+        let aref = self.slots_ref(f, arr, argc);
+        let st_slow = self
             .call(
                 "rt_n_invoke",
                 Some(self.i32t),
                 &[dest.into(), h.into(), aref.into()],
             )
             .expect("st");
-        self.check(f, st);
-        self.drop_v(f.func, h);
-        self.write_tag(h, 0);
-        self.drop_and_nil_slots(f.func, &elems);
-        Ok(())
+        let slow_end = self.builder.get_insert_block().expect("positioned");
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        let phi = self.builder.build_phi(self.i32t, "st").expect("phi");
+        phi.add_incoming(&[(&st_direct, direct_end), (&st_slow, slow_end)]);
+        phi.as_basic_value().into_int_value()
     }
 
     /// `(:k coll)` / `(:k coll not-found)` with a literal keyword head

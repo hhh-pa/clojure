@@ -1121,6 +1121,7 @@ impl Evaluator {
                 owned,
                 meta: None,
                 fast: crate::core::fast_arith_for(f),
+                compiled: None,
             }));
             let sym = Symbol::from_shared(Some(Arc::clone(&home)), Arc::from(name));
             roots.push((sym, native));
@@ -1165,6 +1166,7 @@ impl Evaluator {
             owned,
             meta: None,
             fast,
+            compiled: None,
         }));
         self.registry.intern_with_root(&sym, native.clone());
         native

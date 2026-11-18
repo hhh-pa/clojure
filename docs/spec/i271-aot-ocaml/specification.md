@@ -382,6 +382,20 @@ Measured on macOS, instructions per element:
 
 `count` keeps the cells for now: its AOT slow path passes the seq borrowed, and a borrowed seq may be used again.
 
+### 6.22 Slice 4q: calls through a value
+
+A call whose head is not a known var, such as a local closure or a fn argument (`(f x)` inside a higher-order fn), went through `rt_n_invoke` and the general `Evaluator::call`. That path ran a VM-closure hook, a struct check and two downcasts, then `call_code`'s depth guard and evaluator scope, and finally the compiled code. It cost about 4× a direct `defn` call.
+
+1. `native_abi::invoke` calls a native callee's `func` straight away. Compiled closures are natives, and for them the general call reached the same `func` anyway.
+2. A compiled closure carries its single fixed arity's entry (`NativeFn::compiled`: code address, captured values, parameter count). At a value call site, the AOT asks `rt_n_enter_closure` for it. That function checks the callee and its arity and performs the same call-depth check as `rt_n_enter`. On a hit, the site calls the code directly with the argument slots and closes the call with `rt_n_leave`, exactly as a `defn`'s direct call does. Every other callee and arity, and the depth error, keep `rt_n_invoke`.
+
+The corpus file `closure_calls.clj` pins captured values, nested and returned closures, multi-arity, variadic and wrong-arity calls, non-closure callees (keywords, maps, sets, vectors, natives, nil), exceptions crossing the call, and the `StackOverflowError` of deep recursion through a local fn, against `run` and the previous binary.
+
+Measured on macOS, about 85-125 fewer instructions per call:
+
+- local closure in a `conj` loop: 710 → 587 per iteration;
+- a fn parameter called per item: 439 → 354.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
