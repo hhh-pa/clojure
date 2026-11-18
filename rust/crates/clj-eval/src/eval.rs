@@ -1603,6 +1603,20 @@ impl Evaluator {
     /// analyzer heads and VM-internal bindings reach here;
     /// analyzer-captured paths (`Global`/`VarRef`/`Set`/`Binding`/
     /// `WithRedefs`) carry their ids and never re-resolve (#79).
+    /// A `with-out-str`/`with-in-str` stream var (`*out*`, `*in*`): the
+    /// name as the current namespace maps it, so a user shadow wins
+    /// like a `binding` target, else `clojure.core`'s. Under `run`,
+    /// `user` refers `clojure.core`. A compiled (Lite) program refers
+    /// nothing, and the miss would intern a fresh, non-dynamic var
+    /// (#271).
+    fn stream_var_id(&mut self, sym: &Symbol) -> u64 {
+        let unmapped = sym.namespace().is_none() && self.registry.lookup(sym).is_none();
+        unmapped
+            .then(|| (self.registry).lookup(&Symbol::new(Some("clojure.core"), sym.name())))
+            .flatten()
+            .unwrap_or_else(|| self.var_id(sym))
+    }
+
     pub(crate) fn var_id(&mut self, sym: &Symbol) -> u64 {
         self.registry
             .lookup(sym)
@@ -1851,7 +1865,7 @@ impl Evaluator {
     ) -> Result<Value, Signal> {
         let writer = crate::io::string_writer(self);
         let var = Var {
-            id: self.var_id(out),
+            id: self.stream_var_id(out),
             sym: out.clone(),
         };
         crate::native_abi::binding_call_with(self, vec![(var, writer.clone())], body)?;
@@ -1886,7 +1900,7 @@ impl Evaluator {
         };
         let reader = crate::reader::string_reader(self, text);
         let var = Var {
-            id: self.var_id(input),
+            id: self.stream_var_id(input),
             sym: input.clone(),
         };
         crate::native_abi::binding_call_with(self, vec![(var, reader)], body)
