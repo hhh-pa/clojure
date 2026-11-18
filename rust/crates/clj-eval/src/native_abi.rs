@@ -34,6 +34,12 @@ pub type Step = Result<Value, Signal>;
 
 /// Call `f` with `args` exactly like an interpreted call.
 pub fn invoke(eval: &mut Evaluator, f: &Value, args: &[Value]) -> Step {
+    // A native (a compiled closure included) runs straight away: the
+    // general call reaches the same `func` after a VM-closure hook, a
+    // struct check and a second downcast (#271: ~4x a direct call).
+    if let Some(native) = crate::ext::as_native(f) {
+        return (native.func)(eval, args).map_err(|e| eval.throw(e));
+    }
     eval.call(f, args)
 }
 
