@@ -209,6 +209,14 @@ Exact Linux costs of single operations come from callgrind on synthetic programs
 
 `Evaluator::core_read` keeps the ids and roots of found `clojure.core` names while the lineage epoch holds. Thread bindings are still checked first on every read. Every root write and namespace mutation bumps the epoch, and `remove-ns` now bumps it too. A name not found is never cached: a later intern does not bump the epoch, so a miss always looks again. macOS: `println` −6.0K per call, `prn` of a vector −11.1K. Most cases print 1-4 lines (median 2). Corpus `print_settings.clj` pins bindings, root writes and nested `with-out-str` against `run`.
 
+### 6.11 Slice 4f: less fixed work per program
+
+Linux callgrind of every losing script's empty-input run, profiled function by function, prices each program's fixed work:
+
+1. **`slurp` of stdin.** It read into an 8 KiB zero-filled first chunk. Pin and callgrind count the bulk zero-fill per byte, so that cost about 8.4K instructions per program, although inputs are tiny (median 26 bytes; 94% at most 8 KiB). Closing the reader then built a fresh parser (about 3.4K) over one `slurp` had just drained. Stdin now reads through `read_to_end` into one buffer that is never zero-filled. std probes small inputs on the stack and grows large buffers by `realloc`. The text is validated once, with `\r\n` and a lone `\r` normalized in one pass, and `slurp` only latches the reader closed.
+2. **Declared var names.** `rt_n_declare_vars` received an `ns`/`name` string pair per var: two UTF-8 validations and an `Arc<str>` allocation per var, about 22K for a typical program's 42 vars. The compiler now emits one names text, each namespace once, then every var name, plus a `(ns span, name span, hint)` row per var. The runtime validates and copies the text once, and slots hold spans. Only the vars a program actually interns build a `Symbol`.
+3. **Docstrings.** `def` built its docstring even when the program keeps no var metadata, which never reads it (§6.9 item 4).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

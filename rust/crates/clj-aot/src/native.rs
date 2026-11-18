@@ -202,7 +202,6 @@ pub struct Lowerer<'ctx> {
     var_index: HashMap<(String, String), usize>,
     fns: Vec<FnInfo<'ctx>>,
     strings: HashMap<String, PointerValue<'ctx>>,
-    byte_strings: HashMap<String, PointerValue<'ctx>>,
     fn_seq: usize,
     /// Inline the analyzer's `FastArith` int ops (off when the program
     /// can rebind vars, so core arithmetic always means the native).
@@ -289,7 +288,6 @@ impl<'ctx> Lowerer<'ctx> {
             var_index: HashMap::new(),
             fns: Vec::new(),
             strings: HashMap::new(),
-            byte_strings: HashMap::new(),
             fn_seq: 0,
             inline_arith: true,
             var_meta: true,
@@ -567,24 +565,11 @@ impl<'ctx> Lowerer<'ctx> {
         p
     }
 
-    /// A private constant global holding `text`'s bytes (cached).
+    /// A private constant global holding `text`'s bytes (callers
+    /// dedupe: [`str_lit`](Self::str_lit) caches its headers).
     fn str_bytes(&mut self, text: &str) -> PointerValue<'ctx> {
-        if let Some(p) = self.byte_strings.get(text) {
-            return *p;
-        }
         let value = self.ctx.const_string(text.as_bytes(), false);
-        let bytes = self.const_global(&value, "cljs");
-        self.byte_strings.insert(text.to_owned(), bytes);
-        bytes
-    }
-
-    /// A `CSlice<u8>` header value (not a global) over `text`.
-    fn str_slice_value(&mut self, text: &str) -> inkwell::values::StructValue<'ctx> {
-        let bytes = self.str_bytes(text);
-        self.slice_ty().const_named_struct(&[
-            bytes.into(),
-            self.i64t.const_int(text.len() as u64, false).into(),
-        ])
+        self.const_global(&value, "cljs")
     }
 
     fn constant(&mut self, c: Const) -> u64 {
@@ -5065,6 +5050,44 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("ret");
     }
 
+    /// One names text (each namespace once, then every var name) and
+    /// one `clj_rt::nabi::VarRow` per var, in index order: its spans in
+    /// the text and its Lite native hint (#271: the runtime validates and
+    /// copies the text once, no allocation per var).
+    fn declare_vars(&mut self) {
+        let row_ty = self.ctx.struct_type(&[self.i32t.into(); 5], false);
+        let vars = self.vars.clone();
+        let mut text = String::new();
+        let mut homes: Vec<(&str, u64)> = Vec::new();
+        let mut rows = Vec::with_capacity(vars.len());
+        for (ns, name) in &vars {
+            let ns_at = match homes.iter().find(|(home, _)| *home == ns.as_str()) {
+                Some(&(_, at)) => at,
+                None => {
+                    let at = text.len() as u64;
+                    text.push_str(ns);
+                    homes.push((ns, at));
+                    at
+                }
+            };
+            let at = text.len() as u64;
+            text.push_str(name);
+            let hint = u64::from(clj_eval::aot_boot::lite_native_hint(ns, name));
+            let fields = [ns_at, ns.len() as u64, at, name.len() as u64, hint]
+                .map(|v| self.i32t.const_int(v, false).into());
+            rows.push(row_ty.const_named_struct(&fields));
+        }
+        let names = self.str_bytes(&text);
+        let names_ref = self.const_slice(names, text.len() as u64);
+        let table = self.const_global(&row_ty.const_array(&rows), "cljv");
+        let rows_ref = self.const_slice(table, vars.len() as u64);
+        self.call(
+            "rt_n_declare_vars",
+            None,
+            &[names_ref.into(), rows_ref.into()],
+        );
+    }
+
     fn lower_main(&mut self, path: &str, init: FunctionValue<'ctx>, tops: &[FunctionValue<'ctx>]) {
         let ty = self
             .i32t
@@ -5072,27 +5095,7 @@ impl<'ctx> Lowerer<'ctx> {
         let main = self.module.add_function("main", ty, None);
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
-        // One `clj_rt::nabi::VarDecl` table: `ns/name` and the Lite
-        // native hint of every var, in index order.
-        let slice_ty = self.slice_ty();
-        let decl_ty = self
-            .ctx
-            .struct_type(&[slice_ty.into(), slice_ty.into(), self.i32t.into()], false);
-        let vars = self.vars.clone();
-        let mut decls = Vec::with_capacity(vars.len());
-        for (ns, name) in &vars {
-            let ns_slice = self.str_slice_value(ns);
-            let name_slice = self.str_slice_value(name);
-            let hint = clj_eval::aot_boot::lite_native_hint(ns, name);
-            decls.push(decl_ty.const_named_struct(&[
-                ns_slice.into(),
-                name_slice.into(),
-                self.i32t.const_int(u64::from(hint), false).into(),
-            ]));
-        }
-        let table = self.const_global(&decl_ty.const_array(&decls), "cljv");
-        let decls_ref = self.const_slice(table, vars.len() as u64);
-        self.call("rt_n_declare_vars", None, &[decls_ref.into()]);
+        self.declare_vars();
         let fns: Vec<(String, Vec<ArityCode>)> = self
             .fns
             .iter()
