@@ -434,13 +434,37 @@ pub extern "C" fn rt_n_core_call(out: &mut Value, k: u64, args: &CSlice<&Value>)
 }
 
 /// Fallback of the `rt_n_op*` shims: var `k`'s native with the args
-/// cloned.
+/// cloned. A native taking 1-3 args borrowed gets them in a stack array
+/// and writes `out` directly: no argument buffer, and no `Step` on the
+/// success path (#271: ~470 instructions per generic core call on
+/// Linux, the native's own work often a few).
 fn core_fallback(out: &mut Value, k: u64, args: &[&Value]) -> i32 {
-    let owned = args.iter().map(|a| (*a).clone()).collect();
-    finish(
-        out,
-        with_active(|eval| native::call_core_var(eval, k as usize, owned)),
-    )
+    let direct = with_active(|eval| {
+        let entry = native::core_entry(eval, k as usize)?;
+        let result = match *args {
+            [a] => entry.call_borrowed(eval, &[a.clone()]),
+            [a, b] => entry.call_borrowed(eval, &[a.clone(), b.clone()]),
+            [a, b, c] => entry.call_borrowed(eval, &[a.clone(), b.clone(), c.clone()]),
+            _ => None,
+        }?;
+        Some(match result {
+            Ok(v) => {
+                *out = v;
+                0
+            }
+            Err(e) => {
+                *out = Value::Nil;
+                native::fail(native_abi::native_throw(eval, e))
+            }
+        })
+    });
+    direct.unwrap_or_else(|| {
+        let owned = args.iter().map(|a| (*a).clone()).collect();
+        finish(
+            out,
+            with_active(|eval| native::call_core_var(eval, k as usize, owned)),
+        )
+    })
 }
 
 /// [`rt_n_core_ref`] for one borrowed arg (no argument array).

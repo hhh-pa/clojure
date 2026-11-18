@@ -232,6 +232,12 @@ A Lite program drops a top-level `def` (`dead_defs`) when:
 
 A dropped def's own reads no longer count, so the set grows to a fixpoint: `max-long` frees `min-long`. An unread def whose init has an effect still runs it. macOS empty-input startup: −87K or more for a quarter of the scripts (median −12K). Emit test `native_emit_ir_drops_unread_pure_defs_271`; corpus `dead_defs.clj`.
 
+### 6.13 Slice 4h: generic core calls without the argument buffer
+
+A core fn the compiler neither inlines nor calls directly goes through `rt_n_core_call` (and the `rt_n_op*` fallbacks). That path cloned the arguments into a `SmallVec<[Value; 4]>`, moved the 72-byte buffer through three call layers, and returned a `Step` (`Result<Value, Signal>`, about 60 bytes). On Linux the call cost about 470 instructions; for `identity`, the native's own share was 10. The non-win scripts make about 1300 such calls per case.
+
+A native that takes its arguments borrowed, which is most of them, now gets 1-3 clones in a stack array and writes the result straight to the output slot. A `Signal` is built only on failure, exactly as the general path throws. Owned-args natives (`reduce`, `into`, …) and anything else keep the general path. macOS, per call: `identity` 401 → 304 instructions, `subs` 837 → 737, `name` 608 → 519.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

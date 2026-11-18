@@ -753,6 +753,19 @@ pub struct CoreEntry {
     owned: Option<Arc<crate::ext::OwnedNativeImpl>>,
 }
 
+impl CoreEntry {
+    /// Call the native over borrowed args, as [`call_core`] does for a
+    /// native without an owned-args entry. `None` for an owned-args
+    /// native, which takes its arguments by value.
+    pub fn call_borrowed(
+        &self,
+        eval: &mut Evaluator,
+        args: &[Value],
+    ) -> Option<Result<Value, NativeError>> {
+        self.owned.is_none().then(|| (self.func)(eval, args))
+    }
+}
+
 /// A Lite native's [`CoreEntry`] straight from the registered tables —
 /// compiled code calling it directly needs no var, so its install stays
 /// lazy (`None`: not a Lite native; see `aot_boot::lite_entry`).
