@@ -49,6 +49,10 @@ pub(crate) struct FnDesc {
     pub(crate) arities: Arc<[ArityDesc]>,
 }
 
+/// A declared var as the Lite boot reads it: its namespace and name
+/// spans in the names text, and its Lite native hint.
+type DeclaredVar = ((u32, u32), (u32, u32), u32);
+
 /// One declared var: its qualified name (interned on first use) and
 /// the compiler's Lite native hint for it.
 pub(crate) struct VarSlot {
@@ -661,8 +665,7 @@ pub(crate) fn run_main_lite(
     reset_thread_caches();
     let (names, declared, core_caps, owned_caps, lib_caps, seq_helpers, var_meta) = building(|b| {
         b.lite = true;
-        let declared: Vec<((u32, u32), (u32, u32), u32)> =
-            b.vars.iter().map(|v| (v.ns, v.name, v.hint)).collect();
+        let declared: Vec<DeclaredVar> = b.vars.iter().map(|v| (v.ns, v.name, v.hint)).collect();
         (
             Arc::clone(&b.names),
             declared,

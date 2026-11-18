@@ -6352,7 +6352,7 @@ fn visit_var_reads(e: &Expr, report: &mut dyn FnMut(&Symbol)) {
         Expr::Binding { pairs, .. } | Expr::WithRedefs { pairs, .. } => {
             pairs.iter().for_each(|(v, _)| report(&v.sym));
         }
-        Expr::Declare { syms, .. } => syms.iter().for_each(|s| report(s)),
+        Expr::Declare { syms, .. } => syms.iter().for_each(&mut *report),
         _ => {}
     }
     for_each_child(e, &mut |c| visit_var_reads(c, report));
@@ -6399,10 +6399,9 @@ fn long_vars(units: &[TopUnit]) -> HashSet<(String, String)> {
             init: Some(init),
             ..
         } = &u.expr
+            && is_long_expr(init, &longs)
         {
-            if is_long_expr(init, &longs) {
-                longs.insert(var_key(sym));
-            }
+            longs.insert(var_key(sym));
         }
     }
     longs
