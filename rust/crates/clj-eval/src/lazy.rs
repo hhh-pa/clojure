@@ -1948,6 +1948,18 @@ pub(crate) fn filter_pred(eval: &mut Evaluator, f: &Value, item: &Value) -> Resu
     Ok(eval.call(f, slice)?.is_truthy())
 }
 
+/// A filter predicate resolved once: `None` for `seq`, so
+/// [`filter_pred`] tests emptiness without building a seq, else `f`
+/// prepared for one argument.
+pub(crate) fn filter_prep(f: &Value) -> Option<crate::vm::Prepared<'_>> {
+    let is_seq = crate::ext::as_native(f).is_some_and(|n| &*n.display == "clojure.core/seq");
+    if is_seq {
+        None
+    } else {
+        crate::vm::Prepared::of(f, 1)
+    }
+}
+
 fn test_filter_item(
     eval: &mut Evaluator,
     f: &Value,
@@ -1968,12 +1980,7 @@ fn step_filter(
     mut input: Value,
     invert: bool,
 ) -> Result<Forced, Signal> {
-    let is_seq = crate::ext::as_native(f).is_some_and(|n| &*n.display == "clojure.core/seq");
-    let prep = if is_seq {
-        None
-    } else {
-        crate::vm::Prepared::of(f, 1)
-    };
+    let prep = filter_prep(f);
     loop {
         let (items, tail): (Arc<[Value]>, Value) = match step_unit(eval, &input)? {
             StepUnit::Empty => return Ok(Forced::Empty),

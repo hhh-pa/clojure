@@ -1367,7 +1367,10 @@ fn filterv_vector(eval: &mut Evaluator, f: &Value, v: Vector) -> Result<Value, N
         return Ok(Value::Vector(v.with_meta(None)));
     }
     crate::core::check_ifn(eval, f).map_err(signal_to_native)?;
-    let prep = crate::vm::Prepared::of(f, 1);
+    // `seq` tests emptiness without building a seq, as the lazy `filter`
+    // does: `(filterv seq tokens)` after a split allocated a string seq
+    // per token (#271).
+    let prep = crate::lazy::filter_prep(f);
     let mut tv: Option<clj_value::TransientVector> = None;
     for i in 0..v.len() {
         let item = v.get(i).expect("index in bounds");
