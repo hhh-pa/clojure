@@ -391,10 +391,15 @@ A call whose head is not a known var, such as a local closure or a fn argument (
 
 The corpus file `closure_calls.clj` pins captured values, nested and returned closures, multi-arity, variadic and wrong-arity calls, non-closure callees (keywords, maps, sets, vectors, natives, nil), exceptions crossing the call, and the `StackOverflowError` of deep recursion through a local fn, against `run` and the previous binary.
 
-Measured on macOS, about 85-125 fewer instructions per call:
+3. As a `defn`'s direct call does, plain locals ride in place. A local head is called where it lives, and local arguments are bitwise aliases in the argument array (the callee only reads its args), cleared after the call. A local moved by its last use drops after the call. Moves never target captured values, so nothing the enclosing closure owns is released.
 
-- local closure in a `conj` loop: 710 → 587 per iteration;
-- a fn parameter called per item: 439 → 354.
+Measured on macOS, instructions per call:
+
+| Call | Before | Direct entry | + in-place locals |
+|---|---|---|---|
+| local closure in a `conj` loop | 710 | 587 | 478 |
+| a fn parameter called per item | 477 | 354 | 245 |
+| a captured-adder closure | 475 | 353 | 245 |
 
 ## 7. Acceptance Checklist (Issue #271)
 

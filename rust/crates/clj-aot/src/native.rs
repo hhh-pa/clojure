@@ -2293,17 +2293,64 @@ impl<'ctx> Lowerer<'ctx> {
         {
             return Ok(());
         }
-        let h = self.slot(f);
-        self.lower(f, head, h)?;
+        self.lower_value_invoke(f, head, args, dest)
+    }
+
+    /// `dest = (head args…)` through [`emit_value_call`](Self::emit_value_call).
+    /// As a `defn`'s direct call does, plain locals ride in place: a local
+    /// head is called where it lives, and local args are bitwise aliases in
+    /// the argument array (the callee only reads its args), cleared after
+    /// the call; a local an arg's last use moves drops after it (#271).
+    fn lower_value_invoke(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        head: &Expr,
+        args: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let mut temps = Vec::new();
+        let mut moved = Vec::new();
+        let local_head = match head {
+            Expr::Local(idx) => self.borrowable_before(f, *idx, args),
+            _ => None,
+        };
+        let h = match local_head {
+            Some(p) => {
+                if is_move(f, head) {
+                    moved.push(p);
+                }
+                p
+            }
+            None => {
+                let h = self.slot(f);
+                self.lower(f, head, h)?;
+                temps.push(h);
+                h
+            }
+        };
         let (arr, elems) = self.slot_array(f, args.len());
-        for (a, e) in args.iter().zip(&elems) {
-            self.lower(f, a, *e)?;
+        let mut aliases = Vec::new();
+        for (i, (a, e)) in args.iter().zip(&elems).enumerate() {
+            let local = match a {
+                Expr::Local(idx) => self.borrowable_before(f, *idx, &args[i + 1..]),
+                _ => None,
+            };
+            if let Some(p) = local {
+                self.copy_bits(*e, p);
+                aliases.push(*e);
+                if is_move(f, a) {
+                    moved.push(p);
+                }
+            } else {
+                self.lower(f, a, *e)?;
+                temps.push(*e);
+            }
         }
         let st = self.emit_value_call(f, h, arr, args.len(), dest);
+        self.clear_aliases(&aliases);
         self.check(f, st);
-        self.drop_v(f.func, h);
-        self.write_tag(h, 0);
-        self.drop_and_nil_slots(f.func, &elems);
+        self.drop_and_nil_slots(f.func, &temps);
+        self.drop_and_nil_slots(f.func, &moved);
         Ok(())
     }
 
