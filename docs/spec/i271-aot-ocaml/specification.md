@@ -274,6 +274,12 @@ The projection adds each probed program's RSS change to its h2h 90509c29 cases, 
 
 Ties break in a fixed order, so every job that links the order gets the same one. `run.sh --aot` delegates to the script.
 
+**Correction after the first CI runs.** The probe above ran on empty stdin, so it measured mostly startup. With real inputs, the h2h for f9a16ff5, the first run with a CI-regenerated order, regressed instead: MEM 1280/408/55 → 1046/597/100, and AOT median peak RSS rose 116 KB.
+
+The runtime changes in between were not the cause: on macOS, which has no layout order, peak RSS on the same inputs fell (median −80 KB). A same-runtime probe on empty stdin still ranked the CI order 192 KB better than the committed one.
+
+The cause was the generator. `aot_order.py` kept only Rust-mangled names, so it dropped the runtime's `rt_*` C-ABI entry points (`rt_n_core_call`, `rt_n_drop`, `rt_n_deref`, `rt_n_core_own`, …). Every compiled program calls these while it processes input, but empty-stdin runs barely touch them. The committed order (from `hot_text.py`) listed them. The generator now keeps `rt_*` names alongside Rust ones.
+
 **CI keeps it fresh.**
 
 - The h2h workflow's `hot-text` job regenerates each side's order (aot-from, aot-to) once, using this run's tooling and workloads, and the 32 measure shards link with it.

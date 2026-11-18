@@ -3,8 +3,9 @@
 Steps (callgrind profiles of the training workloads, one revision):
 
   aot_order.py callgrind FILE.cg
-      Every Rust function a callgrind run executed, in first-seen order
-      (one workload's function set; std's precompiled functions included).
+      Every runtime function a callgrind run executed (Rust and the
+      `rt_*` C ABI), in first-seen order (one workload's function set;
+      std's precompiled functions included).
   aot_order.py order --fns DIR --startup FILE --sizes FILE [--previous LD] --out LD
       The layout: the startup set first (in the previous order's
       sequence), then 62 KiB windows filled with functions workloads use
@@ -31,14 +32,18 @@ WINDOW = 64 * 1024
 CAP = 62 * 1024
 
 
-def rust_name(name):
-    """Whether `name` is a Rust mangled symbol (v0 or legacy)."""
-    return re.fullmatch(r'(_R|_ZN)[A-Za-z0-9_.$]+', name) is not None
+def runtime_name(name):
+    """Whether `name` is a runtime function the order may place: a Rust
+    mangled symbol (v0 or legacy), or one of the runtime's unmangled C-ABI
+    entry points (`rt_n_*`, `rt_bc_*`, ...), which every compiled program
+    calls (missing them left the ABI scattered over the cold text)."""
+    return re.fullmatch(r'(_R|_ZN)[A-Za-z0-9_.$]+|rt_[A-Za-z0-9_]+', name) is not None
 
 
 def callgrind(path):
-    """Rust functions with any cost in a callgrind output, in first-seen
-    order (`fn=` ids resolve through their first definition)."""
+    """Runtime functions ([`runtime_name`]) with any cost in a callgrind
+    output, in first-seen order (`fn=` ids resolve through their first
+    definition)."""
     names, seen = {}, {}
     fn, after_call = None, False
     for line in open(path, errors='replace'):
@@ -58,7 +63,7 @@ def callgrind(path):
         elif line[:1].isdigit() or line[:1] in '+-*':
             if after_call:
                 after_call = False
-            elif fn and rust_name(fn):
+            elif fn and runtime_name(fn):
                 seen.setdefault(fn, None)
     return list(seen)
 
