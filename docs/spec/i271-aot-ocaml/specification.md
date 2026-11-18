@@ -298,6 +298,25 @@ Measured on macOS, instructions per element: `{:keys [a b]}` 7777 → 1069; `{:k
 
 The corpus file `map_destructure.clj` replays the JIT against `run` across every source shape: lists, records, vectors, strings, sets, numbers and nil. It also covers present `nil`, both kinds of `:or` key, eager defaults, nested patterns, and required keys.
 
+### 6.17 Slice 4l: lazy steps walk chunks without copying them
+
+`step_head` serves every lazy op that consumes its input one item at a time: multi-input `map`, `take-while`, `drop-while`, `drop`, `take-nth`, the `partition` family, `distinct`, `reductions`, `interleave`, `sequence` and `cycle`. It used to re-chain the rest of each stepped chunk as a fresh copy (`chain_tail`), so walking a 32-item chunk item by item copied about 16 values per item and allocated a vector for each.
+
+The rest of a chunk is now a forced cursor cell sharing the chunk: `SeqState::Chunk { items, pos, tail }`, the cell `rest` already uses (the JVM's `ChunkedCons`). `step_head` peels a cursor cell in place without forcing it. Values, laziness, `realized?` and the seq classes are unchanged (the remainder keeps the `LazySeq` class the re-chained copy had), and `run`, AOT and the previous binary agree on every op above.
+
+Measured on macOS, instructions per element over a 100-item vector:
+
+| Op | Before | After |
+|---|---|---|
+| `(partition 2 v)` | 6509 | 4285 |
+| `(partition-all 3 v)` | 5676 | 3335 |
+| `drop-while` | 4249 | 1508 |
+| `take-while` | 6311 | 3551 |
+| `distinct` | 7474 | 4694 |
+| `(map + v v)` | 10784 | 5199 |
+| `interleave` | 12662 | 7071 |
+| `reductions` | 6634 | 3878 |
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

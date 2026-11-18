@@ -1514,18 +1514,50 @@ fn step_value_forced(eval: &mut Evaluator, v: &Value) -> Result<Forced, Signal> 
     }
 }
 
-/// Step one head plus its remainder (chunk remainders re-chain
-/// ahead of the tail; step chunks are never empty).
+/// Step one head plus its remainder (step chunks are never empty). A
+/// chunk's remainder is a cursor cell sharing the chunk, and a cursor
+/// cell steps in place, so walking a chunk item by item copies nothing
+/// (#271: re-chaining the remainder copied O(chunk) values per item).
 fn step_head(eval: &mut Evaluator, input: &Value) -> Result<Option<(Value, Value)>, Signal> {
+    if let Some(stepped) = as_pending(input).and_then(step_cursor) {
+        return Ok(Some(stepped));
+    }
     // Step chunks are never empty, so one step decides (no loop).
     match step_unit(eval, input)? {
         StepUnit::Empty => Ok(None),
         StepUnit::One { head, tail } => Ok(Some((head, tail))),
         StepUnit::Chunk { items, tail } => {
-            let (head, rest) = items.split_first().expect("step chunks are non-empty");
-            Ok(Some((head.clone(), chain_tail(rest, &tail))))
+            let head = items[0].clone();
+            Ok(Some((head, chunk_cursor(items, 1, tail))))
         }
     }
+}
+
+/// A memoized chunk cell's head and the cursor one past it (`None`
+/// unless the cell holds a forced chunk: pending cells force first).
+fn step_cursor(p: &PendingSeq) -> Option<(Value, Value)> {
+    let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+    let SeqState::Chunk { items, pos, tail } = &*state else {
+        return None;
+    };
+    Some((
+        items[*pos].clone(),
+        chunk_cursor(Arc::clone(items), *pos + 1, tail.clone()),
+    ))
+}
+
+/// `items[pos..]` then `tail`, sharing `items` (`tail` itself past the
+/// end): a forced cell, as `rest` advances one (no metadata, the
+/// `LazySeq` class the re-chained remainder had).
+fn chunk_cursor(items: Arc<[Value]>, pos: usize, tail: Value) -> Value {
+    if pos >= items.len() {
+        return tail;
+    }
+    Value::Extension(Arc::new(PendingSeq {
+        state: Mutex::new(SeqState::Chunk { items, pos, tail }),
+        meta: None,
+        kind: LazyKind::LazySeq,
+    }))
 }
 
 /// Whether `drop`/`nthrest` take the eager `IDrop` path: vectors,
@@ -4987,6 +5019,31 @@ mod tests {
 
     use super::*;
     use clj_value::new_map;
+
+    #[test]
+    fn chain_tail_of_nothing_is_the_tail() {
+        // An exhausted remainder re-chains nothing: the tail itself.
+        assert_eq!(chain_tail(&[], &Value::Int(7)), Value::Int(7));
+    }
+
+    #[test]
+    fn chunk_cursors_step_in_place() {
+        // A chunk's remainder shares the chunk (a forced cursor cell);
+        // stepping a cursor peels its head without forcing or copying,
+        // and the last item steps to the tail itself.
+        let items: Arc<[Value]> = Arc::from(vec![Value::Int(1), Value::Int(2)]);
+        let cursor = chunk_cursor(Arc::clone(&items), 1, Value::Nil);
+        let p = as_pending(&cursor).expect("cursor cell");
+        let (head, rest) = step_cursor(p).expect("forced cursor");
+        assert_eq!(head, Value::Int(2));
+        assert_eq!(rest, Value::Nil);
+        assert_eq!(chunk_cursor(items, 2, Value::Int(9)), Value::Int(9));
+        let unforced = PendingSeq::pending(Thunk::Chain {
+            head: vec![Value::Int(3)],
+            tail: Value::Nil,
+        });
+        assert!(step_cursor(as_pending(&unforced).expect("pending")).is_none());
+    }
 
     fn pending_seq(state: SeqState, kind: LazyKind) -> PendingSeq {
         PendingSeq {
