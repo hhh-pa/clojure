@@ -1863,20 +1863,106 @@ pub(crate) fn walk_sole_map(
     coll: &Value,
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Option<Result<(), Signal>> {
-    Some(match sole_map_parts(coll)? {
-        SoleMap::One(f, input) => walk_map_one(eval, &f, input, visit),
-        SoleMap::Vectors(f, inputs) => walk_map_vectors(eval, &f, &inputs, visit),
-    })
+    let parts = sole_map_parts(coll)?;
+    Some(walk_parts(eval, parts, visit).map(|_| ()))
 }
 
-/// A sole unforced `map` seq's fn and inputs ([`walk_sole_map`]).
+/// A sole unforced `map` seq's fn and inputs ([`walk_sole_map`]), or a
+/// sole unforced `mapcat`'s outer `map` (#271: `for` over several
+/// bindings or with `:when` is a `mapcat`).
 enum SoleMap {
     One(Value, Value),
     Vectors(Value, Vec<Vector>),
+    Cat(Box<SoleMap>),
+}
+
+/// Walk [`SoleMap`] parts; answers whether `visit` let the walk reach
+/// the end. A `mapcat` walks its outer `map` as a `map` walks, then
+/// each result in turn ([`walk_all`]): forcing the cells runs the same
+/// steps in the same order (`step_mapcat`: the outer chunk's results,
+/// realized ones spliced, lazy ones through their own units).
+fn walk_parts(
+    eval: &mut Evaluator,
+    parts: SoleMap,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    match parts {
+        SoleMap::One(f, input) => walk_map_one(eval, &f, input, visit),
+        SoleMap::Vectors(f, inputs) => walk_map_vectors(eval, &f, &inputs, visit),
+        SoleMap::Cat(outer) => {
+            let mut go_on = true;
+            let mut each = |eval: &mut Evaluator, r: Value| -> Result<bool, Signal> {
+                go_on = walk_all(eval, r, visit)?;
+                Ok(go_on)
+            };
+            walk_parts(eval, *outer, &mut each)?;
+            Ok(go_on)
+        }
+    }
+}
+
+/// Walk every item of one `mapcat` result in seq order: a sole unforced
+/// `map`/`mapcat` without its cells, nil and realized lists and vectors
+/// item by item (`splice_realized`), anything else unit by unit through
+/// its seq. Answers whether `visit` let the walk reach the end.
+fn walk_all(
+    eval: &mut Evaluator,
+    coll: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if let Some(parts) = sole_map_parts(&coll) {
+        return walk_parts(eval, parts, visit);
+    }
+    match coll {
+        Value::Nil => Ok(true),
+        Value::List(l) => visit_all(eval, l.iter().cloned(), visit),
+        Value::Vector(v) => visit_all(eval, v.iter(), visit),
+        other => {
+            let s = seq_value(eval, &other)?;
+            walk_units(eval, s, visit)
+        }
+    }
+}
+
+/// Walk a seq unit by unit, forcing each as its cells would; answers
+/// whether `visit` let the walk reach the end.
+fn walk_units(
+    eval: &mut Evaluator,
+    mut cur: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    loop {
+        let (go_on, tail) = match step_unit(eval, &cur)? {
+            StepUnit::Empty => return Ok(true),
+            StepUnit::One { head, tail } => (visit(eval, head)?, tail),
+            StepUnit::Chunk { items, tail } => {
+                (visit_all(eval, items.iter().cloned(), visit)?, tail)
+            }
+        };
+        if !go_on {
+            return Ok(false);
+        }
+        cur = tail;
+    }
+}
+
+/// Visit `items` in order; answers whether `visit` let them all through.
+fn visit_all(
+    eval: &mut Evaluator,
+    items: impl Iterator<Item = Value>,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    for item in items {
+        if !visit(eval, item)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// `coll`'s map fn and inputs when it is an unforced `map` seq with no
-/// other handle (and, past one input, vector inputs only).
+/// other handle (and, past one input, vector inputs only), or the outer
+/// `map` of such a `mapcat` (its only holder is the `mapcat` cell).
 fn sole_map_parts(coll: &Value) -> Option<SoleMap> {
     let Value::Extension(e) = coll else {
         return None;
@@ -1889,8 +1975,12 @@ fn sole_map_parts(coll: &Value) -> Option<SoleMap> {
     let SeqState::Pending(thunk) = &*state else {
         return None;
     };
-    let Thunk::Map { f, inputs } = &**thunk else {
-        return None;
+    let (f, inputs) = match &**thunk {
+        Thunk::Map { f, inputs } => (f, inputs),
+        Thunk::MapCat { outer } => {
+            return sole_map_parts(outer).map(|parts| SoleMap::Cat(Box::new(parts)));
+        }
+        _ => return None,
     };
     if let [input] = &inputs[..] {
         return Some(SoleMap::One(f.clone(), input.clone()));
@@ -1911,10 +2001,10 @@ fn walk_map_one(
     f: &Value,
     mut cur: Value,
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
-) -> Result<(), Signal> {
+) -> Result<bool, Signal> {
     loop {
         let out = match step_unit(eval, &cur)? {
-            StepUnit::Empty => return Ok(()),
+            StepUnit::Empty => return Ok(true),
             StepUnit::One { head, tail } => {
                 cur = tail;
                 map_unit(eval, f, std::slice::from_ref(&head))?
@@ -1924,10 +2014,8 @@ fn walk_map_one(
                 map_unit(eval, f, &items)?
             }
         };
-        for item in out {
-            if !visit(eval, item)? {
-                return Ok(());
-            }
+        if !visit_all(eval, out.into_iter(), visit)? {
+            return Ok(false);
         }
     }
 }
@@ -1939,7 +2027,7 @@ fn walk_map_vectors(
     f: &Value,
     inputs: &[Vector],
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
-) -> Result<(), Signal> {
+) -> Result<bool, Signal> {
     let n = inputs.iter().map(Vector::len).min().unwrap_or(0);
     let mut iters: Vec<_> = inputs.iter().map(Vector::iter).collect();
     let mut heads = Vec::with_capacity(iters.len());
@@ -1949,10 +2037,10 @@ fn walk_map_vectors(
         crate::core::check_ifn(eval, f)?;
         let out = eval.call(f, &heads)?;
         if !visit(eval, out)? {
-            break;
+            return Ok(false);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Re-chain an unconsumed remainder ahead of its tail.

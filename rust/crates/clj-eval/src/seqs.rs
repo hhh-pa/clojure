@@ -2108,7 +2108,7 @@ mod sole_map_walk_tests {
     use super::{Walk, walk_seq};
     use crate::error::NativeError;
     use crate::eval::Evaluator;
-    use crate::lazy::{collect_packed, filter_thunk, map_thunk, seq_value};
+    use crate::lazy::{collect_packed, filter_thunk, map_thunk, mapcat_thunk, seq_value};
     use clj_value::{Value, Vector};
 
     fn source(eval: &mut Evaluator, text: &str) -> Value {
@@ -2136,6 +2136,54 @@ mod sole_map_walk_tests {
             })
         })?;
         Ok(Value::Vector(Vector::from_vec(out)))
+    }
+
+    /// #271: a sole unforced `mapcat` (`for` over several bindings) walks
+    /// without its cells: realized results splice, lazy ones walk (fused
+    /// again when sole), an early stop ends the whole walk, and a
+    /// non-seqable result fails as forcing it would.
+    #[test]
+    fn sole_mapcat_seqs_walk_like_their_cells() {
+        let mut eval = crate::ns::boot();
+        let shapes = source(
+            &mut eval,
+            "(fn [x] (case (int (mod x 6)) 0 [x x] 1 (list x) 2 nil 3 (map inc [x]) 4 (cons x (lazy-seq [x])) \"ab\"))",
+        );
+        let nested = source(&mut eval, "(fn [x] (mapcat (fn [y] [x y]) [1 2]))");
+        let same = source(&mut eval, "(fn [x] x)");
+        let mut walk = |coll: Value, stop: usize| walked(&mut eval, coll, stop);
+        let all = walk(
+            mapcat_thunk(shapes.clone(), vec![ints(&[0, 1, 2, 3, 4, 5])]),
+            99,
+        );
+        let want: Vec<Value> = [0, 0, 1, 4, 4, 4]
+            .iter()
+            .map(|n| Value::Int(*n))
+            .chain([Value::Char('a'), Value::Char('b')])
+            .collect();
+        assert_eq!(
+            all.expect("walks"),
+            Value::Vector(Vector::from_vec(want.clone()))
+        );
+        // An early stop inside a result walked through its seq ends it all.
+        let stopped = walk(
+            mapcat_thunk(shapes.clone(), vec![ints(&[0, 1, 2, 3, 4, 5])]),
+            7,
+        );
+        let first7 = Value::Vector(Vector::from_vec(want[..7].to_vec()));
+        assert_eq!(stopped.expect("walks"), first7);
+        assert_eq!(
+            walk(mapcat_thunk(nested.clone(), vec![ints(&[5, 6])]), 3).expect("walks"),
+            ints(&[5, 1, 5])
+        );
+        assert_eq!(
+            walk(mapcat_thunk(nested, vec![ints(&[5, 6])]), 99).expect("walks"),
+            ints(&[5, 1, 5, 2, 6, 1, 6, 2])
+        );
+        assert!(walk(mapcat_thunk(same, vec![ints(&[1])]), 99).is_err());
+        let shared = mapcat_thunk(shapes, vec![ints(&[0])]);
+        assert_eq!(walk(shared.clone(), 99).expect("walks"), ints(&[0, 0]));
+        drop(shared);
     }
 
     /// #271: a sole unforced `map` seq walks without building its lazy

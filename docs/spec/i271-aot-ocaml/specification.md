@@ -350,6 +350,32 @@ Value equality on maps, sets, vectors and lists walked every entry, even when bo
 
 Equality now answers true first for the same collection (`Arc::ptr_eq`), as the JVM's `Util.equiv` checks `k1 == k2` before anything else. The same 2000 swaps cost 14.5M (500 cost 5.2M: linear). Clojure's `=` goes through its own `equiv` and is unchanged; the shortcut serves internal equality: atom publishes, map keys and set members.
 
+### 6.21 Slice 4p: eager walks fuse `mapcat` (`for` over several bindings)
+
+`for` with several bindings expands to a `mapcat` over inner `map`s, and so does a `mapcat` call. Every element went through lazy cells even when an eager consumer was about to walk the whole seq. `for` is used by 47% of the scripts that lose by more than 2×, against 13% of all-win scripts. A sole unforced `map` was already walked without its cells (`walk_sole_map`).
+
+The fused walk now also takes a sole unforced `mapcat` whose outer `map` is sole and unforced. It walks the outer `map` as before, then each of its results in turn:
+
+- nil, lists and vectors item by item (as `splice_realized` splices them);
+- a sole `map`/`mapcat` fused again, recursively;
+- anything else unit by unit through its seq.
+
+These are the steps forcing the cells runs, in the same order. A visitor's stop ends the whole walk.
+
+The fusion only applies where the walk owns the seq, so nothing else can see the cells. Its consumers are the `walk_seq` callers: `reduce`, `into`, `mapv`, `vec`, `some`, `every?`, `not-any?`, `frequencies`, `group-by`, `doall`, `dorun` and `run!`. The corpus file `for_fused.clj` pins items, side-effect order and counts (including chunked over-evaluation before an early stop), errors, and reuse of a held seq against `run` and the previous binary.
+
+Measured on macOS, instructions per element:
+
+| Consumer | Before | After |
+|---|---|---|
+| `reduce` over a 2-D `for` | 2135 | 1147 |
+| `into []` over a 2-D `for` | 2204 | 1221 |
+| `vec` over a 2-D `for` | 2637 | 1586 |
+| `some` over a 2-D `for` | 2340 | 1354 |
+| `(reduce + (mapcat …))` | 979 | 862 |
+
+`count` keeps the cells for now: its AOT slow path passes the seq borrowed, and a borrowed seq may be used again.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
