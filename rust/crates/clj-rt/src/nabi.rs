@@ -671,6 +671,13 @@ pub extern "C" fn rt_n_map_lit(out: &mut Value, kvs: &CSlice<Value>, meta_k: u64
     )
 }
 
+/// `out =` a keyword map literal (#271): the constant `template`'s keys
+/// (a shaped `{k nil …}`) over the evaluated `vals`, sharing its shape.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_kw_map(out: &mut Value, template: &Value, vals: &CSlice<Value>) {
+    *out = native_abi::kw_map(template, vals.get());
+}
+
 /// `out = #{items…}`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_set_lit(out: &mut Value, items: &CSlice<Value>, meta_k: u64) -> i32 {
@@ -1227,6 +1234,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_def_finish,
         rt_n_vec_lit,
         rt_n_map_lit,
+        rt_n_kw_map,
         rt_n_set_lit,
         rt_n_throw,
         rt_n_new_throwable,

@@ -1755,13 +1755,7 @@ impl<'ctx> Lowerer<'ctx> {
             Expr::SetLit(items, meta) => {
                 self.lower_coll(f, "rt_n_set_lit", items, meta.as_ref(), dest, true)
             }
-            Expr::MapLit(pairs, meta) => {
-                let flat: Vec<Expr> = pairs
-                    .iter()
-                    .flat_map(|(k, v)| [k.clone(), v.clone()])
-                    .collect();
-                self.lower_coll(f, "rt_n_map_lit", &flat, meta.as_ref(), dest, true)
-            }
+            Expr::MapLit(pairs, meta) => self.lower_map_lit(f, pairs, meta.as_ref(), dest),
             Expr::Fn(fun) => {
                 let base = f.env.len();
                 self.make_closure(f, fun, base, dest)
@@ -4305,6 +4299,37 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(())
     }
 
+    /// A map literal. Distinct constant keyword keys (at most 8) build
+    /// through a shaped `{k nil …}` template constant (#271:
+    /// `rt_n_kw_map`; only the values evaluate, in order, as before);
+    /// any other literal pairs up its keys and values (`rt_n_map_lit`).
+    fn lower_map_lit(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        pairs: &[(Expr, Expr)],
+        meta: Option<&Map>,
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
+        if let Some(template) = keyword_template(pairs, meta) {
+            let k = self.value_const(&template)?;
+            let tref = self.const_ref(k);
+            let vals: Vec<Expr> = pairs.iter().map(|(_, v)| v.clone()).collect();
+            let arr = self.lower_args(f, &vals)?;
+            let vref = self.slots_ref(f, arr, vals.len());
+            self.call(
+                "rt_n_kw_map",
+                None,
+                &[dest.into(), tref.into(), vref.into()],
+            );
+            return Ok(());
+        }
+        let flat: Vec<Expr> = pairs
+            .iter()
+            .flat_map(|(k, v)| [k.clone(), v.clone()])
+            .collect();
+        self.lower_coll(f, "rt_n_map_lit", &flat, meta, dest, true)
+    }
+
     fn truthy(&self, v: PointerValue<'ctx>) -> IntValue<'ctx> {
         let t = self.tag(v);
         let non_nil = self
@@ -5778,6 +5803,27 @@ fn borrow_only(body: &[Expr], i: usize) -> bool {
     body.iter().all(|e| walk(e, i))
 }
 
+/// A map literal's `{k nil …}` template (#271) when it carries no
+/// metadata and its keys are 1 to 8 distinct constant keywords: an
+/// array map either way, whose interned shape every evaluation shares.
+fn keyword_template(pairs: &[(Expr, Expr)], meta: Option<&Map>) -> Option<Value> {
+    if meta.is_some() || pairs.is_empty() || pairs.len() > 8 {
+        return None;
+    }
+    let mut keys: Vec<Value> = Vec::with_capacity(pairs.len());
+    for (k, _) in pairs {
+        let Expr::Literal(key @ Value::Keyword(_)) = k else {
+            return None;
+        };
+        if keys.contains(key) {
+            return None;
+        }
+        keys.push(key.clone());
+    }
+    let kvs = keys.into_iter().map(|k| (k, Value::Nil)).collect();
+    Some(Value::Map(Map::from_kvs_last_wins(kvs)))
+}
+
 /// Whether a map pattern binds by direct lookups (#271): no required
 /// (`!`) keys, no `&` key list and no 1.13 outlets, which need the
 /// interpreter's whole destructure. Nested patterns decide for
@@ -7008,6 +7054,20 @@ fn expr_lite_ok(e: &Expr, scope: &LiteScope<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyword_templates_need_distinct_constant_keywords() {
+        let kw = |n: &str| Expr::Literal(Value::Keyword(clj_value::Keyword::new(None, n)));
+        let one = Expr::Literal(Value::Int(1));
+        let template = keyword_template(&[(kw("a"), one.clone()), (kw("b"), one.clone())], None);
+        assert!(matches!(template, Some(Value::Map(m)) if m.size() == 2));
+        // A repeated key (the reader rejects one; a template would
+        // mis-pair the values) and a non-keyword key pair up instead.
+        assert!(
+            keyword_template(&[(kw("a"), one.clone()), (kw("a"), one.clone())], None).is_none()
+        );
+        assert!(keyword_template(&[(one.clone(), one.clone())], None).is_none());
+    }
 
     #[test]
     fn simple_collections_pool_without_the_reader() {

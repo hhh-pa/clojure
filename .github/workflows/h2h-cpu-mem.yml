@@ -313,14 +313,21 @@ jobs:
       - name: Set up LLVM 23
         uses: ./h2h/.github/actions/setup-llvm
 
+      # A revision older than the AOT order (master before #271) links
+      # none: nothing to regenerate, nothing to upload.
       - name: Regenerate the order
-        run: bash h2h/scripts/bench/hot-text/regen-aot.sh rev/rust "$RUNNER_TEMP/hot-text-aot.ld"
+        run: |
+          if [ ! -f rev/rust/hot-text-aot.ld ]; then
+            echo "aot-${{ matrix.side }}: this revision links no AOT hot-text order" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          bash h2h/scripts/bench/hot-text/regen-aot.sh rev/rust "$RUNNER_TEMP/hot-text-aot.ld"
 
       - uses: actions/upload-artifact@v6
         with:
           name: hot-text-${{ matrix.side }}
           path: ${{ runner.temp }}/hot-text-aot.ld
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   # All three legs of a shard on ONE runner: each job builds both
   # native revisions (interpreter-only release: `run` needs no
@@ -531,7 +538,9 @@ jobs:
         run: |
           for side in from to; do
             order="hot-text/hot-text-$side/hot-text-aot.ld"
-            if [ -s "$order" ]; then
+            if [ ! -f "h2h-$side/rust/hot-text-aot.ld" ]; then
+              echo "aot-$side: links no AOT hot-text order" >> "$GITHUB_STEP_SUMMARY"
+            elif [ -s "$order" ]; then
               cp "$order" "h2h-$side/rust/hot-text-aot.ld"
               echo "aot-$side: regenerated hot-text order ($(grep -c '^    \*(' "$order") functions)" >> "$GITHUB_STEP_SUMMARY"
             else

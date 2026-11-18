@@ -131,6 +131,17 @@ pub fn map_pairs(eval: &mut Evaluator, kvs: &[Value]) -> Result<Map, Signal> {
     Ok(Map::from_kvs_last_wins(pairs))
 }
 
+/// A keyword map literal (#271): the `{k nil …}` template constant's
+/// keys over `vals`, sharing its interned shape (a non-map template,
+/// which the compiler never emits, builds nil).
+#[must_use]
+pub fn kw_map(template: &Value, vals: &[Value]) -> Value {
+    match template {
+        Value::Map(t) => Value::Map(Map::with_vals(t, vals.to_vec())),
+        _ => Value::Nil,
+    }
+}
+
 /// A set literal (elements realized, like the interpreter).
 pub fn set_lit(eval: &mut Evaluator, items: &[Value], meta: Option<Map>) -> Step {
     let mut out = clj_value::new_set();
@@ -1241,6 +1252,18 @@ pub fn unreduce(v: &mut Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kw_map_shares_its_template_keys() {
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        let template = Value::Map(Map::from_kvs_last_wins(vec![(kw("a"), Value::Nil)]));
+        let built = kw_map(&template, &[Value::Int(1)]);
+        assert_eq!(
+            built,
+            Value::Map(Map::from_kvs_last_wins(vec![(kw("a"), Value::Int(1))]))
+        );
+        assert_eq!(kw_map(&Value::Nil, &[Value::Int(1)]), Value::Nil);
+    }
 
     #[test]
     fn meta_symbols_match_their_read_back() {

@@ -317,6 +317,14 @@ Measured on macOS, instructions per element over a 100-item vector:
 | `interleave` | 12662 | 7071 |
 | `reductions` | 6634 | 3878 |
 
+### 6.18 Slice 4m: keyword map literals share a shaped template
+
+A map literal lowered every key into a value slot. It then went through `map_pairs` (a pairs vector, `realize_key` per key) and `from_kvs_last_wins` (a dedupe scan plus separate key and value vectors), then `from_parts`, which probes the shape registry. That is about 1.5K macOS instructions more than a two-element vector literal for `{:x x :y y}`, the usual record-like map.
+
+A literal without metadata whose keys are 1 to 8 distinct constant keywords now lowers to `rt_n_kw_map`. The call takes a `{k nil …}` template constant (rebuilt at startup like any constant map, so it holds the interned shape) and the evaluated values, in order. `Map::with_vals` shares the template's shape `Arc` and stores only the values. Keys, iteration order, equality, class (`PersistentArrayMap`), and the order in which values evaluate are unchanged. Any other literal keeps the pairs path.
+
+Measured on macOS, instructions per iteration: `(count {:x i :y i})` 2098 → 652 (a two-element vector literal is 609); four keys 3205 → 785; `(:x {:x i :y i})` 2148 → 697.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

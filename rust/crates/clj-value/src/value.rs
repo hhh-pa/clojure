@@ -1435,6 +1435,34 @@ impl Map {
         }))
     }
 
+    /// A map with `template`'s keys over `vals`, paired in the template's
+    /// iteration order (#271: keyword map literals). A shaped, unsorted
+    /// template lends its interned shape: no shape probe, dedupe scan or
+    /// pair vector, just the values. Any other template (or a count
+    /// mismatch) builds through [`Map::from_kvs_last_wins`].
+    #[must_use]
+    pub fn with_vals(template: &Map, vals: Vec<Value>) -> Self {
+        if let Some(small) = template
+            .0
+            .small
+            .as_ref()
+            .filter(|s| s.shape.keys.len() == vals.len() && template.0.sort.is_none())
+        {
+            return Self(Arc::new(MapData {
+                inner: None,
+                small: Some(Arc::new(SmallMap {
+                    shape: Arc::clone(&small.shape),
+                    vals: vals.into_boxed_slice(),
+                })),
+                keys: None,
+                meta: None,
+                hashy: template.0.hashy,
+                sort: None,
+            }));
+        }
+        Map::from_kvs_last_wins(template.iter().map(|(k, _)| k.clone()).zip(vals).collect())
+    }
+
     /// Build from deduped parallel keys/vals (big maps take the
     /// hash trie directly; small ones intern one shape).
     pub(crate) fn from_parts(keys: Vec<Value>, vals: Vec<Value>, hashy: bool) -> Self {
@@ -4785,6 +4813,37 @@ mod tests {
         assert!(plain_equals(&host_inst(&rec), &host_inst(&rec)));
         let typ = host_def(HostKind::Type);
         assert!(!plain_equals(&host_inst(&typ), &host_inst(&typ)));
+    }
+
+    #[test]
+    fn map_with_vals_shares_the_template_shape() {
+        use super::Map;
+        let kw = |n: &str| Value::Keyword(crate::Keyword::new(None, n));
+        let template = Map::from_kvs_last_wins(vec![(kw("x"), Value::Nil), (kw("y"), Value::Nil)]);
+        let built = Map::with_vals(&template, vec![Value::Int(1), Value::Int(2)]);
+        let literal =
+            Map::from_kvs_last_wins(vec![(kw("x"), Value::Int(1)), (kw("y"), Value::Int(2))]);
+        assert_eq!(built, literal);
+        let order: Vec<Value> = built.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(order, vec![kw("x"), kw("y")]);
+        assert!(Arc::ptr_eq(
+            &built.0.small.as_ref().expect("shaped").shape,
+            &template.0.small.as_ref().expect("shaped").shape
+        ));
+        // A count mismatch (or an unshaped template) builds by pairs.
+        let short = Map::with_vals(&template, vec![Value::Int(5)]);
+        assert_eq!(
+            short,
+            Map::from_kvs_last_wins(vec![(kw("x"), Value::Int(5))])
+        );
+        let big: Vec<(Value, Value)> = (0..20).map(|i| (Value::Int(i), Value::Nil)).collect();
+        let big = Map::from_kvs_last_wins(big);
+        // The values pair with the template's keys in its iteration order.
+        let vals: Vec<Value> = (100..120).map(Value::Int).collect();
+        let rebuilt = Map::with_vals(&big, vals.clone());
+        for (i, (k, _)) in big.iter().enumerate() {
+            assert_eq!(rebuilt.get(k), Some(&vals[i]));
+        }
     }
 
     #[test]

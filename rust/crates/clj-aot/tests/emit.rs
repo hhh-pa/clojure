@@ -1297,3 +1297,51 @@ fn native_emit_ir_binds_plain_map_patterns_by_lookup_271() {
     );
     assert!(required.contains("rt_n_destructure"), "{required}");
 }
+
+#[test]
+fn native_emit_ir_builds_keyword_map_literals_from_a_template_271() {
+    let emit = |src: &str, name: &str| {
+        let ir = tmp(name);
+        clj_aot::build_str(
+            src,
+            "f.clj",
+            &tmp("nope"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("build");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        text
+    };
+    // Distinct constant keyword keys share a shaped template.
+    let kw = emit(
+        "(defn p [x y] {:x x :y y})\n(println (p 1 2))\n",
+        "kw-map.ll",
+    );
+    assert!(kw.contains("rt_n_kw_map"), "{kw}");
+    assert!(!kw.contains("rt_n_map_lit"), "{kw}");
+    // Computed or non-keyword keys, and more than 8 keys, pair up.
+    for (src, name) in [
+        (
+            "(defn q [k] {k 1 :b 2})\n(println (q :a))\n",
+            "kw-map-computed.ll",
+        ),
+        (
+            "(defn s [x] {\"s\" x :k 2})\n(println (s 1))\n",
+            "kw-map-string.ll",
+        ),
+        (
+            "(defn n [x] {:a x :b 2 :c 3 :d 4 :e 5 :f 6 :g 7 :h 8 :i 9})\n(println (n 1))\n",
+            "kw-map-nine.ll",
+        ),
+    ] {
+        let ir = emit(src, name);
+        assert!(ir.contains("rt_n_map_lit"), "{name}: {ir}");
+        assert!(!ir.contains("rt_n_kw_map"), "{name}: {ir}");
+    }
+}
