@@ -1075,6 +1075,74 @@ fn native_emit_ir_lowers_scalar_loops_and_branch_conds_271() {
 /// var keeps no caches at all. Keyword invokes go through the bitcode
 /// `get` with the keyword borrowed from the constant pool.
 #[test]
+fn native_emit_ir_drops_unread_pure_defs_271() {
+    let emit = |src: &str, name: &str| {
+        let ir = tmp(name);
+        clj_aot::build_str(
+            src,
+            "f.clj",
+            &tmp("nope"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("build");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        text
+    };
+    // Unread pure defs drop (their names never reach the var table); a
+    // def read only by a dropped def drops with it (`min-long`); reads,
+    // effects and impure inits keep theirs.
+    let ir = emit(
+        concat!(
+            "(def digit-values (zipmap \"0123456789\" (range)))\n",
+            "(def short-digits (zipmap \"01\" (range 2)))\n",
+            "(def separators #{\\space \\tab})\n",
+            "(def pairs-v [1 2])\n",
+            "(def table-m {:a 1})\n",
+            "(def size-k 100)\n",
+            "(def min-long (bit-shift-left 1 63))\n",
+            "(def max-long (bit-not min-long))\n",
+            "(def mixed-bits (bit-xor (bit-and 7 3) (unsigned-bit-shift-right 8 1)))\n",
+            "(def used-k 5)\n",
+            "(def noisy (do (println \"init\") 1))\n",
+            "(def nonconst-v [used-k])\n",
+            "(declare declared-k)\n",
+            "(def declared-k 3)\n",
+            "(def ^:dynamic *dyn* 1)\n",
+            "(binding [*dyn* 2] (println used-k *dyn*))\n",
+        ),
+        "dead-defs.ll",
+    );
+    for gone in [
+        "digit-values",
+        "short-digits",
+        "separators",
+        "pairs-v",
+        "table-m",
+        "size-k",
+        "min-long",
+        "max-long",
+        "mixed-bits",
+    ] {
+        assert!(!ir.contains(gone), "{gone} should drop:\n{ir}");
+    }
+    for kept in ["used-k", "noisy", "nonconst-v", "declared-k", "*dyn*"] {
+        assert!(ir.contains(kept), "{kept} should stay:\n{ir}");
+    }
+    // A program that can reach vars by name keeps every def.
+    let finder = emit(
+        "(def unread-k 7)\n(def kept-k 1)\n(println (var-get (var kept-k)))\n",
+        "dead-defs-finder.ll",
+    );
+    assert!(finder.contains("unread-k"), "{finder}");
+}
+
+#[test]
 fn native_emit_ir_caches_stable_var_roots_271() {
     let emit = |src: &str, name: &str| {
         let ir = tmp(name);

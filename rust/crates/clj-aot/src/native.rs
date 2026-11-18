@@ -237,6 +237,9 @@ pub struct Lowerer<'ctx> {
     /// caches: call operands borrow the cached root, other reads clone
     /// it, never going through the var (#271).
     stable: HashMap<(String, String), StableRoot<'ctx>>,
+    /// Top-level units [`dead_defs`] drops (a Lite program's unread,
+    /// pure `def`s).
+    dead: HashSet<usize>,
     /// The index of the unit being lowered: code in a unit after a
     /// stable var's `def` runs only once that `def` has run, so it reads
     /// the cache without checking it is set.
@@ -299,6 +302,7 @@ impl<'ctx> Lowerer<'ctx> {
             callees: HashMap::new(),
             consts_base: consts_base.as_pointer_value(),
             stable: HashMap::new(),
+            dead: HashSet::new(),
             unit: 0,
         }
     }
@@ -322,10 +326,11 @@ impl<'ctx> Lowerer<'ctx> {
         self.reserve_defns(units);
         if self.lite {
             self.reserve_stable(units);
+            self.dead = dead_defs(units, &self.stable);
         }
         let mut tops = Vec::with_capacity(units.len());
         for (ui, unit) in units.iter().enumerate() {
-            if self.drops(&unit.expr) {
+            if self.drops(&unit.expr) || self.dead.contains(&ui) {
                 continue;
             }
             self.unit = ui;
@@ -6282,6 +6287,175 @@ fn stable_vars(units: &[TopUnit]) -> HashMap<(String, String), usize> {
             _ => None,
         })
         .collect()
+}
+
+/// The top-level `def`s a Lite program can drop (#271): a stable var
+/// nothing reads, whose init is pure and total ([`is_pure_total`]), in a
+/// program that cannot find vars by name. The snippets' boilerplate
+/// tables are mostly unused (an unread `digit-values` `zipmap` in 177 of
+/// 220 scripts, `separators` sets, `max-long`), and each cost startup
+/// work. A dropped def's own reads no longer count, so the set grows to
+/// a fixpoint (`max-long` frees `min-long`).
+fn dead_defs<V>(units: &[TopUnit], stable: &HashMap<(String, String), V>) -> HashSet<usize> {
+    let mut dead = HashSet::new();
+    if units.iter().any(|u| finds_vars_by_name(&u.expr)) {
+        return dead;
+    }
+    let longs = long_vars(units);
+    loop {
+        let mut reads: HashSet<(String, String)> = HashSet::new();
+        for (i, u) in units.iter().enumerate() {
+            if !dead.contains(&i) {
+                visit_var_reads(&u.expr, &mut |sym| {
+                    reads.insert(var_key(sym));
+                });
+            }
+        }
+        let grown: Vec<usize> = (units.iter().enumerate())
+            .filter(|&(i, u)| !dead.contains(&i) && is_dead_def(&u.expr, stable, &reads, &longs))
+            .map(|(i, _)| i)
+            .collect();
+        if grown.is_empty() {
+            return dead;
+        }
+        dead.extend(grown);
+    }
+}
+
+/// `(ns, name)` of a var symbol (`user` when unqualified).
+fn var_key(sym: &Symbol) -> (String, String) {
+    (
+        sym.namespace().unwrap_or("user").to_owned(),
+        sym.name().to_owned(),
+    )
+}
+
+/// Whether unit `e` is a droppable `def` (see [`dead_defs`]).
+fn is_dead_def<V>(
+    e: &Expr,
+    stable: &HashMap<(String, String), V>,
+    reads: &HashSet<(String, String)>,
+    longs: &HashSet<(String, String)>,
+) -> bool {
+    matches!(e, Expr::Def { sym, init: Some(init), .. }
+        if stable.contains_key(&var_key(sym))
+            && !reads.contains(&var_key(sym))
+            && is_pure_total(init, longs))
+}
+
+/// Report every var `e` reads, binds, sets, declares or takes as an
+/// object, recursively (a `def`'s own name is not a read).
+fn visit_var_reads(e: &Expr, report: &mut dyn FnMut(&Symbol)) {
+    match e {
+        Expr::Global(v) | Expr::VarRef(v) | Expr::Set { var: v, .. } => report(&v.sym),
+        Expr::DirectNative(call) => report(&call.var.sym),
+        Expr::Binding { pairs, .. } | Expr::WithRedefs { pairs, .. } => {
+            pairs.iter().for_each(|(v, _)| report(&v.sym));
+        }
+        Expr::Declare { syms, .. } => syms.iter().for_each(|s| report(s)),
+        _ => {}
+    }
+    for_each_child(e, &mut |c| visit_var_reads(c, report));
+}
+
+/// Whether `e` can reach a var by name at run time (`resolve`,
+/// `ns-publics`, `eval`, …): a program that can keeps every `def`.
+fn finds_vars_by_name(e: &Expr) -> bool {
+    let finder = |sym: &Symbol| {
+        sym.namespace() == Some("clojure.core")
+            && matches!(
+                sym.name(),
+                "resolve"
+                    | "ns-resolve"
+                    | "find-var"
+                    | "intern"
+                    | "ns-publics"
+                    | "ns-interns"
+                    | "ns-map"
+                    | "ns-refers"
+                    | "ns-unmap"
+                    | "requiring-resolve"
+                    | "refer"
+                    | "eval"
+                    | "load"
+                    | "load-file"
+                    | "load-reader"
+                    | "load-string"
+                    | "var-get"
+            )
+    };
+    let mut found = false;
+    visit_var_reads(e, &mut |sym| found |= finder(sym));
+    found
+}
+
+/// The stable-candidate vars whose `def` init is a long expression
+/// ([`is_long_expr`]), in unit order.
+fn long_vars(units: &[TopUnit]) -> HashSet<(String, String)> {
+    let mut longs = HashSet::new();
+    for u in units {
+        if let Expr::Def {
+            sym,
+            init: Some(init),
+            ..
+        } = &u.expr
+        {
+            if is_long_expr(init, &longs) {
+                longs.insert(var_key(sym));
+            }
+        }
+    }
+    longs
+}
+
+/// A direct `clojure.core` native call's name and argument forms (a Lite
+/// program's core calls all analyze to direct natives).
+fn core_call(e: &Expr) -> Option<(&str, &[Expr])> {
+    let Expr::DirectNative(call) = e else {
+        return None;
+    };
+    let sym = &call.var.sym;
+    (sym.namespace() == Some("clojure.core")).then(|| (sym.name(), &call.args[..]))
+}
+
+/// Whether evaluating `e` can neither fail nor be observed: a constant,
+/// a collection literal of constants, a long expression, or `(zipmap
+/// "text" (range n?))`.
+fn is_pure_total(e: &Expr, longs: &HashSet<(String, String)>) -> bool {
+    let constant = |x: &Expr| matches!(x, Expr::Literal(_) | Expr::Quote(_));
+    match e {
+        Expr::Literal(_) | Expr::Quote(_) => true,
+        Expr::VecLit(items, None) | Expr::SetLit(items, None) => items.iter().all(constant),
+        Expr::MapLit(pairs, None) => pairs.iter().all(|(k, v)| constant(k) && constant(v)),
+        _ => {
+            is_long_expr(e, longs)
+                || matches!(core_call(e), Some(("zipmap", [Expr::Literal(Value::Str(_)), r]))
+                    if matches!(core_call(r), Some(("range", []))
+                        | Some(("range", [Expr::Literal(Value::Int(_))]))))
+        }
+    }
+}
+
+/// Whether `e` is a long built from long literals, known-long vars and
+/// the (total) bit operations.
+fn is_long_expr(e: &Expr, longs: &HashSet<(String, String)>) -> bool {
+    match e {
+        Expr::Literal(Value::Int(_)) => true,
+        Expr::Global(v) => longs.contains(&var_key(&v.sym)),
+        _ => match core_call(e) {
+            Some(("bit-not", [a])) => is_long_expr(a, longs),
+            Some((
+                "bit-and"
+                | "bit-or"
+                | "bit-xor"
+                | "bit-shift-left"
+                | "bit-shift-right"
+                | "unsigned-bit-shift-right",
+                [a, b],
+            )) => is_long_expr(a, longs) && is_long_expr(b, longs),
+            _ => false,
+        },
+    }
 }
 
 /// Report every var `e` defines with an init (`true`) or exposes to a

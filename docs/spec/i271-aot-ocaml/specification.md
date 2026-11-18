@@ -217,6 +217,19 @@ Linux callgrind of every losing script's empty-input run, profiled function by f
 2. **Declared var names.** `rt_n_declare_vars` received an `ns`/`name` string pair per var: two UTF-8 validations and an `Arc<str>` allocation per var, about 22K for a typical program's 42 vars. The compiler now emits one names text, each namespace once, then every var name, plus a `(ns span, name span, hint)` row per var. The runtime validates and copies the text once, and slots hold spans. Only the vars a program actually interns build a `Symbol`.
 3. **Docstrings.** `def` built its docstring even when the program keeps no var metadata, which never reads it (§6.9 item 4).
 
+### 6.12 Slice 4g: unread pure defs drop
+
+Most snippets carry the same input boilerplate. A `digit-values` table `(zipmap "0123456789" (range))` appears in 220 of 393 scripts and is never read in 177. Likewise `separators` / `whitespace-chars` character sets (unread in 165) and `max-long` `(bit-not min-long)` (unread in 140; it holds the only read of `min-long`). Each unread def still built its value at startup (a `zipmap` costs about 8.8K instructions on Linux, a 6-char set literal about 4.1K) and ran the def machinery (about 2.8K per def).
+
+A Lite program drops a top-level `def` (`dead_defs`) when:
+
+1. its var is stable (§6.6);
+2. nothing reads, binds, sets, declares or takes the var as an object (`visit_var_reads`);
+3. the program cannot reach vars by name (no `var-get`, `refer`, `load-string`, …; the Lite check already excludes `resolve`, `eval`, `intern`, `ns-publics`, …);
+4. its init is pure and total (`is_pure_total`). That means a constant, a collection literal of constants, a long built from long literals, known-long vars and the bit operations, or `(zipmap "text" (range n?))`.
+
+A dropped def's own reads no longer count, so the set grows to a fixpoint: `max-long` frees `min-long`. An unread def whose init has an effect still runs it. macOS empty-input startup: −87K or more for a quarter of the scripts (median −12K). Emit test `native_emit_ir_drops_unread_pure_defs_271`; corpus `dead_defs.clj`.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
