@@ -217,6 +217,8 @@ Linux callgrind of every losing script's empty-input run, profiled function by f
 2. **Declared var names.** `rt_n_declare_vars` received an `ns`/`name` string pair per var: two UTF-8 validations and an `Arc<str>` allocation per var, about 22K for a typical program's 42 vars. The compiler now emits one names text, each namespace once, then every var name, plus a `(ns span, name span, hint)` row per var. The runtime validates and copies the text once, and slots hold spans. Only the vars a program actually interns build a `Symbol`.
 3. **Docstrings.** `def` built its docstring even when the program keeps no var metadata, which never reads it (§6.9 item 4).
 
+Exact Linux startup (callgrind, empty input, 365 scripts) for the three together: median 256K → 225K instructions. Every script saves between 22K and 41K (median 29K).
+
 ### 6.12 Slice 4g: unread pure defs drop
 
 Most snippets carry the same input boilerplate. A `digit-values` table `(zipmap "0123456789" (range))` appears in 220 of 393 scripts and is never read in 177. Likewise `separators` / `whitespace-chars` character sets (unread in 165) and `max-long` `(bit-not min-long)` (unread in 140; it holds the only read of `min-long`). Each unread def still built its value at startup (a `zipmap` costs about 8.8K instructions on Linux, a 6-char set literal about 4.1K) and ran the def machinery (about 2.8K per def).
