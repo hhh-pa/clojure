@@ -649,6 +649,21 @@ pub fn destructure_encoded(
     Ok(out)
 }
 
+/// A map-destructure source as the bindings read it (#271): a list
+/// converts to its map (`seq_to_map`), anything else is itself.
+pub fn destructure_source(eval: &mut Evaluator, value: &Value) -> Result<Value, Signal> {
+    eval.seq_to_map(value)
+}
+
+/// A map-destructure binding's lookup in a converted source (#271):
+/// present keys only (a present `nil` stays `nil`), over the shapes the
+/// interpreter's own binding reads (records, maps, map entries,
+/// int-keyed vectors and strings, sets).
+#[must_use]
+pub fn destructure_lookup(coll: &Value, key: &Value) -> Option<Value> {
+    crate::eval::lookup(coll, key)
+}
+
 /// How many locals a pattern binds.
 #[must_use]
 pub fn pattern_local_count(pat: &crate::expr::Pattern) -> usize {

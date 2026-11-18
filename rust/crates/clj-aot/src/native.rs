@@ -1416,32 +1416,127 @@ impl<'ctx> Lowerer<'ctx> {
                 }
                 Ok(out)
             }
-            Pattern::Map(_) => {
-                // The interpreter's own destructure over the encoded
-                // pattern, `:or` defaults evaluated here first (eager,
-                // in the enclosing frame, like the interpreter).
-                let (enc, defaults) = native_abi::encode_pattern(pat);
-                let k = self.value_const(&enc)?;
-                let dexprs: Vec<Expr> = defaults.into_iter().cloned().collect();
-                let darr = self.lower_args(f, &dexprs)?;
-                let n = native_abi::pattern_local_count(pat);
-                let (oarr, outs) = self.slot_array(f, n);
-                let oref = self.slots_ref(f, oarr, n);
-                let dref = self.slots_ref(f, darr, dexprs.len());
-                let st = self
-                    .call(
-                        "rt_n_destructure",
-                        Some(self.i32t),
-                        &[oref.into(), src.into(), self.u64c(k), dref.into()],
-                    )
-                    .expect("st");
-                self.check(f, st);
-                for s in &outs {
-                    f.env.push(Some(LocalRef::Slot(*s)));
-                }
-                Ok(outs)
+            Pattern::Map(m) => self.bind_map(f, m, pat, src),
+        }
+    }
+
+    /// A map pattern: a [`plain_map`] binds by direct lookups, any other
+    /// through the interpreter's own destructure.
+    fn bind_map(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        m: &clj_eval::expr::MapPattern,
+        pat: &Pattern,
+        src: PointerValue<'ctx>,
+    ) -> Result<Vec<PointerValue<'ctx>>, Unsupported> {
+        if plain_map(m) {
+            return self.bind_map_plain(f, m, src);
+        }
+        // The interpreter's own destructure over the encoded pattern,
+        // `:or` defaults evaluated here first (eager, in the enclosing
+        // frame, like the interpreter).
+        let (enc, defaults) = native_abi::encode_pattern(pat);
+        let k = self.value_const(&enc)?;
+        let dexprs: Vec<Expr> = defaults.into_iter().cloned().collect();
+        let darr = self.lower_args(f, &dexprs)?;
+        let n = native_abi::pattern_local_count(pat);
+        let (oarr, outs) = self.slot_array(f, n);
+        let oref = self.slots_ref(f, oarr, n);
+        let dref = self.slots_ref(f, darr, dexprs.len());
+        let st = self
+            .call(
+                "rt_n_destructure",
+                Some(self.i32t),
+                &[oref.into(), src.into(), self.u64c(k), dref.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        for s in &outs {
+            f.env.push(Some(LocalRef::Slot(*s)));
+        }
+        Ok(outs)
+    }
+
+    /// A [`plain_map`] pattern bound by direct lookups (#271), as the
+    /// interpreter binds it: the source converted (a list becomes its
+    /// map), every `:or` default evaluated once in the enclosing frame,
+    /// then each entry and `:keys`/`:strs`/`:syms` local read from the
+    /// converted source (present keys only), else its default, else nil;
+    /// `:as` binds the converted source. Locals follow `pattern_names`
+    /// order. The generic path decoded the pattern and ran the whole
+    /// interpreter destructure on every bind (~7.8K macOS instructions
+    /// for two keys).
+    fn bind_map_plain(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        m: &clj_eval::expr::MapPattern,
+        src: PointerValue<'ctx>,
+    ) -> Result<Vec<PointerValue<'ctx>>, Unsupported> {
+        let conv = self.slot(f);
+        let st = self
+            .call(
+                "rt_n_destr_map",
+                Some(self.i32t),
+                &[conv.into(), src.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        let mut defaults = Vec::with_capacity(m.or.len());
+        for (_, default) in &m.or {
+            let d = self.slot(f);
+            self.lower(f, default, d)?;
+            defaults.push(d);
+        }
+        let mut out = Vec::new();
+        for (local, key, or_key, _) in &m.entries {
+            let name = match local {
+                Pattern::Symbol(name) => Some(Value::Symbol(Symbol::new(None, name))),
+                _ => None,
+            };
+            let default = or_default(m, name.as_ref(), or_key).map(|i| defaults[i]);
+            let item = self.slot(f);
+            self.emit_destr_get(item, conv, key, default)?;
+            if name.is_some() {
+                // A fresh slot binds as is (no copy for the local).
+                f.env.push(Some(LocalRef::Slot(item)));
+                out.push(item);
+            } else {
+                out.extend(self.bind_pattern(f, local, item)?);
             }
         }
+        for binding in &m.keys {
+            let name = Value::Symbol(Symbol::new(None, &binding.local));
+            let default = or_default(m, Some(&name), &binding.key).map(|i| defaults[i]);
+            let item = self.slot(f);
+            self.emit_destr_get(item, conv, &binding.key, default)?;
+            f.env.push(Some(LocalRef::Slot(item)));
+            out.push(item);
+        }
+        if m.as_sym.is_some() {
+            f.env.push(Some(LocalRef::Slot(conv)));
+            out.push(conv);
+        }
+        Ok(out)
+    }
+
+    /// `item =` the binding of `key` in the converted source `conv`
+    /// (`rt_n_destr_get`; `default` is the evaluated `:or` slot, if any).
+    fn emit_destr_get(
+        &mut self,
+        item: PointerValue<'ctx>,
+        conv: PointerValue<'ctx>,
+        key: &Value,
+        default: Option<PointerValue<'ctx>>,
+    ) -> Result<(), Unsupported> {
+        let k = self.value_const(key)?;
+        let key_ref = self.const_ref(k);
+        let default = default.unwrap_or_else(|| self.ptr.const_null());
+        self.call(
+            "rt_n_destr_get",
+            None,
+            &[item.into(), conv.into(), key_ref.into(), default.into()],
+        );
+        Ok(())
     }
 
     /// `item = (nth src i nil)` for sequential destructuring (#271): the
@@ -5681,6 +5776,33 @@ fn borrow_only(body: &[Expr], i: usize) -> bool {
         }
     }
     body.iter().all(|e| walk(e, i))
+}
+
+/// Whether a map pattern binds by direct lookups (#271): no required
+/// (`!`) keys, no `&` key list and no 1.13 outlets, which need the
+/// interpreter's whole destructure. Nested patterns decide for
+/// themselves (a plain map forces no outlets on them).
+fn plain_map(m: &clj_eval::expr::MapPattern) -> bool {
+    m.extra_keys.is_empty()
+        && m.select.is_none()
+        && m.all.is_none()
+        && m.excess.is_none()
+        && m.missing.is_none()
+        && m.keys.iter().all(|k| !k.required)
+        && m.entries.iter().all(|(_, _, _, required)| !required)
+}
+
+/// The `:or` default a map binding takes when its key is absent: the
+/// one keyed by the binding's local symbol, else by its key form as
+/// written (the interpreter's `map_binding` order; #158).
+fn or_default(
+    m: &clj_eval::expr::MapPattern,
+    local: Option<&Value>,
+    or_key: &Value,
+) -> Option<usize> {
+    local
+        .and_then(|l| m.or.iter().position(|(k, _)| k == l))
+        .or_else(|| m.or.iter().position(|(k, _)| k == or_key))
 }
 
 fn is_owned_move_op(ns: Option<&str>, name: &str, argc: usize) -> bool {

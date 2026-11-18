@@ -281,6 +281,23 @@ Ties break in a fixed order, so every job that links the order gets the same one
 - A failed regeneration keeps the committed order.
 - The committed copy only serves local builds and is refreshed from the same pipeline.
 
+### 6.16 Slice 4k: map destructuring by direct lookups
+
+The AOT lowered every map pattern (`{:keys [a b] :or {…} :as m}`) to `rt_n_destructure`. That call decoded the pattern constant back into a `Pattern` and ran the interpreter's whole destructure in a fresh `Env`, on every bind: about 7.8K macOS instructions for `(fn [s {:keys [a b]}] …)`, against about 700 for the vector pattern `[a b]`.
+
+A plain map pattern now binds by direct lookups, as the interpreter binds it. Plain means: no required (`!`) keys, no `&` key list, and no 1.13 outlets.
+
+1. `rt_n_destr_map` converts the source: a list becomes its map, and anything else is itself.
+2. Every `:or` default is evaluated once in the enclosing frame.
+3. Each entry and each `:keys`/`:strs`/`:syms` local is read by `rt_n_destr_get`, which uses the interpreter's own `lookup` with the key passed in place from the constant table. A present key wins (a present `nil` stays `nil`). Otherwise the local takes the default keyed by its symbol, then the default keyed by its key form, then nil.
+4. `:as` binds the converted source.
+
+Locals follow `pattern_names` order, and nested patterns lower recursively. Patterns that are not plain keep the generic path.
+
+Measured on macOS, instructions per element: `{:keys [a b]}` 7777 → 1069; `{:keys [a b c] :or {c 1} :as m}` 12598 → 1371; `{:strs [a b]}` in a `let` 7580 → 761.
+
+The corpus file `map_destructure.clj` replays the JIT against `run` across every source shape: lists, records, vectors, strings, sets, numbers and nil. It also covers present `nil`, both kinds of `:or` key, eager defaults, nested patterns, and required keys.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

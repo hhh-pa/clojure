@@ -886,6 +886,28 @@ pub extern "C" fn rt_n_next_mut(v: &mut Value) -> i32 {
     finish(v, step)
 }
 
+/// `out =` the map-destructure source `v` as its bindings read it
+/// (#271): a list converts to its map, anything else is itself.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_destr_map(out: &mut Value, v: &Value) -> i32 {
+    if !matches!(v, Value::List(_)) {
+        *out = v.clone();
+        return 0;
+    }
+    let converted = with_active(|eval| native_abi::destructure_source(eval, v));
+    native::status(converted.map(|m| *out = m))
+}
+
+/// `out =` one map-destructure binding (#271): `key` read from the
+/// converted source `m` when present (a present `nil` stays `nil`),
+/// else `default` when the binding has one, else nil.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_destr_get(out: &mut Value, m: &Value, key: &Value, default: Option<&Value>) {
+    *out = native_abi::destructure_lookup(m, key)
+        .or_else(|| default.cloned())
+        .unwrap_or(Value::Nil);
+}
+
 /// Destructure `v` against encoded pattern constant `k` (with
 /// evaluated `:or` defaults) into the `out` slots.
 #[unsafe(no_mangle)]
@@ -1229,6 +1251,8 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_first,
         rt_n_next_mut,
         rt_n_destructure,
+        rt_n_destr_map,
+        rt_n_destr_get,
         rt_n_cell_new,
         rt_n_cell_set,
         rt_n_cell_get,

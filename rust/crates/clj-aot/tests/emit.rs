@@ -1260,3 +1260,40 @@ fn native_emit_ir_caches_stable_var_roots_271() {
     );
     assert!(!text.contains("@clj_root0"), "{text}");
 }
+
+#[test]
+fn native_emit_ir_binds_plain_map_patterns_by_lookup_271() {
+    let emit = |src: &str, name: &str| {
+        let ir = tmp(name);
+        clj_aot::build_str(
+            src,
+            "f.clj",
+            &tmp("nope"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("build");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        text
+    };
+    // `:keys`/`:strs`/`:syms`, entries, `:or` and `:as` read their keys
+    // directly: no encoded pattern, no interpreter destructure.
+    let plain = emit(
+        "(defn f [{:keys [a b] :strs [c] {:keys [d]} :inner :or {b 2} :as m}] [a b c d m])\n(println (f {:a 1}))\n",
+        "map-plain.ll",
+    );
+    assert!(plain.contains("rt_n_destr_map"), "{plain}");
+    assert!(plain.contains("rt_n_destr_get"), "{plain}");
+    assert!(!plain.contains("rt_n_destructure"), "{plain}");
+    // Required keys keep the interpreter's destructure.
+    let required = emit(
+        "(defn g [{:keys! [a]}] a)\n(println (g {:a 1}))\n",
+        "map-required.ll",
+    );
+    assert!(required.contains("rt_n_destructure"), "{required}");
+}
