@@ -245,6 +245,42 @@ Higher-order natives (`mapv`, `filterv`, `reduce`, the lazy `map` / `filter` ste
 1. **`seq` as a filter predicate.** `(filterv seq tokens)` drops empty strings after a split, and each call allocated a string seq only to test its truthiness. The lazy `filter` already tests emptiness instead (`filter_pred`: nil, lists, vectors, maps, sets, strings, realized seqs; anything else still calls `seq`), and `filterv` now shares that predicate preparation (`filter_prep`). macOS: 639 → 201 instructions per item.
 2. **`inc` / `dec`.** `Prepared::call1` now steps a long inline when the native carries the `inc`/`dec` arithmetic tag, as `call2` already did for the binary tagged ops. Overflow and every other operand still call the native, so its errors and numeric tower stay exact. macOS: `(mapv inc v)` 404 → 261 instructions per element, the lazy `map` and `reduce` over it alike.
 
+### 6.15 Slice 4j: a fresh hot-text order, from generic workloads only
+
+Linux AOT links apply `rust/hot-text-aot.ld` (embedded in clj-aot): a linker script listing the runtime functions that typical programs execute, which the linker packs into one `.text.hot` section. The kernel faults file-backed text in 64 KiB windows, so a run touches a few windows of the hot section instead of most of the runtime's 5-6 MB of code. Code pages dominate a short program's peak RSS.
+
+The order names functions, so it goes stale as runtime code moves: renamed or new functions fall back to the cold `.text`. The committed order (generated from the 30 workloads in `scripts/bench/hot-text` in Slice 3c, and last regenerated for Slices 3k-3n) had drifted, and MEM wins fell from 1372 (b4a57992) to 1280 (90509c29).
+
+**Training set.** The order is trained only on `scripts/bench/hot-text/workloads` and `aot-workloads`: 30 small generic programs (map-assoc, regex, sort, strings, stdin readers, …) committed in #246, before this goal. It is never trained on the benchmark snippets or their test inputs. AOT will run other code bases, and an order fitted to the measured programs would not carry over.
+
+**Measured** with the m-hu fork probe (151 programs, empty stdin, RSS at exit, the same runtime with four orders):
+
+| Order | Median RSS | vs committed | Projected aot-ocaml MEM (win/tie/loss) |
+|---|---|---|---|
+| committed (stale) | 2936 KB | — | 1280/408/55 (= h2h 90509c29) |
+| none | 3464 KB | +512 KB (worse for 151/151) | 297/869/577 |
+| regenerated from the workloads | 2436 KB | −448 KB (better for 151/151) | 1701/32/10 |
+| trained on the snippets (rejected) | 1940 KB | −960 KB | 1729/6/8 |
+
+The projection adds each probed program's RSS change to its h2h 90509c29 cases, and the median change to the rest.
+
+**Tooling.** `scripts/bench/hot-text/regen-aot.sh RUST_WORKSPACE [OUT.ld]` works as follows:
+
+1. Builds the revision's runtime with a blank order.
+2. Compiles each workload with `clojure-rs build` and profiles it under callgrind (stdin from `NAME.in`, else empty).
+3. Lays the profiles out with `aot_order.py`:
+   - the `trivial` workload's startup set comes first, in the previous order's sequence;
+   - then come 62 KiB windows of functions that the same workloads use together, so that each program touches few windows.
+
+Ties break in a fixed order, so every job that links the order gets the same one. `run.sh --aot` delegates to the script.
+
+**CI keeps it fresh.**
+
+- The h2h workflow's `hot-text` job regenerates each side's order (aot-from, aot-to) once, using this run's tooling and workloads, and the 32 measure shards link with it.
+- `rust-release.yml` regenerates the order before the Linux release build, so shipped binaries never carry a stale order.
+- A failed regeneration keeps the committed order.
+- The committed copy only serves local builds and is refreshed from the same pipeline.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

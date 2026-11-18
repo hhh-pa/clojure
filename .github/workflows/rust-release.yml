@@ -96,6 +96,18 @@ jobs:
         with:
           workspaces: rust
           save-if: 'true'
+      # Linux AOT links follow rust/hot-text-aot.ld, embedded in the
+      # binary: regenerate it for this revision from the generic
+      # training workloads before the build, so the shipped order is
+      # never stale (#271). A failure keeps the committed order.
+      - name: Regenerate the AOT hot-text order
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q valgrind
+          bash ../scripts/bench/hot-text/regen-aot.sh .
       - run: cargo build --release --locked
       # Materialize the S8 runtime archive (dependency builds only
       # emit the rlib; the staticlib ships next to the binary). Built
