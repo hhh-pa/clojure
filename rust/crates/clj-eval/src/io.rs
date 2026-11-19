@@ -585,7 +585,7 @@ fn scalar_line(args: &[Value], opts: &clj_value::PrintOpts, ln: bool) -> String 
 }
 
 /// The values [`print_scalars`] renders directly (none carries meta).
-fn is_print_scalar(v: &Value) -> bool {
+pub(crate) fn is_print_scalar(v: &Value) -> bool {
     matches!(
         v,
         Value::Nil

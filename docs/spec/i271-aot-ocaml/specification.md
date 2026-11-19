@@ -494,6 +494,16 @@ The corpus file `sort_calls.clj` pins key functions (natives, closures, keywords
 
 Measured on macOS, instructions per element: `sort >` 5665 → 2464; `sort-by` on a keyword key 1183 → 800; `sort-by first` on tuples 8442 → 4763; `sort-by` with a closure key 1502 → 1078.
 
+### 6.30 Slice 4y: collection printers render scalar children directly
+
+A printed vector, list, set or map dispatched every child through `pr-on`: `*print-dup*` read, method lookup, then `scalar_default`, which re-read all six print settings, cloned the child and wrote it. Each child and each separator was a separate write. On Linux, `prn` of a three-item vector cost 15.2K instructions, 4K of them in core-var reads.
+
+Under the booted print methods with `*print-dup*` off, a scalar child (nil, a boolean, long, double, string, char or keyword) now renders from the parent's options through `pr_into`. That is `scalar_default`'s own answer: no meta to prefix, and levels and lengths never apply to a scalar. The collection's text gathers in one buffer, flushed before any child that prints itself (nested collections, records, seqs), so the output order and every other path are unchanged.
+
+The corpus file `print_collections.clj` pins nested shapes, records, sorted and namespace maps, `*print-length*`, `*print-level*`, `*print-meta*` with meta, `*print-dup*`, `*print-readably*`, `with-out-str`, and a user `print-method` that turns the direct path off, against `run` and the previous binary.
+
+Measured on macOS, instructions per call: `prn` of a 5-item vector into `with-out-str` 31.1K → 17.9K; `prn` of a map 39.5K → 29.1K (kernel `write` included).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

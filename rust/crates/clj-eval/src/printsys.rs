@@ -570,23 +570,50 @@ fn write_seq_items(
 ) -> Result<(), NativeError> {
     // Dup ignores length (like the JVM's `print-sequential`).
     let len = if opts.dup { None } else { opts.length };
-    write_to_writer(w, begin)?;
+    // The text gathers in one buffer (#271), flushed before a child
+    // that prints itself: one write per run of scalars, not one per
+    // item and separator.
+    let mut buf = String::from(begin);
     let mut first = true;
     for (i, item) in items.iter().enumerate() {
         if len.is_some_and(|max| i >= max) {
             if !first {
-                write_to_writer(w, sep)?;
+                buf.push_str(sep);
             }
-            write_to_writer(w, "...")?;
+            buf.push_str("...");
             break;
         }
         if !first {
-            write_to_writer(w, sep)?;
+            buf.push_str(sep);
         }
         first = false;
-        pr_on(eval, item, w).map_err(signal_to_native)?;
+        pr_child(eval, item, w, opts, &mut buf)?;
     }
-    write_to_writer(w, end)?;
+    buf.push_str(end);
+    write_to_writer(w, &buf)
+}
+
+/// One child of a collection printer (#271): under the booted print
+/// methods a scalar renders into `buf` from the parent's options, which
+/// is what `scalar_default` answers (no meta to prefix, `*print-dup*`
+/// off; levels and lengths never apply to a scalar). Anything else
+/// flushes `buf` and dispatches through [`pr_on`].
+fn pr_child(
+    eval: &mut Evaluator,
+    item: &Value,
+    w: &Value,
+    opts: &PrintOpts,
+    buf: &mut String,
+) -> Result<(), NativeError> {
+    if eval.print_defaults_only && !opts.dup && crate::io::is_print_scalar(item) {
+        clj_value::pr_into(item, opts, buf);
+        return Ok(());
+    }
+    if !buf.is_empty() {
+        write_to_writer(w, buf)?;
+        buf.clear();
+    }
+    pr_on(eval, item, w).map_err(signal_to_native)?;
     Ok(())
 }
 
@@ -621,11 +648,13 @@ fn write_map_pair(
     k: &Value,
     v: &Value,
     w: &Value,
+    opts: &PrintOpts,
 ) -> Result<(), NativeError> {
-    pr_on(eval, k, w).map_err(signal_to_native)?;
-    write_to_writer(w, " ")?;
-    pr_on(eval, v, w).map_err(signal_to_native)?;
-    Ok(())
+    let mut buf = String::new();
+    pr_child(eval, k, w, opts, &mut buf)?;
+    buf.push(' ');
+    pr_child(eval, v, w, opts, &mut buf)?;
+    write_to_writer(w, &buf)
 }
 
 /// One map body through the driver (`prefix{` + `k v` pairs, `", "`
@@ -648,7 +677,7 @@ fn write_map_items(
         }
         write_pair_sep(w, first)?;
         first = false;
-        write_map_pair(eval, k, v, w)?;
+        write_map_pair(eval, k, v, w, opts)?;
     }
     write_to_writer(w, "}")?;
     Ok(())
