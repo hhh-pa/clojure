@@ -428,6 +428,38 @@ pub extern "C" fn rt_bc_scalar_conj(tval: &Value, val: i64) -> i8 {
     i8::from(ops::scalar_conj(tval, val))
 }
 
+/// Probe `v` as a flat packed integer vector (`1` on hit, writing `ptr_out` and `len_out`).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_ivec(v: &Value, ptr_out: &mut *const i64, len_out: &mut i64) -> i8 {
+    i8::from(ops::scalar_ivec_probe(v, ptr_out, len_out))
+}
+
+/// Whether `a` and `b` alias the same transient buffer (`1` when equal).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_same_transient(a: &Value, b: &Value) -> i8 {
+    i8::from(ops::scalar_same_transient(a, b))
+}
+
+/// Lock a packed-`Int` transient vector for a scalar loop (`1` on hit).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_tvec_lock(
+    v: &Value,
+    ptr_out: &mut *mut i64,
+    len_out: &mut i64,
+) -> i8 {
+    i8::from(ops::scalar_tvec_lock(v, ptr_out, len_out))
+}
+
+/// Release a transient lock acquired by [`rt_bc_scalar_tvec_lock`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_tvec_unlock(v: &Value) {
+    ops::scalar_tvec_unlock(v);
+}
+
 /// Unboxed effect-position `pop!` entrypoint (`1` on hit).
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
@@ -1129,5 +1161,26 @@ mod tests {
         assert!(!ops::scalar_nth2(&nested, -1, 0, &mut k, &mut v));
         assert!(!ops::scalar_nth2(&nested, 0, -1, &mut k, &mut v));
         assert!(!ops::scalar_nth2(&Value::Nil, 0, 0, &mut k, &mut v));
+
+        let mut iptr = std::ptr::null();
+        let mut ilen = -1;
+        assert!(ops::scalar_ivec_probe(&ivec, &mut iptr, &mut ilen));
+        assert!(!iptr.is_null());
+        assert_eq!(ilen, 2);
+        assert!(!ops::scalar_ivec_probe(&cvec, &mut iptr, &mut ilen));
+        assert!(!ops::scalar_ivec_probe(&Value::Nil, &mut iptr, &mut ilen));
+
+        assert!(ops::scalar_same_transient(&tval, &tval));
+        assert!(!ops::scalar_same_transient(&tval, &tmap));
+        assert!(!ops::scalar_same_transient(&tval, &Value::Nil));
+
+        let mut mptr = std::ptr::null_mut();
+        assert!(ops::scalar_tvec_lock(&tval, &mut mptr, &mut ilen));
+        assert!(!mptr.is_null());
+        assert_eq!(ilen, 1);
+        ops::scalar_tvec_unlock(&tval);
+        ops::scalar_tvec_unlock(&Value::Nil);
+        assert!(!ops::scalar_tvec_lock(&tmap, &mut mptr, &mut ilen));
+        assert!(!ops::scalar_tvec_lock(&Value::Nil, &mut mptr, &mut ilen));
     }
 }

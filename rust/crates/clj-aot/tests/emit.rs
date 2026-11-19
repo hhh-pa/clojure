@@ -1419,3 +1419,42 @@ fn native_emit_ir_reads_keyword_lookups_without_the_general_call_271() {
         assert!(!body.contains("@rt_n_invoke"), "{body}");
     }
 }
+
+#[test]
+fn native_emit_ir_hoists_int_vecs_and_locks_transients_271() {
+    let ir = tmp("hoisted-vecs.ll");
+    clj_aot::build_str(
+        "(defn dp [ws cap] (let [n (count ws) t (transient (vec (repeat (inc cap) 0)))] (loop [i 0] (if (< i n) (let [w (nth ws i)] (assoc! t w (inc (nth t w))) (recur (inc i))) (persistent! t)))))\n\
+         (defn grow [n] (let [t (transient [0])] (loop [i 0] (if (< i n) (do (conj! t i) (assoc! t 0 i) (recur (inc i))) (persistent! t)))))\n\
+         (println (dp [1 2] 3) (grow 3))\n",
+        "f.clj",
+        &tmp("nope-hv"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let dp_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_dp("))
+        .expect("dp fn");
+    // Bitcode-inlined: scalar loop emits hoisted flat-int check + direct
+    // transient store without retaining the rt_bc_ivec/same_transient calls.
+    assert!(dp_body.contains("sc_nth_ichk"), "{dp_body}");
+    assert!(dp_body.contains("sc_assoc_fast"), "{dp_body}");
+    assert!(!dp_body.contains("@rt_bc_scalar_ivec"), "{dp_body}");
+    assert!(
+        !dp_body.contains("@rt_bc_scalar_same_transient"),
+        "{dp_body}"
+    );
+    let grow_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_grow("))
+        .expect("grow fn");
+    assert!(!grow_body.contains("sc_assoc_fast"), "{grow_body}");
+}

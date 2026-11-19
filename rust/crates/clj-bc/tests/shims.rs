@@ -26,8 +26,9 @@ use clj_bc::{
     rt_bc_2_rem, rt_bc_2_shl, rt_bc_2_shr, rt_bc_2_str_ends_with, rt_bc_2_str_includes,
     rt_bc_2_str_starts_with, rt_bc_2_sub, rt_bc_2_ushr, rt_bc_3_assoc_bang, rt_bc_3_assoc_bang_fx,
     rt_bc_3_get, rt_bc_3_nth, rt_bc_clone, rt_bc_deref, rt_bc_is_pod, rt_bc_scalar_assoc,
-    rt_bc_scalar_conj, rt_bc_scalar_count, rt_bc_scalar_nth, rt_bc_scalar_nth2, rt_bc_scalar_pop,
-    rt_bc_scalar_str,
+    rt_bc_scalar_conj, rt_bc_scalar_count, rt_bc_scalar_ivec, rt_bc_scalar_nth, rt_bc_scalar_nth2,
+    rt_bc_scalar_pop, rt_bc_scalar_same_transient, rt_bc_scalar_str, rt_bc_scalar_tvec_lock,
+    rt_bc_scalar_tvec_unlock,
 };
 use clj_value::{BindCounts, FastVars, Transient, TransientKind, TransientVector, Value, Vector};
 
@@ -201,4 +202,17 @@ fn abi_shims_exercise_pod_ops_and_fallbacks() {
     ))]));
     assert_eq!(rt_bc_scalar_nth2(&nested, 0, 0, &mut k, &mut val), 1);
     assert_eq!((k, val), (0, 42));
+
+    let iv = Value::Vector(Vector::from_ints(vec![10, 20, 30]));
+    let mut iptr = std::ptr::null();
+    assert_eq!(rt_bc_scalar_ivec(&iv, &mut iptr, &mut len), 1);
+    assert_eq!(len, 3);
+    assert_eq!(rt_bc_scalar_ivec(&s, &mut iptr, &mut len), 0);
+    assert_eq!(rt_bc_scalar_same_transient(&fx_tval, &fx_tval), 1);
+    assert_eq!(rt_bc_scalar_same_transient(&fx_tval, &iv), 0);
+    let mut mptr = std::ptr::null_mut();
+    assert_eq!(rt_bc_scalar_tvec_lock(&fx_tval, &mut mptr, &mut len), 1);
+    assert!(!mptr.is_null());
+    rt_bc_scalar_tvec_unlock(&fx_tval);
+    rt_bc_scalar_tvec_unlock(&iv);
 }

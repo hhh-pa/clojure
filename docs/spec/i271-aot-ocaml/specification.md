@@ -549,6 +549,16 @@ A Linux callgrind startup profile (`probe-initline`, 34 near-miss scripts vs tri
 
 Measured on macOS (mimalloc, `libinsn.dylib` shim): median empty-stdin startup across 12 near-miss scripts −82K instructions (larger on Linux glibc); closure creation + call −391 instructions per capturing closure (17.07M → 13.16M for 10K) and −388 per capture-free closure (13.48M → 9.60M).
 
+### 6.35 Slice 5d: hoisted flat int-vector and locked transient pointers in scalar loops
+
+Scalar `loop`/`recur` functions over integer vectors and transient DP tables already lowered their arithmetic unboxed (`clj-aot/src/scalar.rs`), but every `(nth v i)` and `(assoc! t i x)` still called `rt_bc_scalar_nth` / `rt_bc_scalar_assoc`, re-acquiring `TransientLock` and re-dispatching `Value` tags per iteration (e.g. `dp/knapsack/solution` spent 295.7M Pin instructions vs OCaml's 50.0M).
+
+- **Zero-`unsafe` packed-int slice & raw transient lock (`clj-value`, `clj-bc`):** `Vector::as_flat_ints` exposes `Packed::Flat<i64>` directly (`rt_bc_scalar_ivec`); `TransientLock::lock_ints_ptr` acquires the existing spinlock for a valid non-empty packed-`Int` `TransientVector`, retains it via `std::mem::forget(guard)` (zero new `unsafe`), and pairs with `TransientLock::unlock_raw` (`rt_bc_scalar_tvec_lock` / `rt_bc_scalar_tvec_unlock`), alongside `rt_bc_scalar_same_transient` for preheader aliasing checks.
+- **Preheader hoisting & single-compare bounds checks (`clj-aot/src/scalar.rs`):** `AstScan` separates growing mutations (`conj!`/`pop!`) from in-bounds updates (`assoc!`) and skips probes a loop does not read. Read-only flat `Int` vectors hoist `(ptr, len)` once; unaliased non-growing `TransientVector`s lock once in the preheader (also caching `count`). Setting inactive `str_len`/`ivec_len` to `0` collapses each fast `nth` and `assoc!` check to one unsigned `idx < len` compare plus a direct `i64` load or store. Every miss, slow call (before any potential throw), deopt, and outer exit unlocks all locked transients and zeroes their cached lengths cleanly.
+- **Verification:** `docs/spec/i259-native-compiler/corpus/scalar_hoisted_vecs.clj` pins flat int vectors, nested knapsack DP, aliased transients, append/type-widening fallback, read-only transients, OOB throws, and overflow deopt against `run`; `native_emit_ir_hoists_int_vecs_and_locks_transients_271` pins the IR.
+
+Measured on macOS (`libinsn.dylib` shim): `dp/knapsack/solution` drops 290.4M → 61.2M instructions (0.211x, −229.2M).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

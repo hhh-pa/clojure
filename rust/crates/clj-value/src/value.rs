@@ -309,6 +309,16 @@ impl Vector {
             VectorInner::Chars(t) => t.get(index).copied().map(ValueRef::Char),
         }
     }
+
+    /// Borrow the flat packed `i64` slice when this vector is backed by flat ints.
+    #[inline(always)]
+    #[must_use]
+    pub fn as_flat_ints(&self) -> Option<&[i64]> {
+        match &self.0.inner {
+            VectorInner::Ints(t) => t.as_flat(),
+            _ => None,
+        }
+    }
 }
 
 /// Vector storage: the generic trie of values, or the same trie over
@@ -4896,6 +4906,13 @@ mod tests {
         let vc = Vector::from_chars(vec!['q']);
         let vg = Vector::from_vec(vec![Value::Bool(true)]);
         assert!(matches!(vi.get_val_ref(0), Some(ValueRef::Int(11))));
+        assert_eq!(vi.as_flat_ints(), Some(&[11][..]));
+        assert!(vc.as_flat_ints().is_none());
+        assert!(vg.as_flat_ints().is_none());
+        let mut vt = Vector::from_ints((0..1025).collect());
+        let _shared = vt.clone();
+        vt = vt.push_back(Value::Int(1025));
+        assert!(vt.as_flat_ints().is_none());
         assert!(vi.get_val_ref(1).is_none());
         assert!(matches!(vc.get_val_ref(0), Some(ValueRef::Char('q'))));
         assert!(matches!(

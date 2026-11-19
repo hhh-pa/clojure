@@ -953,6 +953,52 @@ pub(crate) fn scalar_conj(tval: &Value, val: i64) -> bool {
     }
 }
 
+/// Probe `v` as a flat packed integer vector, writing its element pointer and length.
+#[inline]
+pub(crate) fn scalar_ivec_probe(v: &Value, ptr_out: &mut *const i64, len_out: &mut i64) -> bool {
+    let Value::Vector(vec) = v else {
+        return false;
+    };
+    let Some(slice) = vec.as_flat_ints() else {
+        return false;
+    };
+    *ptr_out = slice.as_ptr();
+    *len_out = slice.len() as i64;
+    true
+}
+
+/// Whether `a` and `b` alias the same transient cell.
+#[inline]
+pub(crate) fn scalar_same_transient(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Transient(ta), Value::Transient(tb)) => ta.same_cell(tb),
+        _ => false,
+    }
+}
+
+/// Acquire a packed-`Int` transient vector lock for a scalar loop, writing its
+/// mutable element pointer and length (`false` on any other value).
+#[inline]
+pub(crate) fn scalar_tvec_lock(v: &Value, ptr_out: &mut *mut i64, len_out: &mut i64) -> bool {
+    let Some(t) = is_transient_vec(v) else {
+        return false;
+    };
+    let Some((ptr, len)) = t.lock_ints_ptr() else {
+        return false;
+    };
+    *ptr_out = ptr;
+    *len_out = len as i64;
+    true
+}
+
+/// Release a transient lock previously acquired via [`scalar_tvec_lock`].
+#[inline]
+pub(crate) fn scalar_tvec_unlock(v: &Value) {
+    if let Some(t) = is_transient_vec(v) {
+        t.unlock_raw();
+    }
+}
+
 /// Unboxed effect-position `pop!` on a transient scalar vector.
 #[inline]
 pub(crate) fn scalar_pop(tval: &Value) -> bool {

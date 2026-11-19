@@ -429,6 +429,18 @@ impl TransientVector {
         false
     }
 
+    /// Borrow the packed integer slice mutably when valid and packed-`Int`.
+    #[inline(always)]
+    pub fn ints_mut(&mut self) -> Option<&mut [i64]> {
+        if !self.valid {
+            return None;
+        }
+        match &mut self.items {
+            TransientItems::Ints(x) => Some(x.as_mut_slice()),
+            _ => None,
+        }
+    }
+
     /// Pop the last item from a packed scalar buffer (`false` when
     /// empty, generic, or invalidated; touches no `Value` drop glue).
     #[inline(always)]
@@ -948,6 +960,32 @@ impl TransientLock {
         let data = unsafe { &mut *data };
         TransientGuard { lock: self, data }
     }
+
+    /// Acquire the lock and return the raw `(ptr, len)` of a valid,
+    /// non-empty packed-`Int` transient vector, holding the lock until
+    /// [`unlock_raw`](Self::unlock_raw). Returns `None` (releasing the
+    /// lock) for empty, non-`Int`, non-vector, or invalidated buffers.
+    #[inline]
+    pub fn lock_ints_ptr(&self) -> Option<(*mut i64, usize)> {
+        let mut guard = self.lock();
+        let pair = match &mut *guard {
+            TransientKind::Vector(tv) => tv
+                .ints_mut()
+                .filter(|s| !s.is_empty())
+                .map(|s| (s.as_mut_ptr(), s.len())),
+            _ => None,
+        };
+        if pair.is_some() {
+            std::mem::forget(guard);
+        }
+        pair
+    }
+
+    /// Release a lock previously acquired via [`lock_ints_ptr`](Self::lock_ints_ptr).
+    #[inline]
+    pub fn unlock_raw(&self) {
+        self.locked.store(false, Ordering::Release);
+    }
 }
 
 /// RAII lock guard for [`TransientLock`]: exclusive access to the
@@ -1032,6 +1070,20 @@ impl Transient {
     #[inline]
     pub fn lock(&self) -> TransientGuard<'_> {
         self.cell.lock()
+    }
+
+    /// Acquire the buffer lock and return the raw `(ptr, len)` of a valid
+    /// packed-`Int` transient vector, holding the lock until
+    /// [`unlock_raw`](Self::unlock_raw).
+    #[inline]
+    pub fn lock_ints_ptr(&self) -> Option<(*mut i64, usize)> {
+        self.cell.lock_ints_ptr()
+    }
+
+    /// Release a lock previously acquired via [`lock_ints_ptr`](Self::lock_ints_ptr).
+    #[inline]
+    pub fn unlock_raw(&self) {
+        self.cell.unlock_raw();
     }
 
     /// The JVM class name of the buffer kind (live: map
@@ -1366,5 +1418,28 @@ mod tests {
         assert!(!tbg.assoc_int_in_bounds(0, 1));
         assert!(!tbg.conj_int_no_grow(1));
         assert!(!tbg.pop_scalar_opt());
+        assert!(tbg.ints_mut().is_none());
+
+        // lock_ints_ptr / unlock_raw: hit on non-empty packed ints, miss on empty/chars/map/invalidated
+        let te = Transient::new(TransientKind::Vector(TransientVector::new()));
+        assert!(te.lock_ints_ptr().is_none());
+        let mut tvi = TransientVector::new();
+        tvi.conj(Value::Int(7)).unwrap();
+        let ti = Transient::new(TransientKind::Vector(tvi));
+        let (ptr, len) = ti.lock_ints_ptr().expect("packed ints");
+        assert!(!ptr.is_null());
+        assert_eq!(len, 1);
+        ti.unlock_raw();
+        if let TransientKind::Vector(tv) = &mut *ti.lock() {
+            let _ = tv.persistent().unwrap();
+        }
+        assert!(ti.lock_ints_ptr().is_none());
+
+        let tc = Transient::new(TransientKind::Vector(TransientVector::from_vector(
+            &crate::Vector::from_chars(vec!['a']),
+        )));
+        assert!(tc.lock_ints_ptr().is_none());
+        let tm = Transient::new(TransientKind::Map(TransientMap::new()));
+        assert!(tm.lock_ints_ptr().is_none());
     }
 }
