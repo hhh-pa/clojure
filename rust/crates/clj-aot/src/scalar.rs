@@ -401,6 +401,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.position_at_end(boxed_hdr);
         f.recur.push(RecurTarget {
             header: boxed_hdr,
+            let_depth: f.let_slots.len(),
             patterns: targets,
         });
         let res = self.lower_body(f, body, dest);

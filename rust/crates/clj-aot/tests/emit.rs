@@ -1458,3 +1458,31 @@ fn native_emit_ir_hoists_int_vecs_and_locks_transients_271() {
         .expect("grow fn");
     assert!(!grow_body.contains("sc_assoc_fast"), "{grow_body}");
 }
+
+#[test]
+fn native_emit_ir_fuses_filter_some_and_in2_moves_271() {
+    let ir = tmp("hof-in2.ll");
+    clj_aot::build_str(
+        "(defn step [st] (-> st (assoc-in [:a :b] 1) (update-in [:a :b] inc) (update :c dec)))\n\
+         (defn hofs [xs] [(filterv (fn [x] (> x 1)) xs) (vec (filter (fn [x] (< x 3)) xs)) (into [] (filter (fn [x] (= x 2)) xs)) (count (filter (fn [x] (> x 0)) xs)) (count (filterv (fn [x] (> x 0)) xs)) (some (fn [x] (if (= x 2) :two nil)) xs) (count (filter odd? xs))])\n\
+         (println (step {:a {:b 0} :c 5}) (hofs [1 2 3]))\n",
+        "f.clj",
+        &tmp("nope-hof-in2"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let hofs_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_hofs("))
+        .expect("hofs fn");
+    assert!(hofs_body.contains("filter_keep"), "{hofs_body}");
+    assert!(hofs_body.contains("some_hit"), "{hofs_body}");
+    assert!(hofs_body.contains("@rt_n_core_own"), "{hofs_body}");
+}

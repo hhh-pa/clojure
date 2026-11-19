@@ -321,6 +321,16 @@ fn native_swap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         other => return Err(cce_err(other, "clojure.lang.IAtom")),
     };
     check_swap_fn(&args[1], args.len())?;
+    {
+        let mut state = atom.lock();
+        if state.validator.is_none() && state.watches.is_empty() {
+            if let Some(new) =
+                crate::vm_ops::try_swap_in_place(&mut state.value, &args[1], &args[2..])
+            {
+                return Ok(new);
+            }
+        }
+    }
     swap_loop(eval, &atom, &args[1], &args[2..]).map(|(_, new)| new)
 }
 

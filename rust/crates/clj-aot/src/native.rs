@@ -150,10 +150,12 @@ enum LocalRef<'ctx> {
     CapturedCell(usize),
 }
 
-/// A `recur` target: its loop header and the patterns rebound from
-/// the recur values (each pattern's slots in binding order).
+/// A `recur` target: its loop header, `let_slots` depth, and the
+/// patterns rebound from the recur values (each pattern's slots in
+/// binding order).
 struct RecurTarget<'ctx> {
     header: BasicBlock<'ctx>,
+    let_depth: usize,
     patterns: Vec<(Pattern, Vec<PointerValue<'ctx>>)>,
 }
 
@@ -169,12 +171,17 @@ enum BoolSink<'ctx> {
     },
 }
 
+type SlotArray<'ctx> = (PointerValue<'ctx>, Vec<PointerValue<'ctx>>);
+
 /// Per-function lowering state.
 struct FnCtx<'ctx> {
     func: FunctionValue<'ctx>,
     entry: BasicBlock<'ctx>,
     fail: BasicBlock<'ctx>,
     slots: Vec<PointerValue<'ctx>>,
+    free_slots: Vec<PointerValue<'ctx>>,
+    free_arrays: HashMap<usize, Vec<SlotArray<'ctx>>>,
+    let_slots: Vec<PointerValue<'ctx>>,
     env: Vec<Option<LocalRef<'ctx>>>,
     recur: Vec<RecurTarget<'ctx>>,
     captured: PointerValue<'ctx>,
@@ -646,6 +653,9 @@ impl<'ctx> Lowerer<'ctx> {
             entry,
             fail,
             slots: Vec::new(),
+            free_slots: Vec::new(),
+            free_arrays: HashMap::new(),
+            let_slots: Vec::new(),
             env,
             recur: Vec::new(),
             captured,
@@ -657,7 +667,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// slot to nil; the exit moves the result out and drops every slot.
     fn end_fn(&mut self, f: FnCtx<'ctx>, result: PointerValue<'ctx>) -> FunctionValue<'ctx> {
         let ret = f.func.get_nth_param(0).expect("ret").into_pointer_value();
-        self.clone_v(f.func, ret, result);
+        self.move_v(f.func, ret, result);
         self.drop_slots(f.func, &f.slots);
         self.builder
             .build_return(Some(&self.i32t.const_zero()))
@@ -689,6 +699,24 @@ impl<'ctx> Lowerer<'ctx> {
             self.drop_v(func, *slot);
             self.write_tag(*slot, 0);
         }
+    }
+
+    fn free_slots(&self, f: &mut FnCtx<'ctx>, slots: &[PointerValue<'ctx>]) {
+        self.drop_and_nil_slots(f.func, slots);
+        f.free_slots.extend_from_slice(slots);
+    }
+
+    fn free_slot_array(
+        &self,
+        f: &mut FnCtx<'ctx>,
+        arr: PointerValue<'ctx>,
+        elems: Vec<PointerValue<'ctx>>,
+    ) {
+        self.drop_and_nil_slots(f.func, &elems);
+        f.free_arrays
+            .entry(elems.len())
+            .or_default()
+            .push((arr, elems));
     }
 
     // ---- inline value primitives (`Value` is `repr(u8)`: tag byte at 0,
@@ -1073,6 +1101,9 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// A fresh nil slot of the current function.
     fn slot(&self, f: &mut FnCtx<'ctx>) -> PointerValue<'ctx> {
+        if let Some(p) = f.free_slots.pop() {
+            return p;
+        }
         let here = self.builder.get_insert_block().expect("positioned");
         self.builder.position_at_end(f.entry);
         let p = self
@@ -1097,6 +1128,9 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> (PointerValue<'ctx>, Vec<PointerValue<'ctx>>) {
         if n == 0 {
             return (self.ptr.const_null(), Vec::new());
+        }
+        if let Some(pair) = f.free_arrays.get_mut(&n).and_then(Vec::pop) {
+            return pair;
         }
         let here = self.builder.get_insert_block().expect("positioned");
         self.builder.position_at_end(f.entry);
@@ -1245,27 +1279,29 @@ impl<'ctx> Lowerer<'ctx> {
         // owned copies first.
         let captures_end = f.env.len();
         let owned = self_recurs(&arity.body);
+        let n_param = f.func.get_nth_param(2).expect("n").into_int_value();
         let mut targets = Vec::with_capacity(pats.len());
         for (i, pat) in pats.iter().enumerate() {
             let arg = self.elem(args, i);
-            let src = if owned {
-                let s = self.slot(&mut f);
-                self.clone_v(f.func, s, arg);
-                s
-            } else {
-                arg
-            };
             let slots = if matches!(pat, Pattern::Symbol(_)) {
+                let src = if owned {
+                    let s = self.slot(&mut f);
+                    let take = self.param_take_flag(n_param, i);
+                    self.take_or_clone(&f, s, arg, take);
+                    s
+                } else {
+                    arg
+                };
                 f.env.push(Some(LocalRef::Slot(src)));
                 vec![src]
             } else {
-                self.bind_pattern(&mut f, pat, src)?
+                self.bind_pattern(&mut f, pat, arg)?
             };
             targets.push(((*pat).clone(), slots));
         }
         let min_slot = if owned { captures_end } else { f.env.len() };
         let taken = if owned {
-            Vec::new()
+            (captures_end..f.env.len()).collect()
         } else {
             self.own_consumed_params(&mut f, &arity.body, captures_end, &pats, &mut targets)
         };
@@ -1280,6 +1316,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.position_at_end(header);
         f.recur.push(RecurTarget {
             header,
+            let_depth: f.let_slots.len(),
             patterns: targets,
         });
         let result = self.slot(&mut f);
@@ -1289,11 +1326,9 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// Give each symbol param the body consumes (a last use it would move)
     /// an owned slot: taken from the caller's array when the call handed
-    /// it over (`native_abi::TAKE_ARGS` in the count — e.g. `reduce`'s
-    /// step, so its accumulator reaches `assoc` uniquely owned), cloned
-    /// otherwise (the clone the use itself made before). Params the body
-    /// never consumes keep reading the caller's array in place. Returns
-    /// the owned params' env indices.
+    /// it over (`native_abi::TAKE_ARGS` or per-arg take bit in the count),
+    /// cloned otherwise. Params the body never consumes keep reading the
+    /// caller's array in place. Returns the owned params' env indices.
     fn own_consumed_params(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -1317,26 +1352,27 @@ impl<'ctx> Lowerer<'ctx> {
             return taken;
         }
         let n = f.func.get_nth_param(2).expect("n").into_int_value();
-        let bit = self
-            .builder
-            .build_and(
-                n,
-                self.i64t.const_int(clj_eval::native_abi::TAKE_ARGS, false),
-                "take_bit",
-            )
-            .expect("and");
-        let take = self
-            .builder
-            .build_int_compare(IntPredicate::NE, bit, self.i64t.const_zero(), "take")
-            .expect("cmp");
         for &i in &taken {
+            let param_idx = i - captures_end;
+            let take = self.param_take_flag(n, param_idx);
             let arg = self.local_slot(f, i).expect("param slot");
             let s = self.slot(f);
             self.take_or_clone(f, s, arg, take);
             f.env[i] = Some(LocalRef::Slot(s));
-            targets[i - captures_end].1 = vec![s];
+            targets[param_idx].1 = vec![s];
         }
         taken
+    }
+
+    fn param_take_flag(&self, n: IntValue<'ctx>, param_idx: usize) -> IntValue<'ctx> {
+        let mask = clj_eval::native_abi::take_arg_mask(param_idx);
+        let bit = self
+            .builder
+            .build_and(n, self.i64t.const_int(mask, false), "take_bit")
+            .expect("and");
+        self.builder
+            .build_int_compare(IntPredicate::NE, bit, self.i64t.const_zero(), "take")
+            .expect("cmp")
     }
 
     /// `dest = take ? move(src) : clone(src)`.
@@ -1363,6 +1399,25 @@ impl<'ctx> Lowerer<'ctx> {
     }
 
     // ---- patterns ----------------------------------------------------------
+
+    /// Bind `pat` taking ownership of `slot`: a symbol adopts `slot`
+    /// directly; a destructuring pattern binds out of `slot` and drops it.
+    fn bind_owned_slot(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        pat: &Pattern,
+        slot: PointerValue<'ctx>,
+        out: &mut Vec<PointerValue<'ctx>>,
+    ) -> Result<(), Unsupported> {
+        if matches!(pat, Pattern::Symbol(_)) {
+            f.env.push(Some(LocalRef::Slot(slot)));
+            out.push(slot);
+        } else {
+            out.extend(self.bind_pattern(f, pat, slot)?);
+            self.free_slots(f, &[slot]);
+        }
+        Ok(())
+    }
 
     /// Bind `pat` to the value in `src`: allocates the pattern's local
     /// slots (in `pattern_names` order), pushes them on the frame, and
@@ -1394,18 +1449,18 @@ impl<'ctx> Lowerer<'ctx> {
                             .call("rt_n_first", Some(self.i32t), &[item.into(), cur.into()])
                             .expect("st");
                         self.check(f, st);
-                        out.extend(self.bind_pattern(f, fixed, item)?);
+                        self.bind_owned_slot(f, fixed, item, &mut out)?;
                         let st = self
                             .call("rt_n_next_mut", Some(self.i32t), &[cur.into()])
                             .expect("st");
                         self.check(f, st);
                     }
-                    out.extend(self.bind_pattern(f, rest, cur)?);
+                    self.bind_owned_slot(f, rest, cur, &mut out)?;
                 } else {
                     for (i, fixed) in v.fixed.iter().enumerate() {
                         let item = self.slot(f);
                         self.emit_nth_nil(f, item, src, i);
-                        out.extend(self.bind_pattern(f, fixed, item)?);
+                        self.bind_owned_slot(f, fixed, item, &mut out)?;
                     }
                 }
                 if v.as_sym.is_some() {
@@ -1496,13 +1551,7 @@ impl<'ctx> Lowerer<'ctx> {
             let default = or_default(m, name.as_ref(), or_key).map(|i| defaults[i]);
             let item = self.slot(f);
             self.emit_destr_get(item, conv, key, default)?;
-            if name.is_some() {
-                // A fresh slot binds as is (no copy for the local).
-                f.env.push(Some(LocalRef::Slot(item)));
-                out.push(item);
-            } else {
-                out.extend(self.bind_pattern(f, local, item)?);
-            }
+            self.bind_owned_slot(f, local, item, &mut out)?;
         }
         for binding in &m.keys {
             let name = Value::Symbol(Symbol::new(None, &binding.local));
@@ -1512,9 +1561,12 @@ impl<'ctx> Lowerer<'ctx> {
             f.env.push(Some(LocalRef::Slot(item)));
             out.push(item);
         }
+        self.free_slots(f, &defaults);
         if m.as_sym.is_some() {
             f.env.push(Some(LocalRef::Slot(conv)));
             out.push(conv);
+        } else {
+            self.free_slots(f, &[conv]);
         }
         Ok(out)
     }
@@ -1597,8 +1649,7 @@ impl<'ctx> Lowerer<'ctx> {
         let fresh = self.bind_pattern(f, pat, src)?;
         f.env.truncate(depth);
         for (dst, s) in slots.iter().zip(fresh) {
-            self.clone_v(f.func, *dst, s);
-            self.drop_v(f.func, s);
+            self.move_v(f.func, *dst, s);
         }
         Ok(())
     }
@@ -1662,7 +1713,7 @@ impl<'ctx> Lowerer<'ctx> {
         } else {
             self.lower(f, expr, t)?;
         }
-        self.drop_v(f.func, t);
+        self.free_slots(f, &[t]);
         Ok(())
     }
 
@@ -2202,23 +2253,19 @@ impl<'ctx> Lowerer<'ctx> {
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
         let depth = f.env.len();
+        let let_depth = f.let_slots.len();
         let mut bound = Vec::new();
         for (pat, init) in bindings {
             let t = self.slot(f);
             self.lower(f, init, t)?;
-            if matches!(pat, Pattern::Symbol(_)) {
-                // The init's slot becomes the local's (no copy).
-                f.env.push(Some(LocalRef::Slot(t)));
-                bound.push(t);
-            } else {
-                bound.extend(self.bind_pattern(f, pat, t)?);
-                self.drop_v(f.func, t);
-            }
+            self.bind_owned_slot(f, pat, t, &mut bound)?;
         }
+        f.let_slots.extend_from_slice(&bound);
         self.lower_body(f, body, dest)?;
+        f.let_slots.truncate(let_depth);
         f.env.truncate(depth);
         // Release let-bound values at scope end (RSS parity).
-        self.drop_slots(f.func, &bound);
+        self.free_slots(f, &bound);
         Ok(())
     }
 
@@ -2330,27 +2377,34 @@ impl<'ctx> Lowerer<'ctx> {
         };
         let (arr, elems) = self.slot_array(f, args.len());
         let mut aliases = Vec::new();
+        let mut take_bits = 0u64;
         for (i, (a, e)) in args.iter().zip(&elems).enumerate() {
             let local = match a {
-                Expr::Local(idx) => self.borrowable_before(f, *idx, &args[i + 1..]),
+                Expr::Local(idx) if !is_move(f, a) => {
+                    self.borrowable_before(f, *idx, &args[i + 1..])
+                }
                 _ => None,
             };
             if let Some(p) = local {
                 self.copy_bits(*e, p);
                 aliases.push(*e);
-                if is_move(f, a) {
-                    moved.push(p);
-                }
             } else {
                 self.lower(f, a, *e)?;
                 temps.push(*e);
+                take_bits |= clj_eval::native_abi::single_take_arg_bit(i);
             }
         }
-        let st = self.emit_value_call(f, h, arr, args.len(), dest);
+        let st = self.emit_value_call(f, h, arr, args.len(), take_bits, dest);
         self.clear_aliases(&aliases);
         self.check(f, st);
         self.drop_and_nil_slots(f.func, &temps);
         self.drop_and_nil_slots(f.func, &moved);
+        if !elems.is_empty() {
+            f.free_arrays
+                .entry(elems.len())
+                .or_default()
+                .push((arr, elems));
+        }
         Ok(())
     }
 
@@ -2365,6 +2419,7 @@ impl<'ctx> Lowerer<'ctx> {
         h: PointerValue<'ctx>,
         arr: PointerValue<'ctx>,
         argc: usize,
+        take_bits: u64,
         dest: PointerValue<'ctx>,
     ) -> IntValue<'ctx> {
         let (code_p, cap_p) = {
@@ -2379,6 +2434,7 @@ impl<'ctx> Lowerer<'ctx> {
             (code_p, cap_p)
         };
         let n = self.u64c(argc as u64);
+        let n_take = self.u64c((argc as u64) | take_bits);
         let entered = self
             .call(
                 "rt_n_enter_closure",
@@ -2415,7 +2471,7 @@ impl<'ctx> Lowerer<'ctx> {
             .build_indirect_call(
                 self.code_ty,
                 code,
-                &[dest.into(), arr.into(), n, cap.into()],
+                &[dest.into(), arr.into(), n_take, cap.into()],
                 "st",
             )
             .expect("call")
@@ -2536,7 +2592,7 @@ impl<'ctx> Lowerer<'ctx> {
         );
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
-        self.drop_and_nil_slots(f.func, &temps);
+        self.free_slots(f, &temps);
         self.drop_and_nil_slots(f.func, &moved);
         Ok(true)
     }
@@ -2566,7 +2622,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.emit_static_fast(f, op, &refs, dest, slow, done);
         self.emit_static_invoke_slow(f, head, args, &refs, dest, slow, done)?;
         self.builder.position_at_end(done);
-        self.drop_and_nil_slots(f.func, &temps);
+        self.free_slots(f, &temps);
         self.drop_and_nil_slots(f.func, &moved);
         Ok(true)
     }
@@ -2804,18 +2860,17 @@ impl<'ctx> Lowerer<'ctx> {
         let (arr, elems) = self.slot_array(f, args.len());
         let mut aliases = Vec::new();
         let mut temps = Vec::new();
-        let mut moved = Vec::new();
+        let mut take_bits = 0u64;
         for (i, (a, e)) in args.iter().zip(&elems).enumerate() {
             let local = match a {
-                Expr::Local(idx) => self.borrowable_before(f, *idx, &args[i + 1..]),
+                Expr::Local(idx) if !is_move(f, a) => {
+                    self.borrowable_before(f, *idx, &args[i + 1..])
+                }
                 _ => None,
             };
             if let Some(p) = local {
                 self.copy_bits(*e, p);
                 aliases.push(*e);
-                if is_move(f, a) {
-                    moved.push(p);
-                }
             } else if let Some((p, fallback)) = self.borrowed(f, a)? {
                 self.copy_bits(*e, p);
                 aliases.push(*e);
@@ -2823,6 +2878,7 @@ impl<'ctx> Lowerer<'ctx> {
             } else {
                 self.lower(f, a, *e)?;
                 temps.push(*e);
+                take_bits |= clj_eval::native_abi::single_take_arg_bit(i);
             }
         }
         // A stable `defn`'s root is its compiled fn once the `def` has
@@ -2857,7 +2913,7 @@ impl<'ctx> Lowerer<'ctx> {
                 &[
                     dest.into(),
                     arr.into(),
-                    self.u64c(args.len() as u64),
+                    self.u64c((args.len() as u64) | take_bits),
                     self.ptr.const_null().into(),
                 ],
                 "st",
@@ -2886,7 +2942,12 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
         self.drop_and_nil_slots(f.func, &temps);
-        self.drop_and_nil_slots(f.func, &moved);
+        if !elems.is_empty() {
+            f.free_arrays
+                .entry(elems.len())
+                .or_default()
+                .push((arr, elems));
+        }
         Ok(())
     }
 
@@ -2973,13 +3034,8 @@ impl<'ctx> Lowerer<'ctx> {
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
         let acc = self.slot(f);
-        match hl.init {
-            Some(init) => self.lower(f, init, acc)?,
-            None => {
-                if hl.kind == HofKind::Collect {
-                    self.call("rt_n_vec_new", None, &[acc.into()]);
-                }
-            }
+        if let Some(init) = hl.init {
+            self.lower(f, init, acc)?;
         }
         let coll = self.slot(f);
         self.lower(f, hl.coll, coll)?;
@@ -3003,6 +3059,16 @@ impl<'ctx> Lowerer<'ctx> {
             .build_conditional_branch(is_direct, direct, general)
             .expect("br");
         self.builder.position_at_end(direct);
+        match hl.kind {
+            HofKind::Collect | HofKind::FilterCollect => {
+                self.call("rt_n_vec_new", None, &[acc.into()]);
+            }
+            HofKind::CountFilter => {
+                self.write_int(f.func, acc, self.i64t.const_zero());
+            }
+            HofKind::Some => self.write_tag(acc, 0),
+            HofKind::Each | HofKind::Reduce => {}
+        }
         let fields = (0..3)
             .map(|i| {
                 let p = self
@@ -3029,7 +3095,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.emit_hof_general(f, hl, base, acc, coll, dest)?;
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
-        self.drop_and_nil_slots(f.func, &[coll, acc]);
+        self.free_slots(f, &[coll, acc]);
         Ok(())
     }
 
@@ -3079,41 +3145,112 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.build_store(i_ptr, next).expect("store");
         let params = match hl.kind {
             HofKind::Reduce => vec![st.acc, item],
-            HofKind::Each | HofKind::Collect => vec![item],
+            _ => vec![item],
         };
         let res = self.slot(f);
-        self.lower_inline_body(f, hl.arity, base, &params, res)?;
-        match hl.kind {
-            HofKind::Each => self.drop_and_nil_slots(f.func, &[res]),
-            HofKind::Collect => {
-                self.call("rt_n_vec_push", None, &[st.acc.into(), res.into()]);
-            }
-            HofKind::Reduce => self.move_v(f.func, st.acc, res),
-        }
-        self.drop_and_nil_slots(f.func, &[item]);
-        if hl.kind == HofKind::Reduce {
-            let stop = self
-                .call("rt_n_unreduce", Some(self.i8t), &[st.acc.into()])
-                .expect("stop");
-            let stopped = self
-                .builder
-                .build_int_compare(IntPredicate::NE, stop, self.i8t.const_zero(), "stopped")
-                .expect("cmp");
-            self.builder
-                .build_conditional_branch(stopped, exit, head)
-                .expect("br");
-        } else {
-            self.builder.build_unconditional_branch(head).expect("br");
-        }
+        self.lower_inline_body(
+            f,
+            hl.arity,
+            base,
+            &params,
+            hl.kind != HofKind::FilterCollect,
+            res,
+        )?;
+        self.emit_hof_fold(f.func, hl.kind, st.acc, item, res, head, exit);
         self.builder.position_at_end(exit);
+        f.free_slots.extend_from_slice(&[item, res]);
         match hl.kind {
             HofKind::Each => self.write_nil(f.func, dest),
-            HofKind::Collect => {
+            HofKind::Collect | HofKind::FilterCollect => {
                 self.call("rt_n_vec_done", None, &[dest.into(), st.acc.into()]);
             }
-            HofKind::Reduce => self.move_v(f.func, dest, st.acc),
+            HofKind::CountFilter | HofKind::Some | HofKind::Reduce => {
+                self.move_v(f.func, dest, st.acc);
+            }
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_hof_fold(
+        &self,
+        func: FunctionValue<'ctx>,
+        kind: HofKind,
+        acc: PointerValue<'ctx>,
+        item: PointerValue<'ctx>,
+        res: PointerValue<'ctx>,
+        head: BasicBlock<'ctx>,
+        exit: BasicBlock<'ctx>,
+    ) {
+        match kind {
+            HofKind::Each => {
+                self.drop_and_nil_slots(func, &[res, item]);
+                self.builder.build_unconditional_branch(head).expect("br");
+            }
+            HofKind::Collect => {
+                self.call("rt_n_vec_push", None, &[acc.into(), res.into()]);
+                self.drop_and_nil_slots(func, &[item]);
+                self.builder.build_unconditional_branch(head).expect("br");
+            }
+            HofKind::FilterCollect => {
+                let ok = self.truthy(res);
+                self.drop_and_nil_slots(func, &[res]);
+                let keep_b = self.ctx.append_basic_block(func, "filter_keep");
+                let next_b = self.ctx.append_basic_block(func, "filter_next");
+                self.builder
+                    .build_conditional_branch(ok, keep_b, next_b)
+                    .expect("br");
+                self.builder.position_at_end(keep_b);
+                self.call("rt_n_vec_push", None, &[acc.into(), item.into()]);
+                self.builder.build_unconditional_branch(next_b).expect("br");
+                self.builder.position_at_end(next_b);
+                self.drop_and_nil_slots(func, &[item]);
+                self.builder.build_unconditional_branch(head).expect("br");
+            }
+            HofKind::CountFilter => {
+                let ok = self.truthy(res);
+                let inc = self
+                    .builder
+                    .build_int_z_extend(ok, self.i64t, "inc")
+                    .expect("zext");
+                let cur = self.int_payload(acc);
+                let next_c = self.builder.build_int_add(cur, inc, "cnt").expect("add");
+                self.builder
+                    .build_store(self.byte_at(acc, 8), next_c)
+                    .expect("store");
+                self.drop_and_nil_slots(func, &[res, item]);
+                self.builder.build_unconditional_branch(head).expect("br");
+            }
+            HofKind::Some => {
+                let ok = self.truthy(res);
+                self.drop_and_nil_slots(func, &[item]);
+                let hit_b = self.ctx.append_basic_block(func, "some_hit");
+                let miss_b = self.ctx.append_basic_block(func, "some_miss");
+                self.builder
+                    .build_conditional_branch(ok, hit_b, miss_b)
+                    .expect("br");
+                self.builder.position_at_end(hit_b);
+                self.move_v(func, acc, res);
+                self.builder.build_unconditional_branch(exit).expect("br");
+                self.builder.position_at_end(miss_b);
+                self.drop_and_nil_slots(func, &[res]);
+                self.builder.build_unconditional_branch(head).expect("br");
+            }
+            HofKind::Reduce => {
+                self.move_v(func, acc, res);
+                self.drop_and_nil_slots(func, &[item]);
+                let stop = self
+                    .call("rt_n_unreduce", Some(self.i8t), &[acc.into()])
+                    .expect("stop");
+                let stopped = self
+                    .builder
+                    .build_int_compare(IntPredicate::NE, stop, self.i8t.const_zero(), "stopped")
+                    .expect("cmp");
+                self.builder
+                    .build_conditional_branch(stopped, exit, head)
+                    .expect("br");
+            }
+        }
     }
 
     /// `item =` the loop's `i`th item: a vector's element (by index), or a
@@ -3174,12 +3311,17 @@ impl<'ctx> Lowerer<'ctx> {
         arity: &Arity,
         base: usize,
         params: &[PointerValue<'ctx>],
+        own_params: bool,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
         for p in params {
             f.env.push(Some(LocalRef::Slot(*p)));
         }
-        let owned: Vec<usize> = (base..base + params.len()).collect();
+        let owned: Vec<usize> = if own_params {
+            (base..base + params.len()).collect()
+        } else {
+            Vec::new()
+        };
         let moves = collect_body_moves(&arity.body, base, &f.env, &owned);
         let saved = std::mem::replace(&mut f.moves, moves);
         let lowered = self.lower_body(f, &arity.body, dest);
@@ -3259,7 +3401,7 @@ impl<'ctx> Lowerer<'ctx> {
             )
             .expect("st");
         self.check(f, st);
-        self.drop_slots(f.func, &elems);
+        self.free_slot_array(f, arr, elems);
     }
 
     fn lower_direct_with(
@@ -3278,21 +3420,12 @@ impl<'ctx> Lowerer<'ctx> {
         let ns = call.var.sym.namespace();
         let name = call.var.sym.name();
         let core_name = (ns == Some("clojure.core")).then(|| name.to_owned());
-        let has_own_op = core_name
-            .as_deref()
-            .and_then(|cname| native_abi::own_op(cname, n))
-            .is_some();
         let bc_sym = bc_override.or_else(|| {
             (fast.is_none() && self.use_bitcode)
                 .then(|| clj_bc::bc_ns_op_symbol(ns, name, n))
                 .flatten()
         });
-        let moving = bc_sym.is_none()
-            && fast.is_none()
-            && (has_own_op
-                || (is_owned_move_op(ns, name, n)
-                    && call.args.iter().any(|a| is_move(f, a) || is_temporary(a))));
-        if moving {
+        if bc_sym.is_none() && fast.is_none() && is_direct_moving(f, call, core_name.as_deref()) {
             return self.lower_direct_moving(f, call, k, core_name.as_deref(), dest);
         }
         let (refs, temps, moved) = self.arg_refs(f, &call.args, dest)?;
@@ -3308,10 +3441,42 @@ impl<'ctx> Lowerer<'ctx> {
             slow,
             done,
         );
-        self.emit_direct_slow(f, &refs, k, n, core_name.as_deref(), dest, slow, done);
-        self.drop_and_nil_slots(f.func, &temps);
+        if core_name.as_deref() == Some("count") && n == 1 && (temps.len() + moved.len() == 1) {
+            self.emit_owned_slow1(f, refs[0], k, dest, slow, done);
+        } else {
+            self.emit_direct_slow(f, &refs, k, n, core_name.as_deref(), dest, slow, done);
+        }
+        self.free_slots(f, &temps);
         self.drop_and_nil_slots(f.func, &moved);
         Ok(())
+    }
+
+    fn emit_owned_slow1(
+        &mut self,
+        f: &FnCtx<'ctx>,
+        arg: PointerValue<'ctx>,
+        k: u64,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        self.builder.position_at_end(slow);
+        let aref = self.slots_ref(f, arg, 1);
+        let st = self
+            .call(
+                "rt_n_core_own",
+                Some(self.i32t),
+                &[
+                    dest.into(),
+                    self.i32t.const_int(u64::from(u32::MAX), false).into(),
+                    self.u64c(k),
+                    aref.into(),
+                ],
+            )
+            .expect("st");
+        self.check(f, st);
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
     }
 
     /// The fast path of a direct-native call: an intrinsic, `FastArith`,
@@ -3456,9 +3621,18 @@ impl<'ctx> Lowerer<'ctx> {
         core_name: Option<&str>,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
-        let n = call.args.len();
+        let (op_name, arg_ptrs): (Option<&str>, Vec<&Expr>) = match (core_name, call.args.as_slice()) {
+            (Some("assoc-in"), [m, Expr::VecLit(ks, None), vf]) if ks.len() == 2 => {
+                (Some("assoc-in2"), vec![m, &ks[0], &ks[1], vf])
+            }
+            (Some("update-in"), [m, Expr::VecLit(ks, None), vf]) if ks.len() == 2 => {
+                (Some("update-in2"), vec![m, &ks[0], &ks[1], vf])
+            }
+            _ => (core_name, call.args.iter().collect()),
+        };
+        let n = arg_ptrs.len();
         let (arr, elems) = self.slot_array(f, n);
-        for (a, e) in call.args.iter().zip(&elems) {
+        for (a, e) in arg_ptrs.into_iter().zip(&elems) {
             let moved = match a {
                 Expr::Local(i) if is_move(f, a) => self.slot_of(f, *i),
                 _ => None,
@@ -3469,7 +3643,7 @@ impl<'ctx> Lowerer<'ctx> {
                 self.lower(f, a, *e)?;
             }
         }
-        let op = core_name
+        let op = op_name
             .and_then(|name| native_abi::own_op(name, n).or_else(|| native_abi::inline_op(name, n)))
             .unwrap_or(u32::MAX);
         let aref = self.slots_ref(f, arr, n);
@@ -3486,7 +3660,7 @@ impl<'ctx> Lowerer<'ctx> {
             )
             .expect("st");
         self.check(f, st);
-        self.drop_slots(f.func, &elems);
+        self.free_slot_array(f, arr, elems);
         Ok(())
     }
 
@@ -4605,8 +4779,7 @@ impl<'ctx> Lowerer<'ctx> {
         let t = self.slot(f);
         self.lower(f, test, t)?;
         let cond = self.truthy(t);
-        self.drop_v(f.func, t);
-        self.write_tag(t, 0);
+        self.free_slots(f, &[t]);
         self.builder
             .build_conditional_branch(cond, then_b, else_b)
             .expect("br");
@@ -4679,7 +4852,8 @@ impl<'ctx> Lowerer<'ctx> {
         self.write_tag(slow_t, 0);
         self.finish_bool(f.func, &sink, sc);
         self.builder.position_at_end(join);
-        self.drop_and_nil_slots(f.func, &temps);
+        self.free_slots(f, &temps);
+        f.free_slots.push(slow_t);
         self.drop_and_nil_slots(f.func, &moved);
         let bit = phi.as_basic_value().into_int_value();
         self.builder
@@ -4743,6 +4917,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.position_at_end(header);
         f.recur.push(RecurTarget {
             header,
+            let_depth: f.let_slots.len(),
             patterns: targets,
         });
         let result = self.lower_body(f, body, dest);
@@ -4768,13 +4943,14 @@ impl<'ctx> Lowerer<'ctx> {
         let depth = f.env.len();
         // Rebinding pushes env entries per pattern position: rebuild
         // the env so later patterns see earlier ones like a fresh bind.
+        for &s in &f.let_slots[target.let_depth..] {
+            self.drop_v(f.func, s);
+        }
         for ((pat, slots), src) in target.patterns.iter().zip(&fresh) {
             self.rebind_pattern(f, pat, *src, slots)?;
         }
         f.env.truncate(depth);
-        for t in &fresh {
-            self.drop_v(f.func, *t);
-        }
+        self.free_slots(f, &fresh);
         self.builder
             .build_unconditional_branch(target.header)
             .expect("br");
@@ -5868,13 +6044,16 @@ fn self_recurs(body: &[Expr]) -> bool {
 enum HofKind {
     Each,
     Collect,
+    FilterCollect,
+    CountFilter,
+    Some,
     Reduce,
 }
 
 /// A core traversal over a literal `fn` that a compiled loop can run
-/// inline (#271 Slice 4c), with the calls the general path makes: the
-/// inner one (`map`, `mapv`, or `reduce`) and, for `dorun` / `vec` /
-/// `into []`, the outer one with its leading argument.
+/// inline (#271 Slice 4c/5g), with the calls the general path makes: the
+/// inner one (`map`, `mapv`, `filter`, `filterv`, `some`, or `reduce`) and,
+/// for `dorun` / `vec` / `into []` / `count`, the outer one with its leading argument.
 struct HofLoop<'a> {
     kind: HofKind,
     fun: &'a FunExpr,
@@ -5896,8 +6075,22 @@ struct LoopState<'ctx> {
     step: IntValue<'ctx>,
 }
 
-/// `call` as a [`HofLoop`]: `(mapv F xs)`, `(reduce F init xs)`, or
-/// `(dorun (map F xs))` / `(vec (map F xs))` / `(into [] (map F xs))`,
+fn is_direct_moving(
+    f: &FnCtx<'_>,
+    call: &clj_eval::expr::DirectCall,
+    core_name: Option<&str>,
+) -> bool {
+    let n = call.args.len();
+    core_name
+        .and_then(|cname| native_abi::own_op(cname, n))
+        .is_some()
+        || (is_owned_move_op(call.var.sym.namespace(), call.var.sym.name(), n)
+            && call.args.iter().any(|a| is_move(f, a) || is_temporary(a)))
+}
+
+/// `call` as a [`HofLoop`]: `(mapv F xs)`, `(filterv F xs)`, `(some F xs)`,
+/// `(reduce F init xs)`, `(dorun (map F xs))`, `(vec (map|filter F xs))`,
+/// `(into [] (map|filter F xs))`, or `(count (filter|filterv F xs))`,
 /// all `clojure.core`.
 fn hof_loop(call: &clj_eval::expr::DirectCall) -> Option<HofLoop<'_>> {
     if call.var.sym.namespace() != Some("clojure.core") {
@@ -5917,20 +6110,35 @@ fn hof_loop(call: &clj_eval::expr::DirectCall) -> Option<HofLoop<'_>> {
     };
     match (call.var.sym.name(), call.args.as_slice()) {
         ("mapv", [fe, coll]) => one(HofKind::Collect, fe, None, coll),
+        ("filterv", [fe, coll]) => one(HofKind::FilterCollect, fe, None, coll),
+        ("some", [fe, coll]) => one(HofKind::Some, fe, None, coll),
         ("reduce", [fe, init, coll]) => one(HofKind::Reduce, fe, Some(init), coll),
-        ("dorun", [inner]) => map_loop(inner, HofKind::Each, call, None),
-        ("vec", [inner]) => map_loop(inner, HofKind::Collect, call, None),
+        _ => outer_hof_loop(call),
+    }
+}
+
+fn outer_hof_loop(call: &clj_eval::expr::DirectCall) -> Option<HofLoop<'_>> {
+    match (call.var.sym.name(), call.args.as_slice()) {
+        ("dorun", [inner]) => inner_hof_loop(inner, &["map"], HofKind::Each, call, None),
+        ("vec", [inner]) => inner_hof_loop(inner, &["map"], HofKind::Collect, call, None)
+            .or_else(|| inner_hof_loop(inner, &["filter"], HofKind::FilterCollect, call, None)),
         ("into", [to @ Expr::VecLit(items, None), inner]) if items.is_empty() => {
-            map_loop(inner, HofKind::Collect, call, Some(to))
+            inner_hof_loop(inner, &["map"], HofKind::Collect, call, Some(to)).or_else(|| {
+                inner_hof_loop(inner, &["filter"], HofKind::FilterCollect, call, Some(to))
+            })
+        }
+        ("count", [inner]) => {
+            inner_hof_loop(inner, &["filter", "filterv"], HofKind::CountFilter, call, None)
         }
         _ => None,
     }
 }
 
-/// `(map F xs)` (a `clojure.core/map` of a literal one-param `fn`) under
-/// the outer call `outer`.
-fn map_loop<'a>(
+/// `(map|filter|filterv F xs)` (a `clojure.core` traversal of a literal
+/// one-param `fn`) under the outer call `outer`.
+fn inner_hof_loop<'a>(
     inner: &'a Expr,
+    names: &[&str],
     kind: HofKind,
     outer: &'a clj_eval::expr::DirectCall,
     prefix: Option<&'a Expr>,
@@ -5941,7 +6149,7 @@ fn map_loop<'a>(
     let [fe, coll] = m.args.as_slice() else {
         return None;
     };
-    if m.var.sym.namespace() != Some("clojure.core") || m.var.sym.name() != "map" {
+    if m.var.sym.namespace() != Some("clojure.core") || !names.contains(&m.var.sym.name()) {
         return None;
     }
     let (fun, arity) = inline_fn(fe, 1)?;
@@ -6058,7 +6266,8 @@ fn is_owned_move_op(ns: Option<&str>, name: &str, argc: usize) -> bool {
             Some("clojure.core"),
             "str" | "vec" | "set" | "butlast" | "doall" | "dorun" | "drop-last" | "take-last"
             | "frequencies" | "reverse" | "sort" | "sort-by" | "group-by" | "some" | "every?"
-            | "not-every?" | "not-any?" | "mapv" | "filterv" | "reduce" | "transduce",
+            | "not-every?" | "not-any?" | "mapv" | "filterv" | "reduce" | "reduce-kv" | "run!"
+            | "transduce",
         ) => argc >= 1,
         _ => false,
     }

@@ -762,6 +762,26 @@ pub fn bind_counts() -> Arc<BindCounts> {
 /// The count itself is the low bits.
 pub const TAKE_ARGS: u64 = 1 << 62;
 
+/// Per-argument ownership bit shift (`TAKE_ARG_SHIFT + (i & 31)`):
+/// a compiled caller sets bit `30 + i` in `n` when `argv[i]` is an owned
+/// temporary or moved last-use local that the callee may move out in place.
+pub const TAKE_ARG_SHIFT: u32 = 30;
+
+/// The single-argument ownership bit in `n` for parameter `i`.
+#[inline]
+#[must_use]
+pub const fn single_take_arg_bit(i: usize) -> u64 {
+    1u64 << (TAKE_ARG_SHIFT + ((i & 31) as u32))
+}
+
+/// The bitmask in `n` allowing parameter `i` to be moved out of `argv[i]`:
+/// either [`TAKE_ARGS`] (all args owned) or [`single_take_arg_bit`].
+#[inline]
+#[must_use]
+pub const fn take_arg_mask(i: usize) -> u64 {
+    TAKE_ARGS | single_take_arg_bit(i)
+}
+
 /// Parse a JVM `Long/parseLong` base-10 string (`None` on malformed or out-of-range).
 #[must_use]
 pub fn parse_long_str(s: &str) -> Option<i64> {
@@ -1143,6 +1163,9 @@ const OWN_OPS: &[(&str, usize, OwnFn)] = &[
         1,
         <crate::vm_ops::Rest as crate::vm_ops::Upd>::apply,
     ),
+    ("update", 3, crate::vm_ops::apply_update3),
+    ("assoc-in2", 4, crate::vm_ops::apply_assoc_in2),
+    ("update-in2", 4, crate::vm_ops::apply_update_in2),
 ];
 
 /// Opcode for [`apply_own`], matching core fns whose in-place `Upd`
@@ -1164,6 +1187,23 @@ pub fn apply_own(id: u32, args: &mut [Value]) -> Option<Value> {
     OWN_OPS
         .get((id & !OWN_BIT) as usize)
         .and_then(|(_, _, f)| f(args))
+}
+
+/// Repack unboxed 2-key path arguments (`[m, k1, k2, vf]`) back into the
+/// 3-argument `[m, [k1 k2], vf]` form when [`apply_own`] falls back to the
+/// general `assoc-in` / `update-in` native.
+pub fn repack_own_args(id: u32, args: &mut smallvec::SmallVec<[Value; 4]>) {
+    if (id & OWN_BIT) != 0
+        && matches!(
+            OWN_OPS.get((id & !OWN_BIT) as usize),
+            Some(&("assoc-in2" | "update-in2", 4, _))
+        )
+        && args.len() == 4
+    {
+        let k2 = args.remove(2);
+        let k1 = std::mem::replace(&mut args[1], Value::Nil);
+        args[1] = Value::Vector(Vector::from_vec(vec![k1, k2]));
+    }
 }
 
 /// A compiled loop's direct iteration plan (#271 Slice 4c): `(1, count,

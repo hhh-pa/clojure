@@ -578,7 +578,8 @@ pub extern "C" fn rt_n_core_own(out: &mut Value, op: u32, k: u64, args: &mut CSl
         *out = v;
         return 0;
     }
-    let moved = take_args(args);
+    let mut moved = take_args(args);
+    native_abi::repack_own_args(op, &mut moved);
     finish(
         out,
         with_active(|eval| native::call_core_var(eval, k as usize, moved)),
