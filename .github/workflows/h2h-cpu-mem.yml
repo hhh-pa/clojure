@@ -259,16 +259,16 @@ jobs:
             echo "  to: \`$to_sha\` ($to)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # A fresh AOT hot-text order per side (#271). Linux AOT links pack
-  # the runtime functions rust/hot-text-aot.ld lists into one
-  # `.text.hot` section; the committed order names functions, so it
-  # goes stale whenever runtime code moves, and a stale order costs
-  # peak RSS. Each side's order is regenerated from that revision's
-  # runtime over the generic training workloads
-  # (scripts/bench/hot-text/regen-aot.sh, from this run's checkout:
+  # Fresh hot-text orders per side (#226, #271). Linux release links pack
+  # the runtime functions rust/hot-text.ld (interpreter) and
+  # rust/hot-text-aot.ld (AOT) list into one `.text.hot` section; each
+  # order names functions, so it goes stale whenever runtime code moves,
+  # and a stale order costs peak RSS. Each side's orders are regenerated
+  # from that revision's runtime over the generic training workloads
+  # (scripts/bench/hot-text/regen-{run,aot}.sh, from this run's checkout:
   # the same workloads for both sides, never the snippets or their
-  # inputs), so both AOT legs link a fresh order, as a release build
-  # does (rust-release.yml). A failed regeneration keeps the side's
+  # inputs), so both `run` and AOT legs link fresh orders, as a release
+  # build does (rust-release.yml). A failed regeneration keeps the side's
   # committed order (the measure job falls back below).
   hot-text:
     needs: [resolve]
@@ -282,9 +282,9 @@ jobs:
       fail-fast: false
       matrix:
         side: [from, to]
-    name: hot-text order (aot-${{ matrix.side }})
+    name: hot-text orders (${{ matrix.side }})
     steps:
-      - name: Check out the aot-${{ matrix.side }} revision
+      - name: Check out the ${{ matrix.side }} revision
         uses: actions/checkout@v5
         with:
           ref: ${{ matrix.side == 'from' && needs.resolve.outputs.rs_from_sha || needs.resolve.outputs.rs_to_sha }}
@@ -310,23 +310,35 @@ jobs:
           key: hot-text-${{ matrix.side }}
           save-if: 'true'
 
+      - name: Regenerate the interpreter hot-text order
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/hot-text-out"
+          if [ ! -f rev/rust/hot-text.ld ]; then
+            echo "rs-${{ matrix.side }}: this revision links no interpreter hot-text order" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          bash h2h/scripts/bench/hot-text/regen-run.sh rev/rust "$RUNNER_TEMP/hot-text-out/hot-text.ld"
+
       - name: Set up LLVM 23
         uses: ./h2h/.github/actions/setup-llvm
 
       # A revision older than the AOT order (master before #271) links
       # none: nothing to regenerate, nothing to upload.
-      - name: Regenerate the order
+      - name: Regenerate the AOT hot-text order
+        continue-on-error: true
         run: |
+          mkdir -p "$RUNNER_TEMP/hot-text-out"
           if [ ! -f rev/rust/hot-text-aot.ld ]; then
             echo "aot-${{ matrix.side }}: this revision links no AOT hot-text order" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          bash h2h/scripts/bench/hot-text/regen-aot.sh rev/rust "$RUNNER_TEMP/hot-text-aot.ld"
+          bash h2h/scripts/bench/hot-text/regen-aot.sh rev/rust "$RUNNER_TEMP/hot-text-out/hot-text-aot.ld"
 
       - uses: actions/upload-artifact@v6
         with:
           name: hot-text-${{ matrix.side }}
-          path: ${{ runner.temp }}/hot-text-aot.ld
+          path: ${{ runner.temp }}/hot-text-out
           if-no-files-found: ignore
 
   # All three legs of a shard on ONE runner: each job builds both
@@ -505,6 +517,27 @@ jobs:
           # measures fail, and the next run reuses them.
           cache-on-failure: 'true'
 
+      - name: Fetch the regenerated hot-text orders
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          pattern: hot-text-*
+          path: hot-text
+
+      - name: Link the interpreter sides with their fresh orders
+        run: |
+          for side in from to; do
+            order="hot-text/hot-text-$side/hot-text.ld"
+            if [ ! -f "h2h-$side/rust/hot-text.ld" ]; then
+              echo "rs-$side: links no interpreter hot-text order" >> "$GITHUB_STEP_SUMMARY"
+            elif [ -s "$order" ]; then
+              cp "$order" "h2h-$side/rust/hot-text.ld"
+              echo "rs-$side: regenerated hot-text order ($(grep -c '^    \*(' "$order") functions)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "rs-$side: committed hot-text order (regeneration unavailable)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
       - name: Build rs-from clojure-rs
         run: |
           cd h2h-from/rust
@@ -526,13 +559,6 @@ jobs:
       # default-feature `aot` toolchains alongside `libcljrt.a` and `hot-text.ld`.
       - name: Set up LLVM 23
         uses: ./h2h/.github/actions/setup-llvm
-
-      - name: Fetch the regenerated hot-text orders
-        continue-on-error: true
-        uses: actions/download-artifact@v6
-        with:
-          pattern: hot-text-*
-          path: hot-text
 
       - name: Link the AOT sides with their fresh orders
         run: |

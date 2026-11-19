@@ -291,12 +291,12 @@ Two fork probes on Linux (generic programs, no snippet inputs) settled the cause
 
 The snippets run runtime paths the 30 workloads never reach. Each such function sits in the cold text and faults in its own 64 KiB window. `regen-aot.sh` now also profiles the compiler's test corpus (`docs/spec/i259-native-compiler/corpus`, empty stdin): generic programs, still never the benchmark snippets or their inputs.
 
-**CI keeps it fresh.**
+**CI keeps both orders fresh.**
 
-- The h2h workflow's `hot-text` job regenerates each side's order (aot-from, aot-to) once, using this run's tooling and workloads, and the 32 measure shards link with it.
-- `rust-release.yml` regenerates the order before the Linux release build, so shipped binaries never carry a stale order.
+- The h2h workflow's `hot-text` job regenerates each side's interpreter order (`rust/hot-text.ld` via `regen-run.sh`, generic 26 workloads) and AOT order (`rust/hot-text-aot.ld` via `regen-aot.sh`) once, using this run's tooling and workloads, and the 32 measure shards link with them. (At ae942dbd, the stale committed `rust/hot-text.ld` had let `rs-from` drift +526 KB above `rs-to`, tripping 6 `recipes` MEM losses against CPython.)
+- `rust-release.yml` regenerates both orders before the Linux release build, so shipped binaries never carry a stale order.
 - A failed regeneration keeps the committed order.
-- The committed copy only serves local builds and is refreshed from the same pipeline.
+- The committed copies only serve local builds and are refreshed from the same pipeline.
 
 ### 6.16 Slice 4k: map destructuring by direct lookups
 
