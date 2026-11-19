@@ -1867,20 +1867,33 @@ pub(crate) fn walk_sole_map(
     Some(walk_parts(eval, parts, visit).map(|_| ()))
 }
 
-/// A sole unforced `map` seq's fn and inputs ([`walk_sole_map`]), or a
-/// sole unforced `mapcat`'s outer `map` (#271: `for` over several
-/// bindings or with `:when` is a `mapcat`).
+/// A sole unforced lazy seq's parts ([`walk_sole_map`]): `map`,
+/// `mapcat` (including multi-binding/`:when` `for`), `filter`,
+/// `remove`, `take`, and `concat` (#271).
 enum SoleMap {
     One(Value, Value),
     Vectors(Value, Vec<Vector>),
     Cat(Box<SoleMap>),
+    Filter {
+        f: Value,
+        input: Value,
+        invert: bool,
+    },
+    Take {
+        n: Value,
+        input: Value,
+    },
+    Concat {
+        cur: Value,
+        rest: Arc<Vec<Value>>,
+        idx: usize,
+        outer: ConcatStack,
+    },
 }
 
 /// Walk [`SoleMap`] parts; answers whether `visit` let the walk reach
-/// the end. A `mapcat` walks its outer `map` as a `map` walks, then
-/// each result in turn ([`walk_all`]): forcing the cells runs the same
-/// steps in the same order (`step_mapcat`: the outer chunk's results,
-/// realized ones spliced, lazy ones through their own units).
+/// the end. Every variant preserves the exact chunking and forcing
+/// order of its `step_*` counterpart without allocating lazy cells.
 fn walk_parts(
     eval: &mut Evaluator,
     parts: SoleMap,
@@ -1898,13 +1911,21 @@ fn walk_parts(
             walk_parts(eval, *outer, &mut each)?;
             Ok(go_on)
         }
+        SoleMap::Filter { f, input, invert } => walk_filter(eval, &f, input, invert, visit),
+        SoleMap::Take { n, input } => walk_take(eval, &n, input, visit),
+        SoleMap::Concat {
+            cur,
+            rest,
+            idx,
+            outer,
+        } => walk_concat(eval, cur, rest, idx, outer, visit),
     }
 }
 
-/// Walk every item of one `mapcat` result in seq order: a sole unforced
-/// `map`/`mapcat` without its cells, nil and realized lists and vectors
-/// item by item (`splice_realized`), anything else unit by unit through
-/// its seq. Answers whether `visit` let the walk reach the end.
+/// Walk every item of one collection in seq order without allocating
+/// lazy cells for sole unforced combinators, vectors, lists, subvectors,
+/// repeats, or counted long ranges. Answers whether `visit` let the
+/// walk reach the end.
 fn walk_all(
     eval: &mut Evaluator,
     coll: Value,
@@ -1917,10 +1938,48 @@ fn walk_all(
         Value::Nil => Ok(true),
         Value::List(l) => visit_all(eval, l.iter().cloned(), visit),
         Value::Vector(v) => visit_all(eval, v.iter(), visit),
-        other => {
-            let s = seq_value(eval, &other)?;
-            walk_units(eval, s, visit)
+        other => walk_all_other(eval, other, visit),
+    }
+}
+
+fn walk_all_other(
+    eval: &mut Evaluator,
+    other: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if let Some(sv) = as_subvector(&other) {
+        return visit_all(eval, sv.vec().iter().skip(sv.start()).take(sv.len()), visit);
+    }
+    if let Some(r) = as_repeat(&other) {
+        return walk_repeat(eval, r, visit);
+    }
+    if let Some((cur, step, n)) = crate::seqs::long_range(&other) {
+        return visit_all(eval, (0..n).map(|k| Value::Int(cur + k * step)), visit);
+    }
+    let s = seq_value(eval, &other)?;
+    walk_units(eval, s, visit)
+}
+
+fn walk_repeat(
+    eval: &mut Evaluator,
+    r: &clj_value::RepeatValue,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let x = r.x();
+    match r.n() {
+        Some(n) => {
+            for _ in 0..n.max(0) {
+                if !visit(eval, x.clone())? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         }
+        None => loop {
+            if !visit(eval, x.clone())? {
+                return Ok(false);
+            }
+        },
     }
 }
 
@@ -1960,9 +2019,8 @@ fn visit_all(
     Ok(true)
 }
 
-/// `coll`'s map fn and inputs when it is an unforced `map` seq with no
-/// other handle (and, past one input, vector inputs only), or the outer
-/// `map` of such a `mapcat` (its only holder is the `mapcat` cell).
+/// `coll`'s parts when it is an unforced combinator seq with no other
+/// handle (`map`, `mapcat`, `filter`, `remove`, `take`, `concat`).
 fn sole_map_parts(coll: &Value) -> Option<SoleMap> {
     let Value::Extension(e) = coll else {
         return None;
@@ -1975,14 +2033,44 @@ fn sole_map_parts(coll: &Value) -> Option<SoleMap> {
     let SeqState::Pending(thunk) = &*state else {
         return None;
     };
-    let (f, inputs) = match &**thunk {
-        Thunk::Map { f, inputs } => (f, inputs),
-        Thunk::MapCat { outer } => {
-            return sole_map_parts(outer).map(|parts| SoleMap::Cat(Box::new(parts)));
-        }
-        _ => return None,
-    };
-    if let [input] = &inputs[..] {
+    sole_thunk_parts(thunk)
+}
+
+fn sole_thunk_parts(thunk: &Thunk) -> Option<SoleMap> {
+    match thunk {
+        Thunk::Map { f, inputs } => sole_map_inputs(f, inputs),
+        Thunk::MapCat { outer } => sole_map_parts(outer).map(|parts| SoleMap::Cat(Box::new(parts))),
+        Thunk::Filter { f, input } => Some(SoleMap::Filter {
+            f: f.clone(),
+            input: input.clone(),
+            invert: false,
+        }),
+        Thunk::Remove { f, input } => Some(SoleMap::Filter {
+            f: f.clone(),
+            input: input.clone(),
+            invert: true,
+        }),
+        Thunk::Take { n, input } => Some(SoleMap::Take {
+            n: n.clone(),
+            input: input.clone(),
+        }),
+        Thunk::Concat {
+            cur,
+            rest,
+            idx,
+            outer,
+        } => Some(SoleMap::Concat {
+            cur: cur.clone(),
+            rest: Arc::clone(rest),
+            idx: *idx,
+            outer: outer.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn sole_map_inputs(f: &Value, inputs: &[Value]) -> Option<SoleMap> {
+    if let [input] = inputs {
         return Some(SoleMap::One(f.clone(), input.clone()));
     }
     let vectors = inputs
@@ -1995,6 +2083,83 @@ fn sole_map_parts(coll: &Value) -> Option<SoleMap> {
     Some(SoleMap::Vectors(f.clone(), vectors))
 }
 
+fn call_map1(
+    eval: &mut Evaluator,
+    f: &Value,
+    prep: Option<&crate::vm::Prepared<'_>>,
+    item: Value,
+) -> Result<Value, Signal> {
+    if let Some(p) = prep {
+        return p.call1(eval, item);
+    }
+    let slice = std::slice::from_ref(&item);
+    match crate::vm::invoke_lookup(f, slice) {
+        Some(v) => Ok(v),
+        None => eval.call(f, slice),
+    }
+}
+
+fn walk_map_vector(
+    eval: &mut Evaluator,
+    f: &Value,
+    v: &Vector,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if v.is_empty() {
+        return Ok(true);
+    }
+    crate::core::check_ifn(eval, f)?;
+    let prep = crate::vm::Prepared::of(f, 1);
+    let mut buf: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
+    let mut iter = v.iter();
+    loop {
+        buf.clear();
+        for item in iter.by_ref().take(CHUNK_SIZE) {
+            buf.push(call_map1(eval, f, prep.as_ref(), item)?);
+        }
+        if buf.is_empty() {
+            return Ok(true);
+        }
+        if !visit_all(eval, buf.drain(..), visit)? {
+            return Ok(false);
+        }
+    }
+}
+
+fn walk_map_range(
+    eval: &mut Evaluator,
+    f: &Value,
+    start: i64,
+    step: i64,
+    n: i64,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if n <= 0 {
+        return Ok(true);
+    }
+    crate::core::check_ifn(eval, f)?;
+    let prep = crate::vm::Prepared::of(f, 1);
+    let mut buf: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
+    let mut k = 0i64;
+    while k < n {
+        buf.clear();
+        let end = (k + CHUNK_SIZE as i64).min(n);
+        while k < end {
+            buf.push(call_map1(
+                eval,
+                f,
+                prep.as_ref(),
+                Value::Int(start + k * step),
+            )?);
+            k += 1;
+        }
+        if !visit_all(eval, buf.drain(..), visit)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// [`walk_sole_map`] over one input: unit by unit, like `step_map_one`.
 fn walk_map_one(
     eval: &mut Evaluator,
@@ -2002,6 +2167,12 @@ fn walk_map_one(
     mut cur: Value,
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Result<bool, Signal> {
+    if let Value::Vector(v) = &cur {
+        return walk_map_vector(eval, f, v, visit);
+    }
+    if let Some((start, step, n)) = crate::seqs::long_range(&cur) {
+        return walk_map_range(eval, f, start, step, n, visit);
+    }
     loop {
         let out = match step_unit(eval, &cur)? {
             StepUnit::Empty => return Ok(true),
@@ -2029,18 +2200,239 @@ fn walk_map_vectors(
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Result<bool, Signal> {
     let n = inputs.iter().map(Vector::len).min().unwrap_or(0);
+    if n == 0 {
+        return Ok(true);
+    }
+    crate::core::check_ifn(eval, f)?;
+    if let [a, b] = inputs {
+        return walk_map_two_vectors(eval, f, a, b, visit);
+    }
     let mut iters: Vec<_> = inputs.iter().map(Vector::iter).collect();
     let mut heads = Vec::with_capacity(iters.len());
     for _ in 0..n {
         heads.clear();
         heads.extend(iters.iter_mut().map(|it| it.next().unwrap_or(Value::Nil)));
-        crate::core::check_ifn(eval, f)?;
         let out = eval.call(f, &heads)?;
         if !visit(eval, out)? {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+fn walk_map_two_vectors(
+    eval: &mut Evaluator,
+    f: &Value,
+    a: &Vector,
+    b: &Vector,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    match crate::vm::Prepared::of(f, 2) {
+        Some(p) => {
+            for (x, y) in a.iter().zip(b.iter()) {
+                let out = p.call2(eval, x, y)?;
+                if !visit(eval, out)? {
+                    return Ok(false);
+                }
+            }
+        }
+        None => {
+            for (x, y) in a.iter().zip(b.iter()) {
+                let out = eval.call(f, &[x, y])?;
+                if !visit(eval, out)? {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn walk_filter(
+    eval: &mut Evaluator,
+    f: &Value,
+    input: Value,
+    invert: bool,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if let Value::Vector(v) = &input {
+        return walk_filter_vector(eval, f, v, invert, visit);
+    }
+    if let Some((start, step, n)) = crate::seqs::long_range(&input) {
+        return walk_filter_range(eval, f, start, step, n, invert, visit);
+    }
+    walk_filter_units(eval, f, input, invert, visit)
+}
+
+fn walk_filter_vector(
+    eval: &mut Evaluator,
+    f: &Value,
+    v: &Vector,
+    invert: bool,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if v.is_empty() {
+        return Ok(true);
+    }
+    crate::core::check_ifn(eval, f)?;
+    let prep = filter_prep(f);
+    let mut kept: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
+    let mut iter = v.iter();
+    loop {
+        kept.clear();
+        let mut saw = false;
+        for item in iter.by_ref().take(CHUNK_SIZE) {
+            saw = true;
+            if test_filter_item(eval, f, prep.as_ref(), &item)? != invert {
+                kept.push(item);
+            }
+        }
+        if !saw {
+            return Ok(true);
+        }
+        if !visit_all(eval, kept.drain(..), visit)? {
+            return Ok(false);
+        }
+    }
+}
+
+fn walk_filter_range(
+    eval: &mut Evaluator,
+    f: &Value,
+    start: i64,
+    step: i64,
+    n: i64,
+    invert: bool,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if n <= 0 {
+        return Ok(true);
+    }
+    crate::core::check_ifn(eval, f)?;
+    let prep = filter_prep(f);
+    let mut kept: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
+    let mut k = 0i64;
+    while k < n {
+        kept.clear();
+        let end = (k + CHUNK_SIZE as i64).min(n);
+        while k < end {
+            let item = Value::Int(start + k * step);
+            if test_filter_item(eval, f, prep.as_ref(), &item)? != invert {
+                kept.push(item);
+            }
+            k += 1;
+        }
+        if !visit_all(eval, kept.drain(..), visit)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn walk_filter_units(
+    eval: &mut Evaluator,
+    f: &Value,
+    mut cur: Value,
+    invert: bool,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let prep = filter_prep(f);
+    let mut checked = false;
+    let mut kept: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
+    loop {
+        match step_unit(eval, &cur)? {
+            StepUnit::Empty => return Ok(true),
+            StepUnit::One { head, tail } => {
+                if !checked {
+                    crate::core::check_ifn(eval, f)?;
+                    checked = true;
+                }
+                cur = tail;
+                if test_filter_item(eval, f, prep.as_ref(), &head)? != invert && !visit(eval, head)?
+                {
+                    return Ok(false);
+                }
+            }
+            StepUnit::Chunk { items, tail } => {
+                if !checked {
+                    crate::core::check_ifn(eval, f)?;
+                    checked = true;
+                }
+                cur = tail;
+                kept.clear();
+                for item in items.iter() {
+                    if test_filter_item(eval, f, prep.as_ref(), item)? != invert {
+                        kept.push(item.clone());
+                    }
+                }
+                if !visit_all(eval, kept.drain(..), visit)? {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+}
+
+fn walk_take(
+    eval: &mut Evaluator,
+    n: &Value,
+    input: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let mut rem = crate::core::take_count(n).map_err(|e| eval.throw(e))?;
+    if rem <= 0 {
+        return Ok(true);
+    }
+    let mut outer_go_on = true;
+    let mut limited = |eval: &mut Evaluator, item: Value| -> Result<bool, Signal> {
+        outer_go_on = visit(eval, item)?;
+        rem -= 1;
+        Ok(outer_go_on && rem > 0)
+    };
+    walk_all(eval, input, &mut limited)?;
+    Ok(outer_go_on)
+}
+
+fn walk_concat(
+    eval: &mut Evaluator,
+    mut cur: Value,
+    mut rest: Arc<Vec<Value>>,
+    mut idx: usize,
+    mut outer: ConcatStack,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    loop {
+        while let Some((icur, irest, iidx, iouter)) = unforced_concat_parts(&cur) {
+            if rest.get(idx).is_some() {
+                outer = Some(Arc::new(ConcatFrame {
+                    rest,
+                    idx,
+                    parent: outer,
+                }));
+            }
+            outer = splice_concat_stack(iouter, outer);
+            cur = icur;
+            rest = irest;
+            idx = iidx;
+        }
+        if !walk_all(eval, cur, visit)? {
+            return Ok(false);
+        }
+        loop {
+            if let Some(next) = rest.get(idx) {
+                cur = next.clone();
+                idx += 1;
+                break;
+            }
+            match pop_concat_frame(&mut outer) {
+                Some((orest, oidx)) => {
+                    rest = orest;
+                    idx = oidx;
+                }
+                None => return Ok(true),
+            }
+        }
+    }
 }
 
 /// Re-chain an unconsumed remainder ahead of its tail.

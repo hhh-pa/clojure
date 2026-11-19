@@ -1397,7 +1397,7 @@ pub(crate) fn native_mapv_owned(
             return Ok(res);
         }
     }
-    // One input under a VM fn walks it in place (#226): no lazy map
+    // One input under a VM/native fn walks it in place (#226): no lazy map
     // in between, the fn resolved once.
     if let ([_], Some(p)) = (&inputs[..], crate::vm::Prepared::of(&args[0], 1)) {
         let input = inputs.into_iter().next().unwrap_or(Value::Nil);
@@ -1410,11 +1410,54 @@ pub(crate) fn native_mapv_owned(
         let vec = tv.persistent().expect("fresh transient is valid at freeze");
         return Ok(Value::Vector(vec));
     }
+    // Two inputs starting with a vector under a prepared 2-arity fn walk
+    // without allocating a lazy `map` cell (#271).
+    let mut inputs = inputs;
+    if let [Value::Vector(v1), second] = &mut inputs[..] {
+        if let Some(p) = crate::vm::Prepared::of(&args[0], 2) {
+            let v1 = v1.clone();
+            let second = std::mem::replace(second, Value::Nil);
+            return mapv_two_prepared(eval, &p, v1, second);
+        }
+    }
     let mapped = map_thunk(args[0].clone(), inputs);
     // Packed streaming (#227): no intermediate `Vec<Value>`, and
     // all-`Int` results freeze to packed storage zero-copy.
     let vec = collect_packed(eval, mapped).map_err(signal_to_native)?;
     Ok(Value::Vector(vec))
+}
+
+fn mapv_two_prepared(
+    eval: &mut Evaluator,
+    p: &crate::vm::Prepared<'_>,
+    v1: Vector,
+    second: Value,
+) -> Result<Value, NativeError> {
+    if v1.is_empty() {
+        return Ok(Value::Vector(Vector::new_sync()));
+    }
+    let mut tv = clj_value::TransientVector::new();
+    if let Value::Vector(v2) = second {
+        for (a, b) in v1.iter().zip(v2.iter()) {
+            let out = p.call2(eval, a, b).map_err(signal_to_native)?;
+            tv.conj(out).expect("fresh transient accepts conj");
+        }
+        return Ok(Value::Vector(
+            tv.persistent().expect("fresh transient is valid at freeze"),
+        ));
+    }
+    let mut a_iter = v1.iter();
+    let mut rem = v1.len();
+    walk_seq(eval, second, |eval, b| {
+        let a = a_iter.next().expect("remaining count matches iterator");
+        let out = p.call2(eval, a, b.clone()).map_err(signal_to_native)?;
+        tv.conj(out).expect("fresh transient accepts conj");
+        rem -= 1;
+        Ok(if rem == 0 { Walk::Stop } else { Walk::Continue })
+    })?;
+    Ok(Value::Vector(
+        tv.persistent().expect("fresh transient is valid at freeze"),
+    ))
 }
 
 fn filterv_vector(eval: &mut Evaluator, f: &Value, v: Vector) -> Result<Value, NativeError> {
@@ -2307,5 +2350,67 @@ mod sole_map_walk_tests {
         assert_eq!(Value::Vector(two.expect("collects")), ints(&[4, 6]));
         let one = collect_packed(&mut eval, map_thunk(inc, vec![ints(&[5])]));
         assert_eq!(Value::Vector(one.expect("collects")), ints(&[6]));
+    }
+
+    /// #271: sole `filter`, `remove`, `take`, `concat`, `repeat`, `range`,
+    /// 2-vector `map`/`mapv`, `count` fusion, and `Prepared` double arith.
+    #[test]
+    fn sole_combinators_walk_like_their_cells() {
+        let mut eval = crate::ns::boot();
+        let cases = [
+            ("(vec (map inc (range 5)))", "[1 2 3 4 5]"),
+            ("(vec (map inc (range 0)))", "[]"),
+            ("(some #{3} (map inc (range 5)))", "3"),
+            ("(vec (map :a [{:a 1} {:a 2}]))", "[1 2]"),
+            ("(vec (map #'inc [1 2]))", "[2 3]"),
+            ("(vec (map + [] [1 2]))", "[]"),
+            ("(vec (map + [1 2] [10 20] [100 200]))", "[111 222]"),
+            ("(some #{111} (map + [1 2] [10 20] [100 200]))", "111"),
+            ("(vec (map {:a 1 :b 2} [:a :c] [9 8]))", "[1 8]"),
+            ("(some #{1} (map {:a 1 :b 2} [:a :b] [9 8]))", "1"),
+            ("(vec (filter even? [1 2 3 4]))", "[2 4]"),
+            ("(vec (filter even? []))", "[]"),
+            ("(some #{2} (filter even? [1 2 3 4]))", "2"),
+            ("(vec (remove even? (range 5)))", "[1 3]"),
+            ("(vec (remove even? (range 0)))", "[]"),
+            ("(some #{1} (remove even? (range 5)))", "1"),
+            ("(vec (filter odd? (list 1 2 3 4)))", "[1 3]"),
+            ("(some #{1} (filter odd? (list 1 2 3 4)))", "1"),
+            ("(vec (filter odd? (drop 1 (range 6))))", "[1 3 5]"),
+            ("(some #{3} (filter odd? (drop 1 (range 6))))", "3"),
+            ("(vec (filter odd? (list)))", "[]"),
+            ("(vec (take 0 [1 2]))", "[]"),
+            ("(vec (take 3 (repeat 7)))", "[7 7 7]"),
+            ("(vec (take 2 (repeat 5 7)))", "[7 7]"),
+            (
+                "(vec (concat [1] (repeat 2 0.0) (subvec [10 20 30] 1 3) (range 2)))",
+                "[1 0.0 0.0 20 30 0 1]",
+            ),
+            (
+                "(vec (concat (concat [1] [2]) (concat [3] [4]) [5]))",
+                "[1 2 3 4 5]",
+            ),
+            ("(some #{2} (concat [1 2] [3 4]))", "2"),
+            ("(count (filter #(= % 2) [1 2 3 2]))", "2"),
+            ("(count (remove odd? (range 6)))", "3"),
+            ("(count (take 4 (concat [1 2] (repeat 9))))", "4"),
+            ("(vec (drop 1 [1 2 3]))", "[2 3]"),
+            ("(mapv + [] (range 3))", "[]"),
+            ("(mapv + [1 2] [3 4])", "[4 6]"),
+            ("(mapv + [1 2] (map inc [10 20 30]))", "[12 23]"),
+            ("(reduce + 0.0 [1.5 2.5])", "4.0"),
+            ("(reduce + 0.0 [1 2])", "3.0"),
+            ("(reduce + 1 [2.5])", "3.5"),
+            ("(mapv inc [1.5 2.5])", "[2.5 3.5]"),
+            ("(mapv dec [2.5 3.5])", "[1.5 2.5]"),
+        ];
+        for (expr, want) in cases {
+            let got = source(&mut eval, expr);
+            let exp = source(&mut eval, want);
+            assert_eq!(got, exp, "expr={expr}");
+        }
+        // Unfused pending thunk (drop) hits the `_ => None` arm in sole_thunk_parts.
+        let dropped = source(&mut eval, "(drop 1 [1 2 3])");
+        assert_eq!(walked(&mut eval, dropped, 9).expect("walks"), ints(&[2, 3]));
     }
 }

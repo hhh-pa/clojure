@@ -2990,6 +2990,21 @@ impl Evaluator {
         }
     }
 
+    /// Inline binary `Double` arithmetic/comparison for `Prepared::call2` (#271).
+    pub(crate) fn fast_double2(op: FastArith, x: f64, y: f64) -> Option<Value> {
+        match op {
+            FastArith::Add => Some(Value::Double(x + y)),
+            FastArith::Sub => Some(Value::Double(x - y)),
+            FastArith::Mul => Some(Value::Double(x * y)),
+            FastArith::Div => Some(Value::Double(x / y)),
+            FastArith::Lt => Some(Value::Bool(x < y)),
+            FastArith::Lte => Some(Value::Bool(x <= y)),
+            FastArith::Gt => Some(Value::Bool(x > y)),
+            FastArith::Gte => Some(Value::Bool(x >= y)),
+            FastArith::None | FastArith::Inc | FastArith::Dec => None,
+        }
+    }
+
     /// A validated call over already-evaluated args (fast-path
     /// fallback: overflow or non-`Int` operands run the genuine
     /// native, so errors and tower results stay exact — and every
@@ -4688,6 +4703,42 @@ mod tests {
         assert_eq!(Evaluator::fast_int2(FastArith::None, 1, 2), None);
         assert_eq!(Evaluator::fast_int2(Inc, 1, 2), None);
         assert_eq!(Evaluator::fast_int2(Dec, 1, 2), None);
+        // Double binary fast path.
+        assert_eq!(
+            Evaluator::fast_double2(Add, 1.5, 2.25),
+            Some(Value::Double(3.75))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Sub, 5.0, 2.5),
+            Some(Value::Double(2.5))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Mul, 2.5, -2.0),
+            Some(Value::Double(-5.0))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Div, 5.0, 2.0),
+            Some(Value::Double(2.5))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Lt, 1.0, 2.0),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Lte, 2.0, 2.0),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Gt, 3.0, 2.0),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Gte, 1.0, 2.0),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(Evaluator::fast_double2(FastArith::None, 1.0, 2.0), None);
+        assert_eq!(Evaluator::fast_double2(Inc, 1.0, 2.0), None);
+        assert_eq!(Evaluator::fast_double2(Dec, 1.0, 2.0), None);
     }
 
     #[test]

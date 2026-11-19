@@ -325,18 +325,10 @@ impl<'c> Prepared<'c> {
                 (hooks.vm_call1)(ev, code, arity, a)
             }
             Prepared::Native(n) => {
-                // A genuine `inc`/`dec` on a long runs inline, as `call2`
-                // runs the tagged arithmetic (#271); overflow and every
-                // other operand take the native.
-                if let Value::Int(x) = a {
-                    let step = match n.fast {
-                        FastArith::Inc => x.checked_add(1),
-                        FastArith::Dec => x.checked_sub(1),
-                        _ => None,
-                    };
-                    if let Some(v) = step {
-                        return Ok(Value::Int(v));
-                    }
+                // A genuine `inc`/`dec` on a long or double runs inline (#271);
+                // overflow and every other operand take the native.
+                if let Some(v) = fast_arith1(n.fast, &a) {
+                    return Ok(v);
                 }
                 let direct = n.compiled.as_ref().filter(|c| c.fixed == 1);
                 if let (Some(c), Some(call)) = (direct, crate::ext::in_place_call()) {
@@ -360,10 +352,8 @@ impl<'c> Prepared<'c> {
                 (hooks.vm_call2)(ev, code, arity, a, b)
             }
             Prepared::Native(n) => {
-                if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
-                    if let Some(v) = Evaluator::fast_int2(n.fast, *x, *y) {
-                        return Ok(v);
-                    }
+                if let Some(v) = fast_arith2(n.fast, &a, &b) {
+                    return Ok(v);
                 }
                 let direct = n.compiled.as_ref().filter(|c| c.fixed == 2);
                 if let (Some(c), Some(call)) = (direct, crate::ext::in_place_call()) {
@@ -372,6 +362,40 @@ impl<'c> Prepared<'c> {
                 call_native(ev, n, smallvec::smallvec![a, b])
             }
         }
+    }
+}
+
+fn fast_arith1(op: FastArith, a: &Value) -> Option<Value> {
+    match (op, a) {
+        (FastArith::Inc, Value::Int(x)) => x.checked_add(1).map(Value::Int),
+        (FastArith::Dec, Value::Int(x)) => x.checked_sub(1).map(Value::Int),
+        (FastArith::Inc, Value::Double(x)) => Some(Value::Double(x + 1.0)),
+        (FastArith::Dec, Value::Double(x)) => Some(Value::Double(x - 1.0)),
+        _ => None,
+    }
+}
+
+fn fast_arith2(op: FastArith, a: &Value, b: &Value) -> Option<Value> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Evaluator::fast_int2(op, *x, *y),
+        (Value::Double(x), Value::Double(y)) => Evaluator::fast_double2(op, *x, *y),
+        (Value::Double(x), Value::Int(y))
+            if matches!(
+                op,
+                FastArith::Add | FastArith::Sub | FastArith::Mul | FastArith::Div
+            ) =>
+        {
+            Evaluator::fast_double2(op, *x, *y as f64)
+        }
+        (Value::Int(x), Value::Double(y))
+            if matches!(
+                op,
+                FastArith::Add | FastArith::Sub | FastArith::Mul | FastArith::Div
+            ) =>
+        {
+            Evaluator::fast_double2(op, *x as f64, *y)
+        }
+        _ => None,
     }
 }
 

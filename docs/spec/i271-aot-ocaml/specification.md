@@ -559,6 +559,17 @@ Scalar `loop`/`recur` functions over integer vectors and transient DP tables alr
 
 Measured on macOS (`libinsn.dylib` shim): `dp/knapsack/solution` drops 290.4M → 61.2M instructions (0.211x, −229.2M).
 
+### 6.36 Slice 5e: lazy combinator fusion, `count` fusion, and `Double` fast arithmetic in `Prepared`
+
+Eager consumers (`vec`, `into`, `reduce`, `some`, `mapv`, `count`) only fused sole unforced `Thunk::Map` and `Thunk::MapCat` seqs (`lazy.rs::walk_sole_map`). Pipelines using `filter`, `remove`, `take`, `concat`, `repeat`, or `count` still allocated `PendingSeq` cells and `Arc<[Value]>` chunks per step (e.g. `binomial_tree`'s `(vec (concat nvals (repeat k 0.0)))`), and `walk_map_vectors` / `Prepared::call2` fell back to general `eval.call` / `native_add` for 2-vector `map` and `Double` arithmetic (`backprop`, `policy_iteration`, `value_iteration`).
+
+- **`Prepared` `Double` & mixed `Double`/`Int` fast arithmetic (`clj-eval::eval`, `clj-eval::vm`):** `Evaluator::fast_double2` handles binary `+`/`-`/`*`/`/`/`<`/`<=`/`>`/`>=` on `Double` pairs and `+`/`-`/`*`/`/` on mixed `Double`/`Int` pairs; `Prepared::call1` handles `inc`/`dec` on `Double`.
+- **Extended `SoleMap` fusion (`clj-eval::lazy`, `clj-eval::coll`):** `sole_map_parts` / `walk_parts` now fuse sole unforced `Thunk::Filter`, `Thunk::Remove`, `Thunk::Take`, and iterative `Thunk::Concat`; `walk_all` walks `SubVector`, finite/infinite `RepeatValue`, and counted `LongRange` directly; `walk_map_one` and `walk_filter` walk `Vector` and `LongRange` inputs in stack-buffered 32-item chunks preserving exact chunked forcing and side-effect order; `walk_map_vectors` specializes 2-vector inputs via `Prepared::of(f, 2)`; `coll::walk_count` enters `walk_sole_map` before stepping seq cells.
+- **2-input `mapv` fast path (`clj-eval::seqs`):** `native_mapv_owned` walks `(mapv f vec coll)` directly through `Prepared::of(f, 2)` without allocating an intermediate lazy `map` cell.
+- **Verification:** `docs/spec/i259-native-compiler/corpus/lazy_fusion.clj` pins chunking/side-effect order under early termination, nested `concat`, infinite `repeat` under `take`, mixed `Double`/`Int` ops, `count` fusion, 2-input `mapv`, and error cases against `run`.
+
+Measured on macOS (`libinsn.dylib` shim, vs Slice 5d): `binomial_tree` 20.64M → 7.94M (0.385x, −12.70M), `backprop` 8.45M → 7.08M (0.839x, −1.36M), `policy_iteration` 6.94M → 6.32M (0.911x, −619K), `value_iteration` 6.56M → 6.16M (0.939x, −403K).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

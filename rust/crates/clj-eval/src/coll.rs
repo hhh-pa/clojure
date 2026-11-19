@@ -721,6 +721,14 @@ fn assoc3(eval: &mut Evaluator, coll: Value, k: &Value, v: Value) -> Result<Valu
 /// Walk a seq counting items (hangs on infinite seqs, like the JVM).
 fn walk_count(eval: &mut Evaluator, v: &Value) -> Result<usize, NativeError> {
     let mut n = 0usize;
+    let mut bump = |_: &mut Evaluator, _: Value| {
+        n += 1;
+        Ok(true)
+    };
+    if let Some(done) = crate::lazy::walk_sole_map(eval, v, &mut bump) {
+        done.map_err(signal_to_native)?;
+        return Ok(n);
+    }
     let mut cur = v.clone();
     loop {
         match step_unit(eval, &cur).map_err(signal_to_native)? {
