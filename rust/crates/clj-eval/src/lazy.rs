@@ -2134,9 +2134,6 @@ fn walk_map_range(
     n: i64,
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Result<bool, Signal> {
-    if n <= 0 {
-        return Ok(true);
-    }
     crate::core::check_ifn(eval, f)?;
     let prep = crate::vm::Prepared::of(f, 1);
     let mut buf: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
@@ -2305,9 +2302,6 @@ fn walk_filter_range(
     invert: bool,
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Result<bool, Signal> {
-    if n <= 0 {
-        return Ok(true);
-    }
     crate::core::check_ifn(eval, f)?;
     let prep = filter_prep(f);
     let mut kept: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
@@ -2340,35 +2334,24 @@ fn walk_filter_units(
     let mut checked = false;
     let mut kept: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
     loop {
-        match step_unit(eval, &cur)? {
+        let (one, chunk, tail) = match step_unit(eval, &cur)? {
             StepUnit::Empty => return Ok(true),
-            StepUnit::One { head, tail } => {
-                if !checked {
-                    crate::core::check_ifn(eval, f)?;
-                    checked = true;
-                }
-                cur = tail;
-                if test_filter_item(eval, f, prep.as_ref(), &head)? != invert && !visit(eval, head)?
-                {
-                    return Ok(false);
-                }
+            StepUnit::One { head, tail } => (Some(head), None, tail),
+            StepUnit::Chunk { items, tail } => (None, Some(items), tail),
+        };
+        if !checked {
+            crate::core::check_ifn(eval, f)?;
+            checked = true;
+        }
+        cur = tail;
+        kept.clear();
+        for item in one.iter().chain(chunk.iter().flat_map(|c| c.iter())) {
+            if test_filter_item(eval, f, prep.as_ref(), item)? != invert {
+                kept.push(item.clone());
             }
-            StepUnit::Chunk { items, tail } => {
-                if !checked {
-                    crate::core::check_ifn(eval, f)?;
-                    checked = true;
-                }
-                cur = tail;
-                kept.clear();
-                for item in items.iter() {
-                    if test_filter_item(eval, f, prep.as_ref(), item)? != invert {
-                        kept.push(item.clone());
-                    }
-                }
-                if !visit_all(eval, kept.drain(..), visit)? {
-                    return Ok(false);
-                }
-            }
+        }
+        if !visit_all(eval, kept.drain(..), visit)? {
+            return Ok(false);
         }
     }
 }
@@ -2402,7 +2385,7 @@ fn walk_concat(
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Result<bool, Signal> {
     loop {
-        while let Some((icur, irest, iidx, iouter)) = unforced_concat_parts(&cur) {
+        while let Some((icur, irest, iidx, _)) = unforced_concat_parts(&cur) {
             if rest.get(idx).is_some() {
                 outer = Some(Arc::new(ConcatFrame {
                     rest,
@@ -2410,7 +2393,6 @@ fn walk_concat(
                     parent: outer,
                 }));
             }
-            outer = splice_concat_stack(iouter, outer);
             cur = icur;
             rest = irest;
             idx = iidx;

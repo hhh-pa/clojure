@@ -2984,8 +2984,18 @@ fn native_subs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         return subs_ascii(s, args);
     }
     let len = s.chars().count() as i64;
-    // The `nth`/`subvec` index path: doubles truncate, nil trips the
-    // `charValue` NPE, anything else fails to `Number`.
+    let (begin, end) = subs_bounds(args, len)?;
+    if begin == 0 && end == len {
+        return Ok(args[0].clone());
+    }
+    let start_b = char_byte_at(s, begin, len);
+    let end_b = char_byte_at(s, end, len);
+    Ok(Value::Str(Arc::from(&s[start_b..end_b])))
+}
+
+/// The `nth`/`subvec` index path for `subs`: doubles truncate, nil
+/// trips the `charValue` NPE, anything else fails to `Number`.
+fn subs_bounds(args: &[Value], len: i64) -> Result<(i64, i64), NativeError> {
     let begin = i64::from(nth_index(&args[1])?);
     let end = if args.len() == 3 {
         i64::from(nth_index(&args[2])?)
@@ -2995,9 +3005,7 @@ fn native_subs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     if begin < 0 || end < begin || end > len {
         return Err(subs_oob(begin, end, len));
     }
-    let start_b = char_byte_at(s, begin, len);
-    let end_b = char_byte_at(s, end, len);
-    Ok(Value::Str(Arc::from(&s[start_b..end_b])))
+    Ok((begin, end))
 }
 
 /// The byte offset of char `idx` (`len`-capped callers only: `idx`
@@ -3025,14 +3033,9 @@ fn subs_oob(begin: i64, end: i64, len: i64) -> NativeError {
 /// answers as the scalar walk).
 fn subs_ascii(s: &str, args: &[Value]) -> Result<Value, NativeError> {
     let len = s.len() as i64;
-    let begin = i64::from(nth_index(&args[1])?);
-    let end = if args.len() == 3 {
-        i64::from(nth_index(&args[2])?)
-    } else {
-        len
-    };
-    if begin < 0 || end < begin || end > len {
-        return Err(subs_oob(begin, end, len));
+    let (begin, end) = subs_bounds(args, len)?;
+    if begin == 0 && end == len {
+        return Ok(args[0].clone());
     }
     Ok(Value::Str(Arc::from(&s[begin as usize..end as usize])))
 }

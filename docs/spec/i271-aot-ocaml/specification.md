@@ -570,6 +570,17 @@ Eager consumers (`vec`, `into`, `reduce`, `some`, `mapv`, `count`) only fused so
 
 Measured on macOS (`libinsn.dylib` shim, vs Slice 5d): `binomial_tree` 20.64M → 7.94M (0.385x, −12.70M), `backprop` 8.45M → 7.08M (0.839x, −1.36M), `policy_iteration` 6.94M → 6.32M (0.911x, −619K), `value_iteration` 6.56M → 6.16M (0.939x, −403K).
 
+### 6.37 Slice 5f: `PackedStrings` vector storage, direct `clojure.string/join`, and zero-copy full-string `subs`
+
+On `30f6ab42`, `aot-ocaml` MEM jumped to `1499/7/237` strict (`551/1163/29` at ±15%, AOT median RSS `2,760 KB` vs OCaml `3,032 KB`), leaving `data_structure/disjoint_set/connected_component` (`test_case_7..9`, 23.3–27.9 MB vs OCaml 5.5–6.3 MB, up to `4.88x`) as the sole >2x MEM outlier. Its `render-chunk` collected ~250K short strings into a `TransientVector` (`Generic(Vec<Value>)`, ~16.8 MB of 32-byte `Value` slots plus ~8 MB of individual `Arc<str>` heap blocks) before passing the frozen vector to `clojure.string/join`.
+
+- **`PackedStrings` (`clj-value`):** flat `buf: String` plus `ends: Vec<u32>` (`VectorInner::Strs(Arc<PackedStrings>)` and `TransientItems::Strs(PackedStrings)`), with 1.5x growth past 256 KiB and copy-spike-free `shed_slack`. `TransientVector` stays `Generic` below `PACK_STR_MIN = 256` (keeping small string vectors zero-alloc on `nth` / `rt_bc_2_nth`) and compacts once at length 256 when every item is a string; non-string items, in-place `assoc!`, or shared updates past `FLAT_MAX` convert cleanly to `Generic`. `ValueRef::Str(&str)` preserves exact in-bounds vs out-of-bounds dispatch in `clj-bc` without allocating in bitcode.
+- **Direct `clojure.string/join` & `apply str` (`clj-eval`, `clj-value`):** `join_vector_buf` joins `Vector::as_packed_strs()` directly from the flat buffer in one pass without boxing items, and `Vector::push_to_string` copies `raw_buf()` directly.
+- **Zero-copy full-string `subs` (`clj-eval::core`):** `(subs s 0 (count s))` clones the `Arc<str>` handle instead of copying multi-megabyte input windows.
+- **Verification:** `docs/spec/i259-native-compiler/corpus/packed_strings.clj` plus `clj-value` and `clj-bc` unit tests pin every vector/transient/seq/equality/hash/join/subs operation against `run`.
+
+Measured on macOS (`connected_component`, vs Slice 5e): `test_case_7` 34,624 → 23,152 KB (−11.5 MB, 0.669x), `test_case_8` 37,904 → 27,792 KB (−10.1 MB, 0.733x), `test_case_9` 44,864 → 28,880 KB (−16.0 MB, 0.644x) and INS 748.3M → 716.4M (0.957x).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

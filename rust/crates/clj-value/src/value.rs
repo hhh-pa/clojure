@@ -285,6 +285,208 @@ impl std::fmt::Debug for Vector {
     }
 }
 
+/// Flat byte buffer + end-offset table for homogeneous string vectors (#271).
+/// Each item `i` is `&buf[start..ends[i] as usize]` where `start` is
+/// `ends[i - 1]` (or `0` when `i == 0`), avoiding per-item `Value` slots
+/// and `Arc<str>` heap allocations.
+#[derive(Clone, Debug, Default)]
+pub struct PackedStrings {
+    buf: String,
+    ends: Vec<u32>,
+}
+
+impl PackedStrings {
+    /// An empty packed string buffer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pre-sized empty buffer for `n` items totaling `bytes` UTF-8 bytes.
+    #[must_use]
+    pub(crate) fn with_capacity(n: usize, bytes: usize) -> Self {
+        Self {
+            buf: String::with_capacity(bytes),
+            ends: Vec::with_capacity(n),
+        }
+    }
+
+    /// Number of stored strings.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    /// Whether no strings are stored.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+
+    /// The concatenated byte buffer of all stored strings.
+    #[inline]
+    #[must_use]
+    pub fn raw_buf(&self) -> &str {
+        &self.buf
+    }
+
+    /// Borrow string `idx` (`None` past the end).
+    #[inline]
+    #[must_use]
+    pub fn get_str(&self, idx: usize) -> Option<&str> {
+        let end = *self.ends.get(idx)? as usize;
+        let start = if idx == 0 {
+            0
+        } else {
+            self.ends[idx - 1] as usize
+        };
+        Some(&self.buf[start..end])
+    }
+
+    /// Append `s` when total bytes stay within `limit` (`false` otherwise).
+    #[inline]
+    pub(crate) fn push_bounded(&mut self, s: &str, limit: usize) -> bool {
+        if s.len() > limit.saturating_sub(self.buf.len()) {
+            return false;
+        }
+        if self.buf.capacity() >= 256 * 1024 && s.len() > self.buf.capacity() - self.buf.len() {
+            self.buf
+                .reserve_exact((self.buf.capacity() / 2).max(s.len()));
+        }
+        self.buf.push_str(s);
+        self.ends.push(self.buf.len() as u32);
+        true
+    }
+
+    /// Append `s` when total bytes stay within `u32::MAX`.
+    #[inline]
+    pub fn try_push(&mut self, s: &str) -> bool {
+        self.push_bounded(s, u32::MAX as usize)
+    }
+
+    /// Drop the last string (`false` when empty).
+    #[inline]
+    pub fn pop(&mut self) -> bool {
+        if self.ends.pop().is_none() {
+            return false;
+        }
+        let new_len = self.ends.last().copied().unwrap_or(0) as usize;
+        self.buf.truncate(new_len);
+        true
+    }
+
+    /// Release excess capacity only when more than half the buffer is slack
+    /// (avoiding a `realloc` copy-peak on freshly grown buffers before `join`).
+    pub(crate) fn shed_slack(&mut self) {
+        if self.buf.capacity() - self.buf.len() > self.buf.len().max(4096) {
+            self.buf.shrink_to_fit();
+        }
+        if self.ends.capacity() - self.ends.len() > self.ends.len().max(1024) {
+            self.ends.shrink_to_fit();
+        }
+    }
+
+    /// Join every stored string with `sep` directly from the flat buffer.
+    #[must_use]
+    pub fn join(&self, sep: &str) -> String {
+        let n = self.ends.len();
+        if n == 0 {
+            return String::new();
+        }
+        let cap = self
+            .buf
+            .len()
+            .saturating_add(sep.len().saturating_mul(n - 1));
+        let mut out = String::with_capacity(cap);
+        let mut start = 0usize;
+        for (i, &end) in self.ends.iter().enumerate() {
+            if i > 0 {
+                out.push_str(sep);
+            }
+            let end = end as usize;
+            out.push_str(&self.buf[start..end]);
+            start = end;
+        }
+        out
+    }
+
+    /// Box all items into a `Vec<Value>`.
+    #[must_use]
+    pub fn to_values(&self) -> Vec<Value> {
+        let mut out = Vec::with_capacity(self.ends.len());
+        let mut start = 0usize;
+        for &end in &self.ends {
+            let end = end as usize;
+            out.push(Value::Str(Arc::from(&self.buf[start..end])));
+            start = end;
+        }
+        out
+    }
+
+    /// Up to 32 items starting at `index` (matching `Packed::chunk_from`).
+    fn chunk_from(&self, index: usize) -> Vec<Value> {
+        if index >= self.ends.len() {
+            return Vec::new();
+        }
+        let end = ((index / 32 + 1) * 32).min(self.ends.len());
+        let mut out = Vec::with_capacity(end - index);
+        for i in index..end {
+            out.push(Value::Str(Arc::from(self.get_str(i).expect("in bounds"))));
+        }
+        out
+    }
+
+    fn iter(&self) -> PackedStringsIter<'_> {
+        PackedStringsIter {
+            ps: self,
+            lo: 0,
+            hi: self.ends.len(),
+        }
+    }
+}
+
+struct PackedStringsIter<'a> {
+    ps: &'a PackedStrings,
+    lo: usize,
+    hi: usize,
+}
+
+impl Iterator for PackedStringsIter<'_> {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Value> {
+        if self.lo >= self.hi {
+            return None;
+        }
+        let s = self.ps.get_str(self.lo).expect("in bounds");
+        self.lo += 1;
+        Some(Value::Str(Arc::from(s)))
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Value> {
+        self.lo = self.lo.saturating_add(n).min(self.hi);
+        self.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.hi - self.lo;
+        (rem, Some(rem))
+    }
+}
+
+impl DoubleEndedIterator for PackedStringsIter<'_> {
+    fn next_back(&mut self) -> Option<Value> {
+        if self.lo >= self.hi {
+            return None;
+        }
+        self.hi -= 1;
+        let s = self.ps.get_str(self.hi).expect("in bounds");
+        Some(Value::Str(Arc::from(s)))
+    }
+}
+
 /// Borrowed or copy-out element reference returned by vector lookup
 /// without constructing (and dropping) an owned temporary [`Value`].
 #[derive(Clone, Copy)]
@@ -293,6 +495,8 @@ pub enum ValueRef<'a> {
     Int(i64),
     /// Packed character element.
     Char(char),
+    /// Packed string slice element.
+    Str(&'a str),
     /// Borrowed element from generic storage.
     Ref(&'a Value),
 }
@@ -307,6 +511,7 @@ impl Vector {
             VectorInner::Generic(t) => t.get(index).map(ValueRef::Ref),
             VectorInner::Ints(t) => t.get(index).copied().map(ValueRef::Int),
             VectorInner::Chars(t) => t.get(index).copied().map(ValueRef::Char),
+            VectorInner::Strs(ps) => ps.get_str(index).map(ValueRef::Str),
         }
     }
 
@@ -319,22 +524,26 @@ impl Vector {
             _ => None,
         }
     }
+
+    /// Borrow the packed string storage when this vector holds packed strings.
+    #[inline(always)]
+    #[must_use]
+    pub fn as_packed_strs(&self) -> Option<&PackedStrings> {
+        match &self.0.inner {
+            VectorInner::Strs(ps) => Some(ps),
+            _ => None,
+        }
+    }
 }
 
-/// Vector storage: the generic trie of values, or the same trie over
-/// packed `i64`s or `char`s (#226: 8 or 4 bytes per element instead
-/// of a 64-byte `Value` — a vector of a string's chars was 16x its
-/// text). Typing is decided at construction (`from_vec` scans,
-/// `from_ints`/`from_chars` and typed transients skip the scan) and by
-/// the first item into an empty vector; a foreign value converts once
-/// to generic, which then stays generic. All three are the same
-/// persistent trie, so shared updates path-copy in log time
-/// whatever the type.
+/// Vector storage: the generic trie of values, or packed `i64`, `char`,
+/// or flat string storage (#226, #271).
 #[derive(Clone, Debug)]
 enum VectorInner {
     Generic(crate::trie::Packed<Value>),
     Ints(crate::trie::Packed<i64>),
     Chars(crate::trie::Packed<char>),
+    Strs(Arc<PackedStrings>),
 }
 
 /// Owned-value vector iteration (typed items box on read).
@@ -346,6 +555,7 @@ enum VectorIterInner<'a> {
     Generic(crate::trie::PackedIter<'a, Value>),
     Ints(crate::trie::PackedIter<'a, i64>),
     Chars(crate::trie::PackedIter<'a, char>),
+    Strs(PackedStringsIter<'a>),
 }
 
 impl Iterator for VectorIter<'_> {
@@ -356,6 +566,7 @@ impl Iterator for VectorIter<'_> {
             VectorIterInner::Generic(it) => it.next().cloned(),
             VectorIterInner::Ints(it) => it.next().map(|n| Value::Int(*n)),
             VectorIterInner::Chars(it) => it.next().map(|c| Value::Char(*c)),
+            VectorIterInner::Strs(it) => it.next(),
         }
     }
 
@@ -366,6 +577,7 @@ impl Iterator for VectorIter<'_> {
             VectorIterInner::Generic(it) => it.nth(n).cloned(),
             VectorIterInner::Ints(it) => it.nth(n).map(|n| Value::Int(*n)),
             VectorIterInner::Chars(it) => it.nth(n).map(|c| Value::Char(*c)),
+            VectorIterInner::Strs(it) => it.nth(n),
         }
     }
 
@@ -374,6 +586,7 @@ impl Iterator for VectorIter<'_> {
             VectorIterInner::Generic(it) => it.size_hint(),
             VectorIterInner::Ints(it) => it.size_hint(),
             VectorIterInner::Chars(it) => it.size_hint(),
+            VectorIterInner::Strs(it) => it.size_hint(),
         }
     }
 }
@@ -384,6 +597,7 @@ impl DoubleEndedIterator for VectorIter<'_> {
             VectorIterInner::Generic(it) => it.next_back().cloned(),
             VectorIterInner::Ints(it) => it.next_back().map(|n| Value::Int(*n)),
             VectorIterInner::Chars(it) => it.next_back().map(|c| Value::Char(*c)),
+            VectorIterInner::Strs(it) => it.next_back(),
         }
     }
 }
@@ -941,7 +1155,13 @@ impl Vector {
         Self::of(VectorInner::Chars(crate::trie::Packed::flat(chars)))
     }
 
-    /// Whether this vector rides on packed `i64` or `char` storage.
+    /// Build a packed string vector from [`PackedStrings`] zero-copy.
+    #[must_use]
+    pub fn from_packed_strs(strs: PackedStrings) -> Self {
+        Self::of(VectorInner::Strs(Arc::new(strs)))
+    }
+
+    /// Whether this vector rides on packed storage (`i64`, `char`, or `str`).
     #[must_use]
     pub fn is_packed(&self) -> bool {
         !matches!(self.0.inner, VectorInner::Generic(_))
@@ -954,6 +1174,7 @@ impl Vector {
             VectorInner::Generic(_) => None,
             VectorInner::Ints(t) => Some(TypedItems::Ints(t.iter().copied().collect())),
             VectorInner::Chars(t) => Some(TypedItems::Chars(t.iter().copied().collect())),
+            VectorInner::Strs(ps) => Some(TypedItems::Strs((**ps).clone())),
         }
     }
 
@@ -969,6 +1190,7 @@ impl Vector {
             }))),
             VectorInner::Ints(t) => Ok(TypedItems::Ints(t.into_vec())),
             VectorInner::Chars(t) => Ok(TypedItems::Chars(t.into_vec())),
+            VectorInner::Strs(ps) => Ok(TypedItems::Strs(Arc::unwrap_or_clone(ps))),
         }
     }
 
@@ -980,11 +1202,12 @@ impl Vector {
             VectorInner::Generic(pvec) => pvec.into_vec(),
             VectorInner::Ints(t) => t.into_vec().into_iter().map(Value::Int).collect(),
             VectorInner::Chars(t) => t.into_vec().into_iter().map(Value::Char).collect(),
+            VectorInner::Strs(ps) => ps.to_values(),
         }
     }
 
-    /// If this vector is packed chars, append all chars directly to `out`
-    /// without boxing into `Value::Char`. Returns true if handled.
+    /// If this vector is packed chars or strings, append directly to `out`
+    /// without boxing items. Returns true if handled.
     pub fn push_to_string(&self, out: &mut String) -> bool {
         match &self.0.inner {
             VectorInner::Chars(packed) => {
@@ -992,6 +1215,10 @@ impl Vector {
                 for &c in packed.iter() {
                     out.push(c);
                 }
+                true
+            }
+            VectorInner::Strs(ps) => {
+                out.push_str(ps.raw_buf());
                 true
             }
             _ => false,
@@ -1038,8 +1265,23 @@ impl Vector {
                 t.push(c);
                 None
             }
+            (VectorInner::Strs(ps), Value::Str(s)) => {
+                let shared_big = Arc::strong_count(ps) > 1 && ps.len() > crate::trie::FLAT_MAX;
+                if !shared_big && Arc::make_mut(ps).try_push(&s) {
+                    None
+                } else {
+                    let mut g = crate::trie::Packed::from_vec(ps.to_values());
+                    g.push(Value::Str(s));
+                    Some(g)
+                }
+            }
             (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| g.push(v))),
             (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| g.push(v))),
+            (VectorInner::Strs(ps), v) => {
+                let mut g = crate::trie::Packed::from_vec(ps.to_values());
+                g.push(v);
+                Some(g)
+            }
         };
         if let Some(g) = generic {
             data.inner = VectorInner::Generic(g);
@@ -1093,6 +1335,11 @@ impl Vector {
             (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| {
                 g.set(index, v);
             })),
+            (VectorInner::Strs(ps), v) => {
+                let mut g = crate::trie::Packed::from_vec(ps.to_values());
+                g.set(index, v);
+                Some(g)
+            }
         };
         if let Some(g) = generic {
             data.inner = VectorInner::Generic(g);
@@ -1137,6 +1384,16 @@ impl Vector {
             VectorInner::Generic(t) => t.pop(),
             VectorInner::Ints(t) => t.pop(),
             VectorInner::Chars(t) => t.pop(),
+            VectorInner::Strs(ps) => {
+                if Arc::strong_count(ps) > 1 && ps.len() > crate::trie::FLAT_MAX {
+                    let mut g = crate::trie::Packed::from_vec(ps.to_values());
+                    let ok = g.pop();
+                    data.inner = VectorInner::Generic(g);
+                    ok
+                } else {
+                    Arc::make_mut(ps).pop()
+                }
+            }
         };
         if !popped {
             return None;
@@ -1152,6 +1409,7 @@ impl Vector {
                 VectorInner::Generic(t) => VectorIterInner::Generic(t.iter()),
                 VectorInner::Ints(t) => VectorIterInner::Ints(t.iter()),
                 VectorInner::Chars(t) => VectorIterInner::Chars(t.iter()),
+                VectorInner::Strs(ps) => VectorIterInner::Strs(ps.iter()),
             },
         }
     }
@@ -1165,6 +1423,7 @@ impl Vector {
             VectorInner::Generic(t) => t.get(index).cloned(),
             VectorInner::Ints(t) => t.get(index).copied().map(Value::Int),
             VectorInner::Chars(t) => t.get(index).copied().map(Value::Char),
+            VectorInner::Strs(ps) => ps.get_str(index).map(|s| Value::Str(Arc::from(s))),
         }
     }
 
@@ -1177,6 +1436,7 @@ impl Vector {
             VectorInner::Generic(t) => f(t.get(index)?),
             VectorInner::Ints(t) => f(&Value::Int(*t.get(index)?)),
             VectorInner::Chars(t) => f(&Value::Char(*t.get(index)?)),
+            VectorInner::Strs(ps) => f(&Value::Str(Arc::from(ps.get_str(index)?))),
         }
     }
 
@@ -1210,6 +1470,7 @@ impl Vector {
                     .map(|c| Value::Char(*c))
                     .collect(),
             ),
+            VectorInner::Strs(ps) => Cow::Owned(ps.chunk_from(index)),
         }
     }
 
@@ -1257,6 +1518,7 @@ fn vector_inner_len(inner: &VectorInner) -> usize {
         VectorInner::Generic(t) => t.len(),
         VectorInner::Ints(t) => t.len(),
         VectorInner::Chars(t) => t.len(),
+        VectorInner::Strs(ps) => ps.len(),
     }
 }
 
@@ -1277,6 +1539,7 @@ fn boxed<T: Copy>(
 pub(crate) enum TypedItems {
     Ints(Vec<i64>),
     Chars(Vec<char>),
+    Strs(PackedStrings),
 }
 
 /// Entries in iteration order (trie order for plain hash-maps,
@@ -4960,5 +5223,95 @@ mod tests {
         );
         assert_eq!(large.len_opt(), Some(20));
         assert_eq!(large.get_small_scalar(&Value::Int(0)), None);
+    }
+
+    #[test]
+    fn packed_strings_vector_operations_and_bounds() {
+        use super::{PackedStrings, ValueRef, Vector};
+        let mut ps = PackedStrings::new();
+        assert!(ps.is_empty());
+        assert_eq!(ps.join(","), "");
+        assert!(!ps.pop());
+        assert!(!ps.push_bounded("abcd", 2));
+        assert!(ps.try_push("aa"));
+        assert!(ps.try_push("bbb"));
+        assert!(ps.try_push("c"));
+        assert_eq!(ps.len(), 3);
+        assert!(!ps.is_empty());
+        assert_eq!(ps.raw_buf(), "aabbbc");
+        assert_eq!(ps.get_str(0), Some("aa"));
+        assert_eq!(ps.get_str(1), Some("bbb"));
+        assert_eq!(ps.get_str(3), None);
+        assert_eq!(ps.join("-"), "aa-bbb-c");
+        assert!(ps.pop());
+        assert_eq!(ps.join("-"), "aa-bbb");
+
+        let mut big_ps = PackedStrings::with_capacity(3000, 12000);
+        for i in 0..1030 {
+            assert!(big_ps.try_push(&i.to_string()));
+        }
+        big_ps.shed_slack();
+        let mut grown = PackedStrings::with_capacity(2, 256 * 1024);
+        let block = "a".repeat(256 * 1024);
+        assert!(grown.try_push(&block));
+        assert!(grown.try_push("b"));
+        grown.shed_slack();
+        let vs = Vector::from_packed_strs(big_ps);
+        assert!(vs.is_packed());
+        assert!(vs.as_packed_strs().is_some());
+        assert!(vs.as_flat_ints().is_none());
+        assert!(matches!(vs.get_val_ref(0), Some(ValueRef::Str("0"))));
+        assert_eq!(vs.get(1), Some(Value::Str(Arc::from("1"))));
+        assert_eq!(
+            vs.read_at(2, |v| Some(v.clone())),
+            Some(Value::Str(Arc::from("2")))
+        );
+        assert!(vs.get_ref(0).is_none());
+        assert_eq!(vs.chunk_from(0).len(), 32);
+        assert!(vs.chunk_from(2000).is_empty());
+        let mut joined = String::new();
+        assert!(vs.push_to_string(&mut joined));
+        assert!(joined.starts_with("0123"));
+
+        // Iter: next, nth, size_hint, next_back, exhausted
+        let mut it = vs.iter();
+        assert_eq!(it.size_hint(), (1030, Some(1030)));
+        assert_eq!(it.next(), Some(Value::Str(Arc::from("0"))));
+        assert_eq!(it.nth(1), Some(Value::Str(Arc::from("2"))));
+        assert_eq!(it.next_back(), Some(Value::Str(Arc::from("1029"))));
+        assert_eq!(it.nth(2000), None);
+        assert_eq!(it.next_back(), None);
+
+        // Shared > FLAT_MAX push_back and drop_last convert to generic
+        let shared = vs.clone();
+        let pushed_shared = vs.clone().push_back(Value::Str(Arc::from("extra")));
+        assert!(!pushed_shared.is_packed());
+        assert_eq!(pushed_shared.len(), 1031);
+        let popped_shared = vs.clone().drop_last_owned().expect("popped");
+        assert!(!popped_shared.is_packed());
+        assert_eq!(popped_shared.len(), 1029);
+        drop(shared);
+
+        // Unique push_back (str + non-str), set_nth, drop_last, into_vec
+        let mut small = PackedStrings::new();
+        assert!(small.try_push("x"));
+        let v1 = Vector::from_packed_strs(small);
+        assert!(v1.typed_items().is_some());
+        let v2 = v1.push_back(Value::Str(Arc::from("y")));
+        assert!(v2.is_packed());
+        assert_eq!(v2.len(), 2);
+        let v3 = v2.clone().drop_last_owned().expect("pop");
+        assert!(v3.is_packed());
+        assert_eq!(v3.len(), 1);
+        let v4 = v2.clone().set_nth_owned(0, Value::Int(7)).expect("set");
+        assert!(!v4.is_packed());
+        assert_eq!(v4.get(0), Some(Value::Int(7)));
+        let v5 = v2.clone().push_back(Value::Int(9));
+        assert!(!v5.is_packed());
+        assert_eq!(v2.clone().into_vec().len(), 2);
+        assert!(v2.into_typed_items().is_ok());
+
+        let empty_v = Vector::from_packed_strs(PackedStrings::new());
+        assert!(empty_v.drop_last_owned().is_none());
     }
 }

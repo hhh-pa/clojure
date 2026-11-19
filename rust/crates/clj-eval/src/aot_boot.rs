@@ -1406,11 +1406,20 @@ mod tests {
         assert_eq!(
             lite_caps_for(&[
                 ("clojure.core", "*out*"),
+                ("clojure.core", "*err*"),
+                ("clojure.core", "*read-eval*"),
+                ("clojure.core", "read"),
                 ("clojure.core", "user-defined"),
                 ("clojure.string", "not-native"),
             ]),
             LiteCaps::default()
         );
+        let flags = scan_lite_vars(&[
+            ("clojure.core", "*err*"),
+            ("clojure.core", "*read-eval*"),
+            ("clojure.core", "read"),
+        ]);
+        assert!(flags.need_err && flags.need_read);
         // `SEQ` implies `CORE` (because internal seq helpers live in `CORE`).
         let seq_caps = lite_caps_for(&[("clojure.core", "map")]);
         assert!(seq_caps.contains(LiteCaps::SEQ));

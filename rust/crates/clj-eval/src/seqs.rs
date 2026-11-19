@@ -2361,6 +2361,7 @@ mod sole_map_walk_tests {
             ("(vec (map inc (range 5)))", "[1 2 3 4 5]"),
             ("(vec (map inc (range 0)))", "[]"),
             ("(some #{3} (map inc (range 5)))", "3"),
+            ("(some #{2} (map inc (list 1 2 3)))", "2"),
             ("(vec (map :a [{:a 1} {:a 2}]))", "[1 2]"),
             ("(vec (map #'inc [1 2]))", "[2 3]"),
             ("(vec (map + [] [1 2]))", "[]"),
@@ -2389,6 +2390,11 @@ mod sole_map_walk_tests {
             (
                 "(vec (concat (concat [1] [2]) (concat [3] [4]) [5]))",
                 "[1 2 3 4 5]",
+            ),
+            ("(vec (concat (concat [1] [2])))", "[1 2]"),
+            (
+                "(let [s (mapcat identity [(concat (concat [1] [2]) [3] [4])])] [(vec s) (vec s)])",
+                "[[1 2 3 4] [1 2 3 4]]",
             ),
             ("(some #{2} (concat [1 2] [3 4]))", "2"),
             ("(count (filter #(= % 2) [1 2 3 2]))", "2"),

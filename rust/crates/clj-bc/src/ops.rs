@@ -227,6 +227,7 @@ fn write_val_ref<O: OutSlot>(out: &mut O, vr: ValueRef<'_>) -> bool {
     match vr {
         ValueRef::Int(n) => write_val(out, Value::Int(n)),
         ValueRef::Char(c) => write_val(out, Value::Char(c)),
+        ValueRef::Str(_) => false,
         ValueRef::Ref(v) => clone_fast(out, v),
     }
 }
@@ -823,7 +824,7 @@ fn scalar_val_ref(vr: ValueRef<'_>) -> Option<(u8, i64)> {
         ValueRef::Ref(Value::Int(n)) => Some((0, *n)),
         ValueRef::Ref(Value::Char(c)) => Some((1, i64::from(u32::from(*c)))),
         ValueRef::Ref(Value::Bool(b)) => Some((2, i64::from(*b))),
-        ValueRef::Ref(_) => None,
+        ValueRef::Str(_) | ValueRef::Ref(_) => None,
     }
 }
 

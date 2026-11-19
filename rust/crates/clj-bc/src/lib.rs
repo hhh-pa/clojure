@@ -1182,5 +1182,11 @@ mod tests {
         ops::scalar_tvec_unlock(&Value::Nil);
         assert!(!ops::scalar_tvec_lock(&tmap, &mut mptr, &mut ilen));
         assert!(!ops::scalar_tvec_lock(&Value::Nil, &mut mptr, &mut ilen));
+
+        let mut ps = clj_value::PackedStrings::new();
+        assert!(ps.try_push("hi"));
+        let psv = Value::Vector(clj_value::Vector::from_packed_strs(ps));
+        assert_eq!(run1(BcOp1::First, &psv), None);
+        assert!(!ops::scalar_nth(&psv, 0, &mut k, &mut v, None));
     }
 }

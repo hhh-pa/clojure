@@ -218,6 +218,9 @@ fn join_vector_buf(
     sep: &str,
     v: &clj_value::Vector,
 ) -> Result<String, NativeError> {
+    if let Some(ps) = v.as_packed_strs() {
+        return Ok(ps.join(sep));
+    }
     let cap = if v.len() >= 64 {
         exact_join_cap(v, sep.len()).unwrap_or_else(|| v.len().saturating_mul(sep.len() + 4))
     } else {

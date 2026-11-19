@@ -24,7 +24,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::{FxBuildHasher, Map, Set, Value, Vector, new_map, new_set};
+use crate::{FxBuildHasher, Map, PackedStrings, Set, Value, Vector, new_map, new_set};
 
 /// A transient failure: exact JVM message + class (probe19). The
 /// evaluator (S4) raises these with the same text.
@@ -78,15 +78,94 @@ fn ensure(valid: bool) -> Result<(), TransientError> {
     }
 }
 
+/// Minimum length before an all-`Str` generic transient packs into flat
+/// [`PackedStrings`], keeping small string vectors zero-alloc on `nth`.
+const PACK_STR_MIN: usize = 256;
+
 /// Transient vector storage: all-`Int` buffers ride packed (8
-/// bytes per element), all-char buffers too (4 bytes); an empty
-/// buffer takes the type of its first item, and the first foreign
-/// value converts to generic (which stays generic).
+/// bytes per element), all-char buffers too (4 bytes), and long
+/// all-`Str` buffers compact into [`PackedStrings`] past
+/// [`PACK_STR_MIN`] (#271); an empty buffer takes the type of its
+/// first item, and the first foreign value converts to generic.
 #[derive(Clone, Debug)]
 enum TransientItems {
     Ints(Vec<i64>),
     Chars(Vec<char>),
+    Strs(PackedStrings),
     Generic(Vec<Value>),
+}
+
+/// Compact `items` plus trailing `extra` into [`PackedStrings`] if every
+/// item is `Value::Str` and the total byte length fits `limit`.
+fn try_pack_strs_bounded(items: &[Value], extra: &str, limit: usize) -> Option<PackedStrings> {
+    let mut total = extra.len();
+    if total > limit {
+        return None;
+    }
+    let mut ps = PackedStrings::with_capacity(items.len() + 1, total);
+    for item in items {
+        let Value::Str(s) = item else {
+            return None;
+        };
+        if s.len() > limit - total {
+            return None;
+        }
+        total += s.len();
+        ps.try_push(s);
+    }
+    ps.try_push(extra);
+    Some(ps)
+}
+
+fn put_generic(x: &mut Vec<Value>, idx: usize, v: Value) -> Option<TransientItems> {
+    let packed = match &v {
+        Value::Str(s) if idx == x.len() && x.len() == PACK_STR_MIN => {
+            try_pack_strs_bounded(x, s, u32::MAX as usize)
+        }
+        _ => None,
+    };
+    match packed {
+        Some(ps) => Some(TransientItems::Strs(ps)),
+        None => {
+            put_at(x, idx, v);
+            None
+        }
+    }
+}
+
+fn put_ints(x: &mut Vec<i64>, idx: usize, v: Value) -> Option<TransientItems> {
+    match v {
+        Value::Int(n) => {
+            put_at(x, idx, n);
+            None
+        }
+        Value::Char(c) if x.is_empty() => Some(TransientItems::Chars(vec![c])),
+        v => Some(TransientItems::Generic(boxed_with(x, Value::Int, idx, v))),
+    }
+}
+
+fn put_chars(x: &mut Vec<char>, idx: usize, v: Value) -> Option<TransientItems> {
+    match v {
+        Value::Char(c) => {
+            put_at(x, idx, c);
+            None
+        }
+        Value::Int(n) if x.is_empty() => Some(TransientItems::Ints(vec![n])),
+        v => Some(TransientItems::Generic(boxed_with(x, Value::Char, idx, v))),
+    }
+}
+
+fn put_strs(ps: &mut PackedStrings, idx: usize, v: Value) -> Option<TransientItems> {
+    let appended = match &v {
+        Value::Str(s) if idx == ps.len() => ps.try_push(s),
+        _ => false,
+    };
+    if appended {
+        return None;
+    }
+    let mut g = ps.to_values();
+    put_at(&mut g, idx, v);
+    Some(TransientItems::Generic(g))
 }
 
 impl TransientItems {
@@ -96,19 +175,14 @@ impl TransientItems {
     #[inline]
     fn put(&mut self, idx: usize, v: Value) {
         let converted = match self {
-            TransientItems::Generic(x) => return put_at(x, idx, v),
-            TransientItems::Ints(x) => match v {
-                Value::Int(n) => return put_at(x, idx, n),
-                Value::Char(c) if x.is_empty() => TransientItems::Chars(vec![c]),
-                v => TransientItems::Generic(boxed_with(x, Value::Int, idx, v)),
-            },
-            TransientItems::Chars(x) => match v {
-                Value::Char(c) => return put_at(x, idx, c),
-                Value::Int(n) if x.is_empty() => TransientItems::Ints(vec![n]),
-                v => TransientItems::Generic(boxed_with(x, Value::Char, idx, v)),
-            },
+            TransientItems::Generic(x) => put_generic(x, idx, v),
+            TransientItems::Ints(x) => put_ints(x, idx, v),
+            TransientItems::Chars(x) => put_chars(x, idx, v),
+            TransientItems::Strs(ps) => put_strs(ps, idx, v),
         };
-        *self = converted;
+        if let Some(next) = converted {
+            *self = next;
+        }
     }
 
     #[inline]
@@ -116,6 +190,7 @@ impl TransientItems {
         match self {
             TransientItems::Ints(x) => x.len(),
             TransientItems::Chars(x) => x.len(),
+            TransientItems::Strs(ps) => ps.len(),
             TransientItems::Generic(x) => x.len(),
         }
     }
@@ -161,6 +236,7 @@ impl TransientVector {
         let items = match v.typed_items() {
             Some(crate::value::TypedItems::Ints(x)) => TransientItems::Ints(x),
             Some(crate::value::TypedItems::Chars(x)) => TransientItems::Chars(x),
+            Some(crate::value::TypedItems::Strs(ps)) => TransientItems::Strs(ps),
             None => TransientItems::Generic(v.iter().collect()),
         };
         Self { items, valid: true }
@@ -173,6 +249,7 @@ impl TransientVector {
         let items = match v.into_typed_items() {
             Ok(crate::value::TypedItems::Ints(x)) => TransientItems::Ints(x),
             Ok(crate::value::TypedItems::Chars(x)) => TransientItems::Chars(x),
+            Ok(crate::value::TypedItems::Strs(ps)) => TransientItems::Strs(ps),
             Err(v) => TransientItems::Generic(v.into_vec()),
         };
         Self { items, valid: true }
@@ -202,6 +279,7 @@ impl TransientVector {
         let empty = match &mut self.items {
             TransientItems::Ints(x) => x.pop().is_none(),
             TransientItems::Chars(x) => x.pop().is_none(),
+            TransientItems::Strs(ps) => !ps.pop(),
             TransientItems::Generic(x) => x.pop().is_none(),
         };
         if empty {
@@ -257,6 +335,7 @@ impl TransientVector {
         Ok(match &self.items {
             TransientItems::Ints(x) => x.get(idx).map(|n| Value::Int(*n)),
             TransientItems::Chars(x) => x.get(idx).map(|c| Value::Char(*c)),
+            TransientItems::Strs(ps) => ps.get_str(idx).map(|s| Value::Str(Arc::from(s))),
             TransientItems::Generic(x) => x.get(idx).cloned(),
         })
     }
@@ -286,6 +365,7 @@ impl TransientVector {
         match &self.items {
             TransientItems::Ints(x) => x.get(idx).map(|n| Value::Int(*n)),
             TransientItems::Chars(x) => x.get(idx).map(|c| Value::Char(*c)),
+            TransientItems::Strs(ps) => ps.get_str(idx).map(|s| Value::Str(Arc::from(s))),
             TransientItems::Generic(x) => x.get(idx).cloned(),
         }
     }
@@ -302,6 +382,7 @@ impl TransientVector {
         match &self.items {
             TransientItems::Ints(x) => f(&Value::Int(*x.get(idx)?)),
             TransientItems::Chars(x) => f(&Value::Char(*x.get(idx)?)),
+            TransientItems::Strs(ps) => f(&Value::Str(Arc::from(ps.get_str(idx)?))),
             TransientItems::Generic(x) => f(x.get(idx)?),
         }
     }
@@ -317,6 +398,7 @@ impl TransientVector {
         match &self.items {
             TransientItems::Ints(x) => x.get(idx).copied().map(crate::ValueRef::Int),
             TransientItems::Chars(x) => x.get(idx).copied().map(crate::ValueRef::Char),
+            TransientItems::Strs(ps) => ps.get_str(idx).map(crate::ValueRef::Str),
             TransientItems::Generic(x) => x.get(idx).map(crate::ValueRef::Ref),
         }
     }
@@ -451,7 +533,7 @@ impl TransientVector {
         match &mut self.items {
             TransientItems::Ints(x) => x.pop().is_some(),
             TransientItems::Chars(x) => x.pop().is_some(),
-            TransientItems::Generic(_) => false,
+            TransientItems::Strs(_) | TransientItems::Generic(_) => false,
         }
     }
 
@@ -475,6 +557,10 @@ impl TransientVector {
             TransientItems::Chars(mut x) => {
                 shed_slack(&mut x);
                 Vector::from_flat_chars(x)
+            }
+            TransientItems::Strs(mut ps) => {
+                ps.shed_slack();
+                Vector::from_packed_strs(ps)
             }
             TransientItems::Generic(mut x) => {
                 shed_slack(&mut x);
@@ -1430,10 +1516,12 @@ mod tests {
         assert!(!ptr.is_null());
         assert_eq!(len, 1);
         ti.unlock_raw();
-        if let TransientKind::Vector(tv) = &mut *ti.lock() {
-            let _ = tv.persistent().unwrap();
-        }
-        assert!(ti.lock_ints_ptr().is_none());
+        assert!(t_inv.ints_mut().is_none());
+        let mut tvi_inv = TransientVector::new();
+        tvi_inv.conj(Value::Int(7)).unwrap();
+        let _ = tvi_inv.persistent().unwrap();
+        let ti_inv = Transient::new(TransientKind::Vector(tvi_inv));
+        assert!(ti_inv.lock_ints_ptr().is_none());
 
         let tc = Transient::new(TransientKind::Vector(TransientVector::from_vector(
             &crate::Vector::from_chars(vec!['a']),
@@ -1441,5 +1529,47 @@ mod tests {
         assert!(tc.lock_ints_ptr().is_none());
         let tm = Transient::new(TransientKind::Map(TransientMap::new()));
         assert!(tm.lock_ints_ptr().is_none());
+
+        // PackedStrings promotion, operations, pop, assoc fallback, and bounds
+        assert!(super::try_pack_strs_bounded(&[], "abcd", 2).is_none());
+        assert!(super::try_pack_strs_bounded(&[Value::Int(1)], "a", 10).is_none());
+        assert!(
+            super::try_pack_strs_bounded(&[Value::Str(std::sync::Arc::from("abc"))], "d", 3)
+                .is_none()
+        );
+        let mut tv_str = TransientVector::new();
+        for i in 0..=super::PACK_STR_MIN + 2 {
+            tv_str
+                .conj(Value::Str(std::sync::Arc::from(i.to_string())))
+                .unwrap();
+        }
+        assert!(tv_str.is_packed());
+        assert_eq!(tv_str.len().unwrap(), super::PACK_STR_MIN + 3);
+        assert_eq!(
+            tv_str.nth(0).unwrap(),
+            Some(Value::Str(std::sync::Arc::from("0")))
+        );
+        assert_eq!(
+            tv_str.nth_opt(1),
+            Some(Value::Str(std::sync::Arc::from("1")))
+        );
+        assert_eq!(
+            tv_str.read_at(2, |v| Some(v.clone())),
+            Some(Value::Str(std::sync::Arc::from("2")))
+        );
+        assert!(matches!(
+            tv_str.get_val_ref(3),
+            Some(crate::ValueRef::Str("3"))
+        ));
+        assert!(!tv_str.pop_scalar_opt());
+        tv_str.pop().unwrap();
+        let frozen = tv_str.persistent().unwrap();
+        assert!(frozen.as_packed_strs().is_some());
+        let mut tv_from_ref = TransientVector::from_vector(&frozen);
+        assert!(tv_from_ref.is_packed());
+        tv_from_ref.assoc(0, Value::Int(42)).unwrap();
+        assert!(!tv_from_ref.is_packed());
+        let tv_owned = TransientVector::from_vector_owned(frozen);
+        assert!(tv_owned.is_packed());
     }
 }
