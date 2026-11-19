@@ -610,7 +610,7 @@ fn fold(
     Ok(num_value(acc))
 }
 
-fn native_add(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_add(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Ok(Value::Int(0));
     }

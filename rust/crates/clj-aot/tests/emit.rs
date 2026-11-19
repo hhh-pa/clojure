@@ -1486,3 +1486,57 @@ fn native_emit_ir_fuses_filter_some_and_in2_moves_271() {
     assert!(hofs_body.contains("some_hit"), "{hofs_body}");
     assert!(hofs_body.contains("@rt_n_core_own"), "{hofs_body}");
 }
+
+#[test]
+fn native_emit_ir_fuses_dot_parse_num_and_hof2_271() {
+    let ir = tmp("dot-hof2.ll");
+    clj_aot::build_str(
+        "(defn dot [a b] (reduce + 0.0 (map * a b)))\n\
+         (defn idf [x] x)\n\
+         (defn pnums [ss] [(mapv #(Long/parseLong %) ss) (mapv #(Integer/parseInt %) ss) (mapv #(Double/parseDouble %) ss) (mapv #(idf %) ss) (mapv #(Math/abs %) [1 -2])])\n\
+         (defn hof2 [a b] [(mapv (fn [x y] (+ x y)) a b) (every? (fn [x] (> x 0)) a) (reduce + 0.0 (map (fn [x y] (* x y)) a b)) (reduce + (map (fn [x] (* x 2)) a))])\n\
+         (defn mrecur [m] (loop [{:keys [a]} m] (if (< a 1) (recur {:a 1}) a)))\n\
+         (defn nth-str [v i] (nth v i))\n\
+         (println (dot [1.0 2.0] [3.0 4.0]) (pnums [\"1\" \"2\"]) (hof2 [1 2] [3 4]) (mrecur {:a 0}) (nth-str [\"a\"] 0))\n",
+        "f.clj",
+        &tmp("nope-dot-hof2"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let dot_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_dot("))
+        .expect("dot fn");
+    assert!(dot_body.contains("@rt_n_dot"), "{dot_body}");
+    let pnums_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_pnums("))
+        .expect("pnums fn");
+    assert_eq!(
+        pnums_body.match_indices("@rt_n_mapv_parse_num").count(),
+        3,
+        "{pnums_body}"
+    );
+    let hof2_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_hof2("))
+        .expect("hof2 fn");
+    assert!(hof2_body.contains("loop_cur2"), "{hof2_body}");
+    assert!(hof2_body.contains("every_fail"), "{hof2_body}");
+    assert!(hof2_body.contains("sum_set"), "{hof2_body}");
+    assert!(hof2_body.contains("@rt_n_add_acc"), "{hof2_body}");
+    // Regression guard: bitcode linked into user modules (`clj-bc`) must stay
+    // panic-free so Linux links never pull undefined `core::str::slice_error_fail`
+    // or `core::panicking` symbols across differing panic/CPU flags.
+    assert!(
+        !text.contains("slice_error_fail") && !text.contains("9panicking"),
+        "bitcode leaked a Rust panic symbol into emitted IR"
+    );
+}

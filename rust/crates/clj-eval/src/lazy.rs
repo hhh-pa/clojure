@@ -1947,6 +1947,9 @@ fn walk_all_other(
     other: Value,
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Result<bool, Signal> {
+    if let Some(sp) = as_splitvec(&other) {
+        return visit_all(eval, sp.iter(), visit);
+    }
     if let Some(sv) = as_subvector(&other) {
         return visit_all(eval, sv.vec().iter().skip(sv.start()).take(sv.len()), visit);
     }

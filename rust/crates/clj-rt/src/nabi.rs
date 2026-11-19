@@ -372,6 +372,36 @@ pub extern "C" fn rt_n_unreduce(v: &mut Value) -> u8 {
     u8::from(native_abi::unreduce(v))
 }
 
+/// Fast path for `(mapv #(Long/parseLong %) coll)` (`mode`: 0 Long, 1 Int, 2 Double):
+/// writes `out` and returns 1 on hit, 0 on miss.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_mapv_parse_num(out: &mut Value, coll: &Value, mode: u8) -> u8 {
+    let Some(v) = native_abi::try_mapv_parse_num(coll, mode) else {
+        return 0;
+    };
+    *out = v;
+    1
+}
+
+/// Fast path for `(reduce + init (map * c1 c2))` over two numeric vectors:
+/// writes `out` and returns 1 on hit, 0 on miss.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_dot(out: &mut Value, init: &Value, c1: &Value, c2: &Value) -> u8 {
+    let Some(v) = native_abi::try_dot_product(init, c1, c2) else {
+        return 0;
+    };
+    *out = v;
+    1
+}
+
+/// Fold `res` (taken: left nil) into `acc` using `clojure.core/+` for a
+/// compiled `(reduce + [init] (map F ...))` loop.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_add_acc(acc: &mut Value, res: &mut Value) -> i32 {
+    let rhs = std::mem::replace(res, Value::Nil);
+    native::status(with_active(|eval| native_abi::add_acc(eval, acc, rhs)))
+}
+
 /// The frozen constant table's first slot (#271): generated code borrows
 /// `&consts[k]` in place of cloning constant `k` into a temporary.
 #[unsafe(no_mangle)]
@@ -1263,6 +1293,9 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_vec_push,
         rt_n_vec_done,
         rt_n_unreduce,
+        rt_n_mapv_parse_num,
+        rt_n_dot,
+        rt_n_add_acc,
         rt_n_regex,
         rt_n_static_field,
         rt_n_class,

@@ -332,17 +332,16 @@ impl PackedStrings {
         &self.buf
     }
 
-    /// Borrow string `idx` (`None` past the end).
+    /// Borrow string `idx` (`None` past the end; panic-free for `clj-bc` bitcode).
     #[inline]
     #[must_use]
     pub fn get_str(&self, idx: usize) -> Option<&str> {
         let end = *self.ends.get(idx)? as usize;
-        let start = if idx == 0 {
-            0
-        } else {
-            self.ends[idx - 1] as usize
+        let start = match idx.checked_sub(1) {
+            Some(prev) => *self.ends.get(prev)? as usize,
+            None => 0,
         };
-        Some(&self.buf[start..end])
+        self.buf.get(start..end)
     }
 
     /// Append `s` when total bytes stay within `limit` (`false` otherwise).

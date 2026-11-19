@@ -962,6 +962,27 @@ impl SplitVecValue {
         }
     }
 
+    /// A fresh split vector (JVM class `PersistentVector`, no metadata)
+    /// keeping only the non-empty spans (`(filterv seq split-vec)`).
+    #[must_use]
+    pub fn filter_non_empty(&self) -> Self {
+        let ws = self.window_spans();
+        let start = usize::from(ws.first().is_some_and(|&(_, l)| l == 0));
+        if ws[start..].iter().all(|&(_, l)| l > 0) {
+            return Self {
+                base: Arc::clone(&self.base),
+                spans: Arc::clone(&self.spans),
+                off: self.off + start,
+                len: self.len - start,
+                sub: false,
+                view: std::sync::OnceLock::new(),
+                meta: None,
+            };
+        }
+        let spans: Vec<(u32, u32)> = ws.iter().copied().filter(|&(_, l)| l > 0).collect();
+        Self::new(Arc::clone(&self.base), Arc::new(spans))
+    }
+
     /// Whether this value is a `subvec` window (JVM class
     /// `APersistentVector$SubVector` rather than
     /// `PersistentVector`).
@@ -2322,6 +2343,13 @@ mod tests {
             Value::Str(Arc::from("7")),
         ]));
         assert_eq!(hv(&v), hv(&plain));
+        assert_eq!(sp.filter_non_empty().len(), 3);
+        let sp_lead =
+            super::SplitVecValue::new(Arc::from(" 10 7"), Arc::new(vec![(0, 0), (1, 2), (4, 1)]));
+        assert_eq!(sp_lead.filter_non_empty().len(), 2);
+        let sp_mid =
+            super::SplitVecValue::new(Arc::from("10,,7"), Arc::new(vec![(0, 2), (3, 0), (4, 1)]));
+        assert_eq!(sp_mid.filter_non_empty().len(), 2);
     }
 
     #[test]

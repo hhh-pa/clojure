@@ -168,6 +168,9 @@ fn walk_direct(
     if let Value::Vector(v) = coll {
         return Some(each(&mut v.iter()));
     }
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Some(each(&mut sp.iter()));
+    }
     if let Some(sv) = crate::lazy::as_subvector(coll) {
         return Some(each(&mut sv.vec().iter().skip(sv.start()).take(sv.len())));
     }
@@ -1514,6 +1517,9 @@ pub(crate) fn native_filterv_owned(
     // Split vectors materialize once into the vector lane (the
     // lazy filter thunk steps per item through pending machinery).
     if let Some(sp) = crate::lazy::as_splitvec(&input) {
+        if crate::ext::as_native(&args[0]).is_some_and(|n| &*n.display == "clojure.core/seq") {
+            return Ok(Value::Extension(Arc::new(sp.filter_non_empty())));
+        }
         let v = clj_value::Vector::from_vec(sp.items());
         return filterv_vector(eval, &args[0], v);
     }

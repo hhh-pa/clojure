@@ -1197,9 +1197,7 @@ fn try_assoc_leaf(coll: Value, k: &mut Value, v: &mut Value) -> Result<Value, Va
             Ok(n) if n == x.len() => Ok(Value::Vector(x.push_back(take(v)))),
             _ => Err(Value::Vector(x)),
         },
-        (Value::Map(m), k_ref)
-            if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) =>
-        {
+        (Value::Map(m), k_ref) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) => {
             Ok(Value::Map(m.insert(take(k), take(v))))
         }
         (other, _) => Err(other),
@@ -1230,9 +1228,7 @@ fn try_update_leaf_int(coll: Value, k: &mut Value, delta: i64) -> Result<Value, 
                 x.set_nth_owned(n, Value::Int(new)).expect("n < x.len()"),
             ))
         }
-        (Value::Map(m), k_ref)
-            if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) =>
-        {
+        (Value::Map(m), k_ref) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) => {
             let Some(Value::Int(old)) = m.get(k_ref) else {
                 return Err(Value::Map(m));
             };
@@ -1315,7 +1311,9 @@ pub(crate) fn apply_assoc_in2(args: &mut [Value]) -> Option<Value> {
 pub(crate) fn apply_update_in2(args: &mut [Value]) -> Option<Value> {
     let [coll, k1, k2, f] = args else { return None };
     let delta = fast_inc_dec_delta(f)?;
-    match try_step_in2(take(coll), k1, |inner| try_update_leaf_int(inner, k2, delta)) {
+    match try_step_in2(take(coll), k1, |inner| {
+        try_update_leaf_int(inner, k2, delta)
+    }) {
         Ok(out) => Some(out),
         Err(orig) => {
             *coll = orig;
@@ -2837,7 +2835,9 @@ mod apply_tests {
     #[test]
     fn owned_update_in2_and_swap_in_place_271() {
         use super::{apply_assoc_in2, apply_update_in2, apply_update3, try_swap_in_place};
-        use crate::native_abi::{apply_own, own_op, repack_own_args, single_take_arg_bit, take_arg_mask, TAKE_ARGS};
+        use crate::native_abi::{
+            TAKE_ARGS, apply_own, own_op, repack_own_args, single_take_arg_bit, take_arg_mask,
+        };
         use clj_value::{Keyword, Map, Vector};
 
         assert_eq!(take_arg_mask(0), TAKE_ARGS | single_take_arg_bit(0));
@@ -2867,11 +2867,19 @@ mod apply_tests {
             apply_update3(&mut [Value::Nil, ka.clone(), inc_fn.clone()]),
             None
         );
-        let v_ok = Value::Vector(Vector::from_vec(vec![Value::Int(10), Value::Nil, Value::Int(i64::MAX)]));
+        let v_ok = Value::Vector(Vector::from_vec(vec![
+            Value::Int(10),
+            Value::Nil,
+            Value::Int(i64::MAX),
+        ]));
         let mut a = [v_ok.clone(), Value::Int(0), inc_fn.clone()];
         assert_eq!(
             apply_update3(&mut a),
-            Some(Value::Vector(Vector::from_vec(vec![Value::Int(11), Value::Nil, Value::Int(i64::MAX)])))
+            Some(Value::Vector(Vector::from_vec(vec![
+                Value::Int(11),
+                Value::Nil,
+                Value::Int(i64::MAX)
+            ])))
         );
         assert_eq!(
             apply_update3(&mut [v_ok.clone(), Value::Int(5), inc_fn.clone()]),
@@ -2905,10 +2913,7 @@ mod apply_tests {
             ]),
             None
         );
-        assert_eq!(
-            apply_update3(&mut [m_ok, kb.clone(), dec_fn.clone()]),
-            None
-        );
+        assert_eq!(apply_update3(&mut [m_ok, kb.clone(), dec_fn.clone()]), None);
 
         // apply_assoc_in2 & apply_update_in2 branches
         assert_eq!(apply_assoc_in2(&mut []), None);
@@ -2924,13 +2929,9 @@ mod apply_tests {
             ),
             (kb.clone(), Value::Int(9)),
         ]));
-        let upd_map = apply_assoc_in2(&mut [
-            nested_map.clone(),
-            ka.clone(),
-            kb.clone(),
-            Value::Int(2),
-        ])
-        .expect("assoc-in2 map");
+        let upd_map =
+            apply_assoc_in2(&mut [nested_map.clone(), ka.clone(), kb.clone(), Value::Int(2)])
+                .expect("assoc-in2 map");
         assert_eq!(
             apply_update_in2(&mut [upd_map, ka.clone(), kb.clone(), inc_fn.clone()]),
             Some(Value::Map(Map::from_kvs_last_wins(vec![
@@ -2952,12 +2953,7 @@ mod apply_tests {
             None
         );
         assert_eq!(
-            apply_assoc_in2(&mut [
-                nested_map.clone(),
-                kb.clone(),
-                ka.clone(),
-                Value::Int(2),
-            ]),
+            apply_assoc_in2(&mut [nested_map.clone(), kb.clone(), ka.clone(), Value::Int(2),]),
             None
         );
         assert_eq!(
@@ -2996,12 +2992,7 @@ mod apply_tests {
             None
         );
         assert_eq!(
-            apply_assoc_in2(&mut [
-                nested_vec,
-                Value::Int(1),
-                Value::Int(0),
-                Value::Int(8),
-            ]),
+            apply_assoc_in2(&mut [nested_vec, Value::Int(1), Value::Int(0), Value::Int(8),]),
             None
         );
 
@@ -3024,9 +3015,15 @@ mod apply_tests {
             Some(Value::Int(15))
         );
         let mut v_max = Value::Int(i64::MAX);
-        assert_eq!(try_swap_in_place(&mut v_max, &add_fn, &[Value::Int(1)]), None);
+        assert_eq!(
+            try_swap_in_place(&mut v_max, &add_fn, &[Value::Int(1)]),
+            None
+        );
         let mut v_nil = Value::Nil;
-        assert_eq!(try_swap_in_place(&mut v_nil, &add_fn, &[Value::Int(1)]), None);
+        assert_eq!(
+            try_swap_in_place(&mut v_nil, &add_fn, &[Value::Int(1)]),
+            None
+        );
         assert_eq!(
             try_swap_in_place(&mut v_nil, &assoc_fn, &[ka.clone(), Value::Int(1)]),
             None

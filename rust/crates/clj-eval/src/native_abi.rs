@@ -1333,6 +1333,144 @@ pub fn unreduce(v: &mut Value) -> bool {
     true
 }
 
+fn str_window(coll: &Value) -> Option<(usize, usize)> {
+    if let Value::Vector(v) = coll {
+        return Some((0, v.len()));
+    }
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Some((0, sp.len()));
+    }
+    crate::lazy::as_subvector(coll).map(|sv| (sv.start(), sv.end()))
+}
+
+fn vec_str_at(v: &Vector, i: usize) -> Option<&str> {
+    match v.get_val_ref(i)? {
+        clj_value::ValueRef::Str(s) => Some(s),
+        clj_value::ValueRef::Ref(Value::Str(s)) => Some(s),
+        _ => None,
+    }
+}
+
+fn str_item(coll: &Value, i: usize) -> Option<&str> {
+    if let Value::Vector(v) = coll {
+        return vec_str_at(v, i);
+    }
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return sp.piece_str(i);
+    }
+    vec_str_at(crate::lazy::as_subvector(coll)?.vec(), i)
+}
+
+/// Parse a string collection (`Vector`, `SplitVecValue`, `SubVectorValue`)
+/// in one pass without materializing token strings (`mode`: 0 `Long/parseLong`,
+/// 1 `Integer/parseInt`, 2 `Double/parseDouble`). Returns `None` on non-string
+/// collections or any malformed token so the caller's general path raises the
+/// exact exception at the failing element.
+#[must_use]
+pub fn try_mapv_parse_num(coll: &Value, mode: u8) -> Option<Value> {
+    let (start, end) = str_window(coll)?;
+    if mode == 2 {
+        let mut out = Vec::with_capacity(end - start);
+        for i in start..end {
+            out.push(Value::Double(parse_double_str(str_item(coll, i)?)?));
+        }
+        return Some(Value::Vector(Vector::from_vec(out)));
+    }
+    let mut ints = Vec::with_capacity(end - start);
+    for i in start..end {
+        let n = parse_long_str(str_item(coll, i)?)?;
+        if mode == 1 && i32::try_from(n).is_err() {
+            return None;
+        }
+        ints.push(n);
+    }
+    Some(Value::Vector(Vector::from_flat_ints(ints)))
+}
+
+fn num_val_as_i64(vr: clj_value::ValueRef<'_>) -> Option<i64> {
+    match vr {
+        clj_value::ValueRef::Int(n) => Some(n),
+        clj_value::ValueRef::Ref(Value::Int(n)) => Some(*n),
+        _ => None,
+    }
+}
+
+fn dot_ints(mut acc: i64, v1: &Vector, v2: &Vector) -> Option<Value> {
+    if let (Some(s1), Some(s2)) = (v1.as_flat_ints(), v2.as_flat_ints()) {
+        for (&x, &y) in s1.iter().zip(s2.iter()) {
+            acc = acc.checked_add(x.checked_mul(y)?)?;
+        }
+        return Some(Value::Int(acc));
+    }
+    let n = v1.len().min(v2.len());
+    for i in 0..n {
+        let x = num_val_as_i64(v1.get_val_ref(i)?)?;
+        let y = num_val_as_i64(v2.get_val_ref(i)?)?;
+        acc = acc.checked_add(x.checked_mul(y)?)?;
+    }
+    Some(Value::Int(acc))
+}
+
+fn dot_doubles(mut acc: f64, v1: &Vector, v2: &Vector) -> Option<Value> {
+    let n = v1.len().min(v2.len());
+    for i in 0..n {
+        let prod = match (v1.get_val_ref(i)?, v2.get_val_ref(i)?) {
+            (
+                clj_value::ValueRef::Ref(Value::Double(x)),
+                clj_value::ValueRef::Ref(Value::Double(y)),
+            ) => x * y,
+            (clj_value::ValueRef::Ref(Value::Double(x)), y) => x * num_val_as_i64(y)? as f64,
+            (x, clj_value::ValueRef::Ref(Value::Double(y))) => num_val_as_i64(x)? as f64 * y,
+            (x, y) => num_val_as_i64(x)?.checked_mul(num_val_as_i64(y)?)? as f64,
+        };
+        acc += prod;
+    }
+    Some(Value::Double(acc))
+}
+
+/// Fast path for `(reduce + init (map * c1 c2))` over two vectors when
+/// `init` and all elements are `Int` or `Double`.
+#[must_use]
+pub fn try_dot_product(init: &Value, c1: &Value, c2: &Value) -> Option<Value> {
+    let (Value::Vector(v1), Value::Vector(v2)) = (c1, c2) else {
+        return None;
+    };
+    match init {
+        Value::Int(acc) => dot_ints(*acc, v1, v2),
+        Value::Double(acc) => dot_doubles(*acc, v1, v2),
+        _ => None,
+    }
+}
+
+/// Fold `res` into `acc` using `clojure.core/+` for a compiled
+/// `(reduce + [init] (map F ...))` loop.
+pub fn add_acc(eval: &mut Evaluator, acc: &mut Value, res: Value) -> Result<(), Signal> {
+    match (&mut *acc, &res) {
+        (Value::Double(a), Value::Double(b)) => {
+            *a += *b;
+            return Ok(());
+        }
+        (Value::Double(a), Value::Int(b)) => {
+            *a += *b as f64;
+            return Ok(());
+        }
+        (Value::Int(a), Value::Double(b)) => {
+            *acc = Value::Double(*a as f64 + *b);
+            return Ok(());
+        }
+        (Value::Int(a), Value::Int(b)) => {
+            if let Some(sum) = a.checked_add(*b) {
+                *a = sum;
+                return Ok(());
+            }
+        }
+        _ => {}
+    }
+    let lhs = std::mem::replace(acc, Value::Nil);
+    *acc = crate::core::native_add(eval, &[lhs, res]).map_err(|e| eval.throw(e))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1632,5 +1770,160 @@ mod tests {
             Some(Value::Int(5))
         );
         assert_eq!(apply_re_matches(&pat, &aa), Some(aa));
+    }
+
+    #[test]
+    fn try_mapv_parse_num_covers_vectors_splits_subvecs_and_misses() {
+        let strs = |xs: &[&str]| {
+            Value::Vector(Vector::from_vec(
+                xs.iter().map(|s| Value::Str(Arc::from(*s))).collect(),
+            ))
+        };
+        let ints = |xs: &[i64]| Value::Vector(Vector::from_flat_ints(xs.to_vec()));
+        let dbls = |xs: &[f64]| {
+            Value::Vector(Vector::from_vec(
+                xs.iter().map(|d| Value::Double(*d)).collect(),
+            ))
+        };
+        // Generic Vector of strings (modes 0, 1, 2)
+        let gv = strs(&["-7", "42", "0"]);
+        assert_eq!(try_mapv_parse_num(&gv, 0), Some(ints(&[-7, 42, 0])));
+        assert_eq!(try_mapv_parse_num(&gv, 1), Some(ints(&[-7, 42, 0])));
+        assert_eq!(
+            try_mapv_parse_num(&strs(&["1.5", "-2.25"]), 2),
+            Some(dbls(&[1.5, -2.25]))
+        );
+        // PackedStrings vector (>= 256 items through TransientVector)
+        let mut tv = clj_value::TransientVector::new();
+        for i in 0..260 {
+            tv.conj(Value::Str(Arc::from(i.to_string()))).expect("conj");
+        }
+        let pv = Value::Vector(tv.persistent().expect("vec"));
+        assert!(matches!(&pv, Value::Vector(v) if v.as_packed_strs().is_some()));
+        let parsed = try_mapv_parse_num(&pv, 0).expect("packed long");
+        assert_eq!(parsed, ints(&(0..260).collect::<Vec<_>>()));
+        // SplitVecValue
+        let sp = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from("10 20 30"),
+            Arc::new(vec![(0, 2), (3, 2), (6, 2)]),
+        )));
+        assert_eq!(try_mapv_parse_num(&sp, 0), Some(ints(&[10, 20, 30])));
+        // SubVectorValue
+        let base_vec = Vector::from_vec(vec![
+            Value::Str(Arc::from("x")),
+            Value::Str(Arc::from("3")),
+            Value::Str(Arc::from("4")),
+        ]);
+        let sv = Value::Extension(Arc::new(clj_value::SubVectorValue::new(base_vec, 1, 3)));
+        assert_eq!(try_mapv_parse_num(&sv, 1), Some(ints(&[3, 4])));
+        // Misses: non-collection, non-string item, malformed token, i32 overflow on mode 1
+        assert_eq!(try_mapv_parse_num(&Value::Nil, 0), None);
+        assert_eq!(try_mapv_parse_num(&ints(&[1, 2]), 0), None);
+        assert_eq!(try_mapv_parse_num(&strs(&["1", "nope"]), 0), None);
+        assert_eq!(try_mapv_parse_num(&strs(&["1.0", "bad"]), 2), None);
+        assert_eq!(try_mapv_parse_num(&strs(&["3000000000"]), 1), None);
+        assert_eq!(
+            try_mapv_parse_num(&strs(&["3000000000"]), 0),
+            Some(ints(&[3_000_000_000]))
+        );
+    }
+
+    #[test]
+    fn try_dot_product_and_add_acc_cover_fast_and_fallback_paths() {
+        let flat = |xs: &[i64]| Value::Vector(Vector::from_flat_ints(xs.to_vec()));
+        let generic_ints = Value::Vector(Vector::from_vec(vec![
+            Value::Int(2),
+            Value::Int(5),
+            Value::Nil,
+        ]));
+        let dbls = |xs: &[f64]| {
+            Value::Vector(Vector::from_vec(
+                xs.iter().map(|d| Value::Double(*d)).collect(),
+            ))
+        };
+        let mixed = Value::Vector(Vector::from_vec(vec![Value::Double(1.5), Value::Int(4)]));
+        let non_num = Value::Vector(Vector::from_vec(vec![Value::Nil]));
+        // dot_ints: flat + generic + overflow miss + non-int miss
+        assert_eq!(
+            try_dot_product(&Value::Int(10), &flat(&[2, 3]), &flat(&[4, 5])),
+            Some(Value::Int(33))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Int(1), &generic_ints, &flat(&[3, 4])),
+            Some(Value::Int(27))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Int(0), &flat(&[i64::MAX]), &flat(&[2])),
+            None
+        );
+        assert_eq!(
+            try_dot_product(&Value::Int(0), &generic_ints, &non_num),
+            None
+        );
+        // dot_doubles: (Double, Double), (Double, Int), (Int, Double), (Int, Int), overflow/non-num miss
+        assert_eq!(
+            try_dot_product(&Value::Double(0.5), &dbls(&[2.0, 3.0]), &dbls(&[4.0, 5.0])),
+            Some(Value::Double(23.5))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &mixed, &flat(&[2, 3])),
+            Some(Value::Double(15.0))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &flat(&[2, 3]), &mixed),
+            Some(Value::Double(15.0))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &flat(&[i64::MAX]), &flat(&[2])),
+            None
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &dbls(&[1.0]), &non_num),
+            None
+        );
+        // Non-vector and non-numeric init misses
+        assert_eq!(
+            try_dot_product(&Value::Int(0), &Value::Nil, &flat(&[1])),
+            None
+        );
+        assert_eq!(try_dot_product(&Value::Nil, &flat(&[1]), &flat(&[1])), None);
+
+        // add_acc: all 4 numeric combos + i64 overflow fallback + non-int fallback
+        let mut eval = crate::boot();
+        let mut a = Value::Double(1.5);
+        add_acc(&mut eval, &mut a, Value::Double(2.5)).expect("d+d");
+        assert_eq!(a, Value::Double(4.0));
+        add_acc(&mut eval, &mut a, Value::Int(3)).expect("d+i");
+        assert_eq!(a, Value::Double(7.0));
+        let mut b = Value::Int(2);
+        add_acc(&mut eval, &mut b, Value::Double(0.5)).expect("i+d");
+        assert_eq!(b, Value::Double(2.5));
+        let mut c = Value::Int(10);
+        add_acc(&mut eval, &mut c, Value::Int(5)).expect("i+i");
+        assert_eq!(c, Value::Int(15));
+        let mut ov = Value::Int(i64::MAX);
+        assert!(add_acc(&mut eval, &mut ov, Value::Int(1)).is_err());
+        let mut big = read_constant("10N").expect("10N");
+        add_acc(&mut eval, &mut big, Value::Int(5)).expect("bigint+i");
+        assert_eq!(big, read_constant("15N").expect("15N"));
+
+        // SplitVec direct walking (`seqs::walk_direct`, `lazy::walk_all_other`, `filterv seq`)
+        let sp = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from(" ab c"),
+            Arc::new(vec![(0, 0), (1, 2), (4, 1)]),
+        )));
+        let walker = eval
+            .eval_source(
+                "(fn [sp] [(vec (take 2 sp)) (some seq sp) (filterv seq sp) \
+                  (vec (take 1 (subvec [\"x\" \"y\"] 0 2))) (some seq (subvec [\"x\" \"y\"] 0 2))])",
+            )
+            .expect("walker")
+            .pop()
+            .expect("fn");
+        let split_walk = eval.call(&walker, &[sp]).expect("split walk");
+        assert_eq!(
+            print_constant(&split_walk),
+            "[[\"\" \"ab\"] (\\a \\b) [\"ab\" \"c\"] [\"x\"] (\\x)]"
+        );
     }
 }

@@ -1283,20 +1283,7 @@ impl<'ctx> Lowerer<'ctx> {
         let mut targets = Vec::with_capacity(pats.len());
         for (i, pat) in pats.iter().enumerate() {
             let arg = self.elem(args, i);
-            let slots = if matches!(pat, Pattern::Symbol(_)) {
-                let src = if owned {
-                    let s = self.slot(&mut f);
-                    let take = self.param_take_flag(n_param, i);
-                    self.take_or_clone(&f, s, arg, take);
-                    s
-                } else {
-                    arg
-                };
-                f.env.push(Some(LocalRef::Slot(src)));
-                vec![src]
-            } else {
-                self.bind_pattern(&mut f, pat, arg)?
-            };
+            let slots = self.bind_param(&mut f, pat, arg, n_param, i, owned)?;
             targets.push(((*pat).clone(), slots));
         }
         let min_slot = if owned { captures_end } else { f.env.len() };
@@ -1400,6 +1387,35 @@ impl<'ctx> Lowerer<'ctx> {
 
     // ---- patterns ----------------------------------------------------------
 
+    /// Bind an arity parameter `pat` from `arg` (taking/cloning owned symbol
+    /// params for `recur` arities; reading destructured params in place).
+    fn bind_param(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        pat: &Pattern,
+        arg: PointerValue<'ctx>,
+        n_param: IntValue<'ctx>,
+        i: usize,
+        owned: bool,
+    ) -> Result<Vec<PointerValue<'ctx>>, Unsupported> {
+        match pat {
+            Pattern::Symbol(_) => {
+                let src = if owned {
+                    let s = self.slot(f);
+                    let take = self.param_take_flag(n_param, i);
+                    self.take_or_clone(f, s, arg, take);
+                    s
+                } else {
+                    arg
+                };
+                f.env.push(Some(LocalRef::Slot(src)));
+                Ok(vec![src])
+            }
+            Pattern::Vec(v) => self.bind_vec(f, v, arg),
+            Pattern::Map(m) => self.bind_map(f, m, pat, arg),
+        }
+    }
+
     /// Bind `pat` taking ownership of `slot`: a symbol adopts `slot`
     /// directly; a destructuring pattern binds out of `slot` and drops it.
     fn bind_owned_slot(
@@ -1409,70 +1425,61 @@ impl<'ctx> Lowerer<'ctx> {
         slot: PointerValue<'ctx>,
         out: &mut Vec<PointerValue<'ctx>>,
     ) -> Result<(), Unsupported> {
-        if matches!(pat, Pattern::Symbol(_)) {
-            f.env.push(Some(LocalRef::Slot(slot)));
-            out.push(slot);
-        } else {
-            out.extend(self.bind_pattern(f, pat, slot)?);
-            self.free_slots(f, &[slot]);
-        }
+        let bound = match pat {
+            Pattern::Symbol(_) => {
+                f.env.push(Some(LocalRef::Slot(slot)));
+                out.push(slot);
+                return Ok(());
+            }
+            Pattern::Vec(v) => self.bind_vec(f, v, slot)?,
+            Pattern::Map(m) => self.bind_map(f, m, pat, slot)?,
+        };
+        out.extend(bound);
+        self.free_slots(f, &[slot]);
         Ok(())
     }
 
-    /// Bind `pat` to the value in `src`: allocates the pattern's local
-    /// slots (in `pattern_names` order), pushes them on the frame, and
-    /// returns them.
-    fn bind_pattern(
+    /// Bind a vector destructuring pattern `v` to `src`.
+    fn bind_vec(
         &mut self,
         f: &mut FnCtx<'ctx>,
-        pat: &Pattern,
+        v: &clj_eval::expr::VecPattern,
         src: PointerValue<'ctx>,
     ) -> Result<Vec<PointerValue<'ctx>>, Unsupported> {
-        match pat {
-            Pattern::Symbol(_) => {
-                let s = self.slot(f);
-                self.clone_v(f.func, s, src);
-                f.env.push(Some(LocalRef::Slot(s)));
-                Ok(vec![s])
+        let mut out = Vec::new();
+        if let Some(rest) = &v.rest {
+            let cur = self.slot(f);
+            let st = self
+                .call("rt_n_gseq", Some(self.i32t), &[cur.into(), src.into()])
+                .expect("st");
+            self.check(f, st);
+            for fixed in &v.fixed {
+                let item = self.slot(f);
+                let st = self
+                    .call("rt_n_first", Some(self.i32t), &[item.into(), cur.into()])
+                    .expect("st");
+                self.check(f, st);
+                self.bind_owned_slot(f, fixed, item, &mut out)?;
+                let st = self
+                    .call("rt_n_next_mut", Some(self.i32t), &[cur.into()])
+                    .expect("st");
+                self.check(f, st);
             }
-            Pattern::Vec(v) => {
-                let mut out = Vec::new();
-                if let Some(rest) = &v.rest {
-                    let cur = self.slot(f);
-                    let st = self
-                        .call("rt_n_gseq", Some(self.i32t), &[cur.into(), src.into()])
-                        .expect("st");
-                    self.check(f, st);
-                    for fixed in &v.fixed {
-                        let item = self.slot(f);
-                        let st = self
-                            .call("rt_n_first", Some(self.i32t), &[item.into(), cur.into()])
-                            .expect("st");
-                        self.check(f, st);
-                        self.bind_owned_slot(f, fixed, item, &mut out)?;
-                        let st = self
-                            .call("rt_n_next_mut", Some(self.i32t), &[cur.into()])
-                            .expect("st");
-                        self.check(f, st);
-                    }
-                    self.bind_owned_slot(f, rest, cur, &mut out)?;
-                } else {
-                    for (i, fixed) in v.fixed.iter().enumerate() {
-                        let item = self.slot(f);
-                        self.emit_nth_nil(f, item, src, i);
-                        self.bind_owned_slot(f, fixed, item, &mut out)?;
-                    }
-                }
-                if v.as_sym.is_some() {
-                    let s = self.slot(f);
-                    self.clone_v(f.func, s, src);
-                    f.env.push(Some(LocalRef::Slot(s)));
-                    out.push(s);
-                }
-                Ok(out)
+            self.bind_owned_slot(f, rest, cur, &mut out)?;
+        } else {
+            for (i, fixed) in v.fixed.iter().enumerate() {
+                let item = self.slot(f);
+                self.emit_nth_nil(f, item, src, i);
+                self.bind_owned_slot(f, fixed, item, &mut out)?;
             }
-            Pattern::Map(m) => self.bind_map(f, m, pat, src),
         }
+        if v.as_sym.is_some() {
+            let s = self.slot(f);
+            self.clone_v(f.func, s, src);
+            f.env.push(Some(LocalRef::Slot(s)));
+            out.push(s);
+        }
+        Ok(out)
     }
 
     /// A map pattern: a [`plain_map`] binds by direct lookups, any other
@@ -1640,13 +1647,15 @@ impl<'ctx> Lowerer<'ctx> {
         src: PointerValue<'ctx>,
         slots: &[PointerValue<'ctx>],
     ) -> Result<(), Unsupported> {
-        // A plain symbol takes the (dead after `recur`) temp by move.
-        if let (Pattern::Symbol(_), [dst]) = (pat, slots) {
-            self.move_v(f.func, *dst, src);
-            return Ok(());
-        }
         let depth = f.env.len();
-        let fresh = self.bind_pattern(f, pat, src)?;
+        let fresh = match pat {
+            Pattern::Symbol(_) => {
+                self.move_v(f.func, slots[0], src);
+                return Ok(());
+            }
+            Pattern::Vec(v) => self.bind_vec(f, v, src)?,
+            Pattern::Map(m) => self.bind_map(f, m, pat, src)?,
+        };
         f.env.truncate(depth);
         for (dst, s) in slots.iter().zip(fresh) {
             self.move_v(f.func, *dst, s);
@@ -3007,6 +3016,9 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
+        if self.try_lower_dot_product(f, call, dest)? {
+            return Ok(true);
+        }
         let Some(hl) = hof_loop(call) else {
             return Ok(false);
         };
@@ -3025,6 +3037,154 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(true)
     }
 
+    fn try_lower_dot_product(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        let Some((plus, init, m, star, c1, c2)) = dot_product_call(call) else {
+            return Ok(false);
+        };
+        let plus_s = self.slot(f);
+        self.lower(f, plus, plus_s)?;
+        let init_s = self.slot(f);
+        self.lower(f, init, init_s)?;
+        let star_s = self.slot(f);
+        self.lower(f, star, star_s)?;
+        let c1_s = self.slot(f);
+        self.lower(f, c1, c1_s)?;
+        let c2_s = self.slot(f);
+        self.lower(f, c2, c2_s)?;
+        let ok = self
+            .call(
+                "rt_n_dot",
+                Some(self.i8t),
+                &[dest.into(), init_s.into(), c1_s.into(), c2_s.into()],
+            )
+            .expect("ok");
+        let slow = self.ctx.append_basic_block(f.func, "dot_slow");
+        let done = self.ctx.append_basic_block(f.func, "dot_done");
+        let hit = self
+            .builder
+            .build_int_compare(IntPredicate::NE, ok, self.i8t.const_zero(), "dot_ok")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(hit, done, slow)
+            .expect("br");
+        self.builder.position_at_end(slow);
+        let seq = self.slot(f);
+        self.core_call_owned(f, m, &[star_s, c1_s, c2_s], seq);
+        self.core_call_owned(f, call, &[plus_s, init_s, seq], dest);
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        self.free_slots(f, &[plus_s, init_s, star_s, c1_s, c2_s, seq]);
+        Ok(true)
+    }
+
+    fn emit_iter_plan(
+        &self,
+        f: &FnCtx<'ctx>,
+        coll: PointerValue<'ctx>,
+    ) -> (IntValue<'ctx>, PointerValue<'ctx>) {
+        let plan_ty = self.ctx.struct_type(&[self.i64t.into(); 3], false);
+        let plan = self.entry_alloca(f, plan_ty, "plan");
+        let kind = self
+            .call(
+                "rt_n_iter_plan",
+                Some(self.i8t),
+                &[coll.into(), plan.into()],
+            )
+            .expect("kind");
+        (kind, plan)
+    }
+
+    fn load_loop_state(
+        &self,
+        acc: PointerValue<'ctx>,
+        coll: PointerValue<'ctx>,
+        kind: IntValue<'ctx>,
+        plan: PointerValue<'ctx>,
+    ) -> LoopState<'ctx> {
+        let plan_ty = self.ctx.struct_type(&[self.i64t.into(); 3], false);
+        let fields = (0..3)
+            .map(|i| {
+                let p = self
+                    .builder
+                    .build_struct_gep(plan_ty, plan, i, "plan_field")
+                    .expect("gep");
+                self.builder
+                    .build_load(self.i64t, p, "plan_v")
+                    .expect("load")
+                    .into_int_value()
+            })
+            .collect::<Vec<_>>();
+        LoopState {
+            acc,
+            coll,
+            kind,
+            n: fields[0],
+            start: fields[1],
+            step: fields[2],
+        }
+    }
+
+    fn emit_parse_num_probe(
+        &self,
+        f: &FnCtx<'ctx>,
+        coll: PointerValue<'ctx>,
+        mode: u8,
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let hit = self
+            .call(
+                "rt_n_mapv_parse_num",
+                Some(self.i8t),
+                &[
+                    dest.into(),
+                    coll.into(),
+                    self.i8t.const_int(u64::from(mode), false).into(),
+                ],
+            )
+            .expect("hit");
+        let plan_b = self.ctx.append_basic_block(f.func, "loop_plan");
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, hit, self.i8t.const_zero(), "parsed")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(ok, done, plan_b)
+            .expect("br");
+        self.builder.position_at_end(plan_b);
+    }
+
+    fn load_hof_states(
+        &self,
+        acc: PointerValue<'ctx>,
+        coll: PointerValue<'ctx>,
+        plan1: (IntValue<'ctx>, PointerValue<'ctx>),
+        coll2: Option<PointerValue<'ctx>>,
+        plan2: Option<(IntValue<'ctx>, PointerValue<'ctx>)>,
+    ) -> (LoopState<'ctx>, Option<LoopState<'ctx>>) {
+        let mut state = self.load_loop_state(acc, coll, plan1.0, plan1.1);
+        let state2 = coll2
+            .zip(plan2)
+            .map(|(c2, (k2, p2))| self.load_loop_state(acc, c2, k2, p2));
+        if let Some(st2) = &state2 {
+            let lt = self
+                .builder
+                .build_int_compare(IntPredicate::SLT, state.n, st2.n, "n_lt")
+                .expect("cmp");
+            state.n = self
+                .builder
+                .build_select(lt, state.n, st2.n, "n_min")
+                .expect("sel")
+                .into_int_value();
+        }
+        (state, state2)
+    }
+
     /// [`try_lower_hof_loop`] once the moves are safe.
     fn lower_hof_loop(
         &mut self,
@@ -3039,64 +3199,81 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let coll = self.slot(f);
         self.lower(f, hl.coll, coll)?;
-        let plan_ty = self.ctx.struct_type(&[self.i64t.into(); 3], false);
-        let plan = self.entry_alloca(f, plan_ty, "plan");
-        let kind = self
-            .call(
-                "rt_n_iter_plan",
-                Some(self.i8t),
-                &[coll.into(), plan.into()],
-            )
-            .expect("kind");
+        let coll2 = match hl.coll2 {
+            Some(c2) => {
+                let s = self.slot(f);
+                self.lower(f, c2, s)?;
+                Some(s)
+            }
+            None => None,
+        };
+        let done = self.ctx.append_basic_block(f.func, "loop_done");
+        if hl.kind == HofKind::Collect
+            && coll2.is_none()
+            && let Some(mode) = parse_num_arity(hl.arity, base)
+        {
+            self.emit_parse_num_probe(f, coll, mode, dest, done);
+        }
+        let plan1 = self.emit_iter_plan(f, coll);
+        let plan2 = coll2.map(|c2| self.emit_iter_plan(f, c2));
         let direct = self.ctx.append_basic_block(f.func, "loop_direct");
         let general = self.ctx.append_basic_block(f.func, "loop_general");
-        let done = self.ctx.append_basic_block(f.func, "loop_done");
-        let is_direct = self
+        let mut is_direct = self
             .builder
-            .build_int_compare(IntPredicate::NE, kind, self.i8t.const_zero(), "direct")
+            .build_int_compare(IntPredicate::NE, plan1.0, self.i8t.const_zero(), "direct")
             .expect("cmp");
+        if let Some((k2, _)) = plan2 {
+            let d2 = self
+                .builder
+                .build_int_compare(IntPredicate::NE, k2, self.i8t.const_zero(), "direct2")
+                .expect("cmp");
+            is_direct = self
+                .builder
+                .build_and(is_direct, d2, "both_direct")
+                .expect("and");
+        }
         self.builder
             .build_conditional_branch(is_direct, direct, general)
             .expect("br");
         self.builder.position_at_end(direct);
-        match hl.kind {
+        self.init_hof_acc(f.func, hl.kind, hl.init.is_some(), acc);
+        let (state, state2) = self.load_hof_states(acc, coll, plan1, coll2, plan2);
+        self.emit_hof_direct(f, hl, base, &state, state2.as_ref(), dest)?;
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(general);
+        self.emit_hof_general(f, hl, base, acc, coll, coll2, dest)?;
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        self.free_slots(f, &[coll, acc]);
+        if let Some(c2) = coll2 {
+            self.free_slots(f, &[c2]);
+        }
+        Ok(())
+    }
+
+    fn init_hof_acc(
+        &self,
+        func: FunctionValue<'ctx>,
+        kind: HofKind,
+        has_init: bool,
+        acc: PointerValue<'ctx>,
+    ) {
+        match kind {
             HofKind::Collect | HofKind::FilterCollect => {
                 self.call("rt_n_vec_new", None, &[acc.into()]);
             }
             HofKind::CountFilter => {
-                self.write_int(f.func, acc, self.i64t.const_zero());
+                self.write_int(func, acc, self.i64t.const_zero());
+            }
+            HofKind::Sum if !has_init => {
+                self.write_int(func, acc, self.i64t.const_zero());
             }
             HofKind::Some => self.write_tag(acc, 0),
-            HofKind::Each | HofKind::Reduce => {}
+            HofKind::Every => {
+                self.write_bool(func, acc, self.ctx.bool_type().const_int(1, false));
+            }
+            HofKind::Each | HofKind::Sum | HofKind::Reduce => {}
         }
-        let fields = (0..3)
-            .map(|i| {
-                let p = self
-                    .builder
-                    .build_struct_gep(plan_ty, plan, i, "plan_field")
-                    .expect("gep");
-                self.builder
-                    .build_load(self.i64t, p, "plan_v")
-                    .expect("load")
-                    .into_int_value()
-            })
-            .collect::<Vec<_>>();
-        let state = LoopState {
-            acc,
-            coll,
-            kind,
-            n: fields[0],
-            start: fields[1],
-            step: fields[2],
-        };
-        self.emit_hof_direct(f, hl, base, &state, dest)?;
-        self.builder.build_unconditional_branch(done).expect("br");
-        self.builder.position_at_end(general);
-        self.emit_hof_general(f, hl, base, acc, coll, dest)?;
-        self.builder.build_unconditional_branch(done).expect("br");
-        self.builder.position_at_end(done);
-        self.free_slots(f, &[coll, acc]);
-        Ok(())
     }
 
     /// The inline loop of [`try_lower_hof_loop`] over a vector (items by
@@ -3110,6 +3287,7 @@ impl<'ctx> Lowerer<'ctx> {
         hl: &HofLoop<'_>,
         base: usize,
         st: &LoopState<'ctx>,
+        st2: Option<&LoopState<'ctx>>,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
         let i_ptr = self.entry_alloca(f, self.i64t, "loop_i");
@@ -3118,6 +3296,11 @@ impl<'ctx> Lowerer<'ctx> {
             .build_store(i_ptr, self.i64t.const_zero())
             .expect("store");
         self.builder.build_store(cur_ptr, st.start).expect("store");
+        let cur2_ptr = st2.map(|s2| {
+            let p = self.entry_alloca(f, self.i64t, "loop_cur2");
+            self.builder.build_store(p, s2.start).expect("store");
+            p
+        });
         let head = self.ctx.append_basic_block(f.func, "loop_head");
         let body = self.ctx.append_basic_block(f.func, "loop_body");
         let exit = self.ctx.append_basic_block(f.func, "loop_exit");
@@ -3138,6 +3321,12 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.position_at_end(body);
         let item = self.slot(f);
         self.emit_loop_item(f, st, item, i, cur_ptr);
+        let mut items = vec![item];
+        if let (Some(s2), Some(c2p)) = (st2, cur2_ptr) {
+            let item2 = self.slot(f);
+            self.emit_loop_item(f, s2, item2, i, c2p);
+            items.push(item2);
+        }
         let next = self
             .builder
             .build_int_add(i, self.i64t.const_int(1, false), "i_next")
@@ -3145,7 +3334,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.build_store(i_ptr, next).expect("store");
         let params = match hl.kind {
             HofKind::Reduce => vec![st.acc, item],
-            _ => vec![item],
+            _ => items.clone(),
         };
         let res = self.slot(f);
         self.lower_inline_body(
@@ -3156,15 +3345,21 @@ impl<'ctx> Lowerer<'ctx> {
             hl.kind != HofKind::FilterCollect,
             res,
         )?;
-        self.emit_hof_fold(f.func, hl.kind, st.acc, item, res, head, exit);
+        let first_sum = (hl.kind == HofKind::Sum && hl.init.is_none()).then_some(i);
+        self.emit_hof_fold(f, hl.kind, st.acc, &items, res, first_sum, head, exit);
         self.builder.position_at_end(exit);
-        f.free_slots.extend_from_slice(&[item, res]);
+        f.free_slots.extend_from_slice(&items);
+        f.free_slots.push(res);
         match hl.kind {
             HofKind::Each => self.write_nil(f.func, dest),
             HofKind::Collect | HofKind::FilterCollect => {
                 self.call("rt_n_vec_done", None, &[dest.into(), st.acc.into()]);
             }
-            HofKind::CountFilter | HofKind::Some | HofKind::Reduce => {
+            HofKind::CountFilter
+            | HofKind::Some
+            | HofKind::Every
+            | HofKind::Sum
+            | HofKind::Reduce => {
                 self.move_v(f.func, dest, st.acc);
             }
         }
@@ -3174,22 +3369,26 @@ impl<'ctx> Lowerer<'ctx> {
     #[allow(clippy::too_many_arguments)]
     fn emit_hof_fold(
         &self,
-        func: FunctionValue<'ctx>,
+        f: &FnCtx<'ctx>,
         kind: HofKind,
         acc: PointerValue<'ctx>,
-        item: PointerValue<'ctx>,
+        items: &[PointerValue<'ctx>],
         res: PointerValue<'ctx>,
+        first_sum: Option<IntValue<'ctx>>,
         head: BasicBlock<'ctx>,
         exit: BasicBlock<'ctx>,
     ) {
+        let func = f.func;
+        let item = items[0];
         match kind {
             HofKind::Each => {
-                self.drop_and_nil_slots(func, &[res, item]);
+                self.drop_and_nil_slots(func, &[res]);
+                self.drop_and_nil_slots(func, items);
                 self.builder.build_unconditional_branch(head).expect("br");
             }
             HofKind::Collect => {
                 self.call("rt_n_vec_push", None, &[acc.into(), res.into()]);
-                self.drop_and_nil_slots(func, &[item]);
+                self.drop_and_nil_slots(func, items);
                 self.builder.build_unconditional_branch(head).expect("br");
             }
             HofKind::FilterCollect => {
@@ -3234,6 +3433,40 @@ impl<'ctx> Lowerer<'ctx> {
                 self.builder.build_unconditional_branch(exit).expect("br");
                 self.builder.position_at_end(miss_b);
                 self.drop_and_nil_slots(func, &[res]);
+                self.builder.build_unconditional_branch(head).expect("br");
+            }
+            HofKind::Every => {
+                let ok = self.truthy(res);
+                self.drop_and_nil_slots(func, &[res, item]);
+                let fail_b = self.ctx.append_basic_block(func, "every_fail");
+                self.builder
+                    .build_conditional_branch(ok, head, fail_b)
+                    .expect("br");
+                self.builder.position_at_end(fail_b);
+                self.write_bool(func, acc, self.ctx.bool_type().const_zero());
+                self.builder.build_unconditional_branch(exit).expect("br");
+            }
+            HofKind::Sum => {
+                self.drop_and_nil_slots(func, items);
+                if let Some(i) = first_sum {
+                    let is_first = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, i, self.i64t.const_zero(), "sum_first")
+                        .expect("cmp");
+                    let set_b = self.ctx.append_basic_block(func, "sum_set");
+                    let add_b = self.ctx.append_basic_block(func, "sum_add");
+                    self.builder
+                        .build_conditional_branch(is_first, set_b, add_b)
+                        .expect("br");
+                    self.builder.position_at_end(set_b);
+                    self.move_v(func, acc, res);
+                    self.builder.build_unconditional_branch(head).expect("br");
+                    self.builder.position_at_end(add_b);
+                }
+                let st = self
+                    .call("rt_n_add_acc", Some(self.i32t), &[acc.into(), res.into()])
+                    .expect("st");
+                self.check(f, st);
                 self.builder.build_unconditional_branch(head).expect("br");
             }
             HofKind::Reduce => {
@@ -3333,6 +3566,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// The general path of [`try_lower_hof_loop`]: the `fn` as a closure,
     /// then the original core calls (`map` then `dorun` / `vec` / `into`,
     /// or `mapv` / `reduce`) over the evaluated collection.
+    #[allow(clippy::too_many_arguments)]
     fn emit_hof_general(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -3340,6 +3574,7 @@ impl<'ctx> Lowerer<'ctx> {
         base: usize,
         acc: PointerValue<'ctx>,
         coll: PointerValue<'ctx>,
+        coll2: Option<PointerValue<'ctx>>,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
         let closure = self.slot(f);
@@ -3349,6 +3584,9 @@ impl<'ctx> Lowerer<'ctx> {
             args.push(acc);
         }
         args.push(coll);
+        if let Some(c2) = coll2 {
+            args.push(c2);
+        }
         let Some((outer, prefix)) = hl.outer else {
             self.core_call_owned(f, hl.inner, &args, dest);
             return Ok(());
@@ -3360,6 +3598,9 @@ impl<'ctx> Lowerer<'ctx> {
             let s = self.slot(f);
             self.lower(f, p, s)?;
             outer_args.push(s);
+        }
+        if hl.kind == HofKind::Sum && hl.init.is_some() {
+            outer_args.push(acc);
         }
         outer_args.push(seq);
         self.core_call_owned(f, outer, &outer_args, dest);
@@ -3621,15 +3862,16 @@ impl<'ctx> Lowerer<'ctx> {
         core_name: Option<&str>,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
-        let (op_name, arg_ptrs): (Option<&str>, Vec<&Expr>) = match (core_name, call.args.as_slice()) {
-            (Some("assoc-in"), [m, Expr::VecLit(ks, None), vf]) if ks.len() == 2 => {
-                (Some("assoc-in2"), vec![m, &ks[0], &ks[1], vf])
-            }
-            (Some("update-in"), [m, Expr::VecLit(ks, None), vf]) if ks.len() == 2 => {
-                (Some("update-in2"), vec![m, &ks[0], &ks[1], vf])
-            }
-            _ => (core_name, call.args.iter().collect()),
-        };
+        let (op_name, arg_ptrs): (Option<&str>, Vec<&Expr>) =
+            match (core_name, call.args.as_slice()) {
+                (Some("assoc-in"), [m, Expr::VecLit(ks, None), vf]) if ks.len() == 2 => {
+                    (Some("assoc-in2"), vec![m, &ks[0], &ks[1], vf])
+                }
+                (Some("update-in"), [m, Expr::VecLit(ks, None), vf]) if ks.len() == 2 => {
+                    (Some("update-in2"), vec![m, &ks[0], &ks[1], vf])
+                }
+                _ => (core_name, call.args.iter().collect()),
+            };
         let n = arg_ptrs.len();
         let (arr, elems) = self.slot_array(f, n);
         for (a, e) in arg_ptrs.into_iter().zip(&elems) {
@@ -4900,17 +5142,9 @@ impl<'ctx> Lowerer<'ctx> {
         for (pat, init) in bindings {
             let t = self.slot(f);
             self.lower(f, init, t)?;
-            let slots = if matches!(pat, Pattern::Symbol(_)) {
-                // The init's slot becomes the loop local's (no extra ref).
-                f.env.push(Some(LocalRef::Slot(t)));
-                vec![t]
-            } else {
-                let s = self.bind_pattern(f, pat, t)?;
-                self.drop_v(f.func, t);
-                s
-            };
-            bound.extend_from_slice(&slots);
-            targets.push((pat.clone(), slots));
+            let before = bound.len();
+            self.bind_owned_slot(f, pat, t, &mut bound)?;
+            targets.push((pat.clone(), bound[before..].to_vec()));
         }
         let header = self.ctx.append_basic_block(f.func, "loop");
         self.builder.build_unconditional_branch(header).expect("br");
@@ -6047,19 +6281,22 @@ enum HofKind {
     FilterCollect,
     CountFilter,
     Some,
+    Every,
+    Sum,
     Reduce,
 }
 
 /// A core traversal over a literal `fn` that a compiled loop can run
-/// inline (#271 Slice 4c/5g), with the calls the general path makes: the
-/// inner one (`map`, `mapv`, `filter`, `filterv`, `some`, or `reduce`) and,
-/// for `dorun` / `vec` / `into []` / `count`, the outer one with its leading argument.
+/// inline (#271 Slice 4c/5g/5h), with the calls the general path makes: the
+/// inner one (`map`, `mapv`, `filter`, `filterv`, `some`, `every?`, or `reduce`)
+/// and, for `dorun` / `vec` / `into []` / `count` / `reduce +`, the outer one.
 struct HofLoop<'a> {
     kind: HofKind,
     fun: &'a FunExpr,
     arity: &'a Arity,
     init: Option<&'a Expr>,
     coll: &'a Expr,
+    coll2: Option<&'a Expr>,
     inner: &'a clj_eval::expr::DirectCall,
     outer: Option<(&'a clj_eval::expr::DirectCall, Option<&'a Expr>)>,
 }
@@ -6088,33 +6325,107 @@ fn is_direct_moving(
             && call.args.iter().any(|a| is_move(f, a) || is_temporary(a)))
 }
 
-/// `call` as a [`HofLoop`]: `(mapv F xs)`, `(filterv F xs)`, `(some F xs)`,
-/// `(reduce F init xs)`, `(dorun (map F xs))`, `(vec (map|filter F xs))`,
-/// `(into [] (map|filter F xs))`, or `(count (filter|filterv F xs))`,
+fn is_core_global(e: &Expr, name: &str) -> bool {
+    matches!(e, Expr::Global(v) if v.sym.namespace() == Some("clojure.core") && v.sym.name() == name)
+}
+
+#[allow(clippy::type_complexity)]
+fn dot_product_call(
+    call: &clj_eval::expr::DirectCall,
+) -> Option<(
+    &Expr,
+    &Expr,
+    &clj_eval::expr::DirectCall,
+    &Expr,
+    &Expr,
+    &Expr,
+)> {
+    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "reduce" {
+        return None;
+    }
+    let [plus, init, Expr::DirectNative(m)] = call.args.as_slice() else {
+        return None;
+    };
+    if !is_core_global(plus, "+")
+        || m.var.sym.namespace() != Some("clojure.core")
+        || m.var.sym.name() != "map"
+    {
+        return None;
+    }
+    let [star, c1, c2] = m.args.as_slice() else {
+        return None;
+    };
+    is_core_global(star, "*").then_some((plus, init, m, star, c1, c2))
+}
+
+fn parse_num_arity(arity: &Arity, base: usize) -> Option<u8> {
+    let [Expr::Invoke { head, args, .. }] = arity.body.as_slice() else {
+        return None;
+    };
+    if !is_core_global(head, "__static*") {
+        return None;
+    }
+    match static_call_op(args)? {
+        (StaticOp::Parse("rt_n_parse_long"), [Expr::Local(i)]) if *i == base => Some(0),
+        (StaticOp::Parse("rt_n_parse_int"), [Expr::Local(i)]) if *i == base => Some(1),
+        (StaticOp::Parse("rt_n_parse_double"), [Expr::Local(i)]) if *i == base => Some(2),
+        _ => None,
+    }
+}
+
+/// `call` as a [`HofLoop`]: `(mapv F xs [ys])`, `(filterv F xs)`, `(some F xs)`,
+/// `(every? F xs)`, `(reduce F init xs)`, `(reduce + [init] (map F xs [ys]))`,
+/// `(dorun (map F xs [ys]))`, `(vec (map|filter F xs [ys]))`,
+/// `(into [] (map|filter F xs [ys]))`, or `(count (filter|filterv F xs))`,
 /// all `clojure.core`.
-fn hof_loop(call: &clj_eval::expr::DirectCall) -> Option<HofLoop<'_>> {
+fn hof_loop<'a>(call: &'a clj_eval::expr::DirectCall) -> Option<HofLoop<'a>> {
     if call.var.sym.namespace() != Some("clojure.core") {
         return None;
     }
-    let one = |kind, fe, init, coll| {
-        let (fun, arity) = inline_fn(fe, if kind == HofKind::Reduce { 2 } else { 1 })?;
-        Some(HofLoop {
-            kind,
-            fun,
-            arity,
-            init,
-            coll,
-            inner: call,
-            outer: None,
-        })
-    };
+    let one =
+        |kind, fe: &'a Expr, init: Option<&'a Expr>, coll: &'a Expr, coll2: Option<&'a Expr>| {
+            let n_params = if kind == HofKind::Reduce || coll2.is_some() {
+                2
+            } else {
+                1
+            };
+            let (fun, arity) = inline_fn(fe, n_params)?;
+            Some(HofLoop {
+                kind,
+                fun,
+                arity,
+                init,
+                coll,
+                coll2,
+                inner: call,
+                outer: None,
+            })
+        };
     match (call.var.sym.name(), call.args.as_slice()) {
-        ("mapv", [fe, coll]) => one(HofKind::Collect, fe, None, coll),
-        ("filterv", [fe, coll]) => one(HofKind::FilterCollect, fe, None, coll),
-        ("some", [fe, coll]) => one(HofKind::Some, fe, None, coll),
-        ("reduce", [fe, init, coll]) => one(HofKind::Reduce, fe, Some(init), coll),
+        ("mapv", [fe, coll]) => one(HofKind::Collect, fe, None, coll, None),
+        ("mapv", [fe, c1, c2]) => one(HofKind::Collect, fe, None, c1, Some(c2)),
+        ("filterv", [fe, coll]) => one(HofKind::FilterCollect, fe, None, coll, None),
+        ("some", [fe, coll]) => one(HofKind::Some, fe, None, coll, None),
+        ("every?", [fe, coll]) => one(HofKind::Every, fe, None, coll, None),
+        ("reduce", [fe, init, coll]) => one(HofKind::Reduce, fe, Some(init), coll, None)
+            .or_else(|| sum_hof_loop(fe, Some(init), coll, call)),
+        ("reduce", [fe, coll]) => sum_hof_loop(fe, None, coll, call),
         _ => outer_hof_loop(call),
     }
+}
+
+fn sum_hof_loop<'a>(
+    plus: &'a Expr,
+    init: Option<&'a Expr>,
+    inner: &'a Expr,
+    outer: &'a clj_eval::expr::DirectCall,
+) -> Option<HofLoop<'a>> {
+    if !is_core_global(plus, "+") {
+        return None;
+    }
+    let mut hl = inner_hof_loop(inner, &["map"], HofKind::Sum, outer, Some(plus))?;
+    hl.init = init;
+    Some(hl)
 }
 
 fn outer_hof_loop(call: &clj_eval::expr::DirectCall) -> Option<HofLoop<'_>> {
@@ -6127,15 +6438,19 @@ fn outer_hof_loop(call: &clj_eval::expr::DirectCall) -> Option<HofLoop<'_>> {
                 inner_hof_loop(inner, &["filter"], HofKind::FilterCollect, call, Some(to))
             })
         }
-        ("count", [inner]) => {
-            inner_hof_loop(inner, &["filter", "filterv"], HofKind::CountFilter, call, None)
-        }
+        ("count", [inner]) => inner_hof_loop(
+            inner,
+            &["filter", "filterv"],
+            HofKind::CountFilter,
+            call,
+            None,
+        ),
         _ => None,
     }
 }
 
-/// `(map|filter|filterv F xs)` (a `clojure.core` traversal of a literal
-/// one-param `fn`) under the outer call `outer`.
+/// `(map|filter|filterv F xs [ys])` (a `clojure.core` traversal of a literal
+/// `fn`) under the outer call `outer`.
 fn inner_hof_loop<'a>(
     inner: &'a Expr,
     names: &[&str],
@@ -6146,19 +6461,22 @@ fn inner_hof_loop<'a>(
     let Expr::DirectNative(m) = inner else {
         return None;
     };
-    let [fe, coll] = m.args.as_slice() else {
-        return None;
-    };
     if m.var.sym.namespace() != Some("clojure.core") || !names.contains(&m.var.sym.name()) {
         return None;
     }
-    let (fun, arity) = inline_fn(fe, 1)?;
+    let (fe, coll, coll2, n_params) = match m.args.as_slice() {
+        [fe, coll] => (fe, coll, None, 1),
+        [fe, c1, c2] if m.var.sym.name() == "map" => (fe, c1, Some(c2), 2),
+        _ => return None,
+    };
+    let (fun, arity) = inline_fn(fe, n_params)?;
     Some(HofLoop {
         kind,
         fun,
         arity,
         init: None,
         coll,
+        coll2,
         inner: m,
         outer: Some((outer, prefix)),
     })
@@ -7572,6 +7890,9 @@ mod tests {
             entry,
             fail: entry,
             slots: Vec::new(),
+            free_slots: Vec::new(),
+            free_arrays: HashMap::new(),
+            let_slots: Vec::new(),
             env: Vec::new(),
             recur: Vec::new(),
             captured: dest,
