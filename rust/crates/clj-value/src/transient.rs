@@ -511,6 +511,23 @@ impl TransientVector {
         false
     }
 
+    /// Overwrite an existing `Double` slot in bounds (`false` when out of
+    /// bounds, non-generic buffer, non-double slot, or invalidated; zero
+    /// allocation, zero drop glue, panic-free for `clj-bc` bitcode).
+    #[inline(always)]
+    pub fn assoc_double_in_bounds(&mut self, idx: usize, d: f64) -> bool {
+        if !self.valid {
+            return false;
+        }
+        if let TransientItems::Generic(x) = &mut self.items {
+            if let Some(Value::Double(slot)) = x.get_mut(idx) {
+                *slot = d;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Borrow the packed integer slice mutably when valid and packed-`Int`.
     #[inline(always)]
     pub fn ints_mut(&mut self) -> Option<&mut [i64]> {
@@ -1571,5 +1588,19 @@ mod tests {
         assert!(!tv_from_ref.is_packed());
         let tv_owned = TransientVector::from_vector_owned(frozen);
         assert!(tv_owned.is_packed());
+
+        // assoc_double_in_bounds: generic double slot hit; OOB, non-double, packed, invalid miss
+        let mut tv_dbl = TransientVector::from_vector(&crate::Vector::from_vec(vec![
+            Value::Double(1.0),
+            Value::Int(2),
+        ]));
+        assert!(tv_dbl.assoc_double_in_bounds(0, 3.5));
+        assert_eq!(tv_dbl.nth(0).unwrap(), Some(Value::Double(3.5)));
+        assert!(!tv_dbl.assoc_double_in_bounds(1, 4.0));
+        assert!(!tv_dbl.assoc_double_in_bounds(9, 4.0));
+        let _ = tv_dbl.persistent().unwrap();
+        assert!(!tv_dbl.assoc_double_in_bounds(0, 5.0));
+        let mut tv_ints = TransientVector::from_vector(&crate::Vector::from_ints(vec![1, 2]));
+        assert!(!tv_ints.assoc_double_in_bounds(0, 1.0));
     }
 }

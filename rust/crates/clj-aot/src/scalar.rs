@@ -18,21 +18,25 @@
 //! in-place fallback for capacity growth.
 
 use clj_eval::aot_scalar::{
-    Calc, Cast, Cmp, Cond, Ctl, Effect, ExitVal, IExpr, Inner, IntOp1, IntOp2, IntTest1, IntTest2,
-    K, Leaf, Loc, Node, ScalarAst, Stmt, compile_aot_loop,
+    Calc, Cast, Cmp, Cond, Ctl, Effect, ExitVal, FpCalc, IExpr, Inner, IntOp1, IntOp2, IntTest1,
+    IntTest2, K, Leaf, Loc, MATH_BINARY, MATH_UNARY, MathOp1, MathOp2, Node, ScalarAst, Stmt,
+    compile_aot_loop,
 };
 use clj_eval::expr::{Expr, Pattern};
-use inkwell::IntPredicate;
+use clj_value::{Value, Var};
 use inkwell::basic_block::BasicBlock;
 use inkwell::types::BasicType;
-use inkwell::values::{FunctionValue, IntValue, PointerValue};
+use inkwell::values::{FloatValue, FunctionValue, IntValue, PointerValue};
+use inkwell::{FloatPredicate, IntPredicate};
 
 use super::{FnCtx, LocalRef, Lowerer, RecurTarget, Unsupported};
 
+const _: () = assert!(std::mem::size_of::<Value>() == 32);
+
 /// Cached preheader metadata for one invariant collection.
 ///
-/// `str_len` and `ivec_len` are `0` when the corresponding fast path is
-/// inactive, so a single unsigned `idx < len` check validates both
+/// `str_len`, `ivec_len`, and `gvec_len` are `0` when the corresponding fast
+/// path is inactive, so a single unsigned `idx < len` check validates both
 /// availability and bounds without a separate ok flag.
 struct CollCache<'ctx> {
     slot: PointerValue<'ctx>,
@@ -41,6 +45,8 @@ struct CollCache<'ctx> {
     str_len: PointerValue<'ctx>,
     ivec_ptr: PointerValue<'ctx>,
     ivec_len: PointerValue<'ctx>,
+    gvec_ptr: PointerValue<'ctx>,
+    gvec_len: PointerValue<'ctx>,
     tvec_locked: Option<PointerValue<'ctx>>,
     cnt_ok: PointerValue<'ctx>,
     cnt_val: PointerValue<'ctx>,
@@ -68,6 +74,7 @@ enum LoopTarget<'a, 'ctx> {
 #[derive(Default)]
 struct AstScan {
     loads: Vec<Loc>,
+    globals: Vec<Var>,
     colls: Vec<Loc>,
     mutated: Vec<Loc>,
     mutated_grow: Vec<Loc>,
@@ -76,6 +83,7 @@ struct AstScan {
     all_locs: Vec<Loc>,
     has_effects: bool,
     has_deopt: bool,
+    has_fp: bool,
 }
 
 impl AstScan {
@@ -88,6 +96,12 @@ impl AstScan {
     fn record_load(&mut self, loc: Loc) {
         Self::push_unique(&mut self.loads, loc);
         Self::push_unique(&mut self.all_locs, loc);
+    }
+
+    fn record_global(&mut self, var: &Var) {
+        if !self.globals.iter().any(|v| v.id == var.id) {
+            self.globals.push(var.clone());
+        }
     }
 
     fn record_coll(&mut self, loc: Loc, mutated: bool, grows: bool) {
@@ -203,8 +217,10 @@ impl AstScan {
 
     fn scan_expr(&mut self, e: &IExpr) {
         match e {
-            IExpr::Slot(_) | IExpr::Kst(_) => {}
+            IExpr::Slot(_) => {}
+            IExpr::Kst(sv) => self.has_fp |= sv.k == K::Double,
             IExpr::Loc(loc) => self.record_load(*loc),
+            IExpr::Global(var) => self.record_global(var),
             IExpr::Calc(c) => self.scan_calc(c),
             IExpr::Ctl(c) => self.scan_ctl(c),
             IExpr::Deopt => self.has_deopt = true,
@@ -213,11 +229,12 @@ impl AstScan {
 
     fn scan_calc(&mut self, c: &Calc) {
         match c {
-            Calc::Op1(_, a) | Calc::Cast(_, a) => self.scan_expr(a),
+            Calc::Op1(_, a) => self.scan_expr(a),
             Calc::Op2(_, a, b) => {
                 self.scan_expr(a);
                 self.scan_expr(b);
             }
+            Calc::Fp(fp) => self.scan_fp(fp),
             Calc::Count(loc) => {
                 self.record_coll(*loc, false, false);
                 Self::push_unique(&mut self.read_count, *loc);
@@ -227,8 +244,27 @@ impl AstScan {
                 Self::push_unique(&mut self.read_nth, *loc);
                 self.scan_expr(a);
             }
-            Calc::Nth2(loc, a, _) => {
+            Calc::Nth2(loc, a, b) => {
                 self.record_coll(*loc, false, false);
+                self.scan_expr(a);
+                self.scan_expr(b);
+            }
+        }
+    }
+
+    fn scan_fp(&mut self, fp: &FpCalc) {
+        match fp {
+            FpCalc::Div(a, b) | FpCalc::Math2(_, a, b) => {
+                self.has_fp = true;
+                self.scan_expr(a);
+                self.scan_expr(b);
+            }
+            FpCalc::Math1(op, a) => {
+                self.has_fp |= *op != MathOp1::Abs;
+                self.scan_expr(a);
+            }
+            FpCalc::Cast(c, a) => {
+                self.has_fp |= *c == Cast::Double;
                 self.scan_expr(a);
             }
         }
@@ -259,10 +295,13 @@ impl AstScan {
 
 /// Per-loop scalar lowering state.
 struct ScalarSession<'ctx> {
+    allow_fp: bool,
     k_slots: Vec<PointerValue<'ctx>>,
     v_slots: Vec<PointerValue<'ctx>>,
     load_locs: Vec<Loc>,
     load_vals: Vec<(IntValue<'ctx>, IntValue<'ctx>)>,
+    global_ids: Vec<u64>,
+    global_vals: Vec<(IntValue<'ctx>, IntValue<'ctx>)>,
     coll_locs: Vec<Loc>,
     colls: Vec<CollCache<'ctx>>,
     scratch_k: PointerValue<'ctx>,
@@ -278,6 +317,15 @@ impl<'ctx> ScalarSession<'ctx> {
             .position(|l| *l == loc)
             .expect("registered load loc");
         self.load_vals[idx]
+    }
+
+    fn global_val(&self, id: u64) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let idx = self
+            .global_ids
+            .iter()
+            .position(|g| *g == id)
+            .expect("registered global id");
+        self.global_vals[idx]
     }
 
     fn coll_idx(&self, loc: Loc) -> usize {
@@ -319,11 +367,22 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(false);
         }
         let (bound, targets) = self.bind_scalar_loop_inits(f, bindings)?;
+        let allow_fp = scan.has_fp
+            || !scan.globals.is_empty()
+            || bindings.iter().enumerate().any(|(p, (_, init))| {
+                ast.scalar[p]
+                    && !matches!(
+                        init,
+                        Expr::Literal(Value::Int(_) | Value::Char(_) | Value::Bool(_))
+                    )
+            });
         let sc_hdr = self.ctx.append_basic_block(f.func, "sc_hdr");
         let deopt_bb = self.ctx.append_basic_block(f.func, "sc_deopt");
         let boxed_hdr = self.ctx.append_basic_block(f.func, "sc_boxed");
         let loop_done = self.ctx.append_basic_block(f.func, "sc_done");
-        let session = self.init_scalar_session(f, &ast, &scan, &bound, sc_hdr, deopt_bb, boxed_hdr);
+        let session = self.init_scalar_session(
+            f, &ast, &scan, allow_fp, &bound, sc_hdr, deopt_bb, boxed_hdr,
+        );
         self.builder.position_at_end(sc_hdr);
         let outer = LoopTarget::Outer {
             scalar: &ast.scalar,
@@ -463,10 +522,12 @@ impl<'ctx> Lowerer<'ctx> {
             .into_int_value()
     }
 
-    /// Unbox `slot` into `(ok: i1, k: i8, v: i64)` with zero branches.
+    /// Unbox `slot` into `(ok: i1, k: i8, v: i64)` with zero branches
+    /// (`0 = Int, 1 = Char, 2 = Bool`, plus `3 = Double` when `allow_fp`).
     fn unbox_scalar(
         &self,
         slot: PointerValue<'ctx>,
+        allow_fp: bool,
     ) -> (IntValue<'ctx>, IntValue<'ctx>, IntValue<'ctx>) {
         let b = &self.builder;
         let t = self.tag(slot);
@@ -479,7 +540,15 @@ impl<'ctx> Lowerer<'ctx> {
         let is_bl = b
             .build_int_compare(IntPredicate::EQ, t, self.i8t.const_int(1, false), "is_b")
             .expect("cmp");
-        let ok1 = b.build_or(is_int, is_chr, "ok1").expect("or");
+        let (is_dbl, is_64) = if allow_fp {
+            let d = b
+                .build_int_compare(IntPredicate::EQ, t, self.i8t.const_int(3, false), "is_d")
+                .expect("cmp");
+            (Some(d), b.build_or(is_int, d, "is_64").expect("or"))
+        } else {
+            (None, is_int)
+        };
+        let ok1 = b.build_or(is_64, is_chr, "ok1").expect("or");
         let ok = b.build_or(ok1, is_bl, "sc_ok").expect("or");
         let iv = self.int_payload(slot);
         let cv = b
@@ -492,7 +561,7 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("sel")
             .into_int_value();
         let v = b
-            .build_select(is_int, iv, v1, "sc_v")
+            .build_select(is_64, iv, v1, "sc_v")
             .expect("sel")
             .into_int_value();
         let k1 = b
@@ -504,14 +573,21 @@ impl<'ctx> Lowerer<'ctx> {
             )
             .expect("sel")
             .into_int_value();
+        let k2 = match is_dbl {
+            Some(d) => b
+                .build_select(d, self.i8t.const_int(3, false), k1, "k2")
+                .expect("sel")
+                .into_int_value(),
+            None => k1,
+        };
         let k = b
-            .build_select(is_int, self.i8t.const_zero(), k1, "sc_k")
+            .build_select(is_int, self.i8t.const_zero(), k2, "sc_k")
             .expect("sel")
             .into_int_value();
         (ok, k, v)
     }
 
-    /// Box `(k: i8, v: i64)` into `dest` (`0 = Int, 1 = Char, 2 = Bool`).
+    /// Box `(k: i8, v: i64)` into `dest` (`0 = Int, 1 = Char, 2 = Bool, 3 = Double`).
     fn box_scalar(
         &self,
         func: FunctionValue<'ctx>,
@@ -527,6 +603,9 @@ impl<'ctx> Lowerer<'ctx> {
         let is_chr = b
             .build_int_compare(IntPredicate::EQ, k, self.i8t.const_int(1, false), "bc")
             .expect("cmp");
+        let is_dbl = b
+            .build_int_compare(IntPredicate::EQ, k, self.i8t.const_int(3, false), "bd")
+            .expect("cmp");
         let t1 = b
             .build_select(
                 is_chr,
@@ -536,8 +615,12 @@ impl<'ctx> Lowerer<'ctx> {
             )
             .expect("sel")
             .into_int_value();
+        let t2 = b
+            .build_select(is_dbl, self.i8t.const_int(3, false), t1, "t2")
+            .expect("sel")
+            .into_int_value();
         let tag = b
-            .build_select(is_int, self.i8t.const_int(2, false), t1, "btag")
+            .build_select(is_int, self.i8t.const_int(2, false), t2, "btag")
             .expect("sel")
             .into_int_value();
         b.build_store(dest, tag).expect("store");
@@ -557,6 +640,7 @@ impl<'ctx> Lowerer<'ctx> {
         f: &mut FnCtx<'ctx>,
         ast: &ScalarAst,
         scan: &AstScan,
+        allow_fp: bool,
         bound: &[PointerValue<'ctx>],
         sc_hdr: BasicBlock<'ctx>,
         deopt_bb: BasicBlock<'ctx>,
@@ -572,7 +656,7 @@ impl<'ctx> Lowerer<'ctx> {
         let scratch_v = self.entry_alloca(f, self.i64t, "scrv");
         for (p, &is_sc) in ast.scalar.iter().enumerate() {
             if is_sc {
-                let (ok, k, v) = self.unbox_scalar(bound[p]);
+                let (ok, k, v) = self.unbox_scalar(bound[p], allow_fp);
                 let next = self.ctx.append_basic_block(f.func, "sc_init");
                 self.builder
                     .build_conditional_branch(ok, next, boxed_hdr)
@@ -585,7 +669,7 @@ impl<'ctx> Lowerer<'ctx> {
         let mut load_vals = Vec::with_capacity(scan.loads.len());
         for &loc in &scan.loads {
             let slot = self.loc_slot(f, loc);
-            let (ok, k, v) = self.unbox_scalar(slot);
+            let (ok, k, v) = self.unbox_scalar(slot, allow_fp);
             let next = self.ctx.append_basic_block(f.func, "sc_box_ok");
             self.builder
                 .build_conditional_branch(ok, next, boxed_hdr)
@@ -593,19 +677,41 @@ impl<'ctx> Lowerer<'ctx> {
             self.builder.position_at_end(next);
             load_vals.push((k, v));
         }
+        let mut global_ids = Vec::with_capacity(scan.globals.len());
+        let mut global_vals = Vec::with_capacity(scan.globals.len());
+        for var in &scan.globals {
+            let tmp = self.slot(f);
+            let kv = self.var_of(var);
+            match self.stable_of(var) {
+                Some(sr) => self.clone_stable(f, sr, kv, tmp),
+                None => self.emit_deref(f.func, tmp, kv),
+            }
+            let (ok, k, v) = self.unbox_scalar(tmp, allow_fp);
+            self.free_slots(f, &[tmp]);
+            let next = self.ctx.append_basic_block(f.func, "sc_glb_ok");
+            self.builder
+                .build_conditional_branch(ok, next, boxed_hdr)
+                .expect("br");
+            self.builder.position_at_end(next);
+            global_ids.push(var.id);
+            global_vals.push((k, v));
+        }
         let mut colls = Vec::with_capacity(scan.colls.len());
         for &loc in &scan.colls {
-            colls.push(self.probe_coll(f, loc, scan));
+            colls.push(self.probe_coll(f, loc, scan, allow_fp));
         }
         for i in 0..colls.len() {
             self.try_lock_tvec(f, &colls, i);
         }
         self.builder.build_unconditional_branch(sc_hdr).expect("br");
         ScalarSession {
+            allow_fp,
             k_slots,
             v_slots,
             load_locs: scan.loads.clone(),
             load_vals,
+            global_ids,
+            global_vals,
             coll_locs: scan.colls.clone(),
             colls,
             scratch_k,
@@ -614,7 +720,13 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
-    fn probe_coll(&self, f: &FnCtx<'ctx>, loc: Loc, scan: &AstScan) -> CollCache<'ctx> {
+    fn probe_coll(
+        &self,
+        f: &FnCtx<'ctx>,
+        loc: Loc,
+        scan: &AstScan,
+        allow_fp: bool,
+    ) -> CollCache<'ctx> {
         let mutated = scan.mutated.contains(&loc);
         let grows = scan.mutated_grow.contains(&loc);
         let needs_nth = scan.read_nth.contains(&loc);
@@ -624,6 +736,8 @@ impl<'ctx> Lowerer<'ctx> {
         let str_len = self.entry_alloca(f, self.i64t, "strn");
         let ivec_ptr = self.entry_alloca(f, self.ptr, "ivp");
         let ivec_len = self.entry_alloca(f, self.i64t, "ivn");
+        let gvec_ptr = self.entry_alloca(f, self.ptr, "gvp");
+        let gvec_len = self.entry_alloca(f, self.i64t, "gvn");
         let lockable = !grows && (mutated || needs_nth);
         let tvec_locked = lockable.then(|| self.entry_alloca(f, self.i8t, "tvlk"));
         let cnt_ok = self.entry_alloca(f, self.i8t, "cntok");
@@ -632,6 +746,7 @@ impl<'ctx> Lowerer<'ctx> {
         let z64 = self.i64t.const_zero();
         self.builder.build_store(str_len, z64).expect("store");
         self.builder.build_store(ivec_len, z64).expect("store");
+        self.builder.build_store(gvec_len, z64).expect("store");
         self.builder.build_store(cnt_ok, z8).expect("store");
         if let Some(tl) = tvec_locked {
             self.builder.build_store(tl, z8).expect("store");
@@ -652,6 +767,13 @@ impl<'ctx> Lowerer<'ctx> {
                     Some(self.i8t),
                     &[slot.into(), ivec_ptr.into(), ivec_len.into()],
                 );
+                if allow_fp {
+                    self.call(
+                        "rt_bc_scalar_gvec",
+                        Some(self.i8t),
+                        &[slot.into(), gvec_ptr.into(), gvec_len.into()],
+                    );
+                }
             }
             if needs_cnt {
                 let cok = self
@@ -671,6 +793,8 @@ impl<'ctx> Lowerer<'ctx> {
             str_len,
             ivec_ptr,
             ivec_len,
+            gvec_ptr,
+            gvec_len,
             tvec_locked,
             cnt_ok,
             cnt_val,
@@ -685,9 +809,13 @@ impl<'ctx> Lowerer<'ctx> {
         let done_bb = self.ctx.append_basic_block(f.func, "sc_tv_done");
         if !c.mutated {
             let next_bb = self.ctx.append_basic_block(f.func, "sc_tv_chk");
+            let a1 = self
+                .builder
+                .build_or(self.load_i64(c.str_len), self.load_i64(c.ivec_len), "alr1")
+                .expect("or");
             let already = self
                 .builder
-                .build_or(self.load_i64(c.str_len), self.load_i64(c.ivec_len), "alr")
+                .build_or(a1, self.load_i64(c.gvec_len), "alr")
                 .expect("or");
             let skip = self
                 .builder
@@ -791,10 +919,11 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
-    fn ivec_elem_ptr(
+    fn scaled_elem_ptr(
         &self,
         ptr_slot: PointerValue<'ctx>,
         iv: IntValue<'ctx>,
+        shift: u64,
     ) -> PointerValue<'ctx> {
         let base = self
             .builder
@@ -803,7 +932,7 @@ impl<'ctx> Lowerer<'ctx> {
             .into_pointer_value();
         let off = self
             .builder
-            .build_left_shift(iv, self.i64t.const_int(3, false), "ioff")
+            .build_left_shift(iv, self.i64t.const_int(shift, false), "ioff")
             .expect("shl");
         let addr = self
             .builder
@@ -818,6 +947,14 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder
             .build_int_to_ptr(addr, self.ptr, "ii2p")
             .expect("i2p")
+    }
+
+    fn ivec_elem_ptr(
+        &self,
+        ptr_slot: PointerValue<'ctx>,
+        iv: IntValue<'ctx>,
+    ) -> PointerValue<'ctx> {
+        self.scaled_elem_ptr(ptr_slot, iv, 3)
     }
 
     fn lower_sc_node(
@@ -1340,26 +1477,145 @@ impl<'ctx> Lowerer<'ctx> {
             }
             Cmp::T1(op, e) => {
                 let (k, v) = self.lower_sc_expr(f, s, e)?;
-                self.require_int(f, k, s.deopt_bb);
-                let name = match op {
-                    IntTest1::Zero => "zero?",
-                    IntTest1::Pos => "pos?",
-                    IntTest1::Neg => "neg?",
-                };
-                Ok(self.int_pred(name, v))
+                Ok(self.lower_sc_t1(f, s, *op, k, v))
             }
             Cmp::T2(op, a, b) => {
                 let (ak, av) = self.lower_sc_expr(f, s, a)?;
                 let (bk, bv) = self.lower_sc_expr(f, s, b)?;
-                self.require_ints(f, ak, bk, s.deopt_bb);
-                Ok(self.lower_sc_int_test2(*op, av, bv))
+                Ok(self.lower_sc_t2(f, s, *op, ak, av, bk, bv))
             }
             Cmp::Eq(a, b) => {
                 let (ak, av) = self.lower_sc_expr(f, s, a)?;
                 let (bk, bv) = self.lower_sc_expr(f, s, b)?;
-                Ok(self.scalar_eq(ak, av, bk, bv))
+                Ok(self.scalar_eq(ak, av, bk, bv, s.allow_fp))
             }
         }
+    }
+
+    fn lower_sc_t1(
+        &self,
+        f: &FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        op: IntTest1,
+        k: IntValue<'ctx>,
+        v: IntValue<'ctx>,
+    ) -> IntValue<'ctx> {
+        let name = match op {
+            IntTest1::Zero => "zero?",
+            IntTest1::Pos => "pos?",
+            IntTest1::Neg => "neg?",
+        };
+        if !s.allow_fp {
+            self.require_int(f, k, s.deopt_bb);
+            return self.int_pred(name, v);
+        }
+        let is_i = self.is_k_int(k);
+        let is_d = self.is_k_dbl(k);
+        let res = self.entry_alloca(f, self.ctx.bool_type(), "t1r");
+        let int_bb = self.ctx.append_basic_block(f.func, "sc_t1_i");
+        let chk_d = self.ctx.append_basic_block(f.func, "sc_t1_cd");
+        let dbl_bb = self.ctx.append_basic_block(f.func, "sc_t1_d");
+        let done_bb = self.ctx.append_basic_block(f.func, "sc_t1_ok");
+        self.builder
+            .build_conditional_branch(is_i, int_bb, chk_d)
+            .expect("br");
+        self.builder.position_at_end(int_bb);
+        let ir = self.int_pred(name, v);
+        self.builder.build_store(res, ir).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(chk_d);
+        self.builder
+            .build_conditional_branch(is_d, dbl_bb, s.deopt_bb)
+            .expect("br");
+        self.builder.position_at_end(dbl_bb);
+        let fp = match op {
+            IntTest1::Zero => FloatPredicate::OEQ,
+            IntTest1::Pos => FloatPredicate::OGT,
+            IntTest1::Neg => FloatPredicate::OLT,
+        };
+        let dr = self
+            .builder
+            .build_float_compare(
+                fp,
+                self.bits_to_f64(v),
+                self.ctx.f64_type().const_zero(),
+                "dt1",
+            )
+            .expect("fcmp");
+        self.builder.build_store(res, dr).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(done_bb);
+        self.builder
+            .build_load(self.ctx.bool_type(), res, "t1v")
+            .expect("ld")
+            .into_int_value()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_sc_t2(
+        &self,
+        f: &FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        op: IntTest2,
+        ak: IntValue<'ctx>,
+        av: IntValue<'ctx>,
+        bk: IntValue<'ctx>,
+        bv: IntValue<'ctx>,
+    ) -> IntValue<'ctx> {
+        if !s.allow_fp {
+            self.require_ints(f, ak, bk, s.deopt_bb);
+            return self.lower_sc_int_test2(op, av, bv);
+        }
+        let both_i = self.is_k_int(self.builder.build_or(ak, bk, "t2o").expect("or"));
+        let res = self.entry_alloca(f, self.ctx.bool_type(), "t2r");
+        let int_bb = self.ctx.append_basic_block(f.func, "sc_t2_i");
+        let chk_d = self.ctx.append_basic_block(f.func, "sc_t2_cd");
+        let dbl_bb = self.ctx.append_basic_block(f.func, "sc_t2_d");
+        let done_bb = self.ctx.append_basic_block(f.func, "sc_t2_ok");
+        self.builder
+            .build_conditional_branch(both_i, int_bb, chk_d)
+            .expect("br");
+        self.builder.position_at_end(int_bb);
+        let ir = self.lower_sc_int_test2(op, av, bv);
+        self.builder.build_store(res, ir).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(chk_d);
+        let both_num = self
+            .builder
+            .build_and(self.is_k_num(ak), self.is_k_num(bk), "bn")
+            .expect("and");
+        self.builder
+            .build_conditional_branch(both_num, dbl_bb, s.deopt_bb)
+            .expect("br");
+        self.builder.position_at_end(dbl_bb);
+        let fa = self.scalar_as_f64(ak, av);
+        let fb = self.scalar_as_f64(bk, bv);
+        let fp = match op {
+            IntTest2::Lt => FloatPredicate::OLT,
+            IntTest2::Lte => FloatPredicate::OLE,
+            IntTest2::Gt => FloatPredicate::OGT,
+            IntTest2::Gte => FloatPredicate::OGE,
+            _ => FloatPredicate::OEQ,
+        };
+        let dr = self
+            .builder
+            .build_float_compare(fp, fa, fb, "dt2")
+            .expect("fcmp");
+        self.builder.build_store(res, dr).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(done_bb);
+        self.builder
+            .build_load(self.ctx.bool_type(), res, "t2v")
+            .expect("ld")
+            .into_int_value()
     }
 
     fn scalar_truthy(&self, k: IntValue<'ctx>, v: IntValue<'ctx>) -> IntValue<'ctx> {
@@ -1381,15 +1637,34 @@ impl<'ctx> Lowerer<'ctx> {
         av: IntValue<'ctx>,
         bk: IntValue<'ctx>,
         bv: IntValue<'ctx>,
+        allow_fp: bool,
     ) -> IntValue<'ctx> {
         let keq = self
             .builder
             .build_int_compare(IntPredicate::EQ, ak, bk, "keq")
             .expect("cmp");
-        let veq = self
+        let veq_i = self
             .builder
-            .build_int_compare(IntPredicate::EQ, av, bv, "veq")
+            .build_int_compare(IntPredicate::EQ, av, bv, "veqi")
             .expect("cmp");
+        let veq = if allow_fp {
+            let is_d = self.is_k_dbl(ak);
+            let veq_d = self
+                .builder
+                .build_float_compare(
+                    FloatPredicate::OEQ,
+                    self.bits_to_f64(av),
+                    self.bits_to_f64(bv),
+                    "veqd",
+                )
+                .expect("fcmp");
+            self.builder
+                .build_select(is_d, veq_d, veq_i, "veq")
+                .expect("sel")
+                .into_int_value()
+        } else {
+            veq_i
+        };
         self.builder.build_and(keq, veq, "eq").expect("and")
     }
 
@@ -1420,11 +1695,13 @@ impl<'ctx> Lowerer<'ctx> {
         match e {
             IExpr::Slot(sl) => Ok((self.load_i8(s.k_slots[*sl]), self.load_i64(s.v_slots[*sl]))),
             IExpr::Loc(loc) => Ok(s.load_val(*loc)),
+            IExpr::Global(var) => Ok(s.global_val(var.id)),
             IExpr::Kst(sv) => {
                 let k = match sv.k {
                     K::Int => 0,
                     K::Char => 1,
                     K::Bool => 2,
+                    K::Double => 3,
                 };
                 Ok((
                     self.i8t.const_int(k, false),
@@ -1537,23 +1814,376 @@ impl<'ctx> Lowerer<'ctx> {
         match calc {
             Calc::Op1(op, a) => {
                 let (ak, av) = self.lower_sc_expr(f, s, a)?;
-                self.require_int(f, ak, s.deopt_bb);
-                Ok((self.i8t.const_zero(), self.lower_sc_op1(f, s, *op, av)))
+                Ok(self.lower_sc_op1_any(f, s, *op, ak, av))
             }
             Calc::Op2(op, a, b) => {
                 let (ak, av) = self.lower_sc_expr(f, s, a)?;
                 let (bk, bv) = self.lower_sc_expr(f, s, b)?;
-                self.require_ints(f, ak, bk, s.deopt_bb);
-                Ok((self.i8t.const_zero(), self.lower_sc_op2(f, s, *op, av, bv)))
+                Ok(self.lower_sc_op2_any(f, s, *op, ak, av, bk, bv))
             }
-            Calc::Cast(c, a) => {
+            Calc::Fp(fp) => self.lower_sc_calc_fp(f, s, fp),
+            Calc::Count(loc) => Ok(self.lower_sc_count(f, s, *loc)),
+            Calc::Nth(loc, idx) => self.lower_sc_nth(f, s, *loc, idx),
+            Calc::Nth2(loc, idx, item) => self.lower_sc_nth2(f, s, *loc, idx, item),
+        }
+    }
+
+    fn lower_sc_calc_fp(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        fp: &FpCalc,
+    ) -> Result<(IntValue<'ctx>, IntValue<'ctx>), Unsupported> {
+        match fp {
+            FpCalc::Div(a, b) => {
+                let (ak, av) = self.lower_sc_expr(f, s, a)?;
+                let (bk, bv) = self.lower_sc_expr(f, s, b)?;
+                Ok(self.lower_sc_div(f, s, ak, av, bk, bv))
+            }
+            FpCalc::Math1(op, a) => {
+                let (ak, av) = self.lower_sc_expr(f, s, a)?;
+                Ok(self.lower_sc_math1(f, s, *op, ak, av))
+            }
+            FpCalc::Math2(op, a, b) => {
+                let (ak, av) = self.lower_sc_expr(f, s, a)?;
+                let (bk, bv) = self.lower_sc_expr(f, s, b)?;
+                Ok(self.lower_sc_math2(f, s, *op, ak, av, bk, bv))
+            }
+            FpCalc::Cast(c, a) => {
                 let (ak, av) = self.lower_sc_expr(f, s, a)?;
                 Ok(self.lower_sc_cast(f, s, *c, ak, av))
             }
-            Calc::Count(loc) => Ok(self.lower_sc_count(f, s, *loc)),
-            Calc::Nth(loc, idx) => self.lower_sc_nth(f, s, *loc, idx),
-            Calc::Nth2(loc, idx, item) => self.lower_sc_nth2(f, s, *loc, idx, *item),
         }
+    }
+
+    fn lower_sc_op1_any(
+        &self,
+        f: &FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        op: IntOp1,
+        ak: IntValue<'ctx>,
+        av: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        if !s.allow_fp || op == IntOp1::BitNot {
+            self.require_int(f, ak, s.deopt_bb);
+            return (self.i8t.const_zero(), self.lower_sc_op1(f, s, op, av));
+        }
+        let rk = self.entry_alloca(f, self.i8t, "o1k");
+        let rv = self.entry_alloca(f, self.i64t, "o1v");
+        let int_bb = self.ctx.append_basic_block(f.func, "sc_o1_i");
+        let chk_d = self.ctx.append_basic_block(f.func, "sc_o1_cd");
+        let dbl_bb = self.ctx.append_basic_block(f.func, "sc_o1_d");
+        let done_bb = self.ctx.append_basic_block(f.func, "sc_o1_ok");
+        self.builder
+            .build_conditional_branch(self.is_k_int(ak), int_bb, chk_d)
+            .expect("br");
+        self.builder.position_at_end(int_bb);
+        let ir = self.lower_sc_op1(f, s, op, av);
+        self.builder
+            .build_store(rk, self.i8t.const_zero())
+            .expect("st");
+        self.builder.build_store(rv, ir).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(chk_d);
+        self.builder
+            .build_conditional_branch(self.is_k_dbl(ak), dbl_bb, s.deopt_bb)
+            .expect("br");
+        self.builder.position_at_end(dbl_bb);
+        let d = self.bits_to_f64(av);
+        let one = self.ctx.f64_type().const_float(1.0);
+        let dr = match op {
+            IntOp1::Inc => self.builder.build_float_add(d, one, "dinc").expect("fadd"),
+            IntOp1::Dec => self.builder.build_float_sub(d, one, "ddec").expect("fsub"),
+            _ => self.builder.build_float_neg(d, "dneg").expect("fneg"),
+        };
+        self.builder
+            .build_store(rk, self.i8t.const_int(3, false))
+            .expect("st");
+        self.builder.build_store(rv, self.f64_bits(dr)).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(done_bb);
+        (self.load_i8(rk), self.load_i64(rv))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_sc_op2_any(
+        &self,
+        f: &FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        op: IntOp2,
+        ak: IntValue<'ctx>,
+        av: IntValue<'ctx>,
+        bk: IntValue<'ctx>,
+        bv: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        if !s.allow_fp
+            || !matches!(
+                op,
+                IntOp2::Add | IntOp2::Sub | IntOp2::Mul | IntOp2::Max | IntOp2::Min
+            )
+        {
+            self.require_ints(f, ak, bk, s.deopt_bb);
+            return (self.i8t.const_zero(), self.lower_sc_op2(f, s, op, av, bv));
+        }
+        let both_i = self.is_k_int(self.builder.build_or(ak, bk, "o2o").expect("or"));
+        let rk = self.entry_alloca(f, self.i8t, "o2k");
+        let rv = self.entry_alloca(f, self.i64t, "o2v");
+        let int_bb = self.ctx.append_basic_block(f.func, "sc_o2_i");
+        let chk_d = self.ctx.append_basic_block(f.func, "sc_o2_cd");
+        let dbl_bb = self.ctx.append_basic_block(f.func, "sc_o2_d");
+        let done_bb = self.ctx.append_basic_block(f.func, "sc_o2_ok");
+        self.builder
+            .build_conditional_branch(both_i, int_bb, chk_d)
+            .expect("br");
+        self.builder.position_at_end(int_bb);
+        let ir = self.lower_sc_op2(f, s, op, av, bv);
+        self.builder
+            .build_store(rk, self.i8t.const_zero())
+            .expect("st");
+        self.builder.build_store(rv, ir).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(chk_d);
+        let both_num = self
+            .builder
+            .build_and(self.is_k_num(ak), self.is_k_num(bk), "bn")
+            .expect("and");
+        self.builder
+            .build_conditional_branch(both_num, dbl_bb, s.deopt_bb)
+            .expect("br");
+        self.builder.position_at_end(dbl_bb);
+        let (dk, dv) = self.lower_sc_float_op2(op, ak, av, bk, bv);
+        self.builder.build_store(rk, dk).expect("st");
+        self.builder.build_store(rv, dv).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(done_bb);
+        (self.load_i8(rk), self.load_i64(rv))
+    }
+
+    fn lower_sc_float_op2(
+        &self,
+        op: IntOp2,
+        ak: IntValue<'ctx>,
+        av: IntValue<'ctx>,
+        bk: IntValue<'ctx>,
+        bv: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let fa = self.scalar_as_f64(ak, av);
+        let fb = self.scalar_as_f64(bk, bv);
+        let d3 = self.i8t.const_int(3, false);
+        match op {
+            IntOp2::Add => (
+                d3,
+                self.f64_bits(self.builder.build_float_add(fa, fb, "fadd").expect("fadd")),
+            ),
+            IntOp2::Sub => (
+                d3,
+                self.f64_bits(self.builder.build_float_sub(fa, fb, "fsub").expect("fsub")),
+            ),
+            IntOp2::Mul => (
+                d3,
+                self.f64_bits(self.builder.build_float_mul(fa, fb, "fmul").expect("fmul")),
+            ),
+            _ => {
+                let pred = if op == IntOp2::Max {
+                    FloatPredicate::OGT
+                } else {
+                    FloatPredicate::OLT
+                };
+                let a_nan = self
+                    .builder
+                    .build_float_compare(FloatPredicate::UNO, fa, fa, "anan")
+                    .expect("fcmp");
+                let ord = self
+                    .builder
+                    .build_float_compare(pred, fa, fb, "mord")
+                    .expect("fcmp");
+                let keep = self.builder.build_or(a_nan, ord, "mkeep").expect("or");
+                let k = self
+                    .builder
+                    .build_select(keep, ak, bk, "mk")
+                    .expect("sel")
+                    .into_int_value();
+                let v = self
+                    .builder
+                    .build_select(keep, av, bv, "mv")
+                    .expect("sel")
+                    .into_int_value();
+                (k, v)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_sc_div(
+        &self,
+        f: &FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        ak: IntValue<'ctx>,
+        av: IntValue<'ctx>,
+        bk: IntValue<'ctx>,
+        bv: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let both_num = self
+            .builder
+            .build_and(self.is_k_num(ak), self.is_k_num(bk), "dn")
+            .expect("and");
+        let any_dbl = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                self.builder.build_or(ak, bk, "dor").expect("or"),
+                self.i8t.const_zero(),
+                "dad",
+            )
+            .expect("cmp");
+        let ok = self
+            .builder
+            .build_and(both_num, any_dbl, "dok")
+            .expect("and");
+        let ok_bb = self.ctx.append_basic_block(f.func, "sc_div_ok");
+        self.builder
+            .build_conditional_branch(ok, ok_bb, s.deopt_bb)
+            .expect("br");
+        self.builder.position_at_end(ok_bb);
+        let fa = self.scalar_as_f64(ak, av);
+        let fb = self.scalar_as_f64(bk, bv);
+        let r = self.builder.build_float_div(fa, fb, "fdiv").expect("fdiv");
+        (self.i8t.const_int(3, false), self.f64_bits(r))
+    }
+
+    fn lower_sc_math1(
+        &self,
+        f: &FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        op: MathOp1,
+        ak: IntValue<'ctx>,
+        av: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        match op {
+            MathOp1::Abs => self.lower_sc_abs(f, s, ak, av),
+            MathOp1::Sqrt => {
+                self.require_num(f, ak, s.deopt_bb);
+                let x = self.scalar_as_f64(ak, av);
+                let intr = inkwell::intrinsics::Intrinsic::find("llvm.sqrt").expect("llvm.sqrt");
+                let decl = intr
+                    .get_declaration(&self.module, &[self.ctx.f64_type().into()])
+                    .expect("decl");
+                let r = self
+                    .builder
+                    .build_call(decl, &[x.into()], "sc_sqrt")
+                    .expect("call")
+                    .try_as_basic_value()
+                    .expect_basic("sqrt")
+                    .into_float_value();
+                (self.i8t.const_int(3, false), self.f64_bits(r))
+            }
+            MathOp1::Unary(i) => {
+                self.require_num(f, ak, s.deopt_bb);
+                let x = self.scalar_as_f64(ak, av);
+                let r = self.call_f64(MATH_UNARY[usize::from(i)].1, &[x.into()]);
+                (self.i8t.const_int(3, false), self.f64_bits(r))
+            }
+        }
+    }
+
+    fn emit_iabs(&self, av: IntValue<'ctx>) -> IntValue<'ctx> {
+        let intr = inkwell::intrinsics::Intrinsic::find("llvm.abs").expect("llvm.abs");
+        let decl = intr
+            .get_declaration(&self.module, &[self.i64t.into()])
+            .expect("decl");
+        self.builder
+            .build_call(
+                decl,
+                &[av.into(), self.ctx.bool_type().const_zero().into()],
+                "sc_iabs",
+            )
+            .expect("call")
+            .try_as_basic_value()
+            .expect_basic("iabs")
+            .into_int_value()
+    }
+
+    fn lower_sc_abs(
+        &self,
+        f: &FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        ak: IntValue<'ctx>,
+        av: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        if !s.allow_fp {
+            self.require_int(f, ak, s.deopt_bb);
+            return (self.i8t.const_zero(), self.emit_iabs(av));
+        }
+        let rk = self.entry_alloca(f, self.i8t, "absk");
+        let rv = self.entry_alloca(f, self.i64t, "absv");
+        let int_bb = self.ctx.append_basic_block(f.func, "sc_abs_i");
+        let chk_d = self.ctx.append_basic_block(f.func, "sc_abs_cd");
+        let dbl_bb = self.ctx.append_basic_block(f.func, "sc_abs_d");
+        let done_bb = self.ctx.append_basic_block(f.func, "sc_abs_ok");
+        self.builder
+            .build_conditional_branch(self.is_k_int(ak), int_bb, chk_d)
+            .expect("br");
+        self.builder.position_at_end(int_bb);
+        let ir = self.emit_iabs(av);
+        self.builder
+            .build_store(rk, self.i8t.const_zero())
+            .expect("st");
+        self.builder.build_store(rv, ir).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(chk_d);
+        self.builder
+            .build_conditional_branch(self.is_k_dbl(ak), dbl_bb, s.deopt_bb)
+            .expect("br");
+        self.builder.position_at_end(dbl_bb);
+        let fintr = inkwell::intrinsics::Intrinsic::find("llvm.fabs").expect("llvm.fabs");
+        let fdecl = fintr
+            .get_declaration(&self.module, &[self.ctx.f64_type().into()])
+            .expect("decl");
+        let dr = self
+            .builder
+            .build_call(fdecl, &[self.bits_to_f64(av).into()], "sc_fabs")
+            .expect("call")
+            .try_as_basic_value()
+            .expect_basic("fabs")
+            .into_float_value();
+        self.builder
+            .build_store(rk, self.i8t.const_int(3, false))
+            .expect("st");
+        self.builder.build_store(rv, self.f64_bits(dr)).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(done_bb);
+        (self.load_i8(rk), self.load_i64(rv))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_sc_math2(
+        &self,
+        f: &FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        op: MathOp2,
+        ak: IntValue<'ctx>,
+        av: IntValue<'ctx>,
+        bk: IntValue<'ctx>,
+        bv: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        self.require_num(f, ak, s.deopt_bb);
+        self.require_num(f, bk, s.deopt_bb);
+        let x = self.scalar_as_f64(ak, av);
+        let y = self.scalar_as_f64(bk, bv);
+        let r = self.call_f64(MATH_BINARY[usize::from(op.0)].1, &[x.into(), y.into()]);
+        (self.i8t.const_int(3, false), self.f64_bits(r))
     }
 
     fn lower_sc_op1(
@@ -1634,19 +2264,37 @@ impl<'ctx> Lowerer<'ctx> {
         ak: IntValue<'ctx>,
         av: IntValue<'ctx>,
     ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        if c == Cast::Double {
+            self.require_num(f, ak, s.deopt_bb);
+            return (
+                self.i8t.const_int(3, false),
+                self.f64_bits(self.scalar_as_f64(ak, av)),
+            );
+        }
+        let rv = self.entry_alloca(f, self.i64t, "castv");
+        let done_bb = self.ctx.append_basic_block(f.func, "sc_cast_ok");
+        if s.allow_fp {
+            let dbl_bb = self.ctx.append_basic_block(f.func, "sc_cast_d");
+            let non_d = self.ctx.append_basic_block(f.func, "sc_cast_nd");
+            self.builder
+                .build_conditional_branch(self.is_k_dbl(ak), dbl_bb, non_d)
+                .expect("br");
+            self.builder.position_at_end(dbl_bb);
+            let dv = self.lower_sc_double_to_int(f, s, c == Cast::Long, av);
+            self.builder.build_store(rv, dv).expect("st");
+            self.builder
+                .build_unconditional_branch(done_bb)
+                .expect("br");
+            self.builder.position_at_end(non_d);
+        }
         let b = &self.builder;
-        let is_bool = b
-            .build_int_compare(IntPredicate::EQ, ak, self.i8t.const_int(2, false), "cb")
+        let is_chr = b
+            .build_int_compare(IntPredicate::EQ, ak, self.i8t.const_int(1, false), "cc")
             .expect("cmp");
+        let is_int = self.is_k_int(ak);
         let ok_kind = match c {
-            Cast::Long => b.build_not(is_bool, "cl_ok").expect("not"),
-            Cast::Int => {
-                let is_chr = b
-                    .build_int_compare(IntPredicate::EQ, ak, self.i8t.const_int(1, false), "cc")
-                    .expect("cmp");
-                let is_int = b
-                    .build_int_compare(IntPredicate::EQ, ak, self.i8t.const_zero(), "ci")
-                    .expect("cmp");
+            Cast::Long => b.build_or(is_int, is_chr, "cl_ok").expect("or"),
+            _ => {
                 let t32 = b.build_int_truncate(av, self.i32t, "t32").expect("trunc");
                 let s64 = b.build_int_s_extend(t32, self.i64t, "s64").expect("sext");
                 let fits = b
@@ -1656,11 +2304,83 @@ impl<'ctx> Lowerer<'ctx> {
                 b.build_or(is_chr, ok_i, "ci_ok").expect("or")
             }
         };
-        let ok_bb = self.ctx.append_basic_block(f.func, "sc_cast_ok");
-        b.build_conditional_branch(ok_kind, ok_bb, s.deopt_bb)
+        let keep_bb = self.ctx.append_basic_block(f.func, "sc_cast_k");
+        b.build_conditional_branch(ok_kind, keep_bb, s.deopt_bb)
             .expect("br");
-        self.builder.position_at_end(ok_bb);
-        (self.i8t.const_zero(), av)
+        self.builder.position_at_end(keep_bb);
+        self.builder.build_store(rv, av).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(done_bb);
+        (self.i8t.const_zero(), self.load_i64(rv))
+    }
+
+    fn lower_sc_double_to_int(
+        &self,
+        f: &FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        long: bool,
+        av: IntValue<'ctx>,
+    ) -> IntValue<'ctx> {
+        let d = self.bits_to_f64(av);
+        let f64t = self.ctx.f64_type();
+        let (lo, hi, hi_pred) = if long {
+            (
+                f64t.const_float(-9223372036854775808.0),
+                f64t.const_float(9223372036854775808.0),
+                FloatPredicate::OLT,
+            )
+        } else {
+            (
+                f64t.const_float(f64::from(i32::MIN)),
+                f64t.const_float(f64::from(i32::MAX)),
+                FloatPredicate::OLE,
+            )
+        };
+        let ge_lo = self
+            .builder
+            .build_float_compare(FloatPredicate::OGE, d, lo, "dlo")
+            .expect("fcmp");
+        let lt_hi = self
+            .builder
+            .build_float_compare(hi_pred, d, hi, "dhi")
+            .expect("fcmp");
+        let in_rng = self.builder.build_and(ge_lo, lt_hi, "drng").expect("and");
+        let res = self.entry_alloca(f, self.i64t, "d2ir");
+        let conv_bb = self.ctx.append_basic_block(f.func, "sc_d2i_ok");
+        let chk_nan = self.ctx.append_basic_block(f.func, "sc_d2i_nan");
+        let nan_bb = self.ctx.append_basic_block(f.func, "sc_d2i_z");
+        let done_bb = self.ctx.append_basic_block(f.func, "sc_d2i_done");
+        self.builder
+            .build_conditional_branch(in_rng, conv_bb, chk_nan)
+            .expect("br");
+        self.builder.position_at_end(conv_bb);
+        let iv = self
+            .builder
+            .build_float_to_signed_int(d, self.i64t, "f2i")
+            .expect("fptosi");
+        self.builder.build_store(res, iv).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(chk_nan);
+        let is_nan = self
+            .builder
+            .build_float_compare(FloatPredicate::UNO, d, d, "isnan")
+            .expect("fcmp");
+        self.builder
+            .build_conditional_branch(is_nan, nan_bb, s.deopt_bb)
+            .expect("br");
+        self.builder.position_at_end(nan_bb);
+        self.builder
+            .build_store(res, self.i64t.const_zero())
+            .expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(done_bb);
+        self.load_i64(res)
     }
 
     fn lower_sc_count(
@@ -1771,7 +2491,15 @@ impl<'ctx> Lowerer<'ctx> {
         } else {
             self.emit_sc_nth_str(f, c, iv, res_k, res_v, ivec_chk_bb, done_bb);
         }
-        self.emit_sc_nth_ivec(f, c, iv, res_k, res_v, ivec_chk_bb, bc_bb, done_bb);
+        let after_ivec = if !c.mutated && s.allow_fp {
+            self.ctx.append_basic_block(f.func, "sc_nth_gchk")
+        } else {
+            bc_bb
+        };
+        self.emit_sc_nth_ivec(f, c, iv, res_k, res_v, ivec_chk_bb, after_ivec, done_bb);
+        if !c.mutated && s.allow_fp {
+            self.emit_sc_nth_gvec(f, c, iv, res_k, res_v, after_ivec, bc_bb, done_bb);
+        }
         self.builder.position_at_end(bc_bb);
         self.unlock_coll_tvec(f, c);
         let probe = self
@@ -1799,15 +2527,24 @@ impl<'ctx> Lowerer<'ctx> {
             .build_conditional_branch(hit, bc_ok_bb, slow_bb)
             .expect("br");
         self.builder.position_at_end(bc_ok_bb);
-        self.builder
-            .build_store(res_k, self.load_i8(s.scratch_k))
-            .expect("st");
+        let bk = self.load_i8(s.scratch_k);
+        self.builder.build_store(res_k, bk).expect("st");
         self.builder
             .build_store(res_v, self.load_i64(s.scratch_v))
             .expect("st");
-        self.builder
-            .build_unconditional_branch(done_bb)
-            .expect("br");
+        if s.allow_fp {
+            self.builder
+                .build_unconditional_branch(done_bb)
+                .expect("br");
+        } else {
+            let not_d = self
+                .builder
+                .build_int_compare(IntPredicate::NE, bk, self.i8t.const_int(3, false), "nd")
+                .expect("cmp");
+            self.builder
+                .build_conditional_branch(not_d, done_bb, s.deopt_bb)
+                .expect("br");
+        }
         self.emit_sc_nth_slow(f, s, c_slot, iv, res_k, res_v, slow_bb, done_bb);
         self.builder.position_at_end(done_bb);
         Ok((self.load_i8(res_k), self.load_i64(res_v)))
@@ -1899,6 +2636,42 @@ impl<'ctx> Lowerer<'ctx> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn emit_sc_nth_gvec(
+        &self,
+        f: &FnCtx<'ctx>,
+        c: &CollCache<'ctx>,
+        iv: IntValue<'ctx>,
+        res_k: PointerValue<'ctx>,
+        res_v: PointerValue<'ctx>,
+        chk_bb: BasicBlock<'ctx>,
+        miss_bb: BasicBlock<'ctx>,
+        done_bb: BasicBlock<'ctx>,
+    ) {
+        self.builder.position_at_end(chk_bb);
+        let fast = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, iv, self.load_i64(c.gvec_len), "fgv")
+            .expect("cmp");
+        let gvec_bb = self.ctx.append_basic_block(f.func, "sc_nth_gvec");
+        let hit_bb = self.ctx.append_basic_block(f.func, "sc_nth_ghit");
+        self.builder
+            .build_conditional_branch(fast, gvec_bb, miss_bb)
+            .expect("br");
+        self.builder.position_at_end(gvec_bb);
+        let ep = self.scaled_elem_ptr(c.gvec_ptr, iv, 5);
+        let (ok, uk, uv) = self.unbox_scalar(ep, true);
+        self.builder
+            .build_conditional_branch(ok, hit_bb, miss_bb)
+            .expect("br");
+        self.builder.position_at_end(hit_bb);
+        self.builder.build_store(res_k, uk).expect("st");
+        self.builder.build_store(res_v, uv).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_sc_nth_slow(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -1931,7 +2704,7 @@ impl<'ctx> Lowerer<'ctx> {
             call_bb,
             slow_ok,
         );
-        let (u_ok, uk, uv) = self.unbox_scalar(tmp_out);
+        let (u_ok, uk, uv) = self.unbox_scalar(tmp_out, s.allow_fp);
         self.drop_and_nil_slots(f.func, &[tmp_out]);
         self.builder.build_store(res_k, uk).expect("st");
         self.builder.build_store(res_v, uv).expect("st");
@@ -1946,12 +2719,13 @@ impl<'ctx> Lowerer<'ctx> {
         s: &ScalarSession<'ctx>,
         loc: Loc,
         idx_e: &IExpr,
-        item: u16,
+        item_e: &IExpr,
     ) -> Result<(IntValue<'ctx>, IntValue<'ctx>), Unsupported> {
         let (ik, iv) = self.lower_sc_expr(f, s, idx_e)?;
         self.require_int(f, ik, s.deopt_bb);
+        let (jk, jv) = self.lower_sc_expr(f, s, item_e)?;
+        self.require_int(f, jk, s.deopt_bb);
         let c_slot = s.colls[s.coll_idx(loc)].slot;
-        let item_v = self.i64t.const_int(u64::from(item), false);
         let ok = self
             .call(
                 "rt_bc_scalar_nth2",
@@ -1959,7 +2733,7 @@ impl<'ctx> Lowerer<'ctx> {
                 &[
                     c_slot.into(),
                     iv.into(),
-                    item_v.into(),
+                    jv.into(),
                     s.scratch_k.into(),
                     s.scratch_v.into(),
                 ],
@@ -1974,7 +2748,71 @@ impl<'ctx> Lowerer<'ctx> {
             .build_conditional_branch(hit, ok_bb, s.deopt_bb)
             .expect("br");
         self.builder.position_at_end(ok_bb);
-        Ok((self.load_i8(s.scratch_k), self.load_i64(s.scratch_v)))
+        let rk = self.load_i8(s.scratch_k);
+        if !s.allow_fp {
+            let not_d = self
+                .builder
+                .build_int_compare(IntPredicate::NE, rk, self.i8t.const_int(3, false), "nd")
+                .expect("cmp");
+            let ok2 = self.ctx.append_basic_block(f.func, "sc_nth2_nd");
+            self.builder
+                .build_conditional_branch(not_d, ok2, s.deopt_bb)
+                .expect("br");
+            self.builder.position_at_end(ok2);
+        }
+        Ok((rk, self.load_i64(s.scratch_v)))
+    }
+
+    fn is_k_int(&self, k: IntValue<'ctx>) -> IntValue<'ctx> {
+        self.builder
+            .build_int_compare(IntPredicate::EQ, k, self.i8t.const_zero(), "ki")
+            .expect("cmp")
+    }
+
+    fn is_k_dbl(&self, k: IntValue<'ctx>) -> IntValue<'ctx> {
+        self.builder
+            .build_int_compare(IntPredicate::EQ, k, self.i8t.const_int(3, false), "kd")
+            .expect("cmp")
+    }
+
+    fn is_k_num(&self, k: IntValue<'ctx>) -> IntValue<'ctx> {
+        self.builder
+            .build_or(self.is_k_int(k), self.is_k_dbl(k), "kn")
+            .expect("or")
+    }
+
+    fn bits_to_f64(&self, v: IntValue<'ctx>) -> FloatValue<'ctx> {
+        self.builder
+            .build_bit_cast(v, self.ctx.f64_type(), "b2d")
+            .expect("bc")
+            .into_float_value()
+    }
+
+    fn f64_bits(&self, d: FloatValue<'ctx>) -> IntValue<'ctx> {
+        self.builder
+            .build_bit_cast(d, self.i64t, "d2b")
+            .expect("bc")
+            .into_int_value()
+    }
+
+    fn scalar_as_f64(&self, k: IntValue<'ctx>, v: IntValue<'ctx>) -> FloatValue<'ctx> {
+        let as_i = self
+            .builder
+            .build_signed_int_to_float(v, self.ctx.f64_type(), "i2d")
+            .expect("sitofp");
+        let as_d = self.bits_to_f64(v);
+        self.builder
+            .build_select(self.is_k_int(k), as_i, as_d, "fval")
+            .expect("sel")
+            .into_float_value()
+    }
+
+    fn require_num(&self, f: &FnCtx<'ctx>, k: IntValue<'ctx>, fail: BasicBlock<'ctx>) {
+        let ok_bb = self.ctx.append_basic_block(f.func, "sc_num_ok");
+        self.builder
+            .build_conditional_branch(self.is_k_num(k), ok_bb, fail)
+            .expect("br");
+        self.builder.position_at_end(ok_bb);
     }
 
     fn require_int(&self, f: &FnCtx<'ctx>, k: IntValue<'ctx>, fail: BasicBlock<'ctx>) {

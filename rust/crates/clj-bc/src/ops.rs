@@ -802,13 +802,14 @@ pub(crate) fn assoc_bang_fast<O: OutSlot>(
     let Some(idx) = index_i32(key) else {
         return false;
     };
-    let Value::Int(n) = val else {
-        return false;
-    };
     let ok = {
         let mut guard = t.lock();
         if let TransientKind::Vector(tv) = &mut *guard {
-            tv.assoc_int_in_bounds(idx, *n)
+            match val {
+                Value::Int(n) => tv.assoc_int_in_bounds(idx, *n),
+                Value::Double(d) => tv.assoc_double_in_bounds(idx, *d),
+                _ => false,
+            }
         } else {
             false
         }
@@ -824,6 +825,7 @@ fn scalar_val_ref(vr: ValueRef<'_>) -> Option<(u8, i64)> {
         ValueRef::Ref(Value::Int(n)) => Some((0, *n)),
         ValueRef::Ref(Value::Char(c)) => Some((1, i64::from(u32::from(*c)))),
         ValueRef::Ref(Value::Bool(b)) => Some((2, i64::from(*b))),
+        ValueRef::Ref(Value::Double(d)) => Some((3, d.to_bits() as i64)),
         ValueRef::Str(_) | ValueRef::Ref(_) => None,
     }
 }
@@ -961,6 +963,20 @@ pub(crate) fn scalar_ivec_probe(v: &Value, ptr_out: &mut *const i64, len_out: &m
         return false;
     };
     let Some(slice) = vec.as_flat_ints() else {
+        return false;
+    };
+    *ptr_out = slice.as_ptr();
+    *len_out = slice.len() as i64;
+    true
+}
+
+/// Probe `v` as a flat generic [`Value`] vector, writing its element pointer and length.
+#[inline]
+pub(crate) fn scalar_gvec_probe(v: &Value, ptr_out: &mut *const Value, len_out: &mut i64) -> bool {
+    let Value::Vector(vec) = v else {
+        return false;
+    };
+    let Some(slice) = vec.as_flat_values() else {
         return false;
     };
     *ptr_out = slice.as_ptr();

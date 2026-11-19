@@ -435,6 +435,17 @@ pub extern "C" fn rt_bc_scalar_ivec(v: &Value, ptr_out: &mut *const i64, len_out
     i8::from(ops::scalar_ivec_probe(v, ptr_out, len_out))
 }
 
+/// Probe `v` as a flat generic [`Value`] vector (`1` on hit, writing `ptr_out` and `len_out`).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_gvec(
+    v: &Value,
+    ptr_out: &mut *const Value,
+    len_out: &mut i64,
+) -> i8 {
+    i8::from(ops::scalar_gvec_probe(v, ptr_out, len_out))
+}
+
 /// Whether `a` and `b` alias the same transient buffer (`1` when equal).
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
@@ -1116,6 +1127,7 @@ mod tests {
             Value::Int(3),
             Value::Char('z'),
             Value::Bool(true),
+            Value::Double(1.5),
             str_val("no"),
         ]));
         assert!(ops::scalar_nth(&gvec, 0, &mut k, &mut v, None));
@@ -1124,7 +1136,9 @@ mod tests {
         assert_eq!((k, v), (1, i64::from(b'z')));
         assert!(ops::scalar_nth(&gvec, 2, &mut k, &mut v, None));
         assert_eq!((k, v), (2, 1));
-        assert!(!ops::scalar_nth(&gvec, 3, &mut k, &mut v, None));
+        assert!(ops::scalar_nth(&gvec, 3, &mut k, &mut v, None));
+        assert_eq!((k, v), (3, 1.5_f64.to_bits() as i64));
+        assert!(!ops::scalar_nth(&gvec, 4, &mut k, &mut v, None));
 
         let s = str_val("ab");
         assert!(ops::scalar_nth(&s, 1, &mut k, &mut v, None));
@@ -1169,6 +1183,14 @@ mod tests {
         assert_eq!(ilen, 2);
         assert!(!ops::scalar_ivec_probe(&cvec, &mut iptr, &mut ilen));
         assert!(!ops::scalar_ivec_probe(&Value::Nil, &mut iptr, &mut ilen));
+
+        let mut gptr = std::ptr::null();
+        let mut glen = -1;
+        assert!(ops::scalar_gvec_probe(&gvec, &mut gptr, &mut glen));
+        assert!(!gptr.is_null());
+        assert_eq!(glen, 5);
+        assert!(!ops::scalar_gvec_probe(&ivec, &mut gptr, &mut glen));
+        assert!(!ops::scalar_gvec_probe(&Value::Nil, &mut gptr, &mut glen));
 
         assert!(ops::scalar_same_transient(&tval, &tval));
         assert!(!ops::scalar_same_transient(&tval, &tmap));

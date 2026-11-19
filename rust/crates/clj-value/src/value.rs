@@ -524,6 +524,17 @@ impl Vector {
         }
     }
 
+    /// Borrow the flat generic [`Value`] slice when this vector is backed by
+    /// flat generic storage (panic-free for `clj-bc` bitcode).
+    #[inline(always)]
+    #[must_use]
+    pub fn as_flat_values(&self) -> Option<&[Value]> {
+        match &self.0.inner {
+            VectorInner::Generic(t) => t.as_flat(),
+            _ => None,
+        }
+    }
+
     /// Borrow the packed string storage when this vector holds packed strings.
     #[inline(always)]
     #[must_use]
@@ -5311,6 +5322,13 @@ mod tests {
         assert!(v2.into_typed_items().is_ok());
 
         let empty_v = Vector::from_packed_strs(PackedStrings::new());
+        assert!(empty_v.as_flat_values().is_none());
         assert!(empty_v.drop_last_owned().is_none());
+
+        // as_flat_values: generic flat hits; packed ints/chars/strs miss
+        let fv = Vector::from_vec(vec![Value::Double(1.5), Value::Double(2.5)]);
+        assert_eq!(fv.as_flat_values().map(<[Value]>::len), Some(2));
+        assert!(Vector::from_ints(vec![1, 2]).as_flat_values().is_none());
+        assert!(Vector::from_chars(vec!['a']).as_flat_values().is_none());
     }
 }

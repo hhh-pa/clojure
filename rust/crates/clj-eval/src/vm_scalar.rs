@@ -52,10 +52,11 @@ pub enum K {
     Int,
     Char,
     Bool,
+    Double,
 }
 
 /// An unboxed scalar: its kind and payload (a char's code, a
-/// boolean's 0/1).
+/// boolean's 0/1, or a double's IEEE 754 bit pattern).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Sv {
     pub k: K,
@@ -79,6 +80,14 @@ impl Sv {
     }
 
     #[inline(always)]
+    fn double(d: f64) -> Self {
+        Sv {
+            k: K::Double,
+            v: d.to_bits() as i64,
+        }
+    }
+
+    #[inline(always)]
     fn of(v: &Value) -> Option<Self> {
         match v {
             Value::Int(n) => Some(Sv::int(*n)),
@@ -87,6 +96,7 @@ impl Sv {
                 v: i64::from(u32::from(*c)),
             }),
             Value::Bool(b) => Some(Sv::bool(*b)),
+            Value::Double(d) => Some(Sv::double(*d)),
             _ => None,
         }
     }
@@ -96,12 +106,22 @@ impl Sv {
             K::Int => Value::Int(self.v),
             K::Char => char::from_u32(self.v as u32).map_or(Value::Nil, Value::Char),
             K::Bool => Value::Bool(self.v != 0),
+            K::Double => Value::Double(f64::from_bits(self.v as u64)),
         }
     }
 
     #[inline(always)]
     fn int_of(self) -> Option<i64> {
         (self.k == K::Int).then_some(self.v)
+    }
+
+    #[inline(always)]
+    fn f64_of(self) -> Option<f64> {
+        match self.k {
+            K::Double => Some(f64::from_bits(self.v as u64)),
+            K::Int => Some(self.v as f64),
+            _ => None,
+        }
     }
 
     /// Clojure truth: only `false` is falsy among scalars.
@@ -111,12 +131,58 @@ impl Sv {
     }
 }
 
-/// A numeric cast (`int`, `long`).
+/// A numeric cast (`int`, `long`, `double`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cast {
     Int,
     Long,
+    Double,
 }
+
+/// Table row for a unary `java.lang.Math` op (`(method, shim, fn)`).
+pub type MathUnarySpec = (&'static str, &'static str, fn(f64) -> f64);
+
+/// Table row for a binary `java.lang.Math` op (`(method, shim, fn)`).
+pub type MathBinarySpec = (&'static str, &'static str, fn(f64, f64) -> f64);
+
+/// Unary `java.lang.Math` functions lowered as direct `f64 -> f64` shims
+/// (single source of truth shared by VM scalar execution and AOT lowering).
+pub const MATH_UNARY: &[MathUnarySpec] = &[
+    ("exp", "rt_n_math_exp", f64::exp),
+    ("log", "rt_n_math_log", f64::ln),
+    ("log10", "rt_n_math_log10", f64::log10),
+    ("ceil", "rt_n_math_ceil", f64::ceil),
+    ("floor", "rt_n_math_floor", f64::floor),
+    ("sin", "rt_n_math_sin", f64::sin),
+    ("cos", "rt_n_math_cos", f64::cos),
+    ("tan", "rt_n_math_tan", f64::tan),
+    ("asin", "rt_n_math_asin", f64::asin),
+    ("acos", "rt_n_math_acos", f64::acos),
+    ("atan", "rt_n_math_atan", f64::atan),
+    ("sinh", "rt_n_math_sinh", f64::sinh),
+    ("cosh", "rt_n_math_cosh", f64::cosh),
+    ("tanh", "rt_n_math_tanh", f64::tanh),
+    ("cbrt", "rt_n_math_cbrt", f64::cbrt),
+];
+
+/// Binary `java.lang.Math` functions lowered as direct `(f64, f64) -> f64` shims.
+pub const MATH_BINARY: &[MathBinarySpec] = &[
+    ("pow", "rt_n_math_pow", f64::powf),
+    ("atan2", "rt_n_math_atan2", f64::atan2),
+    ("hypot", "rt_n_math_hypot", f64::hypot),
+];
+
+/// A unary math operation over scalars (`abs`, `sqrt`, or a [`MATH_UNARY`] index).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MathOp1 {
+    Abs,
+    Sqrt,
+    Unary(u8),
+}
+
+/// A binary math operation over scalars (a [`MATH_BINARY`] index).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MathOp2(pub u8);
 
 /// A scalar expression.
 #[derive(Clone)]
@@ -125,6 +191,8 @@ pub enum IExpr {
     Slot(usize),
     /// A local bound outside the loop, read in place.
     Loc(Loc),
+    /// A top-level var read once at loop entry (scalar loops cannot rebind vars).
+    Global(Var),
     Kst(Sv),
     Calc(Box<Calc>),
     Ctl(Box<Ctl>),
@@ -137,14 +205,24 @@ pub enum IExpr {
 pub enum Calc {
     Op1(IntOp1, IExpr),
     Op2(IntOp2, IExpr, IExpr),
-    Cast(Cast, IExpr),
+    Fp(FpCalc),
     /// `(nth coll i)` over an invariant collection.
     Nth(Loc, IExpr),
     /// `(count coll)` over an invariant collection.
     Count(Loc),
-    /// Item `k` of the vector at `coll[i]`: a name of a
-    /// destructured `(let [[a b …] (nth coll i)] …)`.
-    Nth2(Loc, IExpr, u16),
+    /// Item `j` of the vector at `coll[i]` (destructured `(let [[a b …] (nth coll i)] …)`
+    /// or nested `(nth (nth coll i) j)`).
+    Nth2(Loc, IExpr, IExpr),
+}
+
+/// Floating-point, math, and numeric cast operations.
+#[derive(Clone)]
+pub enum FpCalc {
+    /// Floating-point division (`/` with at least one `Double` operand).
+    Div(IExpr, IExpr),
+    Math1(MathOp1, IExpr),
+    Math2(MathOp2, IExpr, IExpr),
+    Cast(Cast, IExpr),
 }
 
 /// A control form in value position.
@@ -261,9 +339,18 @@ type Sl = u16;
 enum Step {
     Op1(IntOp1, Sl, Sl),
     Op2(IntOp2, Sl, Sl, Sl),
-    Cast(Cast, Sl, Sl),
+    Fp(FpStep),
     Mov(Sl, Sl),
     Set(Sl, bool),
+}
+
+/// Floating-point, math, and cast steps over slots.
+#[derive(Clone, Copy)]
+enum FpStep {
+    Div(Sl, Sl, Sl),
+    Math1(MathOp1, Sl, Sl),
+    Math2(MathOp2, Sl, Sl, Sl),
+    Cast(Cast, Sl, Sl),
 }
 
 /// A collection read: result, collection index (and index slot).
@@ -271,8 +358,8 @@ enum Step {
 enum Co {
     Nth(Sl, u16, Sl),
     Count(Sl, u16),
-    /// Result, collection index, index slot, item.
-    Nth2(Sl, u16, Sl, u16),
+    /// Result, collection index, outer index slot, inner index slot.
+    Nth2(Sl, u16, Sl, Sl),
 }
 
 /// A branch test over slots.
@@ -310,7 +397,16 @@ impl Ins {
     /// so only single-writer steps retarget).
     fn retarget(&mut self, from: Sl, to: Sl) -> bool {
         let d = match self {
-            Ins::Do(Step::Op1(_, d, _) | Step::Op2(_, d, ..) | Step::Cast(_, d, _))
+            Ins::Do(
+                Step::Op1(_, d, _)
+                | Step::Op2(_, d, ..)
+                | Step::Fp(
+                    FpStep::Div(d, ..)
+                    | FpStep::Math1(_, d, _)
+                    | FpStep::Math2(_, d, ..)
+                    | FpStep::Cast(_, d, _),
+                ),
+            )
             | Ins::Co(Co::Nth(d, ..) | Co::Count(d, _) | Co::Nth2(d, ..)) => d,
             _ => return false,
         };
@@ -416,6 +512,8 @@ pub(crate) struct ScalarLoop {
     code: Box<[Ins]>,
     /// Invariant scalars, loaded at entry.
     loads: Box<[(Sl, Loc)]>,
+    /// Invariant top-level globals, loaded at entry.
+    globals: Box<[(Sl, Var)]>,
     colls: Box<[Loc]>,
     effs: Box<[EffI]>,
     exits: Box<[ExitI]>,
@@ -497,11 +595,12 @@ fn nth(coll: &Coll<'_>, i: Sv) -> Option<Sv> {
     }
 }
 
-/// The scalar item `k` of the vector at `coll[i]` (a destructured
-/// `(nth coll i)`): anything but a vector there, or a non-scalar or
-/// missing item, misses.
-fn nth2(coll: &Coll<'_>, i: Sv, k: usize) -> Option<Sv> {
+/// The scalar item `j` of the vector at `coll[i]` (a destructured
+/// `(nth coll i)` or nested `(nth (nth coll i) j)`): anything but a vector
+/// there, or a non-scalar or missing item, misses.
+fn nth2(coll: &Coll<'_>, i: Sv, j: Sv) -> Option<Sv> {
     let idx = usize::try_from(i.int_of()?).ok()?;
+    let k = usize::try_from(j.int_of()?).ok()?;
     let item = |v: &Value| match v {
         Value::Vector(inner) => inner.read_at(k, Sv::of),
         _ => None,
@@ -528,14 +627,31 @@ fn count(coll: &Coll<'_>) -> Option<Sv> {
     i64::try_from(n).ok().map(Sv::int)
 }
 
-/// `int`/`long` of a scalar (a char's code; `int` range-checked).
+/// `int`/`long`/`double` of a scalar.
 #[inline(always)]
 fn cast(c: Cast, x: Sv) -> Option<Sv> {
     match (c, x.k) {
-        (_, K::Char) | (Cast::Long, K::Int) => Some(Sv::int(x.v)),
+        (Cast::Double, K::Int) => Some(Sv::double(x.v as f64)),
+        (Cast::Double, K::Double) => Some(x),
+        (Cast::Long, K::Int | K::Char) | (Cast::Int, K::Char) => Some(Sv::int(x.v)),
         (Cast::Int, K::Int) => i32::try_from(x.v).ok().map(|_| Sv::int(x.v)),
-        (_, K::Bool) => None,
+        (Cast::Long, K::Double) => cast_double_int(f64::from_bits(x.v as u64), true),
+        (Cast::Int, K::Double) => cast_double_int(f64::from_bits(x.v as u64), false),
+        _ => None,
     }
+}
+
+#[inline(always)]
+fn cast_double_int(d: f64, long: bool) -> Option<Sv> {
+    if d.is_nan() {
+        return Some(Sv::int(0));
+    }
+    let in_range = if long {
+        (-9223372036854775808.0..9223372036854775808.0).contains(&d)
+    } else {
+        (f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&d)
+    };
+    in_range.then(|| Sv::int(d.trunc() as i64))
 }
 
 /// `assoc!` of a scalar (an `Int` keeps a packed buffer packed).
@@ -681,26 +797,131 @@ fn vector(k: &mut TransientKind) -> Option<&mut TransientVector> {
 }
 
 #[inline(always)]
+fn test1_sv(op: IntTest1, a: Sv) -> Option<bool> {
+    match a.k {
+        K::Int => Some(op.test(a.v)),
+        K::Double => {
+            let d = f64::from_bits(a.v as u64);
+            Some(match op {
+                IntTest1::Zero => d == 0.0,
+                IntTest1::Pos => d > 0.0,
+                IntTest1::Neg => d < 0.0,
+            })
+        }
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn test2_sv(op: IntTest2, a: Sv, b: Sv) -> Option<bool> {
+    if a.k == K::Int && b.k == K::Int {
+        return Some(op.test(a.v, b.v));
+    }
+    let (x, y) = (a.f64_of()?, b.f64_of()?);
+    Some(match op {
+        IntTest2::Lt => x < y,
+        IntTest2::Lte => x <= y,
+        IntTest2::Gt => x > y,
+        IntTest2::Gte => x >= y,
+        _ => x == y,
+    })
+}
+
+#[inline(always)]
+fn eq_sv(a: Sv, b: Sv) -> bool {
+    if a.k != b.k {
+        return false;
+    }
+    if a.k == K::Double {
+        f64::from_bits(a.v as u64) == f64::from_bits(b.v as u64)
+    } else {
+        a.v == b.v
+    }
+}
+
+#[inline(always)]
 fn branch(b: Br, s: &[Sv]) -> Option<bool> {
     let at = |x: Sl| s[usize::from(x)];
-    Some(match b {
-        Br::T1(op, a) => op.test(at(a).int_of()?),
-        Br::T2(op, a, b) => op.test(at(a).int_of()?, at(b).int_of()?),
-        Br::Eq(a, b) => at(a) == at(b),
-        Br::Truthy(a) => at(a).truthy(),
-    })
+    match b {
+        Br::T1(op, a) => test1_sv(op, at(a)),
+        Br::T2(op, a, b) => test2_sv(op, at(a), at(b)),
+        Br::Eq(a, b) => Some(eq_sv(at(a), at(b))),
+        Br::Truthy(a) => Some(at(a).truthy()),
+    }
+}
+
+#[inline(always)]
+fn op1_sv(op: IntOp1, a: Sv) -> Option<Sv> {
+    match a.k {
+        K::Int => Some(Sv::int(op.apply(a.v)?)),
+        K::Double => {
+            let d = f64::from_bits(a.v as u64);
+            Some(Sv::double(match op {
+                IntOp1::Inc => d + 1.0,
+                IntOp1::Dec => d - 1.0,
+                IntOp1::Negate => -d,
+                IntOp1::BitNot => return None,
+            }))
+        }
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn op2_sv(op: IntOp2, a: Sv, b: Sv) -> Option<Sv> {
+    if a.k == K::Int && b.k == K::Int {
+        return Some(Sv::int(op.apply(a.v, b.v)?));
+    }
+    let (x, y) = (a.f64_of()?, b.f64_of()?);
+    float_op2_sv(op, a, b, x, y)
+}
+
+#[inline(always)]
+fn float_op2_sv(op: IntOp2, a: Sv, b: Sv, x: f64, y: f64) -> Option<Sv> {
+    match op {
+        IntOp2::Add => Some(Sv::double(x + y)),
+        IntOp2::Sub => Some(Sv::double(x - y)),
+        IntOp2::Mul => Some(Sv::double(x * y)),
+        IntOp2::Max => Some(if x.is_nan() || x > y { a } else { b }),
+        IntOp2::Min => Some(if x.is_nan() || x < y { a } else { b }),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn div_sv(a: Sv, b: Sv) -> Option<Sv> {
+    if a.k != K::Double && b.k != K::Double {
+        return None;
+    }
+    Some(Sv::double(a.f64_of()? / b.f64_of()?))
+}
+
+#[inline(always)]
+fn math1_sv(op: MathOp1, a: Sv) -> Option<Sv> {
+    match op {
+        MathOp1::Abs => match a.k {
+            K::Int => Some(Sv::int(a.v.wrapping_abs())),
+            K::Double => Some(Sv::double(f64::from_bits(a.v as u64).abs())),
+            _ => None,
+        },
+        MathOp1::Sqrt => Some(Sv::double(a.f64_of()?.sqrt())),
+        MathOp1::Unary(i) => Some(Sv::double((MATH_UNARY[usize::from(i)].2)(a.f64_of()?))),
+    }
+}
+
+#[inline(always)]
+fn math2_sv(op: MathOp2, a: Sv, b: Sv) -> Option<Sv> {
+    let (x, y) = (a.f64_of()?, b.f64_of()?);
+    Some(Sv::double((MATH_BINARY[usize::from(op.0)].2)(x, y)))
 }
 
 #[inline(always)]
 fn step(st: Step, s: &mut [Sv]) -> Option<()> {
     let at = |s: &[Sv], x: Sl| s[usize::from(x)];
     let (d, v) = match st {
-        Step::Op1(op, d, a) => (d, Sv::int(op.apply(at(s, a).int_of()?)?)),
-        Step::Op2(op, d, a, b) => {
-            let (x, y) = (at(s, a).int_of()?, at(s, b).int_of()?);
-            (d, Sv::int(op.apply(x, y)?))
-        }
-        Step::Cast(c, d, a) => (d, cast(c, at(s, a))?),
+        Step::Op1(op, d, a) => (d, op1_sv(op, at(s, a))?),
+        Step::Op2(op, d, a, b) => (d, op2_sv(op, at(s, a), at(s, b))?),
+        Step::Fp(fp) => step_fp(fp, s)?,
         Step::Mov(d, a) => (d, at(s, a)),
         Step::Set(d, b) => (d, Sv::bool(b)),
     };
@@ -709,13 +930,24 @@ fn step(st: Step, s: &mut [Sv]) -> Option<()> {
 }
 
 #[inline(always)]
+fn step_fp(fp: FpStep, s: &[Sv]) -> Option<(Sl, Sv)> {
+    let at = |x: Sl| s[usize::from(x)];
+    match fp {
+        FpStep::Div(d, a, b) => Some((d, div_sv(at(a), at(b))?)),
+        FpStep::Math1(op, d, a) => Some((d, math1_sv(op, at(a))?)),
+        FpStep::Math2(op, d, a, b) => Some((d, math2_sv(op, at(a), at(b))?)),
+        FpStep::Cast(c, d, a) => Some((d, cast(c, at(a))?)),
+    }
+}
+
+#[inline(always)]
 fn co_step(co: Co, s: &mut [Sv], colls: &[Coll<'_>]) -> Option<()> {
     let (d, v) = match co {
         Co::Nth(d, c, i) => (d, nth(&colls[usize::from(c)], s[usize::from(i)])?),
-        Co::Nth2(d, c, i, k) => {
-            let v = nth2(&colls[usize::from(c)], s[usize::from(i)], usize::from(k))?;
-            (d, v)
-        }
+        Co::Nth2(d, c, i, j) => (
+            d,
+            nth2(&colls[usize::from(c)], s[usize::from(i)], s[usize::from(j)])?,
+        ),
         Co::Count(d, c) => (d, count(&colls[usize::from(c)])?),
     };
     s[usize::from(d)] = v;
@@ -845,6 +1077,10 @@ fn run(ev: &mut Evaluator, f: &mut Frame<'_>, sc: &ScalarLoop, targets: &[usize]
     for (slot, l) in sc.loads.iter() {
         s[usize::from(*slot)] = Sv::of(f.get(*l))?;
     }
+    for (slot, var) in sc.globals.iter() {
+        let val = ev.deref_var_cached(var.id, &var.sym);
+        s[usize::from(*slot)] = Sv::of(&val)?;
+    }
     if !may_enter(ev, sc) {
         return None;
     }
@@ -958,6 +1194,7 @@ struct Lower<'b> {
     nslots: usize,
     consts: Vec<(Sl, Sv)>,
     loads: Vec<(Sl, Loc)>,
+    globals: Vec<(Sl, Var)>,
     colls: Vec<Loc>,
     effs: Vec<EffI>,
     exits: Vec<ExitI>,
@@ -1009,6 +1246,15 @@ impl Lower<'_> {
         s
     }
 
+    fn global(&mut self, var: &Var) -> Sl {
+        if let Some((s, _)) = self.globals.iter().find(|(_, v)| v.id == var.id) {
+            return *s;
+        }
+        let s = self.sl();
+        self.globals.push((s, var.clone()));
+        s
+    }
+
     /// A constant's slot (one per distinct constant).
     fn konst(&mut self, v: Sv) -> Sl {
         if let Some((s, _)) = self.consts.iter().find(|(_, c)| *c == v) {
@@ -1031,6 +1277,7 @@ impl Lower<'_> {
             IExpr::Slot(i) => *i as Sl,
             IExpr::Kst(v) => self.konst(*v),
             IExpr::Loc(l) => self.load(*l),
+            IExpr::Global(var) => self.global(var),
             IExpr::Calc(c) => self.calc_val(c),
             IExpr::Ctl(c) => self.ctl_val(c),
             IExpr::Deopt => self.miss(),
@@ -1049,10 +1296,7 @@ impl Lower<'_> {
                 let (a, b) = (self.val(a), self.val(b));
                 Ins::Do(Step::Op2(*op, self.sl(), a, b))
             }
-            Calc::Cast(k, a) => {
-                let a = self.val(a);
-                Ins::Do(Step::Cast(*k, self.sl(), a))
-            }
+            Calc::Fp(fp) => Ins::Do(Step::Fp(self.fp_calc_val(fp))),
             Calc::Nth(l, i) => {
                 let (c, i) = (self.coll(*l), self.val(i));
                 Ins::Co(Co::Nth(self.sl(), c, i))
@@ -1061,13 +1305,34 @@ impl Lower<'_> {
                 let c = self.coll(*l);
                 Ins::Co(Co::Count(self.sl(), c))
             }
-            Calc::Nth2(l, i, k) => {
-                let (c, i) = (self.coll(*l), self.val(i));
-                Ins::Co(Co::Nth2(self.sl(), c, i, *k))
+            Calc::Nth2(l, i, j) => {
+                let (c, i, j) = (self.coll(*l), self.val(i), self.val(j));
+                Ins::Co(Co::Nth2(self.sl(), c, i, j))
             }
         };
         self.code.push(ins);
         (self.nslots - 1) as Sl
+    }
+
+    fn fp_calc_val(&mut self, fp: &FpCalc) -> FpStep {
+        match fp {
+            FpCalc::Div(a, b) => {
+                let (a, b) = (self.val(a), self.val(b));
+                FpStep::Div(self.sl(), a, b)
+            }
+            FpCalc::Math1(op, a) => {
+                let a = self.val(a);
+                FpStep::Math1(*op, self.sl(), a)
+            }
+            FpCalc::Math2(op, a, b) => {
+                let (a, b) = (self.val(a), self.val(b));
+                FpStep::Math2(*op, self.sl(), a, b)
+            }
+            FpCalc::Cast(k, a) => {
+                let a = self.val(a);
+                FpStep::Cast(*k, self.sl(), a)
+            }
+        }
     }
 
     fn ctl_val(&mut self, c: &Ctl) -> Sl {
@@ -1414,8 +1679,10 @@ fn reads_coll(e: &IExpr) -> bool {
     match e {
         IExpr::Calc(c) => match &**c {
             Calc::Nth(..) | Calc::Count(_) | Calc::Nth2(..) => true,
-            Calc::Op1(_, a) | Calc::Cast(_, a) => reads_coll(a),
-            Calc::Op2(_, a, b) => reads_coll(a) || reads_coll(b),
+            Calc::Op1(_, a) | Calc::Fp(FpCalc::Math1(_, a) | FpCalc::Cast(_, a)) => reads_coll(a),
+            Calc::Op2(_, a, b) | Calc::Fp(FpCalc::Div(a, b) | FpCalc::Math2(_, a, b)) => {
+                reads_coll(a) || reads_coll(b)
+            }
         },
         IExpr::Ctl(c) => ctl_reads(c),
         _ => false,
@@ -1660,6 +1927,7 @@ pub(crate) fn compile(
         nslots: ast.nslots,
         consts: Vec::new(),
         loads: Vec::new(),
+        globals: Vec::new(),
         colls: Vec::new(),
         effs: Vec::new(),
         exits: Vec::new(),
@@ -1680,6 +1948,7 @@ pub(crate) fn compile(
         init[usize::from(*slot)] = *v;
     }
     let loads = std::mem::take(&mut lw.loads);
+    let globals = std::mem::take(&mut lw.globals);
     let (colls, effs) = (std::mem::take(&mut lw.colls), std::mem::take(&mut lw.effs));
     let exits = std::mem::take(&mut lw.exits);
     let mut code = lw.finish();
@@ -1689,6 +1958,7 @@ pub(crate) fn compile(
         init: init.into(),
         code: code.into(),
         loads: loads.into(),
+        globals: globals.into(),
         colls: colls.into(),
         effs: effs.into(),
         exits: exits.into(),
@@ -1750,8 +2020,12 @@ fn misses(e: &IExpr) -> bool {
 
 fn calc_misses(c: &Calc) -> bool {
     match c {
-        Calc::Op1(_, a) | Calc::Cast(_, a) | Calc::Nth(_, a) | Calc::Nth2(_, a, _) => misses(a),
-        Calc::Op2(_, a, b) => misses(a) || misses(b),
+        Calc::Op1(_, a) | Calc::Fp(FpCalc::Math1(_, a) | FpCalc::Cast(_, a)) | Calc::Nth(_, a) => {
+            misses(a)
+        }
+        Calc::Op2(_, a, b)
+        | Calc::Fp(FpCalc::Div(a, b) | FpCalc::Math2(_, a, b))
+        | Calc::Nth2(_, a, b) => misses(a) || misses(b),
         Calc::Count(_) => false,
     }
 }
@@ -1853,8 +2127,9 @@ impl Builder<'_> {
         match e {
             Expr::Literal(v) => Sv::of(v).map_or(IExpr::Deopt, IExpr::Kst),
             Expr::Local(idx) => self.local(*idx),
+            Expr::Global(var) => IExpr::Global(var.clone()),
             Expr::DirectNative(call) => self.call(call),
-            Expr::Invoke { head, args, .. } => self.inline(head, args),
+            Expr::Invoke { head, args, .. } => self.invoke_expr(head, args),
             Expr::If { test, then, els } => {
                 let c = self.cond(test);
                 let a = self.expr(then);
@@ -1944,7 +2219,14 @@ impl Builder<'_> {
         for k in 0..vp.fixed.len() {
             let s = self.slot();
             self.lex.push(Lex::Slot(s));
-            out.push((s, calc(Calc::Nth2(loc, IExpr::Slot(t), k as u16))));
+            out.push((
+                s,
+                calc(Calc::Nth2(
+                    loc,
+                    IExpr::Slot(t),
+                    IExpr::Kst(Sv::int(k as i64)),
+                )),
+            ));
         }
         Some(())
     }
@@ -1980,6 +2262,33 @@ impl Builder<'_> {
         });
         self.lex.truncate(mark);
         out
+    }
+
+    fn invoke_expr(&mut self, head: &Expr, args: &[Expr]) -> IExpr {
+        if let Some(e) = self.static_math_expr(head, args) {
+            return e;
+        }
+        self.inline(head, args)
+    }
+
+    fn static_math_expr(&mut self, head: &Expr, args: &[Expr]) -> Option<IExpr> {
+        let Expr::Global(v) = head else { return None };
+        if v.sym.namespace() != Some("clojure.core") || v.sym.name() != "__static*" {
+            return None;
+        }
+        let ([fqn, mem], rest) = args.split_first_chunk::<2>()?;
+        if expr_str(fqn)? != "java.lang.Math" {
+            return None;
+        }
+        let name = expr_str(mem)?;
+        match rest {
+            [x] => math1_op(name).map(|op| calc(Calc::Fp(FpCalc::Math1(op, self.expr(x))))),
+            [x, y] => math2_op(name).map(|op| {
+                let a = self.expr(x);
+                calc(Calc::Fp(FpCalc::Math2(op, a, self.expr(y))))
+            }),
+            _ => None,
+        }
     }
 
     /// A call through a var holding a closure, inlined: the params
@@ -2088,21 +2397,60 @@ impl Builder<'_> {
         if let Some(op) = crate::vm_ops::int_fold_op(call) {
             return self.fold(op, args);
         }
-        match (crate::vm_ops::core_name(call), args.as_slice()) {
-            (Some("nth"), [coll, i]) => match self.boxed_local(coll) {
-                Some(loc) => calc(Calc::Nth(loc, self.expr(i))),
-                None => IExpr::Deopt,
-            },
-            (Some("count"), [coll]) => self
+        if let Some(name) = crate::vm_ops::core_name(call) {
+            if let Some(e) = self.core_calc_expr(name, args) {
+                return e;
+            }
+        }
+        match self.test_call(call) {
+            Some(c) => IExpr::Ctl(Box::new(Ctl::Test(c))),
+            None => IExpr::Deopt,
+        }
+    }
+
+    fn core_calc_expr(&mut self, name: &str, args: &[Expr]) -> Option<IExpr> {
+        Some(match (name, args) {
+            ("/", args) if !args.is_empty() => self.div_expr(args),
+            ("nth", [coll, i]) => self.nth_expr(coll, i),
+            ("count", [coll]) => self
                 .boxed_local(coll)
                 .map_or(IExpr::Deopt, |l| calc(Calc::Count(l))),
-            (Some("int"), [x]) => calc(Calc::Cast(Cast::Int, self.expr(x))),
-            (Some("long"), [x]) => calc(Calc::Cast(Cast::Long, self.expr(x))),
-            _ => match self.test_call(call) {
-                Some(c) => IExpr::Ctl(Box::new(Ctl::Test(c))),
-                None => IExpr::Deopt,
-            },
+            ("int", [x]) => calc(Calc::Fp(FpCalc::Cast(Cast::Int, self.expr(x)))),
+            ("long", [x]) => calc(Calc::Fp(FpCalc::Cast(Cast::Long, self.expr(x)))),
+            ("double", [x]) => calc(Calc::Fp(FpCalc::Cast(Cast::Double, self.expr(x)))),
+            ("abs", [x]) => calc(Calc::Fp(FpCalc::Math1(MathOp1::Abs, self.expr(x)))),
+            _ => return None,
+        })
+    }
+
+    fn div_expr(&mut self, args: &[Expr]) -> IExpr {
+        if let [x] = args {
+            return calc(Calc::Fp(FpCalc::Div(IExpr::Kst(Sv::int(1)), self.expr(x))));
         }
+        let mut acc = self.expr(&args[0]);
+        for a in &args[1..] {
+            acc = calc(Calc::Fp(FpCalc::Div(acc, self.expr(a))));
+        }
+        acc
+    }
+
+    fn nth_expr(&mut self, coll: &Expr, idx: &Expr) -> IExpr {
+        if let Some(loc) = self.boxed_local(coll) {
+            return calc(Calc::Nth(loc, self.expr(idx)));
+        }
+        if let Expr::DirectNative(inner) = coll {
+            if let (Some("nth"), [outer, i]) =
+                (crate::vm_ops::core_name(inner), inner.args.as_slice())
+            {
+                if let Some(loc) = self.boxed_local(outer) {
+                    let site = self.host.site(inner);
+                    self.sites.push(site);
+                    let outer_i = self.expr(i);
+                    return calc(Calc::Nth2(loc, outer_i, self.expr(idx)));
+                }
+            }
+        }
+        IExpr::Deopt
     }
 
     /// An n-ary op as its left fold (see `vm_ops::int_fold_op`).
@@ -2383,12 +2731,41 @@ fn exit_expr(v: &ExitVal) -> std::option::IntoIter<&IExpr> {
     .into_iter()
 }
 
+fn expr_str(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Quote(Value::Str(s)) | Expr::Literal(Value::Str(s)) => Some(s.as_ref()),
+        _ => None,
+    }
+}
+
+fn math1_op(name: &str) -> Option<MathOp1> {
+    match name {
+        "abs" => Some(MathOp1::Abs),
+        "sqrt" => Some(MathOp1::Sqrt),
+        _ => MATH_UNARY
+            .iter()
+            .position(|r| r.0 == name)
+            .map(|i| MathOp1::Unary(i as u8)),
+    }
+}
+
+fn math2_op(name: &str) -> Option<MathOp2> {
+    MATH_BINARY
+        .iter()
+        .position(|r| r.0 == name)
+        .map(|i| MathOp2(i as u8))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use super::{Co, ExitVal, Ins, Leaf, Node, compile_aot_loop};
+    use super::{
+        Cast, Co, ExitVal, FpStep, Ins, IntOp1, IntOp2, IntTest1, IntTest2, Leaf, MathOp1, MathOp2,
+        Node, Step, Sv, compile_aot_loop, expr_str, math1_op, math1_sv, math2_op, op1_sv, op2_sv,
+        test1_sv, test2_sv,
+    };
     use crate::aot_front::front_end;
     use crate::expr::Expr;
     use crate::ns::boot;
@@ -2521,5 +2898,153 @@ mod tests {
         assert!(ast.primed);
         assert_eq!(ast.scalar, vec![true, true]);
         assert!(compile_aot_loop(&[Expr::Local(1)], &[1], 2, &callees).is_none());
+    }
+
+    #[test]
+    fn vm_scalar_double_math_globals_and_nth2_271() {
+        let mut ev = boot();
+        // Exercise every K::Double / FpCalc / Math1 / Math2 / Global / Nth2 path
+        // in the VM ScalarLoop tier (loop >= 5000 iterations so ScalarLoop compiles & runs).
+        let src = r#"
+(def G_A 0.5)
+(def G_NON [1 2])
+(defn fp-ops [xs mat]
+  (loop [i 0 acc 0.0]
+    (if (< i 5000)
+      (let [x (nth xs (bit-and i 3))
+            y (nth (nth mat (bit-and i 1)) (bit-and i 1))
+            a (+ (- (* x 2.0) 1.0) (+ G_A G_A))
+            b (/ (inc (dec (- a))) 2.0)
+            c (/ 4.0)
+            m1 (max b 0.25)
+            m2 (min m1 5.0)
+            w (+ (Math/sqrt (Math/abs m2))
+                 (abs (- i 10))
+                 (Math/exp 0.0)
+                 (Math/log 1.0)
+                 (Math/pow 2.0 3.0))
+            d (+ (double i) (double 1.5))
+            l1 (long d)
+            l2 (int d)
+            l3 (long Double/NaN)
+            l4 (int Double/NaN)
+            t1 (and (pos? 1.5) (neg? -1.5) (zero? 0.0)
+                    (<= 1.0 1) (>= 2 1.5) (> 2.5 2) (== 2 2.0)
+                    (= -0.0 0.0) (not= Double/NaN Double/NaN) (not= 1 1.0))]
+        (recur (inc i) (if t1 (+ acc y c w l1 l2 l3 l4) acc)))
+      acc)))
+(defn fp-mut [t xs]
+  (loop [i 0 acc 0.0]
+    (if (< i 5000)
+      (let [v (+ (Math/sqrt (nth xs (bit-and i 1)))
+                 (double (nth xs (bit-and i 1)))
+                 (/ (nth xs (bit-and i 1)) 2.0)
+                 (Math/pow (nth xs (bit-and i 1)) 1.0))]
+        (assoc! t (bit-and i 1) v)
+        (recur (inc i) (+ acc v)))
+      acc)))
+(defn fp-deopts [flag xs mat]
+  [(loop [i 0 r 0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (inc true) (catch Exception _ 1)) (inc r)))
+       r))
+   (loop [i 0 r 0.0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (bit-not 1.5) (catch Exception _ 1.0)) (+ r 0.0)))
+       r))
+   (loop [i 0 r 0.0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (quot 5.0 2.0) (catch Exception _ 1.0)) (+ r 0.0)))
+       r))
+   (loop [i 0 r 0.0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (+ 1.0 true) (catch Exception _ 1.0)) (+ r 0.0)))
+       r))
+   (loop [i 0 r 0.0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (+ 0.0 (/ 1 2)) (+ r 0.0)))
+       r))
+   (loop [i 0 r 0.0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (/ 1.0 true) (catch Exception _ 1.0)) (+ r 0.0)))
+       r))
+   (loop [i 0 r 0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (zero? true) (catch Exception _ 1)) (inc r)))
+       r))
+   (loop [i 0 r 0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (< 1.0 true) (catch Exception _ 1)) (inc r)))
+       r))
+   (loop [i 0 r 0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (abs true) (catch Exception _ 1)) (inc r)))
+       r))
+   (loop [i 0 r 0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (double true) (catch Exception _ 1)) (inc r)))
+       r))
+   (loop [i 0 r 0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (long 1e30) (catch Exception _ 1)) (inc r)))
+       r))
+   (loop [i 0 r 0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (int 1e20) (catch Exception _ 1)) (inc r)))
+       r))
+   (loop [i 0 r 0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (count G_NON) (inc r)))
+       r))
+   (loop [i 0 r 0]
+     (if (< i 5000)
+       (recur (inc i) (if (and (= i 4999) flag) (try (nth (nth mat 0) 99) (catch Exception _ 1)) (inc r)))
+       r))
+   (loop [i 0 r 0.0]
+     (if (< i 5000)
+       (recur (inc i) (+ r (if (= i 0) (Math/random) 0.0) (Double/parseDouble "0.0") (nth (vector 0.0) 0) (nth (nth (vector [0.0]) 0) 0)))
+       r))])
+(let [r1 (fp-ops [1.0 2.0 3.0 4.0] [[1.0 2.0] [3.0 4.0]])
+      t (transient [0.0 0.0])
+      r2 (fp-mut t [1.0 4.0])
+      _ (persistent! t)
+      r3 (fp-deopts true [1.0 2.0] [[1.0 2.0]])]
+  [(> r1 0.0) (> r2 0.0) (count r3)])
+"#;
+        let out = ev.eval_source(src).expect("eval");
+        assert_eq!(
+            out.last(),
+            Some(&clj_value::Value::Vector(clj_value::Vector::from_vec(
+                vec![
+                    clj_value::Value::Bool(true),
+                    clj_value::Value::Bool(true),
+                    clj_value::Value::Int(15),
+                ]
+            )))
+        );
+
+        // Direct unit checks on helper edge cases (Ins::retarget for FpStep, expr_str, math1/2 miss).
+        for mut ins in [
+            Ins::Do(Step::Fp(FpStep::Div(1, 0, 0))),
+            Ins::Do(Step::Fp(FpStep::Math1(MathOp1::Sqrt, 1, 0))),
+            Ins::Do(Step::Fp(FpStep::Math2(MathOp2(0), 1, 0, 0))),
+            Ins::Do(Step::Fp(FpStep::Cast(Cast::Double, 1, 0))),
+        ] {
+            assert!(ins.retarget(1, 2));
+            assert!(!ins.retarget(9, 2));
+        }
+        assert!(expr_str(&Expr::Literal(clj_value::Value::Int(1))).is_none());
+        assert!(math1_op("nope").is_none());
+        assert!(math2_op("nope").is_none());
+        assert!(Sv::bool(true).f64_of().is_none());
+        assert!(test1_sv(IntTest1::Zero, Sv::bool(true)).is_none());
+        assert_eq!(
+            test2_sv(IntTest2::Lt, Sv::double(1.0), Sv::int(2)),
+            Some(true)
+        );
+        assert!(op1_sv(IntOp1::BitNot, Sv::double(1.0)).is_none());
+        assert!(op1_sv(IntOp1::Inc, Sv::bool(true)).is_none());
+        assert!(op2_sv(IntOp2::Quot, Sv::double(5.0), Sv::double(2.0)).is_none());
+        assert!(math1_sv(MathOp1::Abs, Sv::bool(true)).is_none());
     }
 }

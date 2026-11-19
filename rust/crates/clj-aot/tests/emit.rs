@@ -1540,3 +1540,73 @@ fn native_emit_ir_fuses_dot_parse_num_and_hof2_271() {
         "bitcode leaked a Rust panic symbol into emitted IR"
     );
 }
+
+#[test]
+fn native_emit_ir_lowers_double_scalar_loops_and_gvec_271() {
+    let ir = tmp("scalar-double.ll");
+    clj_aot::build_str(
+        "(def G_SCALE 2.5)\n\
+         (def ^:dynamic *dyn-bias* 0.5)\n\
+         (defn fp-loop [xs mat n]\n\
+           (loop [i 0 acc 0.0]\n\
+             (if (< i n)\n\
+               (let [x (nth xs i)\n\
+                     y (nth (nth mat 0) i)\n\
+                     a (+ (- (* x G_SCALE) G_SCALE) *dyn-bias*)\n\
+                     b (/ (inc (dec (- a))) 2.0)\n\
+                     m (min (max b 0.0) 10.0)\n\
+                     w (+ (Math/sqrt (Math/abs m)) (Math/log (+ m 1.0)) (Math/pow 2.0 3.0))\n\
+                     c (+ (double i) (long w) (int w))]\n\
+                 (if (and (pos? m) (neg? (- m)) (zero? 0.0) (<= 0.0 m) (>= m 0.0) (> m -1.0) (== m m) (= m m))\n\
+                   (recur (inc i) (+ acc y c))\n\
+                   (recur (inc i) acc)))\n\
+               acc)))\n\
+         (defn int-loop [xs mat n]\n\
+           (loop [i 0 acc 0]\n\
+             (if (< i n)\n\
+               (let [x (nth xs i)\n\
+                     y (nth (nth mat 0) i)\n\
+                     a (+ (Math/abs (- x y)) (long x) (int y) (bit-not i))]\n\
+                 (if (and (pos? a) (= x y))\n\
+                   (recur (inc i) (+ acc a))\n\
+                   (recur (inc i) acc)))\n\
+               acc)))\n\
+         (println (fp-loop [1.0 2.0] [[3.0 4.0]] 2) (int-loop [1 2] [[1 2]] 2))\n",
+        "f.clj",
+        &tmp("nope-scalar-double"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let fp_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_fp_loop("))
+        .expect("fp-loop fn");
+    assert!(fp_body.contains("sc_nth_gvec"), "{fp_body}");
+    assert!(fp_body.contains("@rt_n_math_log"), "{fp_body}");
+    assert!(fp_body.contains("@rt_n_math_pow"), "{fp_body}");
+    assert!(fp_body.contains("llvm.sqrt.f64"), "{fp_body}");
+    assert!(fp_body.contains("llvm.fabs.f64"), "{fp_body}");
+    assert!(fp_body.contains("sc_glb_ok"), "{fp_body}");
+    assert!(fp_body.contains("sc_div_ok"), "{fp_body}");
+    assert!(fp_body.contains("sc_d2i_ok"), "{fp_body}");
+
+    let int_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_int_loop("))
+        .expect("int-loop fn");
+    assert!(int_body.contains("llvm.abs.i64"), "{int_body}");
+    assert!(!int_body.contains("sc_nth_gvec"), "{int_body}");
+    assert!(!int_body.contains("sc_o2_d"), "{int_body}");
+    assert!(!int_body.contains("sc_abs_d"), "{int_body}");
+    assert!(
+        !text.contains("slice_error_fail") && !text.contains("9panicking"),
+        "bitcode leaked a Rust panic symbol into emitted IR"
+    );
+}
