@@ -197,11 +197,51 @@ pub(crate) struct LazyHooks {
 
 /// [`Evaluator::core_read`]'s cache: `(name, var id or none, root once
 /// read)` per probed `clojure.core` name, under the lineage epoch it
-/// was filled in.
+/// was filled in, plus each name address's position in it (#271: the
+/// position scan cost every `println` and `format` ~2.2K instructions,
+/// a dozen probes deep into some 50 names).
 #[derive(Default)]
 pub(crate) struct CoreReads {
     epoch: u64,
     vars: Vec<(&'static str, Option<u64>, Option<Value>)>,
+    by_addr: CoreReadWays,
+}
+
+/// Direct-mapped `(name address, position in vars)` pairs (address 0
+/// marks an empty way). Call sites pass their literal, so a probe
+/// almost always hits; a collision only falls back to the scan.
+struct CoreReadWays([(usize, u32); 64]);
+
+impl Default for CoreReadWays {
+    fn default() -> Self {
+        Self([(0, 0); 64])
+    }
+}
+
+impl CoreReads {
+    /// `name`'s position in `vars` under lineage `epoch` (cleared when it
+    /// moved on), resolving and appending the var on its first probe.
+    fn slot(&mut self, registry: &SharedRegistry, epoch: u64, name: &'static str) -> usize {
+        if self.epoch != epoch {
+            self.vars.clear();
+            self.by_addr = CoreReadWays::default();
+            self.epoch = epoch;
+        }
+        let addr = name.as_ptr() as usize;
+        let way = addr.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (usize::BITS - 6);
+        let (at, pos) = self.by_addr.0[way];
+        if at == addr {
+            return pos as usize;
+        }
+        let found = (self.vars.iter()).position(|(n, _, _)| std::ptr::eq(*n, name) || *n == name);
+        let pos = found.unwrap_or_else(|| {
+            let id = registry.lookup_str("clojure.core", name);
+            self.vars.push((name, id, None));
+            self.vars.len() - 1
+        });
+        self.by_addr.0[way] = (addr, pos as u32);
+        pos
+    }
 }
 
 /// The evaluator: shared lineage state (namespace registry plus
@@ -1222,16 +1262,7 @@ impl Evaluator {
     pub(crate) fn core_read(&self, name: &'static str) -> Value {
         let epoch = self.registry.epoch();
         let mut reads = self.core_reads.lock().unwrap_or_else(|e| e.into_inner());
-        if reads.epoch != epoch {
-            reads.vars.clear();
-            reads.epoch = epoch;
-        }
-        let found = (reads.vars.iter()).position(|(n, _, _)| std::ptr::eq(*n, name) || *n == name);
-        let slot = found.unwrap_or_else(|| {
-            let id = self.registry.lookup_str("clojure.core", name);
-            reads.vars.push((name, id, None));
-            reads.vars.len() - 1
-        });
+        let slot = reads.slot(&self.registry, epoch, name);
         let (_, id, root) = &mut reads.vars[slot];
         let Some(id) = id else {
             return Value::Nil;
@@ -1243,6 +1274,15 @@ impl Evaluator {
             (self.registry).root_or_unbound(*id, &Symbol::new(Some("clojure.core"), name))
         })
         .clone()
+    }
+
+    /// `clojure.core/<name>`'s var id (`None` when there is no such var),
+    /// through [`Self::core_read`]'s cache.
+    pub(crate) fn core_var_id(&self, name: &'static str) -> Option<u64> {
+        let epoch = self.registry.epoch();
+        let mut reads = self.core_reads.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = reads.slot(&self.registry, epoch, name);
+        reads.vars[slot].1
     }
 
     pub(crate) fn deref_var_unforced(&self, id: u64, sym: &Symbol) -> Value {

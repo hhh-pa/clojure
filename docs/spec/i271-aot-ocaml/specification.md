@@ -442,6 +442,12 @@ Measured on macOS, instructions per element: `(:k m)` on a 40-key hash map 713 â
 
 The corpus file `lookup_calls.clj` pins keyword, map and set calls with and without defaults on shaped and hash maps, records, sets, sorted maps, nil, vectors and strings, tuple, double and lazy-seq keys, and the arity errors, against `run`.
 
+### 6.25 Slice 4t: core-var reads by name address
+
+Printing reads about ten `clojure.core` vars per call: `*out*` three times, six `*print-*` settings, `*flush-on-newline*` and `*print-dup*`. `Evaluator::core_read` cached each name's var id and root per lineage epoch, but found a name by scanning the cache, which by then held some 50 names. The scan cost every `println` and every `format` about 2.2K Linux instructions (`deref_core` in the probe below). `print` also resolved `*print-readably*` by name through the registry for its binding on every call.
+
+The cache now keeps a 64-way direct-mapped table from the name's address to its position. Call sites pass their own literal, so a probe hits without a scan; a collision falls back to the scan. `push_core_binding` takes its var id from the same cache. Ids and roots still live only as long as the lineage epoch, as before.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

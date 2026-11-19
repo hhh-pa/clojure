@@ -1264,9 +1264,11 @@ pub(crate) fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
     eval.registry.lookup_str("clojure.core", name)
 }
 
-/// Push a thread binding for `clojure.core/<name>` if that core var exists.
-pub(crate) fn push_core_binding(eval: &mut Evaluator, name: &str, value: Value) {
-    if let Some(id) = core_var(eval, name) {
+/// Push a thread binding for `clojure.core/<name>` if that core var exists
+/// (its id through the evaluator's core-read cache: `print` binds
+/// `*print-readably*` on every call).
+pub(crate) fn push_core_binding(eval: &mut Evaluator, name: &'static str, value: Value) {
+    if let Some(id) = eval.core_var_id(name) {
         eval.push_binding(core_var_handle(id, name), value);
     }
 }
