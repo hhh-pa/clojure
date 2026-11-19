@@ -723,6 +723,41 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(())
     }
 
+    /// The outer loop's exit value into `dest` (split from
+    /// [`Self::lower_sc_exit`] for the complexity budget).
+    fn lower_outer_exit(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        val: &ExitVal,
+        scalar: &[bool],
+        dest: PointerValue<'ctx>,
+        bound: &[PointerValue<'ctx>],
+    ) -> Result<(), Unsupported> {
+        match val {
+            ExitVal::Const(v) => self.lower_const(f.func, v, dest)?,
+            ExitVal::Box(loc) => {
+                let src = self.loc_slot(f, *loc);
+                self.clone_v(f.func, dest, src);
+            }
+            ExitVal::Var(p) if !scalar[*p] => {
+                self.clone_v(f.func, dest, bound[*p]);
+            }
+            ExitVal::Var(p) => {
+                let k = self.load_i8(s.k_slots[*p]);
+                let v = self.load_i64(s.v_slots[*p]);
+                self.box_scalar(f.func, dest, k, v);
+            }
+            ExitVal::Expr(e) => {
+                let (k, v) = self.lower_sc_expr(f, s, e)?;
+                self.box_scalar(f.func, dest, k, v);
+            }
+            // Reads only locals bound before the loop (#271).
+            ExitVal::Boxed(e) => self.lower(f, e, dest)?,
+        }
+        Ok(())
+    }
+
     fn lower_sc_exit(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -738,27 +773,7 @@ impl<'ctx> Lowerer<'ctx> {
                 bound,
                 ..
             } => {
-                match val {
-                    ExitVal::Const(v) => self.lower_const(f.func, v, *dest)?,
-                    ExitVal::Box(loc) => {
-                        let src = self.loc_slot(f, *loc);
-                        self.clone_v(f.func, *dest, src);
-                    }
-                    ExitVal::Var(p) if !scalar[*p] => {
-                        self.clone_v(f.func, *dest, bound[*p]);
-                    }
-                    ExitVal::Var(p) => {
-                        let k = self.load_i8(s.k_slots[*p]);
-                        let v = self.load_i64(s.v_slots[*p]);
-                        self.box_scalar(f.func, *dest, k, v);
-                    }
-                    ExitVal::Expr(e) => {
-                        let (k, v) = self.lower_sc_expr(f, s, e)?;
-                        self.box_scalar(f.func, *dest, k, v);
-                    }
-                    // Reads only locals bound before the loop (#271).
-                    ExitVal::Boxed(e) => self.lower(f, e, *dest)?,
-                }
+                self.lower_outer_exit(f, s, val, scalar, *dest, bound)?;
                 self.builder.build_unconditional_branch(*done).expect("br");
             }
             LoopTarget::Inner {

@@ -2346,21 +2346,32 @@ impl Builder<'_> {
 /// Whether `e` reads only locals below `limit` and binds none: literals,
 /// var reads, calls, collection literals and `if` over such forms.
 fn outer_only(e: &Expr, limit: usize) -> bool {
-    let all = |xs: &[Expr]| xs.iter().all(|x| outer_only(x, limit));
     match e {
         Expr::Local(i) => *i < limit,
         Expr::Literal(_) | Expr::Quote(_) | Expr::Global(_) | Expr::VarRef(_) => true,
-        Expr::DirectNative(call) => all(&call.args),
-        Expr::Invoke { head, args, .. } => outer_only(head, limit) && all(args),
-        Expr::VecLit(items, _) | Expr::SetLit(items, _) => all(items),
-        Expr::MapLit(pairs, _) => pairs
-            .iter()
-            .all(|(k, v)| outer_only(k, limit) && outer_only(v, limit)),
+        Expr::DirectNative(call) => all_outer(&call.args, limit),
+        Expr::Invoke { head, args, .. } => outer_only(head, limit) && all_outer(args, limit),
         Expr::If { test, then, els } => {
             outer_only(test, limit) && outer_only(then, limit) && outer_only(els, limit)
         }
+        other => outer_only_lit(other, limit),
+    }
+}
+
+/// [`outer_only`] over collection literals (split for the complexity
+/// budget): anything else binds or reads in ways the exit cannot.
+fn outer_only_lit(e: &Expr, limit: usize) -> bool {
+    match e {
+        Expr::VecLit(items, _) | Expr::SetLit(items, _) => all_outer(items, limit),
+        Expr::MapLit(pairs, _) => pairs
+            .iter()
+            .all(|(k, v)| outer_only(k, limit) && outer_only(v, limit)),
         _ => false,
     }
+}
+
+fn all_outer(xs: &[Expr], limit: usize) -> bool {
+    xs.iter().all(|x| outer_only(x, limit))
 }
 
 /// An exit value's scalar expression, if any.
@@ -2395,11 +2406,13 @@ mod tests {
         }
     }
 
-    /// Whether the exit of `(loop [i 0] (if (< i 3) (recur (inc i)) EXIT))`
-    /// in `(fn [a b] …)` runs boxed (`None`: the loop is not scalar).
+    /// Whether the exit of `(loop [i 0] (let [j (inc i)] (if (< i 3)
+    /// (recur j) EXIT)))` in `(fn [a b] …)` runs boxed (`None`: the loop
+    /// is not scalar). The units before `f` take each miss of the search.
     fn boxed_exit_of(exit: &str) -> Option<bool> {
         let src = format!(
-            "(def g 1) (def f (fn [a b] (loop [i 0] (if (< i 3) (recur (inc i)) {exit})))) 1"
+            "1 (def g 1) (def h (fn [] 2)) \
+             (def f (fn [a b] (loop [i 0] (let [j (inc i)] (if (< i 3) (recur j) {exit})))))"
         );
         let mut ev = boot();
         let front = front_end(&mut ev, &src, "t.clj").expect("plan");
@@ -2436,7 +2449,11 @@ mod tests {
             assert_eq!(boxed_exit_of(exit), Some(true), "{exit}");
         }
         // A loop variable or a body binding keeps the scalar form.
-        for exit in ["[i (persistent! a)]", "[(let [z a] (persistent! z))]"] {
+        for exit in [
+            "[i (persistent! a)]",
+            "[j (persistent! a)]",
+            "[(let [z a] (persistent! z))]",
+        ] {
             assert_eq!(boxed_exit_of(exit), Some(false), "{exit}");
         }
         // A scalar exit over outer locals stays scalar.
