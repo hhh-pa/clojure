@@ -119,7 +119,8 @@ impl AstScan {
             }
             Leaf::Exit(ExitVal::Expr(e)) => self.scan_expr(e),
             Leaf::Exit(ExitVal::Box(loc)) => Self::push_unique(&mut self.all_locs, *loc),
-            Leaf::Exit(ExitVal::Const(_) | ExitVal::Var(_)) => {}
+            // A boxed exit lowers as ordinary code over outer locals.
+            Leaf::Exit(ExitVal::Const(_) | ExitVal::Var(_) | ExitVal::Boxed(_)) => {}
         }
     }
 
@@ -755,6 +756,8 @@ impl<'ctx> Lowerer<'ctx> {
                         let (k, v) = self.lower_sc_expr(f, s, e)?;
                         self.box_scalar(f.func, *dest, k, v);
                     }
+                    // Reads only locals bound before the loop (#271).
+                    ExitVal::Boxed(e) => self.lower(f, e, *dest)?,
                 }
                 self.builder.build_unconditional_branch(*done).expect("br");
             }

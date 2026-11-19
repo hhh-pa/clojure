@@ -1368,3 +1368,25 @@ fn native_emit_ir_calls_compiled_closures_directly_271() {
     assert!(text.contains("@rt_n_enter_closure"), "{text}");
     assert!(text.contains("@rt_n_invoke"), "{text}");
 }
+
+#[test]
+fn native_emit_ir_keeps_loops_with_boxed_exits_scalar_271() {
+    let ir = tmp("boxed-exit.ll");
+    clj_aot::build_str(
+        "(defn sq [n] (let [acc (transient [])] (loop [i 0] (if (= i n) (persistent! acc) (do (conj! acc (* i i)) (recur (inc i)))))))\n(println (sq 4))\n",
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    // The `(persistent! acc)` exit reads only a local bound before the
+    // loop, so the loop stays scalar (it was boxed for the exit alone).
+    assert!(text.contains("sc_deopt"), "{text}");
+}

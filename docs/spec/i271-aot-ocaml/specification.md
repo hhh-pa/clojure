@@ -403,6 +403,32 @@ Measured on macOS, instructions per call:
 | a fn parameter called per item | 477 | 354 | 245 |
 | a captured-adder closure | 475 | 353 | 245 |
 
+### 6.23 Slice 4r: scalar loops keep exits over outer locals
+
+The scalar loop compiler (`vm_scalar`, shared by the VM and the AOT) gave up on the whole loop when an exit value had no scalar form. The common case is a loop that fills a transient and returns it persistent:
+
+```clojure
+(let [pi (transient (vec (repeat m 0)))]
+  (loop [i 1 j 0]
+    (if (>= i m)
+      (persistent! pi)
+      (do (assoc! pi i j) (recur (inc i) …)))))
+```
+
+That exit misses on every run, and the AOT does not lower a loop with transient effects that may deopt (a resumed iteration would replay its effects). So the loop stayed boxed, and every `nth`, comparison and `assoc!` in it went through boxed values.
+
+An exit now runs boxed when the loop ends (`ExitVal::Boxed`) if all of these hold:
+
+- its scalar form always misses;
+- it is the outer loop's own exit, not an inner loop's value;
+- it reads only locals bound before the loop: literals, vars, calls, collection literals, and `if` over such forms. An exit that reads a loop variable or a body binding keeps its scalar form.
+
+The AOT lowers such an exit as ordinary code after the scalar loop. The effects it can observe already happened in place, in order. The VM's scalar loops deopt at that exit as before, and the boxed loop evaluates it.
+
+The corpus file `scalar_boxed_exits.clj` pins `persistent!`, `count`, map and vector exits, an exit that reads the loop variable, and a throwing exit, against `run`.
+
+Measured on macOS: KMP substring search (`string_related/kmp/substring_searching`) fell from 163M to 67M instructions on one input; its prefix-table loop is now scalar.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

@@ -217,6 +217,11 @@ pub enum ExitVal {
     /// An outer loop variable (its slot when scalar, else its
     /// register).
     Var(usize),
+    /// An exit the boxed lowering evaluates when the loop ends (#271):
+    /// its scalar form always misses and it reads only locals bound
+    /// before the loop, so no scalar state (`(persistent! acc)` of a
+    /// transient the loop fills). The VM's scalar loops deopt there.
+    Boxed(Expr),
 }
 
 /// The end of one iteration.
@@ -1322,6 +1327,8 @@ impl Lower<'_> {
             ExitVal::Box(l) => ExitI::Loc(*l),
             ExitVal::Var(p) if self.scalar[*p] => ExitI::Slot(*p as Sl),
             ExitVal::Var(p) => ExitI::Loc(Loc::Reg(self.targets[*p])),
+            // The VM resumes the boxed loop there (its scalar form misses).
+            ExitVal::Boxed(_) => ExitI::Slot(self.val(&IExpr::Deopt)),
         };
         self.stmts(effects);
         self.exits.push(x);
@@ -2313,8 +2320,46 @@ impl Builder<'_> {
                 Ok(p) => ExitVal::Var(p),
                 Err(loc) => ExitVal::Box(loc),
             },
-            other => ExitVal::Expr(self.expr(other)),
+            other => {
+                let primed = self.primed;
+                let ie = self.expr(other);
+                if self.boxed_exit(other, &ie) {
+                    // Its scalar form never runs, nor its operators.
+                    self.primed = primed;
+                    ExitVal::Boxed(other.clone())
+                } else {
+                    ExitVal::Expr(ie)
+                }
+            }
         }
+    }
+
+    /// Whether exit `e`, whose scalar form `ie` always misses, runs boxed
+    /// when the loop ends instead (#271): an outer loop's own exit (not an
+    /// inlined callee's) reading only locals bound before the loop.
+    fn boxed_exit(&self, e: &Expr, ie: &IExpr) -> bool {
+        let first = self.targets.iter().min().copied().unwrap_or(0);
+        self.stack.is_empty() && misses(ie) && outer_only(e, first)
+    }
+}
+
+/// Whether `e` reads only locals below `limit` and binds none: literals,
+/// var reads, calls, collection literals and `if` over such forms.
+fn outer_only(e: &Expr, limit: usize) -> bool {
+    let all = |xs: &[Expr]| xs.iter().all(|x| outer_only(x, limit));
+    match e {
+        Expr::Local(i) => *i < limit,
+        Expr::Literal(_) | Expr::Quote(_) | Expr::Global(_) | Expr::VarRef(_) => true,
+        Expr::DirectNative(call) => all(&call.args),
+        Expr::Invoke { head, args, .. } => outer_only(head, limit) && all(args),
+        Expr::VecLit(items, _) | Expr::SetLit(items, _) => all(items),
+        Expr::MapLit(pairs, _) => pairs
+            .iter()
+            .all(|(k, v)| outer_only(k, limit) && outer_only(v, limit)),
+        Expr::If { test, then, els } => {
+            outer_only(test, limit) && outer_only(then, limit) && outer_only(els, limit)
+        }
+        _ => false,
     }
 }
 
@@ -2332,10 +2377,84 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use super::{Co, Ins, compile_aot_loop};
+    use super::{Co, ExitVal, Ins, Leaf, Node, compile_aot_loop};
     use crate::aot_front::front_end;
     use crate::expr::Expr;
     use crate::ns::boot;
+
+    /// The exit leaves of a scalar loop body.
+    fn exits<'n>(n: &'n Node, out: &mut Vec<&'n ExitVal>) {
+        match n {
+            Node::If(_, a, b) => {
+                exits(a, out);
+                exits(b, out);
+            }
+            Node::Let(_, body) | Node::Seq(_, body) => exits(body, out),
+            Node::Leaf(Leaf::Exit(v)) => out.push(v),
+            Node::Leaf(Leaf::Recur(_)) | Node::Deopt => {}
+        }
+    }
+
+    /// Whether the exit of `(loop [i 0] (if (< i 3) (recur (inc i)) EXIT))`
+    /// in `(fn [a b] …)` runs boxed (`None`: the loop is not scalar).
+    fn boxed_exit_of(exit: &str) -> Option<bool> {
+        let src = format!(
+            "(def g 1) (def f (fn [a b] (loop [i 0] (if (< i 3) (recur (inc i)) {exit})))) 1"
+        );
+        let mut ev = boot();
+        let front = front_end(&mut ev, &src, "t.clj").expect("plan");
+        let callees = HashMap::new();
+        let body = front.units.iter().find_map(|u| match &u.expr {
+            Expr::Def {
+                init: Some(init), ..
+            } => match init.as_ref() {
+                Expr::Fn(fun) => match &fun.arities[0].body[0] {
+                    Expr::Loop { body, .. } => Some(body.clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        });
+        let ast = compile_aot_loop(&body.expect("loop"), &[2], 3, &callees)?;
+        let mut out = Vec::new();
+        exits(&ast.node, &mut out);
+        Some(out.iter().any(|v| matches!(v, ExitVal::Boxed(_))))
+    }
+
+    #[test]
+    fn exits_over_outer_locals_run_boxed_271() {
+        for exit in [
+            "(persistent! a)",
+            "(a b)",
+            "[a 'q g #'g 1]",
+            "#{a}",
+            "{:k a}",
+            "[(if (persistent! a) a b)]",
+            "(+' (count (persistent! a)) 1)",
+        ] {
+            assert_eq!(boxed_exit_of(exit), Some(true), "{exit}");
+        }
+        // A loop variable or a body binding keeps the scalar form.
+        for exit in ["[i (persistent! a)]", "[(let [z a] (persistent! z))]"] {
+            assert_eq!(boxed_exit_of(exit), Some(false), "{exit}");
+        }
+        // A scalar exit over outer locals stays scalar.
+        assert_eq!(boxed_exit_of("(count a)"), Some(false));
+    }
+
+    #[test]
+    fn vm_scalar_loops_deopt_at_boxed_exits_271() {
+        let mut ev = boot();
+        let v = ev
+            .eval_source(
+                "(defn sq [n] (let [acc (transient [])]
+                   (loop [i 0] (if (= i n) (persistent! acc) (do (conj! acc (* i i)) (recur (inc i)))))))
+                 (let [v (sq 5000)] (= [(count v) (nth v 4999)] [5000 24990001]))",
+            )
+            .expect("eval");
+        assert_eq!(v.last(), Some(&clj_value::Value::Bool(true)));
+    }
 
     #[test]
     fn ins_retarget_updates_matching_dest_only() {
