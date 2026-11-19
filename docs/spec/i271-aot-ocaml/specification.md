@@ -448,6 +448,14 @@ Printing reads about ten `clojure.core` vars per call: `*out*` three times, six 
 
 The cache now keeps a 64-way direct-mapped table from the name's address to its position. Call sites pass their own literal, so a probe hits without a scan; a collision falls back to the scan. `push_core_binding` takes its var id from the same cache. Ids and roots still live only as long as the lineage epoch, as before.
 
+### 6.26 Slice 4u: longs and doubles compare without the numeric tower
+
+`compare`, `sort-by`, sorted collections and vector comparison order numbers through `jvm_compare`. Two longs took the exact path, which converted both to `Ratio<BigInt>` (heap digits) and cross-multiplied them on every compare. Over the 348 tiny-input non-win cases, the instrumented runtime counted 583K such compares and 1.17M rational conversions.
+
+`jvm_compare` now orders long and double pairs first, exactly as `compare_numbers` does: longs exactly, and a double on either side as `f64` with `<`/`>` (`NaN` ties). Every other pair keeps the tower. A unit test checks the fast path against `compare_numbers` over longs, doubles, signed zeros, infinities, `NaN` and the long extremes.
+
+Measured on macOS, instructions per element: `(compare i 50)` 761 → 418; `sort-by` on a key 1584 → 1183; sorted-set inserts 12297 → 10482.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

@@ -1310,6 +1310,11 @@ mod tests {
         // Other arities keep the general call (and its arity error).
         assert_eq!(call(&m, &[]), None);
         assert_eq!(call(&kw("a"), &[m.clone(), Value::Nil, Value::Nil]), None);
+        // The general call answers the same (natives still reach it).
+        assert_eq!(
+            eval.call(&s, &[Value::Int(5), Value::Int(0)]).ok(),
+            Some(Value::Int(0))
+        );
     }
 
     #[test]

@@ -1312,6 +1312,9 @@ fn native_neg(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 /// non-`Comparable`s (whose own class fails against
 /// `Comparable`). All probed.
 pub(crate) fn jvm_compare(x: &Value, y: &Value) -> Result<std::cmp::Ordering, NativeError> {
+    if let Some(ord) = compare_long_double(x, y) {
+        return Ok(ord);
+    }
     if let Some(ord) = compare_nil(x, y) {
         return Ok(ord);
     }
@@ -1322,6 +1325,29 @@ pub(crate) fn jvm_compare(x: &Value, y: &Value) -> Result<std::cmp::Ordering, Na
         return Ok(ord);
     }
     Err(compare_cast_err(x, y))
+}
+
+/// Longs and doubles, the usual sort keys, without the numeric tower
+/// (#271): two longs went through `Ratio<BigInt>` (allocated and
+/// cross-multiplied) on every compare, and `compare_vectors` per item.
+/// Exactly [`compare_numbers`]: longs order exactly, and a double on
+/// either side compares as `f64` (`NaN` ties). `None` for anything else.
+fn compare_long_double(x: &Value, y: &Value) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    let (a, b) = match (x, y) {
+        (Value::Int(a), Value::Int(b)) => return Some(a.cmp(b)),
+        (Value::Int(a), Value::Double(b)) => (*a as f64, *b),
+        (Value::Double(a), Value::Int(b)) => (*a, *b as f64),
+        (Value::Double(a), Value::Double(b)) => (*a, *b),
+        _ => return None,
+    };
+    Some(if a < b {
+        Ordering::Less
+    } else if a > b {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    })
 }
 
 /// Nils sort first (`nil` is less than everything, equal to itself).
@@ -5559,6 +5585,33 @@ mod tests {
             "merged root is a map carrying my/tag"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn long_and_double_compares_match_the_tower_271() {
+        let vals = [
+            Value::Int(0),
+            Value::Int(-1),
+            Value::Int(7),
+            Value::Int(i64::MAX),
+            Value::Int(i64::MIN),
+            Value::Double(0.0),
+            Value::Double(-0.0),
+            Value::Double(7.0),
+            Value::Double(6.5),
+            Value::Double(9.223_372_036_854_776E18),
+            Value::Double(f64::NAN),
+            Value::Double(f64::INFINITY),
+            Value::Double(f64::NEG_INFINITY),
+        ];
+        for x in &vals {
+            for y in &vals {
+                let tower = compare_numbers(x, y).expect("numbers").expect("ordered");
+                assert_eq!(compare_long_double(x, y), Some(tower), "{x:?} {y:?}");
+                assert_eq!(jvm_compare(x, y).expect("cmp"), tower, "{x:?} {y:?}");
+            }
+        }
+        assert_eq!(compare_long_double(&Value::Int(1), &Value::Nil), None);
     }
 
     #[test]
