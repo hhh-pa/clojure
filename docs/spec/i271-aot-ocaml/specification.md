@@ -512,6 +512,14 @@ The evaluator keeps a `PrintSnap`: the validated print options, `*print-dup*`, `
 
 Measured on macOS, instructions per call: `println` of a long 18.0K → 16.6K; `prn` of a 3-item vector 25.6K → 23.5K (kernel `write` included). A print inside `with-out-str` rebinds `*out*` each time, so it misses: 9.2K → 9.5K. No snippet uses `with-out-str`.
 
+### 6.32 Slice 5a: generic core calls resolve their native once
+
+`core_fallback`, behind `rt_n_core_call` and the `rt_n_op*` misses, resolved var `k`'s native entry and offered it the arguments as a borrowed stack array. A native with an owned-args entry (`range`, `repeat`, `concat`, `map` …) refused that array. Its clones were dropped, the arguments were cloned again into a buffer, and a second `with_active` resolved the entry a second time before the call.
+
+`CoreEntry::call_refs` now takes the resolved entry once. An owned-args native gets its clones by value directly; a borrowing one gets them in a stack array (one to three args) or a buffer.
+
+Measured on macOS, instructions per call: `(range 3)` 1680 → 1510, `(repeat 2 :x)` 1750 → 1600, `(concat a b)` 9360 → 9190 (owned natives); `subvec` (borrowing) 1170 → 1140.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

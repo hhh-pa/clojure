@@ -468,13 +468,7 @@ pub extern "C" fn rt_n_core_call(out: &mut Value, k: u64, args: &CSlice<&Value>)
 fn core_fallback(out: &mut Value, k: u64, args: &[&Value]) -> i32 {
     let direct = with_active(|eval| {
         let entry = native::core_entry(eval, k as usize)?;
-        let result = match *args {
-            [a] => entry.call_borrowed(eval, std::slice::from_ref(a)),
-            [a, b] => entry.call_borrowed(eval, &[a.clone(), b.clone()]),
-            [a, b, c] => entry.call_borrowed(eval, &[a.clone(), b.clone(), c.clone()]),
-            _ => None,
-        }?;
-        Some(match result {
+        Some(match entry.call_refs(eval, args) {
             Ok(v) => {
                 *out = v;
                 0

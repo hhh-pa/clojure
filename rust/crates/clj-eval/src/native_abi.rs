@@ -815,15 +815,25 @@ pub struct CoreEntry {
 }
 
 impl CoreEntry {
-    /// Call the native over borrowed args, as [`call_core`] does for a
-    /// native without an owned-args entry. `None` for an owned-args
-    /// native, which takes its arguments by value.
-    pub fn call_borrowed(
-        &self,
-        eval: &mut Evaluator,
-        args: &[Value],
-    ) -> Option<Result<Value, NativeError>> {
-        self.owned.is_none().then(|| (self.func)(eval, args))
+    /// Call the native over borrowed args, as [`call_core`] does (#271):
+    /// an owned-args native takes clones by value, a borrowing one gets
+    /// them in a stack array (one or a few args) — one entry resolution
+    /// either way, where an owned native used to be cloned for, refused,
+    /// cloned again and resolved a second time.
+    pub fn call_refs(&self, eval: &mut Evaluator, args: &[&Value]) -> Result<Value, NativeError> {
+        if let Some(owned) = &self.owned {
+            return owned(eval, args.iter().map(|a| (*a).clone()).collect());
+        }
+        match *args {
+            [a] => (self.func)(eval, std::slice::from_ref(a)),
+            [a, b] => (self.func)(eval, &[a.clone(), b.clone()]),
+            [a, b, c] => (self.func)(eval, &[a.clone(), b.clone(), c.clone()]),
+            _ => {
+                let owned: smallvec::SmallVec<[Value; 4]> =
+                    args.iter().map(|a| (*a).clone()).collect();
+                (self.func)(eval, &owned)
+            }
+        }
     }
 }
 
