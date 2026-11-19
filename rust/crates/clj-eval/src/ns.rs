@@ -2758,14 +2758,14 @@ pub(crate) const OWNED_SEQ_ENTRIES: &[(&str, OwnedNativeFnPtr)] = &[
 pub(crate) fn owned_entry_in(
     entries: &[(&str, OwnedNativeFnPtr)],
     name: &str,
-) -> Option<std::sync::Arc<crate::ext::OwnedNativeImpl>> {
+) -> Option<OwnedNativeFnPtr> {
     let idx = entries.binary_search_by(|(n, _)| n.cmp(&name)).ok()?;
-    Some(std::sync::Arc::new(entries[idx].1))
+    Some(entries[idx].1)
 }
 
 /// The owned-args entry for a looping native by name (`None`
 /// for borrow-only natives — test doubles install literally with `owned: None`).
-pub(crate) fn owned_entry(name: &str) -> Option<std::sync::Arc<crate::ext::OwnedNativeImpl>> {
+pub(crate) fn owned_entry(name: &str) -> Option<OwnedNativeFnPtr> {
     owned_entry_in(OWNED_CORE_ENTRIES, name).or_else(|| owned_entry_in(OWNED_SEQ_ENTRIES, name))
 }
 

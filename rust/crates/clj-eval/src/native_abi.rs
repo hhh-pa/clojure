@@ -38,7 +38,7 @@ pub fn invoke(eval: &mut Evaluator, f: &Value, args: &[Value]) -> Step {
     // general call reaches the same `func` after a VM-closure hook, a
     // struct check and a second downcast (#271: ~4x a direct call).
     if let Some(native) = crate::ext::as_native(f) {
-        return (native.func)(eval, args).map_err(|e| eval.throw(e));
+        return native.func.call(eval, args).map_err(|e| eval.throw(e));
     }
     if let Some(found) = lookup_call(f, args) {
         return Ok(found);
@@ -784,10 +784,7 @@ pub fn call_value_owned(
     args: smallvec::SmallVec<[Value; 4]>,
 ) -> Step {
     if let Some(native) = crate::ext::as_native(callee) {
-        return match &native.owned {
-            Some(owned) => owned(eval, args).map_err(|e| eval.throw(e)),
-            None => (native.func)(eval, &args).map_err(|e| eval.throw(e)),
-        };
+        return native.call_owned(eval, args).map_err(|e| eval.throw(e));
     }
     eval.call(callee, &args)
 }
@@ -810,8 +807,8 @@ pub fn leave_call(eval: &mut Evaluator) {
 /// A core native's entries, resolved once (the compiled program
 /// cannot rebind core vars when it uses these).
 pub struct CoreEntry {
-    func: Arc<crate::ext::NativeImpl>,
-    owned: Option<Arc<crate::ext::OwnedNativeImpl>>,
+    func: crate::ext::NativeTarget,
+    owned: Option<crate::ext::OwnedTarget>,
 }
 
 impl CoreEntry {
@@ -822,16 +819,16 @@ impl CoreEntry {
     /// cloned again and resolved a second time.
     pub fn call_refs(&self, eval: &mut Evaluator, args: &[&Value]) -> Result<Value, NativeError> {
         if let Some(owned) = &self.owned {
-            return owned(eval, args.iter().map(|a| (*a).clone()).collect());
+            return owned.call(eval, args.iter().map(|a| (*a).clone()).collect());
         }
         match *args {
-            [a] => (self.func)(eval, std::slice::from_ref(a)),
-            [a, b] => (self.func)(eval, &[a.clone(), b.clone()]),
-            [a, b, c] => (self.func)(eval, &[a.clone(), b.clone(), c.clone()]),
+            [a] => self.func.call(eval, std::slice::from_ref(a)),
+            [a, b] => self.func.call(eval, &[a.clone(), b.clone()]),
+            [a, b, c] => self.func.call(eval, &[a.clone(), b.clone(), c.clone()]),
             _ => {
                 let owned: smallvec::SmallVec<[Value; 4]> =
                     args.iter().map(|a| (*a).clone()).collect();
-                (self.func)(eval, &owned)
+                self.func.call(eval, &owned)
             }
         }
     }
@@ -852,7 +849,7 @@ pub fn lite_core_entry(
 pub fn core_entry(eval: &mut Evaluator, var: &Var) -> Option<CoreEntry> {
     let root = eval.deref_var_cached(var.id, &var.sym);
     crate::ext::as_native(&root).map(|n| CoreEntry {
-        func: Arc::clone(&n.func),
+        func: n.func.clone(),
         owned: n.owned.clone(),
     })
 }
@@ -864,8 +861,8 @@ pub fn call_core(
     args: smallvec::SmallVec<[Value; 4]>,
 ) -> Step {
     match &entry.owned {
-        Some(owned) => owned(eval, args).map_err(|e| eval.throw(e)),
-        None => (entry.func)(eval, &args).map_err(|e| eval.throw(e)),
+        Some(owned) => owned.call(eval, args).map_err(|e| eval.throw(e)),
+        None => entry.func.call(eval, &args).map_err(|e| eval.throw(e)),
     }
 }
 
@@ -1051,18 +1048,19 @@ pub fn delay(f: Value) -> Value {
 /// every call.
 pub fn bound_fn(eval: &mut Evaluator, f: Value) -> Value {
     let conveyed = eval.bindings.clone();
-    let display: Arc<str> = Arc::from("clojure.core/bound-fn");
-    let func = Arc::new(move |ev: &mut Evaluator, args: &[Value]| {
-        let depth = ev.bindings_depth();
-        let frame: Vec<(Var, Value)> = conveyed
-            .pairs()
-            .map(|(v, x)| (v.clone(), x.clone()))
-            .collect();
-        ev.push_frame(frame);
-        let out = ev.call(&f, args);
-        ev.pop_bindings(depth);
-        out.map_err(signal_to_native)
-    });
+    let display = crate::ext::DisplayName::shared("clojure.core/bound-fn");
+    let func =
+        crate::ext::NativeTarget::Dyn(Arc::new(move |ev: &mut Evaluator, args: &[Value]| {
+            let depth = ev.bindings_depth();
+            let frame: Vec<(Var, Value)> = conveyed
+                .pairs()
+                .map(|(v, x)| (v.clone(), x.clone()))
+                .collect();
+            ev.push_frame(frame);
+            let out = ev.call(&f, args);
+            ev.pop_bindings(depth);
+            out.map_err(signal_to_native)
+        }));
     Value::Extension(Arc::new(crate::ext::NativeFn {
         id: eval.next_id(),
         display,

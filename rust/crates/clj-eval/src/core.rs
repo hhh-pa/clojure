@@ -29,7 +29,7 @@ use clj_value::{
 
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
-use crate::ext::{FastArith, NativeFn};
+use crate::ext::{DisplayName, FastArith, NativeFn, NativeTarget};
 use crate::lazy::{
     as_pending, as_realized, as_subvector, collect_all, equiv_vals, is_counted_seq, is_seq_value,
     realize_deep,
@@ -2083,11 +2083,11 @@ fn default_reader_fn(
 ) -> Value {
     Value::Extension(Arc::new(NativeFn {
         id: eval.next_id(),
-        display: Arc::from(display),
-        func: Arc::new(move |_, args| {
+        display: DisplayName::shared(display),
+        func: NativeTarget::Dyn(Arc::new(move |_, args| {
             check_arity(display, args, &[1])?;
             reader(&args[0])
-        }),
+        })),
         owned: None,
         meta: None,
         fast: FastArith::None,

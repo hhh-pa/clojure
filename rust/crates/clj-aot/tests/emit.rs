@@ -557,7 +557,7 @@ fn native_emit_ir_lowers_units_constants_and_main_259() {
     for needle in [
         "@rt_n_main_lite(",
         "@rt_n_declare_vars(",
-        "@rt_n_declare_fn(",
+        "@rt_n_declare_fns(",
         "@rt_n_set_const(",
         "@cljconst_init",
     ] {

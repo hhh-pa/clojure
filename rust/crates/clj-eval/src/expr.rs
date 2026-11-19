@@ -26,7 +26,7 @@ use clj_value::{
 use crate::core::cce_message;
 use crate::error::{CompileError, NativeError, Signal, Verb, jvm_class_of, span_of};
 use crate::eval::Evaluator;
-use crate::ext::{FastArith, NativeFn, NativeImpl, OwnedNativeImpl};
+use crate::ext::{FastArith, NativeFn, NativeTarget, OwnedTarget};
 
 /// A `catch` clause: resolved class name, local slot, body.
 #[derive(Clone, Debug)]
@@ -349,8 +349,8 @@ pub struct DirectCall {
     /// The analyzed root (the identity witness for `Arc::ptr_eq`).
     pub expect: Arc<dyn ExtensionValue>,
     /// The analyzed native's entries (called without downcast).
-    pub func: Arc<NativeImpl>,
-    pub owned: Option<Arc<OwnedNativeImpl>>,
+    pub func: NativeTarget,
+    pub owned: Option<OwnedTarget>,
     /// The inline integer op (`None` for non-arith natives).
     pub fast: FastArith,
     /// The call's argument forms and site.
@@ -1218,7 +1218,7 @@ impl<'a> Analyzer<'a> {
         Expr::DirectNative(Box::new(DirectCall {
             var: var.clone(),
             expect: Arc::clone(&expect),
-            func: Arc::clone(&native.func),
+            func: native.func.clone(),
             owned: native.owned.clone(),
             fast: native.fast,
             args,

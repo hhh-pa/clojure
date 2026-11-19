@@ -539,6 +539,16 @@ Measured on macOS, instructions per call: `(range 3)` 1680 → 1510, `(repeat 2 
 
 Measured on macOS: `sort-by` with a closure key 1077 → 877 instructions per element. On macOS the buffer moves are inline copies, so elsewhere the gain shows only on Linux.
 
+### 6.34 Slice 5c: zero-closure native dispatch, bulk fn tables, and lazy Lite helpers
+
+A Linux callgrind startup profile (`probe-initline`, 34 near-miss scripts vs trivial) put per-script startup at ~300 `malloc` calls (~48K glibc instructions) plus ~19K self instructions in `rt_n_main_lite`: `install_native_rows` (58.9 mallocs), `rt_n_declare_fn` (33.9), `Symbol::new` (30.4), `rt_n_make_fn` (27.4), and 19 repeated linear scans of declared vars in `boot_lite_impl`.
+
+- **`NativeTarget` / `OwnedTarget` / `DisplayName` (`clj-eval::ext`):** table-driven natives carry bare function pointers (`NativeTarget::Ptr` / `OwnedTarget::Ptr`) instead of allocating `Arc<dyn Fn>` wrappers; compiled AOT closures carry `(desc, captured)` dispatched through one process-wide `CompiledDispatch` table and slice their display name (`DisplayName::Span`) straight from `Tables::fn_names`. `rt_n_make_fn` drops from 3 allocations to 1 (no per-fn closures or display string), and direct core-call resolution (`lite_entry`) allocates nothing.
+- **Bulk `rt_n_declare_fns` (`clj-aot`, `clj-rt`):** mirrors `rt_n_declare_vars`, declaring every compiled fn's display name span and arities slice in one table call and pre-sizing `b.consts`; `rt_n_set_const` moves constants out of the builder slot instead of cloning and dropping them.
+- **Single-pass Lite boot + lazy `LITE_INTERNAL_HELPERS` (`clj-eval::aot_boot`, `clj-rt`):** `boot_lite_impl` scans declared vars once (`scan_lite_vars`), reserves tight `clojure.core` capacity when reflection vars are absent, and defers the 13 `LITE_INTERNAL_HELPERS` until `Evaluator::core_read` actually misses on one. `run_main_lite` passes `&[Code]` and moves `BUILDING` vectors without cloning.
+
+Measured on macOS (mimalloc, `libinsn.dylib` shim): median empty-stdin startup across 12 near-miss scripts −82K instructions (larger on Linux glibc); closure creation + call −391 instructions per capturing closure (17.07M → 13.16M for 10K) and −388 per capture-free closure (13.48M → 9.60M).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

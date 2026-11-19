@@ -5381,6 +5381,62 @@ impl<'ctx> Lowerer<'ctx> {
         );
     }
 
+    /// One names text, one `clj_rt::nabi::FnRow` per compiled fn, and one
+    /// flat arities table, plus the constant count so `b.consts` sizes once
+    /// (#271: replaces per-fn `rt_n_declare_fn` calls and allocations).
+    fn declare_fns(&mut self) {
+        let row_ty = self.ctx.struct_type(&[self.i32t.into(); 4], false);
+        let arity_ty = self.ctx.struct_type(
+            &[self.i64t.into(), self.i64t.into(), self.ptr.into()],
+            false,
+        );
+        let fns: Vec<(String, Vec<ArityCode>)> = self
+            .fns
+            .iter()
+            .map(|i| (i.display.clone(), i.arities.clone()))
+            .collect();
+        let mut text = String::new();
+        let mut rows = Vec::with_capacity(fns.len());
+        let mut arities = Vec::new();
+        for (display, fn_arities) in &fns {
+            let name_at = text.len() as u64;
+            text.push_str(display);
+            let arity_at = arities.len() as u64;
+            for a in fn_arities {
+                arities.push(arity_ty.const_named_struct(&[
+                    self.i64t.const_int(a.0 as u64, false).into(),
+                    self.i64t.const_int(u64::from(a.1), false).into(),
+                    a.2.as_global_value().as_pointer_value().into(),
+                ]));
+            }
+            let fields = [
+                name_at,
+                display.len() as u64,
+                arity_at,
+                fn_arities.len() as u64,
+            ]
+            .map(|v| self.i32t.const_int(v, false).into());
+            rows.push(row_ty.const_named_struct(&fields));
+        }
+        let names = self.str_bytes(&text);
+        let names_ref = self.const_slice(names, text.len() as u64);
+        let rows_g = self.const_global(&row_ty.const_array(&rows), "cljfnr");
+        let rows_ref = self.const_slice(rows_g, rows.len() as u64);
+        let arities_g = self.const_global(&arity_ty.const_array(&arities), "cljfna");
+        let arities_ref = self.const_slice(arities_g, arities.len() as u64);
+        let n_consts = self.u64c(self.consts.len() as u64);
+        self.call(
+            "rt_n_declare_fns",
+            None,
+            &[
+                names_ref.into(),
+                rows_ref.into(),
+                arities_ref.into(),
+                n_consts,
+            ],
+        );
+    }
+
     fn lower_main(&mut self, path: &str, init: FunctionValue<'ctx>, tops: &[FunctionValue<'ctx>]) {
         let ty = self
             .i32t
@@ -5389,36 +5445,7 @@ impl<'ctx> Lowerer<'ctx> {
         let entry = self.ctx.append_basic_block(main, "entry");
         self.builder.position_at_end(entry);
         self.declare_vars();
-        let fns: Vec<(String, Vec<ArityCode>)> = self
-            .fns
-            .iter()
-            .map(|i| (i.display.clone(), i.arities.clone()))
-            .collect();
-        for (k, (display, arities)) in fns.iter().enumerate() {
-            let dp = self.str_ptr(display);
-            let arity_ty = self.ctx.struct_type(
-                &[self.i64t.into(), self.i64t.into(), self.ptr.into()],
-                false,
-            );
-            let descs: Vec<inkwell::values::StructValue> = arities
-                .iter()
-                .map(|a| {
-                    arity_ty.const_named_struct(&[
-                        self.i64t.const_int(a.0 as u64, false).into(),
-                        self.i64t.const_int(u64::from(a.1), false).into(),
-                        a.2.as_global_value().as_pointer_value().into(),
-                    ])
-                })
-                .collect();
-            let arr = arity_ty.const_array(&descs);
-            let g = self.const_global(&arr, "clja");
-            let aref = self.const_slice(g, arities.len() as u64);
-            self.call(
-                "rt_n_declare_fn",
-                None,
-                &[self.u64c(k as u64), dp.into(), aref.into()],
-            );
-        }
+        self.declare_fns();
         let top_ptrs: Vec<PointerValue> = tops
             .iter()
             .map(|t| t.as_global_value().as_pointer_value())

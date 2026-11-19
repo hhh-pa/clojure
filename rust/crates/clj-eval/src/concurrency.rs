@@ -71,7 +71,7 @@ use clj_value::{
 use crate::core::{cce_err, is_ifn};
 use crate::error::{NativeError, Signal, internal_throwable};
 use crate::eval::Evaluator;
-use crate::ext::{FastArith, NativeFn};
+use crate::ext::{DisplayName, FastArith, NativeFn, NativeTarget};
 use crate::lazy::as_pending;
 use crate::ns::{NativeFnPtr, check_arity, npe, signal_to_native, str_of};
 use crate::vars::check_min_arity;
@@ -1924,11 +1924,11 @@ fn check_not_in_action(eval: &Evaluator) -> Result<(), NativeError> {
 fn barrier_fn(eval: &mut Evaluator, tx: mpsc::Sender<()>) -> Value {
     Value::Extension(Arc::new(NativeFn {
         id: eval.next_id(),
-        display: Arc::from("clojure.core/await-count-down"),
-        func: Arc::new(move |_, args| {
+        display: DisplayName::shared("clojure.core/await-count-down"),
+        func: NativeTarget::Dyn(Arc::new(move |_, args| {
             let _ = tx.send(());
             Ok(args.first().cloned().unwrap_or(Value::Nil))
-        }),
+        })),
         owned: None,
         fast: FastArith::None,
         compiled: None,

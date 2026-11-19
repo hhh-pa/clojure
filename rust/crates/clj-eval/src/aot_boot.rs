@@ -451,12 +451,43 @@ pub fn install_lazy(eval: &mut Evaluator, (ns, name, hint): (&str, &str, u32), t
 pub(crate) fn lite_entry(
     decl: (&str, &str, u32),
     tables: LiteTables,
-) -> Option<(
-    std::sync::Arc<crate::ext::NativeImpl>,
-    Option<std::sync::Arc<crate::ext::OwnedNativeImpl>>,
-)> {
+) -> Option<(crate::ext::NativeTarget, Option<crate::ext::OwnedTarget>)> {
     let (_, f, owned) = lite_row(decl, tables)?;
-    Some((std::sync::Arc::new(f), owned))
+    Some((
+        crate::ext::NativeTarget::Ptr(f),
+        owned.map(crate::ext::OwnedTarget::Ptr),
+    ))
+}
+
+/// Capability slices retained by a Lite evaluator so [`LITE_INTERNAL_HELPERS`]
+/// install lazily on first [`Evaluator::core_read`] miss (#271).
+pub(crate) struct LiteHelperTables {
+    core_groups: Vec<LiteCoreGroup>,
+    owned_groups: Vec<LiteOwnedSlice>,
+}
+
+/// Lazily install a [`LITE_INTERNAL_HELPERS`] native on first `core_read`
+/// miss (`None` for any other name or if absent from the registered groups).
+pub(crate) fn install_lite_helper(
+    registry: &crate::env::SharedRegistry,
+    name: &str,
+    helpers: &LiteHelperTables,
+) -> Option<Value> {
+    if name.starts_with('*') {
+        return None;
+    }
+    let idx = LITE_INTERNAL_HELPERS.iter().position(|&h| h == name)?;
+    let tables = LiteTables {
+        core_groups: &helpers.core_groups,
+        owned_groups: &helpers.owned_groups,
+        lib_tables: &[],
+    };
+    let (_, f, owned) = lite_row(("clojure.core", name, LITE_HELPER_HINTS[idx]), tables)?;
+    let native =
+        crate::eval::make_native_ptr_value(registry.next_id(), "clojure.core", name, f, owned);
+    let sym = Symbol::new(Some("clojure.core"), name);
+    registry.intern_with_root(&sym, native.clone());
+    Some(native)
 }
 
 /// The native a declared Lite var installs — `None` for a dynamic
@@ -553,39 +584,68 @@ pub fn boot_lite_with_caps(
     )
 }
 
-fn has_core_ref(vars: &[(&str, &str)], name: &str) -> bool {
-    vars.iter()
-        .any(|&(vn, vname)| vn == "clojure.core" && vname == name)
+#[derive(Default)]
+struct LiteVarFlags {
+    need_all: bool,
+    need_stdout: bool,
+    need_err: bool,
+    need_in: bool,
+    need_read: bool,
+    opt_mask: u8,
 }
 
-fn needs_stdout_dynamics(vars: &[(&str, &str)]) -> bool {
-    vars.iter().any(|&(ns, name)| {
-        ns == "clojure.core"
-            && matches!(
-                name,
-                "*out*"
-                    | "*flush-on-newline*"
-                    | "*print-readably*"
-                    | "*print-namespace-maps*"
-                    | "*print-length*"
-                    | "*print-level*"
-                    | "*print-meta*"
-                    | "*print-dup*"
-                    | "println"
-                    | "print"
-                    | "pr"
-                    | "prn"
-                    | "pr-str"
-                    | "prn-str"
-                    | "print-str"
-                    | "newline"
-                    | "flush"
-                    | "with-out-str"
-                    | "format"
-                    | "printf"
-                    | "time"
-            )
-    })
+const OPT_DYNAMICS: &[(&str, DynInit, bool)] = &[
+    ("*print-length*", DynInit::Nil, true),
+    ("*print-level*", DynInit::Nil, true),
+    ("*print-meta*", DynInit::Bool(false), false),
+    ("*print-dup*", DynInit::Bool(false), false),
+    ("*verbose-defrecords*", DynInit::Bool(false), true),
+    ("*command-line-args*", DynInit::Nil, true),
+    ("*file*", DynInit::NoSource, true),
+    ("*source-path*", DynInit::NoSource, false),
+];
+
+fn mark_star_flag(f: &mut LiteVarFlags, name: &str) {
+    match name {
+        "*err*" => f.need_err = true,
+        "*in*" => f.need_in = true,
+        "*read-eval*" => f.need_read = true,
+        "*out*" | "*flush-on-newline*" | "*print-readably*" | "*print-namespace-maps*" => {
+            f.need_stdout = true;
+        }
+        "*print-length*" | "*print-level*" | "*print-meta*" | "*print-dup*" => {
+            f.need_stdout = true;
+        }
+        _ => {}
+    }
+    if let Some(i) = OPT_DYNAMICS.iter().position(|(n, _, _)| *n == name) {
+        f.opt_mask |= 1u8 << i;
+    }
+}
+
+fn mark_core_flag(f: &mut LiteVarFlags, name: &str) {
+    match name {
+        "resolve" | "ns-resolve" | "find-var" | "var-get" | "intern" => f.need_all = true,
+        "read" | "read-string" => f.need_read = true,
+        "println" | "print" | "pr" | "prn" | "pr-str" | "prn-str" | "print-str" | "newline"
+        | "flush" | "with-out-str" | "format" | "printf" | "time" => f.need_stdout = true,
+        _ => {}
+    }
+}
+
+fn scan_lite_vars(vars: &[(&str, &str)]) -> LiteVarFlags {
+    let mut f = LiteVarFlags::default();
+    for &(ns, name) in vars {
+        if ns != "clojure.core" {
+            continue;
+        }
+        if name.starts_with('*') {
+            mark_star_flag(&mut f, name);
+        } else {
+            mark_core_flag(&mut f, name);
+        }
+    }
+    f
 }
 
 /// Whether a Lite program can observe var metadata (it references a
@@ -626,19 +686,9 @@ impl DynInit {
     }
 }
 
-fn install_optional_dynamics(eval: &mut Evaluator, vars: &[(&str, &str)], need_all: bool) {
-    let entries: &[(&str, DynInit, bool)] = &[
-        ("*print-length*", DynInit::Nil, true),
-        ("*print-level*", DynInit::Nil, true),
-        ("*print-meta*", DynInit::Bool(false), false),
-        ("*print-dup*", DynInit::Bool(false), false),
-        ("*verbose-defrecords*", DynInit::Bool(false), true),
-        ("*command-line-args*", DynInit::Nil, true),
-        ("*file*", DynInit::NoSource, true),
-        ("*source-path*", DynInit::NoSource, false),
-    ];
-    for (name, init, has_meta) in entries {
-        if need_all || has_core_ref(vars, name) {
+fn install_optional_dynamics(eval: &mut Evaluator, flags: &LiteVarFlags, need_all: bool) {
+    for (i, (name, init, has_meta)) in OPT_DYNAMICS.iter().enumerate() {
+        if need_all || (flags.opt_mask & (1u8 << i)) != 0 {
             let v = match init {
                 DynInit::Nil => DynInit::Nil.into_value(),
                 DynInit::Bool(b) => DynInit::Bool(*b).into_value(),
@@ -647,10 +697,7 @@ fn install_optional_dynamics(eval: &mut Evaluator, vars: &[(&str, &str)], need_a
             install_core_dynamic(eval, name, v, *has_meta);
         }
     }
-    let read_needed = ["*read-eval*", "read", "read-string"]
-        .iter()
-        .any(|n| has_core_ref(vars, n));
-    if need_all || read_needed {
+    if need_all || flags.need_read {
         install_core_dynamic(eval, "*read-eval*", Value::Bool(true), false);
     }
 }
@@ -658,13 +705,14 @@ fn install_optional_dynamics(eval: &mut Evaluator, vars: &[(&str, &str)], need_a
 /// Install the declared vars' natives (the compiler's list is
 /// distinct), one batch per namespace — under `lazy` (compiled
 /// binaries) only the [`LITE_BY_NAME`] ones, the rest on first use —
-/// then the internal helpers the program did not declare.
+/// then the internal helpers (eager when `eager_helpers`, else deferred
+/// to [`Evaluator::core_read`] on first miss, #271).
 fn install_declared(
     eval: &mut Evaluator,
     vars: &[(&str, &str)],
     hints: &[u32],
     tables: LiteTables,
-    (seq_helpers, lazy): (bool, bool),
+    (seq_helpers, lazy, eager_helpers): (bool, bool, bool),
 ) {
     let mut batches: Vec<(&str, Vec<crate::eval::NativeRow>)> = Vec::new();
     for (i, &(ns, name)) in vars.iter().enumerate() {
@@ -683,7 +731,7 @@ fn install_declared(
     for (ns, rows) in batches {
         eval.install_native_rows(ns, rows);
     }
-    if seq_helpers {
+    if seq_helpers && eager_helpers {
         let helpers = LITE_INTERNAL_HELPERS
             .iter()
             .zip(&LITE_HELPER_HINTS)
@@ -691,6 +739,11 @@ fn install_declared(
             .filter_map(|(&name, &hint)| lite_row(("clojure.core", name, hint), tables))
             .collect();
         eval.install_native_rows("clojure.core", helpers);
+    } else if seq_helpers {
+        eval.lite_helpers = Some(Arc::new(LiteHelperTables {
+            core_groups: tables.core_groups.to_vec(),
+            owned_groups: tables.owned_groups.to_vec(),
+        }));
     }
 }
 
@@ -710,35 +763,30 @@ fn boot_lite_impl(
     eval.registry.ensure_ns("clojure.core");
     let user_id = eval.registry.ensure_ns("user");
     let user_handle = ns_value("user", user_id);
-    let helper_cap = usize::from(seq_helpers) * LITE_INTERNAL_HELPERS.len();
-    let need_all = all_dynamics
-        || ["resolve", "ns-resolve", "find-var", "var-get", "intern"]
-            .iter()
-            .any(|n| has_core_ref(vars, n));
-    eval.registry.reserve_vars(
-        "clojure.core",
-        helper_cap
+    let flags = scan_lite_vars(vars);
+    let need_all = all_dynamics || flags.need_all;
+    let core_cap = if need_all {
+        usize::from(seq_helpers) * LITE_INTERNAL_HELPERS.len()
             + vars.len()
-            + if need_all {
-                LITE_DYNAMIC_NAMES.len()
-            } else {
-                6
-            },
-    );
+            + LITE_DYNAMIC_NAMES.len()
+    } else {
+        16
+    };
+    eval.registry.reserve_vars("clojure.core", core_cap);
 
     install_core_dynamic(&mut eval, "*ns*", user_handle.clone(), true);
-    if need_all || needs_stdout_dynamics(vars) {
+    if need_all || flags.need_stdout {
         let out = crate::io::stdout_writer(&mut eval);
         install_core_dynamic(&mut eval, "*out*", out, false);
         install_core_dynamic(&mut eval, "*flush-on-newline*", Value::Bool(true), false);
         install_core_dynamic(&mut eval, "*print-readably*", Value::Bool(true), false);
         install_core_dynamic(&mut eval, "*print-namespace-maps*", Value::Bool(true), true);
     }
-    if need_all || has_core_ref(vars, "*err*") {
+    if need_all || flags.need_err {
         let err = crate::io::stderr_writer(&mut eval);
         install_core_dynamic(&mut eval, "*err*", err, false);
     }
-    if need_all || need_stdin || has_core_ref(vars, "*in*") {
+    if need_all || need_stdin || flags.need_in {
         let stdin = if need_stdin {
             crate::reader::stdin_reader(&mut eval)
         } else {
@@ -746,7 +794,7 @@ fn boot_lite_impl(
         };
         install_core_dynamic(&mut eval, "*in*", stdin, false);
     }
-    install_optional_dynamics(&mut eval, vars, need_all);
+    install_optional_dynamics(&mut eval, &flags, need_all);
 
     // Base thread-local `*ns*` binding frame (mirrors full `boot`: `in-ns`
     // mutates the frame rather than the root).
@@ -755,7 +803,13 @@ fn boot_lite_impl(
 
     // Compiled binaries (`boot_lite_with_caps`) install on first use; the
     // interpreter-side `boot_lite` resolves names, so it installs all.
-    install_declared(&mut eval, vars, hints, tables, (seq_helpers, !all_dynamics));
+    install_declared(
+        &mut eval,
+        vars,
+        hints,
+        tables,
+        (seq_helpers, !all_dynamics, need_all),
+    );
 
     eval.registry.set_current("user");
     eval.reset_gensym();
@@ -1022,16 +1076,32 @@ mod tests {
                 true,
                 needs_var_meta(&vars, true),
             );
-            // Boot installs the by-name `assoc` and the helpers; `inc`
-            // and `join` wait for first use.
+            // Boot installs the by-name `assoc`; `inc`, `join` and the
+            // internal helpers wait for first use.
             assert!(core_var(&eval, "inc").is_none());
+            assert!(core_var(&eval, "persistent!").is_none());
             assert!(installed_owned(&eval, "clojure.core", "assoc"));
             resolve_all(&mut eval, &vars, hints, tables);
             assert!(!installed_owned(&eval, "clojure.core", "inc"));
             assert!(installed_owned(&eval, "clojure.core", "conj"));
             assert!(installed_owned(&eval, "clojure.string", "join"));
+            // Reading a helper lazily installs it; unknown/star names stay nil.
+            assert_eq!(deref_core(&eval, "*print-length*"), Value::Nil);
+            assert_eq!(deref_core(&eval, "no-such-helper"), Value::Nil);
+            assert!(matches!(
+                deref_core(&eval, "persistent!"),
+                Value::Extension(_)
+            ));
             assert!(core_var(&eval, "persistent!").is_some());
         }
+        // Missing group in lazy helpers returns nil cleanly.
+        let empty = LiteTables {
+            core_groups: &[],
+            owned_groups: &[],
+            lib_tables: &[],
+        };
+        let eval_empty = boot_lite_with_caps(&[], &[], false, empty, true, false);
+        assert_eq!(deref_core(&eval_empty, "conj"), Value::Nil);
     }
 
     #[test]

@@ -29,7 +29,10 @@ use crate::error::{CompileError, NativeError, Signal, jvm_class_of, span_of};
 use crate::expr::{
     Analyzer, CaseTest, Catch, DirectCall, Expr, MapPattern, NsClause, Pattern, pattern_names,
 };
-use crate::ext::{Closure, FastArith, NativeFn, NsHandle, as_closure, as_native};
+use crate::ext::{
+    Closure, DisplayName, FastArith, NativeFn, NativeTarget, NsHandle, OwnedTarget, as_closure,
+    as_native,
+};
 
 /// A form-by-form live read of one source text (see
 /// [`Evaluator::live_forms`]).
@@ -355,6 +358,10 @@ pub struct Evaluator {
     install_home: Option<Arc<str>>,
     /// Optional `core_lazy`/interpreter dispatch hooks (`None` in Lite AOT boot).
     pub(crate) lazy_hooks: Option<&'static LazyHooks>,
+    /// Lazy `BootMode::Lite` internal helper tables (`Some` when
+    /// `seq_helpers` are deferred until a native actually reads one via
+    /// [`Self::core_read`], #271).
+    pub(crate) lite_helpers: Option<Arc<crate::aot_boot::LiteHelperTables>>,
 }
 
 /// Pooled `recur` buffers retained per evaluator (see
@@ -453,6 +460,7 @@ impl Evaluator {
             skip_var_meta: false,
             install_home: None,
             lazy_hooks: None,
+            lite_helpers: None,
         }
     }
 
@@ -517,6 +525,7 @@ impl Evaluator {
             skip_var_meta: self.skip_var_meta,
             install_home: None,
             lazy_hooks: self.lazy_hooks,
+            lite_helpers: self.lite_helpers.clone(),
         }
     }
 
@@ -1150,9 +1159,9 @@ impl Evaluator {
         self.install_native_inner(
             ns,
             name,
-            func,
+            NativeTarget::Dyn(func),
             FastArith::None,
-            crate::ns::owned_entry(name),
+            crate::ns::owned_entry(name).map(OwnedTarget::Ptr),
         )
     }
 
@@ -1172,15 +1181,7 @@ impl Evaluator {
         let home: Arc<str> = Arc::from(ns);
         let mut roots = Vec::with_capacity(rows.len());
         for (name, f, owned) in rows {
-            let native = Value::Extension(Arc::new(NativeFn {
-                id: self.next_id(),
-                display: qualified_display(ns, name),
-                func: Arc::new(f),
-                owned,
-                meta: None,
-                fast: crate::core::fast_arith_for(f),
-                compiled: None,
-            }));
+            let native = make_native_ptr_value(self.next_id(), ns, name, f, owned);
             let sym = Symbol::from_shared(Some(Arc::clone(&home)), Arc::from(name));
             roots.push((sym, native));
         }
@@ -1194,10 +1195,15 @@ impl Evaluator {
         ns: &str,
         name: &str,
         f: crate::ns::NativeFnPtr,
-        owned: Option<Arc<crate::ext::OwnedNativeImpl>>,
+        owned: Option<crate::ns::OwnedNativeFnPtr>,
     ) -> Value {
-        let func: Arc<crate::ext::NativeImpl> = Arc::new(f);
-        self.install_native_inner(ns, name, func, crate::core::fast_arith_for(f), owned)
+        self.install_native_inner(
+            ns,
+            name,
+            NativeTarget::Ptr(f),
+            crate::core::fast_arith_for(f),
+            owned.map(OwnedTarget::Ptr),
+        )
     }
 
     /// Install one native root (shared by the `Arc` and
@@ -1206,9 +1212,9 @@ impl Evaluator {
         &mut self,
         ns: &str,
         name: &str,
-        func: Arc<crate::ext::NativeImpl>,
+        func: NativeTarget,
         fast: FastArith,
-        owned: Option<Arc<crate::ext::OwnedNativeImpl>>,
+        owned: Option<OwnedTarget>,
     ) -> Value {
         let id = self.next_id();
         let home = match self.install_home.take() {
@@ -1219,7 +1225,7 @@ impl Evaluator {
         self.install_home = Some(home);
         let native = Value::Extension(Arc::new(NativeFn {
             id,
-            display: qualified_display(ns, name),
+            display: DisplayName::Shared(qualified_display(ns, name)),
             func,
             owned,
             meta: None,
@@ -1283,7 +1289,8 @@ impl Evaluator {
         let slot = reads.slot(&self.registry, epoch, name);
         let (_, id, root) = &mut reads.vars[slot];
         let Some(id) = id else {
-            return Value::Nil;
+            drop(reads);
+            return self.try_install_lite_helper(name).unwrap_or(Value::Nil);
         };
         if let Some(v) = self.bindings.get(*id) {
             return v.clone();
@@ -1292,6 +1299,13 @@ impl Evaluator {
             (self.registry).root_or_unbound(*id, &Symbol::new(Some("clojure.core"), name))
         })
         .clone()
+    }
+
+    /// Lazily install a `BootMode::Lite` internal helper (`conj`, `transient`, …)
+    /// when a native first reads it through [`Self::core_read`] (#271).
+    fn try_install_lite_helper(&self, name: &str) -> Option<Value> {
+        let helpers = self.lite_helpers.as_deref()?;
+        crate::aot_boot::install_lite_helper(&self.registry, name, helpers)
     }
 
     /// The current print settings ([`PrintSnap`]): the stamped copy while
@@ -2804,10 +2818,7 @@ impl Evaluator {
         native: &NativeFn,
         args: SmallVec<[Value; 4]>,
     ) -> Result<Value, Signal> {
-        match &native.owned {
-            Some(owned) => owned(self, args).map_err(|e| self.throw(e)),
-            None => (native.func)(self, &args).map_err(|e| self.throw(e)),
-        }
+        native.call_owned(self, args).map_err(|e| self.throw(e))
     }
 
     /// A direct-threaded native call (see [`Expr::DirectNative`]):
@@ -2876,8 +2887,10 @@ impl Evaluator {
     ) -> Result<Value, Signal> {
         let saved = self.native_call_span.replace(call.span);
         let out = match &call.owned {
-            Some(owned) => owned(self, std::mem::take(values)).map_err(|e| self.throw(e)),
-            None => (call.func)(self, values).map_err(|e| self.throw(e)),
+            Some(owned) => owned
+                .call(self, std::mem::take(values))
+                .map_err(|e| self.throw(e)),
+            None => call.func.call(self, values).map_err(|e| self.throw(e)),
         };
         self.native_call_span = saved;
         out
@@ -2988,7 +3001,7 @@ impl Evaluator {
         args: &[Value],
     ) -> Result<Value, Signal> {
         let saved = self.native_call_span.replace(call.span);
-        let out = (call.func)(self, args).map_err(|e| self.throw(e));
+        let out = call.func.call(self, args).map_err(|e| self.throw(e));
         self.native_call_span = saved;
         out
     }
@@ -3097,7 +3110,7 @@ impl Evaluator {
     fn invoke_extension(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         if let Some(native) = as_native(callee) {
             // The caller holds `callee` for the call (no `Arc` bump).
-            return (native.func)(self, args).map_err(|e| self.throw(e));
+            return native.func.call(self, args).map_err(|e| self.throw(e));
         }
         if let Some(closure) = as_closure(callee) {
             let Some(hooks) = self.lazy_hooks else {
@@ -4359,8 +4372,28 @@ fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
 pub(crate) type NativeRow<'a> = (
     &'a str,
     crate::ns::NativeFnPtr,
-    Option<Arc<crate::ext::OwnedNativeImpl>>,
+    Option<crate::ns::OwnedNativeFnPtr>,
 );
+
+/// Build a table-driven [`NativeFn`] value without allocating `Arc<dyn Fn>`
+/// wrappers (#271).
+pub(crate) fn make_native_ptr_value(
+    id: u64,
+    ns: &str,
+    name: &str,
+    f: crate::ns::NativeFnPtr,
+    owned: Option<crate::ns::OwnedNativeFnPtr>,
+) -> Value {
+    Value::Extension(Arc::new(NativeFn {
+        id,
+        display: DisplayName::Shared(qualified_display(ns, name)),
+        func: NativeTarget::Ptr(f),
+        owned: owned.map(OwnedTarget::Ptr),
+        meta: None,
+        fast: crate::core::fast_arith_for(f),
+        compiled: None,
+    }))
+}
 
 /// `ns/name` as one shared string, built in a stack buffer (boot
 /// qualifies every native it installs: the heap `String` a `format!`

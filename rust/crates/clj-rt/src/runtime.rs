@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use clj_eval::coll::{nth_str, str_utf16_len};
 use clj_eval::core::nth_index;
-use clj_eval::{Evaluator, NativeError, NativeImpl, as_native, boot};
+use clj_eval::{Evaluator, NativeError, NativeTarget, as_native, boot};
 use clj_value::{Keyword, List, ThrowClass, Value, Vector, print_to_string};
 
 /// `clojure.core` names in [`Prim`](clj_eval::Prim) declaration order: the table
@@ -64,7 +64,7 @@ pub(crate) const PRIM_NAMES: [&str; 19] = [
 /// primitive implementations, indexed by [`Prim`](clj_eval::Prim) discriminant.
 struct Runtime {
     eval: Evaluator,
-    prims: [Arc<NativeImpl>; 19],
+    prims: [NativeTarget; 19],
 }
 
 impl Runtime {
@@ -78,14 +78,14 @@ impl Runtime {
     }
 
     /// Every [`PRIM_NAMES`] native, resolved through `eval`.
-    fn resolve_all(eval: &mut Evaluator) -> [Arc<NativeImpl>; 19] {
+    fn resolve_all(eval: &mut Evaluator) -> [NativeTarget; 19] {
         PRIM_NAMES.map(|name| Self::resolve(eval, name))
     }
 
     /// Resolve one `clojure.core` native through the booted
     /// evaluator (the `expect`s name boot bugs — every core prim
     /// resolves, pinned by the smoke test).
-    fn resolve(eval: &mut Evaluator, name: &str) -> Arc<NativeImpl> {
+    fn resolve(eval: &mut Evaluator, name: &str) -> NativeTarget {
         let probe = format!("clojure.core/{name}");
         let value = eval
             .eval_source(&probe)
@@ -93,7 +93,10 @@ impl Runtime {
             .into_iter()
             .next()
             .expect("a symbol evaluates to one value");
-        Arc::clone(&as_native(&value).expect("core prims are natives").func)
+        as_native(&value)
+            .expect("core prims are natives")
+            .func
+            .clone()
     }
 }
 
@@ -114,7 +117,7 @@ fn with_runtime<R>(f: impl FnOnce(&mut Runtime) -> R) -> R {
 
 /// The prim natives resolved from the first active evaluator (the
 /// natives are the same `clojure.core` fns in every evaluator).
-static SHARED_PRIMS: OnceLock<[Arc<NativeImpl>; 19]> = OnceLock::new();
+static SHARED_PRIMS: OnceLock<[NativeTarget; 19]> = OnceLock::new();
 
 thread_local! {
     /// The evaluator the current native call runs on (null outside
@@ -166,12 +169,12 @@ pub(crate) fn call_prim(index: usize, args: Vec<Value>) -> Result<Value, NativeE
         // the native call (it is not used again until the scope
         // ends); this reborrow ends before the shim returns.
         let eval = unsafe { &mut *active };
-        let func = Arc::clone(&SHARED_PRIMS.get_or_init(|| Runtime::resolve_all(eval))[index]);
-        return catch_panic(AssertUnwindSafe(|| func(eval, &args)));
+        let func = SHARED_PRIMS.get_or_init(|| Runtime::resolve_all(eval))[index].clone();
+        return catch_panic(AssertUnwindSafe(|| func.call(eval, &args)));
     }
     with_runtime(|rt| {
-        let func = Arc::clone(&rt.prims[index]);
-        catch_panic(AssertUnwindSafe(|| func(&mut rt.eval, &args)))
+        let func = rt.prims[index].clone();
+        catch_panic(AssertUnwindSafe(|| func.call(&mut rt.eval, &args)))
     })
 }
 

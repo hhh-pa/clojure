@@ -28,7 +28,7 @@ use std::ffi::{CStr, c_char};
 use clj_eval::native_abi;
 use clj_value::{FastVars, Keyword, Symbol, Value};
 
-use crate::native::{self, ArityDesc, Code, FnDesc, items_of, settle, str_of, sym_of};
+use crate::native::{self, ArityDesc, Code, items_of, settle, str_of, sym_of};
 use crate::runtime::with_active;
 
 /// `len` contiguous `T`s at `ptr`: the `{ptr, len}` header generated
@@ -163,32 +163,48 @@ pub extern "C" fn rt_n_declare_vars(names: &CSlice<u8>, rows: &CSlice<VarRow>) {
     );
 }
 
-/// Declare compiled fn `k`: its display name and arities.
+/// One declared compiled fn as generated code describes it: its display
+/// name span in the names text and its arities slice span in the shared
+/// arities table (#271).
+#[repr(C)]
+pub struct FnRow {
+    name_at: u32,
+    name_len: u32,
+    arity_at: u32,
+    arity_len: u32,
+}
+
+/// Declare every compiled fn in index order and pre-size the constant
+/// table (#271: one names text, one arities array, zero per-fn
+/// allocations at startup).
 #[unsafe(no_mangle)]
-pub extern "C" fn rt_n_declare_fn(k: u64, display: &CSlice<u8>, arities: &CSlice<ArityC>) {
-    // Collected straight into the shared slice (one allocation).
-    let arities: std::sync::Arc<[ArityDesc]> = arities
-        .get()
-        .iter()
-        .map(|a| ArityDesc {
+pub extern "C" fn rt_n_declare_fns(
+    names: &CSlice<u8>,
+    rows: &CSlice<FnRow>,
+    arities: &CSlice<ArityC>,
+    n_consts: u64,
+) {
+    let text: std::sync::Arc<str> = std::sync::Arc::from(names.as_str().as_ref());
+    native::declare_fns(
+        text,
+        rows.get()
+            .iter()
+            .map(|r| ((r.name_at, r.name_len), (r.arity_at, r.arity_len))),
+        arities.get().iter().map(|a| ArityDesc {
             fixed: a.fixed as usize,
             variadic: a.variadic != 0,
             code: a.code,
-        })
-        .collect();
-    native::declare_fn(
-        k as usize,
-        FnDesc {
-            display: std::sync::Arc::from(display.as_str().as_ref()),
-            arities,
-        },
+        }),
+        n_consts as usize,
     );
 }
 
-/// Store constant `k` (constant initialization only).
+/// Store constant `k`, moving it out of `v` (leaving nil; constant
+/// initialization only, #271: avoids cloning and immediately dropping
+/// every constant).
 #[unsafe(no_mangle)]
-pub extern "C" fn rt_n_set_const(k: u64, v: &Value) {
-    native::set_const(k as usize, v.clone());
+pub extern "C" fn rt_n_set_const(k: u64, v: &mut Value) {
+    native::set_const(k as usize, std::mem::replace(v, Value::Nil));
 }
 
 /// Run the program (see [`native::run_main`]); returns the exit code.
@@ -220,7 +236,7 @@ pub extern "C" fn rt_n_main_lite(
         &path.as_str(),
         &argv_strings(argv),
         init,
-        tops.get().to_vec(),
+        tops.get(),
         need_stdin != 0,
     )
 }
@@ -1228,7 +1244,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_declare_vars,
         rt_n_def_begin_var,
         rt_n_def_finish_var,
-        rt_n_declare_fn,
+        rt_n_declare_fns,
         rt_n_set_const,
         rt_n_main,
         rt_n_main_lite,

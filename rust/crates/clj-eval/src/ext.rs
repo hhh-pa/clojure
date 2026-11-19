@@ -229,13 +229,111 @@ pub enum FastArith {
     Dec,
 }
 
+/// A [`NativeFn`]'s display name (`"ns/name"`): a shared `Arc<str>` or
+/// a byte span of a shared table (`Tables::fn_names` in AOT, avoiding
+/// a per-fn string allocation, #271).
+#[derive(Clone)]
+pub enum DisplayName {
+    Shared(Arc<str>),
+    Span { buf: Arc<str>, start: u32, len: u32 },
+}
+
+impl DisplayName {
+    /// A shared display name from any string slice.
+    #[must_use]
+    pub fn shared(s: &str) -> Self {
+        Self::Shared(Arc::from(s))
+    }
+
+    /// A display name slicing `buf[start..start + len]`.
+    #[must_use]
+    pub fn span(buf: Arc<str>, start: u32, len: u32) -> Self {
+        Self::Span { buf, start, len }
+    }
+}
+
+impl std::ops::Deref for DisplayName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            Self::Shared(s) => s,
+            Self::Span { buf, start, len } => {
+                let at = *start as usize;
+                buf.get(at..at + *len as usize).unwrap_or("")
+            }
+        }
+    }
+}
+
+impl AsRef<str> for DisplayName {
+    fn as_ref(&self) -> &str {
+        self
+    }
+}
+
+impl std::fmt::Debug for DisplayName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+/// How a [`NativeFn`] runs borrowed-argument calls (#271): a plain fn
+/// pointer (zero heap allocation, direct call for every booted native),
+/// a compiled AOT closure (dispatched through [`CompiledDispatch`] with
+/// no per-fn closure allocation), or a dynamic Rust closure (`comp`,
+/// `partial`, transducers, tests).
+#[derive(Clone)]
+pub enum NativeTarget {
+    Ptr(crate::ns::NativeFnPtr),
+    Compiled { desc: usize, captured: Arc<[Value]> },
+    Dyn(Arc<NativeImpl>),
+}
+
+impl NativeTarget {
+    /// Invoke this target over borrowed `args`.
+    #[inline]
+    pub fn call(&self, eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+        match self {
+            Self::Ptr(f) => f(eval, args),
+            Self::Compiled { desc, captured } => {
+                (compiled_dispatch().call)(eval, *desc, captured, args)
+            }
+            Self::Dyn(f) => f(eval, args),
+        }
+    }
+}
+
+/// How a [`NativeFn`] runs owned-argument calls (#271): a plain fn
+/// pointer (zero heap allocation) or a single-arity compiled AOT
+/// closure (dispatched through [`CompiledDispatch`], zero closure
+/// allocation).
+#[derive(Clone)]
+pub enum OwnedTarget {
+    Ptr(crate::ns::OwnedNativeFnPtr),
+    Compiled { desc: usize, captured: Arc<[Value]> },
+}
+
+impl OwnedTarget {
+    /// Invoke this target taking ownership of `args`.
+    #[inline]
+    pub fn call(&self, eval: &mut Evaluator, args: OwnedArgs) -> Result<Value, NativeError> {
+        match self {
+            Self::Ptr(f) => f(eval, args),
+            Self::Compiled { desc, captured } => {
+                (compiled_dispatch().call_owned)(eval, *desc, captured, args)
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct NativeFn {
     pub id: u64,
-    pub display: Arc<str>,
-    pub func: Arc<NativeImpl>,
+    pub display: DisplayName,
+    pub func: NativeTarget,
     /// The owned-args entry (`None` for borrow-only natives).
-    pub owned: Option<Arc<OwnedNativeImpl>>,
+    pub owned: Option<OwnedTarget>,
     pub meta: Option<Map>,
     /// The inline integer op (`None` unless installed from a
     /// genuine core arith/compare fn pointer).
@@ -243,6 +341,21 @@ pub struct NativeFn {
     /// A compiled closure's single fixed-arity entry, for compiled call
     /// sites to call directly (#271); `None` for every other native.
     pub compiled: Option<CompiledEntry>,
+}
+
+impl NativeFn {
+    /// Invoke with owned `args`: takes `owned` when present, else borrows `args`.
+    #[inline]
+    pub(crate) fn call_owned(
+        &self,
+        eval: &mut Evaluator,
+        args: OwnedArgs,
+    ) -> Result<Value, NativeError> {
+        match &self.owned {
+            Some(owned) => owned.call(eval, args),
+            None => self.func.call(eval, &args),
+        }
+    }
 }
 
 /// Compiled code's entry point (`out`, argv, argc with flags, captured
@@ -261,22 +374,44 @@ pub struct CompiledEntry {
 /// may take its params from (leaving nil; the caller drops the rest):
 /// `Prepared` hands one or two args straight over, with no argument
 /// buffer moved through the owned entry (#271: three 144-byte copies per
-/// `map`/`filter`/`reduce` step). The native runtime registers it (it
-/// publishes the evaluator to compiled code); one per process, so no
-/// closure is allocated per compiled fn.
+/// `map`/`filter`/`reduce` step).
 pub type InPlaceCall =
     fn(&mut Evaluator, CodePtr, &[Value], &mut [Value]) -> Result<Value, NativeError>;
 
-static IN_PLACE: std::sync::OnceLock<InPlaceCall> = std::sync::OnceLock::new();
+/// Borrowed-argument entry for a compiled AOT closure.
+pub type CompiledBorrowCall =
+    fn(&mut Evaluator, usize, &[Value], &[Value]) -> Result<Value, NativeError>;
 
-/// Register the process's [`InPlaceCall`] (the first registration stands).
-pub fn set_in_place_call(f: InPlaceCall) {
-    let _ = IN_PLACE.set(f);
+/// Owned-argument entry for a compiled AOT closure.
+pub type CompiledOwnedCall =
+    fn(&mut Evaluator, usize, &[Value], OwnedArgs) -> Result<Value, NativeError>;
+
+/// Process-wide entry points registered once by the native runtime for
+/// compiled AOT closures (#271): borrowed, owned, and in-place calls
+/// without allocating a closure per compiled fn.
+#[derive(Clone, Copy)]
+pub struct CompiledDispatch {
+    pub call: CompiledBorrowCall,
+    pub call_owned: CompiledOwnedCall,
+    pub call_in_place: InPlaceCall,
+}
+
+static COMPILED: std::sync::OnceLock<CompiledDispatch> = std::sync::OnceLock::new();
+
+/// Register the process's [`CompiledDispatch`] (the first registration stands).
+pub fn set_compiled_dispatch(d: CompiledDispatch) {
+    let _ = COMPILED.set(d);
+}
+
+/// The registered [`CompiledDispatch`] (registered before any compiled
+/// closure is created).
+fn compiled_dispatch() -> CompiledDispatch {
+    *COMPILED.get().expect("compiled dispatch registered")
 }
 
 /// The registered [`InPlaceCall`] (`None` before any compiled code).
 pub(crate) fn in_place_call() -> Option<InPlaceCall> {
-    IN_PLACE.get().copied()
+    COMPILED.get().map(|d| d.call_in_place)
 }
 
 impl std::fmt::Debug for NativeFn {
@@ -427,8 +562,8 @@ mod tests {
         let func: Arc<NativeImpl> = Arc::new(|_, _| Ok(Value::Nil));
         let f = NativeFn {
             id: 7,
-            display: Arc::from("user/dbl"),
-            func,
+            display: DisplayName::shared("user/dbl"),
+            func: NativeTarget::Dyn(func),
             owned: None,
             meta: None,
             fast: FastArith::None,
@@ -438,6 +573,11 @@ mod tests {
         assert!(s.contains("NativeFn"), "{s}");
         assert!(s.contains('7'), "{s}");
         assert!(s.contains("user/dbl"), "{s}");
+        let buf: Arc<str> = Arc::from("xxuser/spanyy");
+        let sp = DisplayName::span(buf, 2, 9);
+        assert_eq!(&*sp, "user/span");
+        assert_eq!(sp.as_ref(), "user/span");
+        assert!(format!("{sp:?}").contains("user/span"));
     }
 
     #[test]

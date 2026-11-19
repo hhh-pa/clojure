@@ -29,7 +29,7 @@ use clj_value::{
 use crate::core::{Reduced, cce_err, is_lazy_seq_str, print_opts, str_of_one};
 use crate::error::{NativeError, Signal, jvm_class_of, map_class_of, set_class_of};
 use crate::eval::Evaluator;
-use crate::ext::{Closure, FastArith, NativeFn, NsHandle, munge};
+use crate::ext::{Closure, DisplayName, FastArith, NativeFn, NativeTarget, NsHandle, munge};
 use crate::io::{EmissionGuard, Writer, check_writer, write_to_writer};
 use crate::lazy::{PendingSeq, realize_deep};
 use crate::multi::invoke_multifn;
@@ -1585,11 +1585,10 @@ pub(crate) fn boot_print_system(eval: &mut Evaluator) {
 /// One booted method fn value (a `NativeFn` — invokable through
 /// `eval.call` like any method fn).
 fn method_fn_value(eval: &mut Evaluator, display: &str, f: NativeFnPtr) -> Value {
-    let func: Arc<crate::ext::NativeImpl> = Arc::new(f);
     Value::Extension(Arc::new(NativeFn {
         id: eval.next_id(),
-        display: Arc::from(display),
-        func,
+        display: DisplayName::shared(display),
+        func: NativeTarget::Ptr(f),
         owned: None,
         meta: None,
         fast: FastArith::None,
@@ -1898,8 +1897,8 @@ mod tests {
         let func: Arc<NativeImpl> = Arc::new(|_, _| Ok(Value::Nil));
         let native = NativeFn {
             id: 2,
-            display: Arc::from("user/g"),
-            func,
+            display: DisplayName::shared("user/g"),
+            func: NativeTarget::Dyn(func),
             owned: None,
             meta: Some(with_type),
             fast: FastArith::None,

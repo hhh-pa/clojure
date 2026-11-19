@@ -383,10 +383,7 @@ fn call_native(
     n: &crate::ext::NativeFn,
     args: SmallVec<[Value; 4]>,
 ) -> Result<Value, Signal> {
-    match &n.owned {
-        Some(owned) => owned(ev, args).map_err(|e| ev.throw(e)),
-        None => (n.func)(ev, &args).map_err(|e| ev.throw(e)),
-    }
+    n.call_owned(ev, args).map_err(|e| ev.throw(e))
 }
 
 /// Run an arity over its loaded params (`regs` grows to the
@@ -2927,7 +2924,7 @@ fn site_of(call: &DirectCall) -> Arc<DirectCall> {
     Arc::new(DirectCall {
         var: call.var.clone(),
         expect: Arc::clone(&call.expect),
-        func: Arc::clone(&call.func),
+        func: call.func.clone(),
         owned: call.owned.clone(),
         fast: call.fast,
         args: Vec::new(),
