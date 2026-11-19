@@ -2426,6 +2426,7 @@ impl<'ctx> Lowerer<'ctx> {
         let direct_end = self.builder.get_insert_block().expect("positioned");
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(slow_b);
+        let looked = self.emit_lookup_call(f, h, arr, argc, dest, done);
         let aref = self.slots_ref(f, arr, argc);
         let st_slow = self
             .call(
@@ -2439,14 +2440,62 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.position_at_end(done);
         let phi = self.builder.build_phi(self.i32t, "st").expect("phi");
         phi.add_incoming(&[(&st_direct, direct_end), (&st_slow, slow_end)]);
+        if let Some(b) = looked {
+            phi.add_incoming(&[(&self.i32t.const_zero(), b)]);
+        }
         phi.as_basic_value().into_int_value()
+    }
+
+    /// A one- or two-arg value call that missed the compiled-closure
+    /// entry (#271): a map, set, keyword or symbol callee answers through
+    /// `rt_n_lookup_call` straight to `done` (the block returned, status
+    /// 0); anything else continues in a fresh block, positioned for
+    /// `rt_n_invoke`. Other arities emit nothing.
+    fn emit_lookup_call(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        h: PointerValue<'ctx>,
+        arr: PointerValue<'ctx>,
+        argc: usize,
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) -> Option<BasicBlock<'ctx>> {
+        if !(1..=2).contains(&argc) {
+            return None;
+        }
+        let a = self.elem(arr, 0);
+        let nf = if argc == 2 {
+            self.elem(arr, 1)
+        } else {
+            self.ptr.const_null()
+        };
+        let hit = self
+            .call(
+                "rt_n_lookup_call",
+                Some(self.i8t),
+                &[dest.into(), h.into(), a.into(), nf.into()],
+            )
+            .expect("hit");
+        let is_hit = self
+            .builder
+            .build_int_compare(IntPredicate::NE, hit, self.i8t.const_zero(), "looked")
+            .expect("cmp");
+        let looked = self.builder.get_insert_block().expect("positioned");
+        let invoke_b = self.ctx.append_basic_block(f.func, "value_invoke");
+        self.builder
+            .build_conditional_branch(is_hit, done, invoke_b)
+            .expect("br");
+        self.builder.position_at_end(invoke_b);
+        Some(looked)
     }
 
     /// `(:k coll)` / `(:k coll not-found)` with a literal keyword head
     /// (#271): the bitcode `get` over borrowed operands (the keyword in
-    /// place in the constant pool), falling back to the keyword's own
-    /// invoke for any shape the helper leaves to the runtime. Both read
-    /// through the interpreter's `lookup`, so results match exactly.
+    /// place in the constant pool), falling back for any shape the
+    /// helper leaves to the runtime to `rt_n_destr_get`: the keyword's
+    /// own invoke is the interpreter's `lookup` with its default
+    /// (`invoke_keyed_name`), so it reads through that directly, with no
+    /// general call (hash maps, records, sets, strings …).
     fn try_lower_kw_invoke(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -2476,24 +2525,15 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.build_unconditional_branch(bc).expect("br");
         self.emit_bc_op(f.func, bc, shim, &refs, dest, slow, done);
         self.builder.position_at_end(slow);
-        let h = self.slot(f);
-        self.lower_const(f.func, kw, h)?;
-        let (arr, elems) = self.slot_array(f, args.len());
-        for (e, r) in elems.iter().zip(&args_refs) {
-            self.copy_bits(*e, *r);
-        }
-        let aref = self.slots_ref(f, arr, args.len());
-        let st = self
-            .call(
-                "rt_n_invoke",
-                Some(self.i32t),
-                &[dest.into(), h.into(), aref.into()],
-            )
-            .expect("st");
-        self.clear_aliases(&elems);
-        self.check(f, st);
-        self.drop_v(f.func, h);
-        self.write_tag(h, 0);
+        let nf = args_refs
+            .get(1)
+            .copied()
+            .unwrap_or_else(|| self.ptr.const_null());
+        self.call(
+            "rt_n_destr_get",
+            None,
+            &[dest.into(), args_refs[0].into(), kref.into(), nf.into()],
+        );
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
         self.drop_and_nil_slots(f.func, &temps);

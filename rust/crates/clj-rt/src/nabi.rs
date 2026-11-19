@@ -932,6 +932,25 @@ pub extern "C" fn rt_n_destr_map(out: &mut Value, v: &Value) -> i32 {
     native::status(converted.map(|m| *out = m))
 }
 
+/// `out = (f a)` / `(f a not-found)` when `f` is a map, set, keyword or
+/// symbol (#271): the lookup the general invoke ends in, without it.
+/// 0 leaves the call to `rt_n_invoke` (closures and other callees).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_lookup_call(
+    out: &mut Value,
+    f: &Value,
+    a: &Value,
+    not_found: Option<&Value>,
+) -> u8 {
+    match native_abi::lookup_value_call(f, a, not_found) {
+        Some(v) => {
+            *out = v;
+            1
+        }
+        None => 0,
+    }
+}
+
 /// `out =` one map-destructure binding (#271): `key` read from the
 /// converted source `m` when present (a present `nil` stays `nil`),
 /// else `default` when the binding has one, else nil.
@@ -1289,6 +1308,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_destructure,
         rt_n_destr_map,
         rt_n_destr_get,
+        rt_n_lookup_call,
         rt_n_cell_new,
         rt_n_cell_set,
         rt_n_cell_get,

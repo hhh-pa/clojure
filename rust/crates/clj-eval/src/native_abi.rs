@@ -40,7 +40,36 @@ pub fn invoke(eval: &mut Evaluator, f: &Value, args: &[Value]) -> Step {
     if let Some(native) = crate::ext::as_native(f) {
         return (native.func)(eval, args).map_err(|e| eval.throw(e));
     }
+    if let Some(found) = lookup_call(f, args) {
+        return Ok(found);
+    }
     eval.call(f, args)
+}
+
+/// A map, set, keyword or symbol called on one arg, or two with a
+/// default (#271), through [`lookup_value_call`]. Other arities take the
+/// general call (for their arity errors).
+fn lookup_call(f: &Value, args: &[Value]) -> Option<Value> {
+    match args {
+        [a] => lookup_value_call(f, a, None),
+        [a, not_found] => lookup_value_call(f, a, Some(not_found)),
+        _ => None,
+    }
+}
+
+/// `(f a)` / `(f a not-found)` when `f` is a map, set, keyword or symbol
+/// (#271): the lookup `Evaluator::invoke` ends in (`invoke_map`,
+/// `invoke_set`, `invoke_keyed_name`), without the general call. `None`
+/// for any other callee.
+#[must_use]
+pub fn lookup_value_call(f: &Value, a: &Value, not_found: Option<&Value>) -> Option<Value> {
+    let found = match f {
+        Value::Map(_) => crate::eval::lookup(f, a),
+        Value::Set(s) => crate::eval::member(s, a),
+        Value::Keyword(_) | Value::Symbol(_) => crate::eval::lookup(a, f),
+        _ => return None,
+    };
+    Some(found.or_else(|| not_found.cloned()).unwrap_or(Value::Nil))
 }
 
 /// The runtime var for a fully qualified symbol (interned like the
@@ -1259,6 +1288,29 @@ pub fn unreduce(v: &mut Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_set_and_keyword_calls_look_up_directly_271() {
+        let mut eval = crate::boot();
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        let m = Value::Map(Map::from_kvs_last_wins(vec![(kw("a"), Value::Int(1))]));
+        let s = Value::Set(clj_value::new_set().insert(Value::Int(2)));
+        let sym = Value::Symbol(Symbol::new(None, "a"));
+        let sm = Value::Map(Map::from_kvs_last_wins(vec![(sym.clone(), Value::Int(3))]));
+        let mut call = |f: &Value, args: &[Value]| invoke(&mut eval, f, args).ok();
+        assert_eq!(call(&m, &[kw("a")]), Some(Value::Int(1)));
+        assert_eq!(call(&m, &[kw("b"), Value::Int(9)]), Some(Value::Int(9)));
+        assert_eq!(call(&s, &[Value::Int(2)]), Some(Value::Int(2)));
+        assert_eq!(call(&s, &[Value::Int(5)]), Some(Value::Nil));
+        assert_eq!(
+            call(&kw("a"), std::slice::from_ref(&m)),
+            Some(Value::Int(1))
+        );
+        assert_eq!(call(&sym, &[sm, Value::Nil]), Some(Value::Int(3)));
+        // Other arities keep the general call (and its arity error).
+        assert_eq!(call(&m, &[]), None);
+        assert_eq!(call(&kw("a"), &[m.clone(), Value::Nil, Value::Nil]), None);
+    }
 
     #[test]
     fn kw_map_shares_its_template_keys() {

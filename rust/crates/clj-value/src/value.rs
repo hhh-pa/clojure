@@ -461,6 +461,12 @@ impl MapShape {
                 return None;
             }
         }
+        // Keywords are interned and equal only to themselves (#271): an
+        // address compare per key instead of `Value::eq`'s dispatch.
+        if let Value::Keyword(kw) = k {
+            return (self.keys.iter())
+                .position(|ek| matches!(ek, Value::Keyword(e) if e.ptr_eq(kw)));
+        }
         self.keys.iter().position(|ek| ek == k)
     }
 }

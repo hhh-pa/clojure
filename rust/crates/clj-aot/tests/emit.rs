@@ -1390,3 +1390,32 @@ fn native_emit_ir_keeps_loops_with_boxed_exits_scalar_271() {
     // loop, so the loop stays scalar (it was boxed for the exit alone).
     assert!(text.contains("sc_deopt"), "{text}");
 }
+
+#[test]
+fn native_emit_ir_reads_keyword_lookups_without_the_general_call_271() {
+    let ir = tmp("kw-lookup.ll");
+    clj_aot::build_str(
+        "(defn kwf [m] (:k7 m))\n(defn kwd [m] (:k7 m 0))\n(println (kwf {:k7 1}) (kwd {}))\n",
+        "f.clj",
+        &tmp("nope-kw"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    // A shape the bitcode `get` leaves to the runtime (a hash map, a
+    // record, a set) reads through `lookup`, not the keyword's invoke.
+    for name in ["user_kwf(", "user_kwd("] {
+        let body = text
+            .split("\ndefine ")
+            .find(|d| d.contains(name))
+            .expect("fn");
+        assert!(body.contains("@rt_n_destr_get"), "{body}");
+        assert!(!body.contains("@rt_n_invoke"), "{body}");
+    }
+}

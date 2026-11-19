@@ -1742,7 +1742,7 @@ impl Op2 for Get {
     #[inline(always)]
     fn apply(a: &Value, b: &Value) -> Option<Value> {
         match a {
-            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
+            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_lookup_key(b) => {
                 Some(m.get(b).cloned().unwrap_or(Value::Nil))
             }
             _ => crate::vm_intrinsics::get_of(a, b, None),
@@ -2176,7 +2176,7 @@ impl Op3 for Get3 {
     #[inline(always)]
     fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
         match a {
-            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
+            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_lookup_key(b) => {
                 Some(m.get(b).cloned().unwrap_or_else(|| c.clone()))
             }
             _ => crate::vm_intrinsics::get_of(a, b, Some(c)),

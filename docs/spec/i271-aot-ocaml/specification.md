@@ -429,6 +429,19 @@ The corpus file `scalar_boxed_exits.clj` pins `persistent!`, `count`, map and ve
 
 Measured on macOS: KMP substring search (`string_related/kmp/substring_searching`) fell from 163M to 67M instructions on one input; its prefix-table loop is now scalar.
 
+### 6.24 Slice 4s: lookups without the general call
+
+Three lookup paths still went through generic machinery that the lookup itself never needed:
+
+1. `(:k coll)` and `(:k coll nf)` with a literal keyword try the bitcode `get`, which answers nil, vectors, strings and shaped maps with scalar keys. Every other shape (a hash map past 16 entries, a record, a set) fell back to the keyword's own invoke through `rt_n_invoke` and `Evaluator::call`. That invoke is the interpreter's `lookup` with the default (`invoke_keyed_name`), so the fallback now calls `rt_n_destr_get`, the same `lookup` with the default, directly.
+2. A call through a value (`(m k)`, `(s x)`, `(k m)` with the callee in a local) that misses the compiled-closure entry now tries `rt_n_lookup_call` before `rt_n_invoke`. A map, set, keyword or symbol callee with one argument, or two with a default, answers there with the lookup `Evaluator::invoke` ends in (`lookup`, `member`). Any other callee or arity takes `rt_n_invoke`, whose `native_abi::invoke` makes the same shortcut for its other callers.
+3. The inline `get` and `contains?` ops (VM and `rt_n_op2`/`rt_n_op3`) answered unsorted maps and sets only for scalar keys, so a tuple key such as `[r c]` or a double paid the generic core call. They now accept any key except an extension value. The natives realize only a pending seq key (an extension) before the same `Map::get`, `Map::contains_key` and `Set::contains`, so the answers are the natives' own.
+4. A shaped map finds a keyword key by address: keywords are interned and equal only to themselves, so this is `Value::eq`'s answer without its dispatch per key.
+
+Measured on macOS, instructions per element: `(:k m)` on a 40-key hash map 713 → 489; a 4-key map called as a function 690 → 520.
+
+The corpus file `lookup_calls.clj` pins keyword, map and set calls with and without defaults on shaped and hash maps, records, sets, sorted maps, nil, vectors and strings, tuple, double and lazy-seq keys, and the arity errors, against `run`.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

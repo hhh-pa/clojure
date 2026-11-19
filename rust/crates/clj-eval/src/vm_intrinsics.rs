@@ -108,11 +108,11 @@ pub(crate) fn get_of(coll: &Value, key: &Value, not_found: Option<&Value>) -> Op
 }
 
 fn get_map(m: &clj_value::Map, key: &Value) -> Option<Option<Value>> {
-    (!m.is_sorted() && is_scalar_key(key)).then(|| m.get(key).cloned())
+    (!m.is_sorted() && is_lookup_key(key)).then(|| m.get(key).cloned())
 }
 
 fn get_set(s: &clj_value::Set, key: &Value) -> Option<Option<Value>> {
-    (!s.is_sorted() && is_scalar_key(key)).then(|| s.get(key).cloned())
+    (!s.is_sorted() && is_lookup_key(key)).then(|| s.get(key).cloned())
 }
 
 fn get_subvec(coll: &Value, key: &Value) -> Option<Option<Value>> {
@@ -143,6 +143,15 @@ fn get_transient(t: &clj_value::Transient, key: &Value) -> Option<Option<Value>>
         return None;
     };
     Some(tm.get(key).ok()?.cloned())
+}
+
+/// Keys an unsorted map or set looks up exactly as given (#271): all
+/// but extension values. `get` and `contains?` realize only a pending
+/// seq key (`lazy::realize_key`), an extension, so tuple keys such as
+/// `[r c]` and doubles look up here as the natives would, without the
+/// generic core call.
+pub(crate) fn is_lookup_key(k: &Value) -> bool {
+    !matches!(k, Value::Extension(_))
 }
 
 /// Keys whose lookup needs no realization (equality is structural
@@ -194,8 +203,8 @@ pub(crate) fn count_of(v: &Value) -> Option<Value> {
 /// `contains?` of an unsorted map, set, vector, or nil.
 pub(crate) fn contains_test(coll: &Value, key: &Value) -> Option<bool> {
     match coll {
-        Value::Map(m) if !m.is_sorted() && is_scalar_key(key) => Some(m.contains_key(key)),
-        Value::Set(s) if !s.is_sorted() && is_scalar_key(key) => Some(s.contains(key)),
+        Value::Map(m) if !m.is_sorted() && is_lookup_key(key) => Some(m.contains_key(key)),
+        Value::Set(s) if !s.is_sorted() && is_lookup_key(key) => Some(s.contains(key)),
         Value::Vector(v) => match key {
             Value::Int(n) => match usize::try_from(*n as i32) {
                 Ok(idx) => Some(idx < v.len()),
@@ -230,6 +239,40 @@ mod tests {
         Array, ArrayDesc, ArrayStore, BaseType, Keyword, Transient, TransientKind, TransientVector,
         Vector,
     };
+
+    #[test]
+    fn tuple_and_double_keys_look_up_inline_271() {
+        let tuple =
+            |a: i64, b: i64| Value::Vector(Vector::from_vec(vec![Value::Int(a), Value::Int(b)]));
+        // 20 entries: a hash (trie) map, past the shaped maps.
+        let m = Value::Map(clj_value::Map::from_kvs_last_wins(
+            (0..20).map(|i| (tuple(i, i + 1), Value::Int(i))).collect(),
+        ));
+        assert_eq!(get_of(&m, &tuple(3, 4), None), Some(Value::Int(3)));
+        assert_eq!(
+            get_of(&m, &tuple(4, 3), Some(&Value::Int(-1))),
+            Some(Value::Int(-1))
+        );
+        assert_eq!(contains_test(&m, &tuple(19, 20)), Some(true));
+        let s = Value::Set(
+            clj_value::new_set()
+                .insert(Value::Double(1.5))
+                .insert(tuple(1, 2)),
+        );
+        assert_eq!(
+            get_of(&s, &Value::Double(1.5), None),
+            Some(Value::Double(1.5))
+        );
+        assert_eq!(contains_test(&s, &tuple(1, 2)), Some(true));
+        // An extension key (a pending seq realizes first) is left to the
+        // natives.
+        let seq = Value::Extension(std::sync::Arc::new(clj_value::RealizedSeq::new(
+            clj_value::Seq::eager(vec![Value::Int(3), Value::Int(4)]).expect("seq"),
+        )));
+        assert!(!is_lookup_key(&seq));
+        assert_eq!(get_of(&m, &seq, None), None);
+        assert_eq!(contains_test(&s, &seq), None);
+    }
 
     #[test]
     fn nth_of_coverage_arms() {

@@ -4115,7 +4115,7 @@ fn lookup_string(s: &str, key: &Value) -> Option<Value> {
 
 /// Set membership: the key when present (`get` returns the equal
 /// key; ours is identical by construction).
-fn member(s: &clj_value::Set, key: &Value) -> Option<Value> {
+pub(crate) fn member(s: &clj_value::Set, key: &Value) -> Option<Value> {
     s.contains(key).then(|| key.clone())
 }
 
