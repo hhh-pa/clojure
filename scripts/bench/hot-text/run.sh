@@ -13,7 +13,7 @@
 # --aot regenerates rust/hot-text-aot.ld instead (#271), through
 # regen-aot.sh: the same workloads plus aot-workloads/ (stdin from each
 # NAME.in) compiled with `clojure-rs build`, profiled as native
-# binaries, laid out by aot_order.py. clj-aot embeds that script for
+# binaries, laid out by hot_text.py. clj-aot embeds that script for
 # its Linux AOT links; CI regenerates it for every AOT build it ships
 # or measures, so the committed copy only serves local builds.
 set -euo pipefail

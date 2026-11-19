@@ -16,8 +16,11 @@
 # Profiles: callgrind of each workload compiled against the revision's
 # runtime, linked with an empty order (callgrind attributes the
 # `.text.hot` output section to an unnamed object, so an order in place
-# would hide its own functions); the startup set is the `trivial`
-# workload's. aot_order.py lays them out.
+# would hide its own functions). hot_text.py lists the functions they
+# run, the ones most workloads run first, the same layout as the
+# interpreter's rust/hot-text.ld. (A layout packing 62 KiB windows of
+# co-used functions measured better on empty stdin but raised median
+# peak RSS by 116 KB on the h2h inputs, #271.)
 #
 # Needs Linux, valgrind, python3, and LLVM for `clojure-rs build`.
 #
@@ -43,7 +46,8 @@ echo "== build $ws (blank order)"
 compiler=$ws/target/release/clojure-rs
 
 echo "== profile the workloads"
-mkdir -p "$work/fns"
+# Every workload links as `prog`, the object hot_text.py reads.
+mkdir -p "$work/cg"
 for w in "$here"/workloads/*.clj "$here"/aot-workloads/*.clj; do
   name=$(basename "$w" .clj)
   input=${w%.clj}.in
@@ -54,21 +58,16 @@ for w in "$here"/workloads/*.clj "$here"/aot-workloads/*.clj; do
     exit 1
   }
   valgrind --tool=callgrind --demangle=no --dump-instr=no \
-    --callgrind-out-file="$work/$name.cg" "$work/prog" < "$input" > /dev/null 2>> "$work/$name.err" || {
+    --callgrind-out-file="$work/cg/$name.cg" "$work/prog" < "$input" > /dev/null 2>> "$work/$name.err" || {
     tail -n 5 "$work/$name.err" >&2
     echo "regen-aot: workload $name failed" >&2
     exit 1
   }
-  python3 "$here/aot_order.py" callgrind "$work/$name.cg" > "$work/fns/$name.txt"
-  echo "   $name: $(wc -l < "$work/fns/$name.txt") functions"
-  rm -f "$work/$name.cg"
+  echo "   $name"
 done
-[ -s "$work/fns/trivial.txt" ] || { echo "regen-aot: no startup profile (workloads/trivial.clj)" >&2; exit 1; }
 
 echo "== order"
-nm -S --size-sort -t d "$ws/target/release/libcljrt.a" > "$work/sizes.txt" 2> /dev/null || true
-python3 "$here/aot_order.py" order --fns "$work/fns" --startup "$work/fns/trivial.txt" \
-  --sizes "$work/sizes.txt" --previous "$work/previous.ld" --out "$work/new.ld"
+python3 "$here/hot_text.py" "$work/prog" "$work/new.ld" "$work"/cg/*.cg
 # Restore the revision's order, then write OUT (which may be that
 # order itself), and drop the restoring trap.
 cp "$work/previous.ld" "$order"

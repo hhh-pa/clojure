@@ -268,9 +268,7 @@ The projection adds each probed program's RSS change to its h2h 90509c29 cases, 
 
 1. Builds the revision's runtime with a blank order.
 2. Compiles each workload with `clojure-rs build` and profiles it under callgrind (stdin from `NAME.in`, else empty).
-3. Lays the profiles out with `aot_order.py`:
-   - the `trivial` workload's startup set comes first, in the previous order's sequence;
-   - then come 62 KiB windows of functions that the same workloads use together, so that each program touches few windows.
+3. Lists the functions they run with `hot_text.py`, the generator of the interpreter's `rust/hot-text.ld` and of the committed AOT order: the functions most workloads run come first, ties in the order the profiles first ran them. (Until f955bd39 a separate `aot_order.py` packed 62 KiB windows of co-used functions; see the second correction below.)
 
 Ties break in a fixed order, so every job that links the order gets the same one. `run.sh --aot` delegates to the script.
 
@@ -278,7 +276,11 @@ Ties break in a fixed order, so every job that links the order gets the same one
 
 The runtime changes in between were not the cause: on macOS, which has no layout order, peak RSS on the same inputs fell (median −80 KB). A same-runtime probe on empty stdin still ranked the CI order 192 KB better than the committed one.
 
-The cause was the generator. `aot_order.py` kept only Rust-mangled names, so it dropped the runtime's `rt_*` C-ABI entry points (`rt_n_core_call`, `rt_n_drop`, `rt_n_deref`, `rt_n_core_own`, …). Every compiled program calls these while it processes input, but empty-stdin runs barely touch them. The committed order (from `hot_text.py`) listed them. The generator now keeps `rt_*` names alongside Rust ones.
+The first suspect was the generator's name filter. `aot_order.py` kept only Rust-mangled names, so it dropped the runtime's `rt_*` C-ABI entry points (`rt_n_core_call`, `rt_n_drop`, `rt_n_deref`, `rt_n_core_own`, …). Every compiled program calls these while it processes input, but empty-stdin runs barely touch them. The committed order (from `hot_text.py`) listed them. f955bd39 kept `rt_*` names alongside Rust ones.
+
+**Second correction.** That was not the whole cause. The h2h for f955bd39 (run 44411733078) still gave MEM 1024/616/103 and an AOT median of 2992 KB, against 2876 KB with the committed order at 90509c29. Per case, the shift from the committed order is broad, not a constant: median +116 KB, 5th to 95th percentile −160 to +368 KB. 300 cases that won MEM at 90509c29 no longer win.
+
+Both orders come from the same 30 workload profiles. The one remaining difference is the layout: the committed order lists functions by how many workloads run them (`hot_text.py`), while `aot_order.py` packed 62 KiB windows of co-used functions. `regen-aot.sh` therefore lays out with `hot_text.py` itself, and `aot_order.py` is gone. The next h2h checks the result.
 
 **CI keeps it fresh.**
 
