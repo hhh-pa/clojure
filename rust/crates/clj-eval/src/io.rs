@@ -496,7 +496,10 @@ fn print_impl(
 ) -> Result<Value, NativeError> {
     // Eager validation first (limits CCE before anything realizes
     // or writes, as before).
-    print_opts(eval, readably)?;
+    let opts = print_opts(eval, readably)?;
+    if print_scalars(eval, args, &opts, ln)? {
+        return Ok(Value::Nil);
+    }
     let mut vals = Vec::with_capacity(args.len());
     for arg in args {
         vals.push(realize_deep(eval, arg).map_err(signal_to_native)?);
@@ -524,6 +527,61 @@ fn print_impl(
         flush_out(eval)?;
     }
     Ok(Value::Nil)
+}
+
+/// `print`/`println`/`pr`/`prn` of scalars under the booted print
+/// methods (#271): every arg is nil, a boolean, long, double, string,
+/// char or keyword, which `print-method` renders through
+/// `scalar_default` as `pr_to_string` under the ambient options (no meta
+/// to prefix, `*print-dup*` off). The line builds once and goes out in
+/// one write, with no `*print-readably*` frame (`opts` carries the
+/// override) and no per-arg dispatch; the `*out*` check, the emission
+/// lock and the flush stay. `false` leaves the call to the general road
+/// (other args, live print methods, `*print-dup*`, no args).
+fn print_scalars(
+    eval: &mut Evaluator,
+    args: &[Value],
+    opts: &clj_value::PrintOpts,
+    ln: bool,
+) -> Result<bool, NativeError> {
+    let plain = !args.is_empty() && args.iter().all(is_print_scalar);
+    if !plain || !eval.print_defaults_only || deref_core(eval, "*print-dup*").is_truthy() {
+        return Ok(false);
+    }
+    let out = deref_core(eval, "*out*");
+    check_writer(&out)?;
+    let mut line = String::new();
+    for (i, v) in args.iter().enumerate() {
+        if i > 0 {
+            line.push(' ');
+        }
+        line.push_str(&clj_value::pr_to_string(v, opts));
+    }
+    if ln {
+        line.push('\n');
+    }
+    {
+        let _emission = EmissionGuard::acquire();
+        write_to_writer(&out, &line)?;
+    }
+    if ln && deref_core(eval, "*flush-on-newline*").is_truthy() {
+        flush_out(eval)?;
+    }
+    Ok(true)
+}
+
+/// The values [`print_scalars`] renders directly (none carries meta).
+fn is_print_scalar(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Nil
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Double(_)
+            | Value::Str(_)
+            | Value::Char(_)
+            | Value::Keyword(_)
+    )
 }
 
 /// One `pr-on` per arg (separators between, `*out*` re-read per

@@ -456,6 +456,16 @@ The cache now keeps a 64-way direct-mapped table from the name's address to its 
 
 Measured on macOS, instructions per element: `(compare i 50)` 761 → 418; `sort-by` on a key 1584 → 1183; sorted-set inserts 12297 → 10482.
 
+### 6.27 Slice 4v: scalar prints in one write
+
+`print`, `println`, `pr` and `prn` validated the print options, pushed a `*print-readably*` binding frame (a fresh `Var`, a frame vector and a count-map entry, all undone after), and then dispatched every argument through `pr-on`, the static `print-method` and `scalar_default`. That path re-read the options and the writer, and wrote each argument, separator and newline separately.
+
+When every argument is nil, a boolean, long, double, string, char or keyword, the booted print methods are in place (`print_defaults_only`) and `*print-dup*` is off, `scalar_default` renders each argument as `pr_to_string` under the ambient options: none of these carries meta. Those calls now build the line once from the validated options (`readably` already carries the `print`/`println` override) and write it in one emission, under the same `*out*` check, emission lock and `*flush-on-newline*` flush. Any other argument, a live `print-method`, `*print-dup*`, or a call with no arguments takes the general road.
+
+The corpus file `print_scalars.clj` pins every scalar shape (unicode, `NaN` and infinities, readable strings and chars), `with-out-str`, the `*print-readably*`, `*print-dup*` and `*print-length*` bindings, a nil `*out*`, empty calls, and a user `print-method`, against `run` and the previous binary.
+
+Measured on macOS (kernel `write` included): `println` of a long 22.4K → 18.2K instructions; a two-argument `prn` 25.2K → 19.2K; `println` into `with-out-str` 13.4K → 9.4K.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
