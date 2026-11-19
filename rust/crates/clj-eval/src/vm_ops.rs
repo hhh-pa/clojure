@@ -2633,6 +2633,22 @@ mod apply_tests {
         );
         assert_eq!(CompareNum::apply(&int(2), &int(2)), Some(int(0)));
         assert_eq!(CompareNum::apply(&s, &s), None);
+        // The natives answer the same when called as values.
+        let mut ev = crate::boot();
+        let v = ev
+            .eval_source(
+                "(= [(reduce unchecked-add [9223372036854775807 1])
+                     (reduce unchecked-subtract [-9223372036854775808 1])
+                     (reduce unchecked-multiply [9223372036854775807 2])
+                     (first (map unchecked-inc [9223372036854775807]))
+                     (first (map unchecked-dec [-9223372036854775808]))
+                     (first (map unchecked-negate [-9223372036854775808]))
+                     (first (map deref [(volatile! 5)]))]
+                    [-9223372036854775808 9223372036854775807 -2
+                     -9223372036854775808 9223372036854775807 -9223372036854775808 5])",
+            )
+            .expect("eval");
+        assert_eq!(v.last(), Some(&Value::Bool(true)));
     }
 
     #[test]

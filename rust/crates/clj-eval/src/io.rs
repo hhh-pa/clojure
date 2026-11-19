@@ -550,7 +550,21 @@ fn print_scalars(
     }
     let out = deref_core(eval, "*out*");
     check_writer(&out)?;
-    // One buffer, sized for the strings (no regrowth copying a big one).
+    let line = scalar_line(args, opts, ln);
+    {
+        let _emission = EmissionGuard::acquire();
+        write_to_writer(&out, &line)?;
+    }
+    if ln && deref_core(eval, "*flush-on-newline*").is_truthy() {
+        flush_out(eval)?;
+    }
+    Ok(true)
+}
+
+/// The line [`print_scalars`] writes: each arg rendered by `pr_into`,
+/// spaced, plus the `ln` newline, in one buffer presized for the
+/// strings (no regrowth copying a big one).
+fn scalar_line(args: &[Value], opts: &clj_value::PrintOpts, ln: bool) -> String {
     let cap = (args.iter())
         .map(|v| match v {
             Value::Str(s) => s.len() + 2,
@@ -567,14 +581,7 @@ fn print_scalars(
     if ln {
         line.push('\n');
     }
-    {
-        let _emission = EmissionGuard::acquire();
-        write_to_writer(&out, &line)?;
-    }
-    if ln && deref_core(eval, "*flush-on-newline*").is_truthy() {
-        flush_out(eval)?;
-    }
-    Ok(true)
+    line
 }
 
 /// The values [`print_scalars`] renders directly (none carries meta).
