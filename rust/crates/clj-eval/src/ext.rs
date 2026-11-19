@@ -246,13 +246,23 @@ pub struct NativeFn {
 }
 
 /// A compiled closure's code (its address in the compiled-code ABI,
-/// opaque here), captured values and parameter count (#271).
+/// opaque here), captured values and parameter count (#271), plus
+/// `direct`: the code over an argument array the caller owns.
 #[derive(Clone)]
 pub struct CompiledEntry {
     pub code: usize,
     pub captured: Arc<[Value]>,
     pub fixed: usize,
+    pub direct: Arc<DirectImpl>,
 }
+
+/// A compiled closure called over the caller's argument array, which it
+/// may take its params from (leaving nil; the caller drops the rest):
+/// `Prepared` hands one or two args straight over, with no argument
+/// buffer moved through the owned entry (#271: three 144-byte copies per
+/// `map`/`filter`/`reduce` step).
+pub type DirectImpl =
+    dyn Fn(&mut Evaluator, &mut [Value]) -> Result<Value, NativeError> + Send + Sync;
 
 impl std::fmt::Debug for NativeFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

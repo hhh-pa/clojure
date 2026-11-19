@@ -444,10 +444,16 @@ pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> V
     });
     // Compiled call sites call a single fixed arity's code directly
     // (`rt_n_enter_closure`, #271), as a `defn`'s direct call does.
-    let compiled = single.map(|(fixed, code)| clj_eval::ext::CompiledEntry {
-        code: code as usize,
-        captured: Arc::clone(&captured),
-        fixed,
+    let compiled = single.map(|(fixed, code)| {
+        let held = Arc::clone(&captured);
+        clj_eval::ext::CompiledEntry {
+            code: code as usize,
+            captured: Arc::clone(&captured),
+            fixed,
+            direct: Arc::new(move |eval: &mut Evaluator, argv: &mut [Value]| {
+                call_code_in_place(eval, code, &held, argv).map_err(native_abi::signal_to_native)
+            }),
+        }
     });
     let func: Arc<clj_eval::ext::NativeImpl> = match single {
         Some((fixed, code)) => Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
@@ -603,6 +609,31 @@ fn call_code_owned(
             )
         };
         drop(argv);
+        if status == 0 {
+            Ok(ret)
+        } else {
+            Err(take_pending())
+        }
+    })
+}
+
+/// [`call_code_owned`] over an argument array the caller owns (#271):
+/// the code may take params from its slots, and the caller drops what is
+/// left; nothing moves through the call but the slice.
+fn call_code_in_place(
+    eval: &mut Evaluator,
+    code: Code,
+    captured: &[Value],
+    argv: &mut [Value],
+) -> Step {
+    let n = argv.len() | native_abi::TAKE_ARGS as usize;
+    let ptr = argv.as_mut_ptr().cast_const();
+    native_abi::guarded(eval, |eval| {
+        let mut ret = Value::Nil;
+        let status = {
+            let _active = ActiveScope::enter(eval);
+            code(&mut ret, ptr, n, captured.as_ptr())
+        };
         if status == 0 {
             Ok(ret)
         } else {

@@ -338,6 +338,9 @@ impl<'c> Prepared<'c> {
                         return Ok(Value::Int(v));
                     }
                 }
+                if let Some(c) = n.compiled.as_ref().filter(|c| c.fixed == 1) {
+                    return (c.direct)(ev, &mut [a]).map_err(|e| ev.throw(e));
+                }
                 call_native(ev, n, smallvec::smallvec![a])
             }
         }
@@ -360,6 +363,9 @@ impl<'c> Prepared<'c> {
                     if let Some(v) = Evaluator::fast_int2(n.fast, *x, *y) {
                         return Ok(v);
                     }
+                }
+                if let Some(c) = n.compiled.as_ref().filter(|c| c.fixed == 2) {
+                    return (c.direct)(ev, &mut [a, b]).map_err(|e| ev.throw(e));
                 }
                 call_native(ev, n, smallvec::smallvec![a, b])
             }

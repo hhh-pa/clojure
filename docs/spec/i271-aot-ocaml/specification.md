@@ -520,6 +520,14 @@ Measured on macOS, instructions per call: `println` of a long 18.0K → 16.6K; `
 
 Measured on macOS, instructions per call: `(range 3)` 1680 → 1510, `(repeat 2 :x)` 1750 → 1600, `(concat a b)` 9360 → 9190 (owned natives); `subvec` (borrowing) 1170 → 1140.
 
+### 6.33 Slice 5b: natives call compiled closures over their own argument array
+
+`Prepared::call1`/`call2` (the step calls of `map`, `filter`, `mapv`, `reduce`, `sort-by` …) reached a compiled closure through `call_native`. That built a 144-byte `SmallVec` argument buffer and moved it by value through the owned `dyn Fn` entry into `guarded`'s closure. On Linux those moves were out-of-line `memcpy` calls: 126 instructions per element of `(count (for [x (range n)] x))`.
+
+A compiled closure with a single fixed arity now also carries `CompiledEntry::direct`: its code over an argument array the caller owns, passed as a slice. `Prepared` hands one or two args over as a stack array. The code may take its params from the slots, exactly as on the owned path (`TAKE_ARGS`), and the caller drops what is left. Other natives, other arities and VM closures keep their paths.
+
+Measured on macOS: `sort-by` with a closure key 1077 → 877 instructions per element. On macOS the buffer moves are inline copies, so elsewhere the gain shows only on Linux.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
