@@ -412,7 +412,7 @@ pub extern "C" fn rt_n_enter_closure(
     if !with_active(native_abi::enter_call) {
         return 0;
     }
-    *code = entry.code;
+    *code = entry.code as usize;
     *captured = entry.captured.as_ptr();
     1
 }
@@ -466,9 +466,13 @@ pub extern "C" fn rt_n_core_call(out: &mut Value, k: u64, args: &CSlice<&Value>)
 /// success path (#271: ~470 instructions per generic core call on
 /// Linux, the native's own work often a few).
 fn core_fallback(out: &mut Value, k: u64, args: &[&Value]) -> i32 {
-    let direct = with_active(|eval| {
-        let entry = native::core_entry(eval, k as usize)?;
-        Some(match entry.call_refs(eval, args) {
+    with_active(|eval| {
+        // Direct core calls come only from programs that cannot rebind
+        // core vars (a rebinding program calls each var's current root),
+        // so var k holds the native the analyzer saw (#271).
+        let entry = native::core_entry(eval, k as usize)
+            .expect("a direct core call's var holds its native");
+        match entry.call_refs(eval, args) {
             Ok(v) => {
                 *out = v;
                 0
@@ -477,14 +481,7 @@ fn core_fallback(out: &mut Value, k: u64, args: &[&Value]) -> i32 {
                 *out = Value::Nil;
                 native::fail(native_abi::native_throw(eval, e))
             }
-        })
-    });
-    direct.unwrap_or_else(|| {
-        let owned = args.iter().map(|a| (*a).clone()).collect();
-        finish(
-            out,
-            with_active(|eval| native::call_core_var(eval, k as usize, owned)),
-        )
+        }
     })
 }
 

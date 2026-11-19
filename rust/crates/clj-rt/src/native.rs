@@ -444,16 +444,11 @@ pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> V
     });
     // Compiled call sites call a single fixed arity's code directly
     // (`rt_n_enter_closure`, #271), as a `defn`'s direct call does.
-    let compiled = single.map(|(fixed, code)| {
-        let held = Arc::clone(&captured);
-        clj_eval::ext::CompiledEntry {
-            code: code as usize,
-            captured: Arc::clone(&captured),
-            fixed,
-            direct: Arc::new(move |eval: &mut Evaluator, argv: &mut [Value]| {
-                call_code_in_place(eval, code, &held, argv).map_err(native_abi::signal_to_native)
-            }),
-        }
+    clj_eval::ext::set_in_place_call(call_code_in_place);
+    let compiled = single.map(|(fixed, code)| clj_eval::ext::CompiledEntry {
+        code,
+        captured: Arc::clone(&captured),
+        fixed,
     });
     let func: Arc<clj_eval::ext::NativeImpl> = match single {
         Some((fixed, code)) => Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
@@ -625,7 +620,7 @@ fn call_code_in_place(
     code: Code,
     captured: &[Value],
     argv: &mut [Value],
-) -> Step {
+) -> Result<Value, clj_eval::error::NativeError> {
     let n = argv.len() | native_abi::TAKE_ARGS as usize;
     let ptr = argv.as_mut_ptr().cast_const();
     native_abi::guarded(eval, |eval| {
@@ -640,6 +635,7 @@ fn call_code_in_place(
             Err(take_pending())
         }
     })
+    .map_err(native_abi::signal_to_native)
 }
 
 fn reset_thread_caches() {

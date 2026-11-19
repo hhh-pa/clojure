@@ -338,8 +338,9 @@ impl<'c> Prepared<'c> {
                         return Ok(Value::Int(v));
                     }
                 }
-                if let Some(c) = n.compiled.as_ref().filter(|c| c.fixed == 1) {
-                    return (c.direct)(ev, &mut [a]).map_err(|e| ev.throw(e));
+                let direct = n.compiled.as_ref().filter(|c| c.fixed == 1);
+                if let (Some(c), Some(call)) = (direct, crate::ext::in_place_call()) {
+                    return call(ev, c.code, &c.captured, &mut [a]).map_err(|e| ev.throw(e));
                 }
                 call_native(ev, n, smallvec::smallvec![a])
             }
@@ -364,8 +365,9 @@ impl<'c> Prepared<'c> {
                         return Ok(v);
                     }
                 }
-                if let Some(c) = n.compiled.as_ref().filter(|c| c.fixed == 2) {
-                    return (c.direct)(ev, &mut [a, b]).map_err(|e| ev.throw(e));
+                let direct = n.compiled.as_ref().filter(|c| c.fixed == 2);
+                if let (Some(c), Some(call)) = (direct, crate::ext::in_place_call()) {
+                    return call(ev, c.code, &c.captured, &mut [a, b]).map_err(|e| ev.throw(e));
                 }
                 call_native(ev, n, smallvec::smallvec![a, b])
             }

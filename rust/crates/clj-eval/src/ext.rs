@@ -245,24 +245,39 @@ pub struct NativeFn {
     pub compiled: Option<CompiledEntry>,
 }
 
-/// A compiled closure's code (its address in the compiled-code ABI,
-/// opaque here), captured values and parameter count (#271), plus
-/// `direct`: the code over an argument array the caller owns.
+/// Compiled code's entry point (`out`, argv, argc with flags, captured
+/// values), as the native runtime emits and calls it.
+pub type CodePtr = extern "C" fn(*mut Value, *const Value, usize, *const Value) -> i32;
+
+/// A compiled closure's code, captured values and parameter count (#271).
 #[derive(Clone)]
 pub struct CompiledEntry {
-    pub code: usize,
+    pub code: CodePtr,
     pub captured: Arc<[Value]>,
     pub fixed: usize,
-    pub direct: Arc<DirectImpl>,
 }
 
-/// A compiled closure called over the caller's argument array, which it
+/// Compiled code called over an argument array the caller owns, which it
 /// may take its params from (leaving nil; the caller drops the rest):
 /// `Prepared` hands one or two args straight over, with no argument
 /// buffer moved through the owned entry (#271: three 144-byte copies per
-/// `map`/`filter`/`reduce` step).
-pub type DirectImpl =
-    dyn Fn(&mut Evaluator, &mut [Value]) -> Result<Value, NativeError> + Send + Sync;
+/// `map`/`filter`/`reduce` step). The native runtime registers it (it
+/// publishes the evaluator to compiled code); one per process, so no
+/// closure is allocated per compiled fn.
+pub type InPlaceCall =
+    fn(&mut Evaluator, CodePtr, &[Value], &mut [Value]) -> Result<Value, NativeError>;
+
+static IN_PLACE: std::sync::OnceLock<InPlaceCall> = std::sync::OnceLock::new();
+
+/// Register the process's [`InPlaceCall`] (the first registration stands).
+pub fn set_in_place_call(f: InPlaceCall) {
+    let _ = IN_PLACE.set(f);
+}
+
+/// The registered [`InPlaceCall`] (`None` before any compiled code).
+pub(crate) fn in_place_call() -> Option<InPlaceCall> {
+    IN_PLACE.get().copied()
+}
 
 impl std::fmt::Debug for NativeFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
