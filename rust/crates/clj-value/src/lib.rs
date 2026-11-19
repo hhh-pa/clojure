@@ -75,7 +75,7 @@ pub use jvm::{jvm_class_of, map_class_of, set_class_of};
 pub use keyword::Keyword;
 pub use multifn::{MultiFn, method_for, multifn_hex, multifn_str};
 pub use print::{
-    CHAR_ESCAPES, CHAR_NAMES, class_java_debug, java_debug, java_double_string, lift_ns,
+    CHAR_ESCAPES, CHAR_NAMES, class_java_debug, java_debug, java_double_string, lift_ns, pr_into,
     pr_to_string, print, print_opts::PrintOpts, print_to_string, str_of_value,
 };
 pub use promise::{Promise, PromiseState};

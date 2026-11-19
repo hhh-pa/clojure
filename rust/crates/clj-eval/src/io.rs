@@ -550,12 +550,19 @@ fn print_scalars(
     }
     let out = deref_core(eval, "*out*");
     check_writer(&out)?;
-    let mut line = String::new();
+    // One buffer, sized for the strings (no regrowth copying a big one).
+    let cap = (args.iter())
+        .map(|v| match v {
+            Value::Str(s) => s.len() + 2,
+            _ => 24,
+        })
+        .sum::<usize>();
+    let mut line = String::with_capacity(cap + args.len() + 1);
     for (i, v) in args.iter().enumerate() {
         if i > 0 {
             line.push(' ');
         }
-        line.push_str(&clj_value::pr_to_string(v, opts));
+        clj_value::pr_into(v, opts, &mut line);
     }
     if ln {
         line.push('\n');

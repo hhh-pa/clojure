@@ -466,6 +466,8 @@ The corpus file `print_scalars.clj` pins every scalar shape (unicode, `NaN` and 
 
 Measured on macOS (kernel `write` included): `println` of a long 22.4K → 18.2K instructions; a two-argument `prn` 25.2K → 19.2K; `println` into `with-out-str` 13.4K → 9.4K.
 
+The line is one buffer presized for the string arguments, and each argument renders into it through `pr_into`. A first version rendered each argument to a temporary and copied it in, so `println` of a 1.27 MB string cost 1.57M macOS instructions instead of 0.19M; it now costs 0.25M. Readable strings also copy the runs between escapes whole: every `CHAR_ESCAPES` entry is ASCII, so a byte scan finds the same cuts the per-char table lookup did. `prn` of that string went from 49.9M to 41.7M (it escapes a newline every 6 bytes).
+
 ### 6.28 Slice 4w: unchecked arithmetic, `deref`, `char` and `compare` inline
 
 A core call with no inline op goes through `core_fallback`: the evaluator, the var's entry, cloned arguments and the native. That is about 240 Linux instructions even for `identity` (probe `identity_call`). A trace of these generic calls over the 348 tiny-input non-win cases counted 210K. Some of the most frequent were trivial: `unchecked-multiply` and `unchecked-add` (38.6K each, a pseudo-random generator), `deref` (14.3K, `@atom`), `char` (2.8K) and `compare` (1.7K).
