@@ -610,6 +610,11 @@ pub(crate) const APPLY1: &[(&str, Apply1)] = &[
     ("int", <IntCast as Op1>::apply),
     ("long", <LongCast as Op1>::apply),
     ("double", <DoubleCast as Op1>::apply),
+    ("unchecked-inc", <UncheckedInc as Op1>::apply),
+    ("unchecked-dec", <UncheckedDec as Op1>::apply),
+    ("unchecked-negate", <UncheckedNegate as Op1>::apply),
+    ("deref", <DerefCell as Op1>::apply),
+    ("char", <CharOf as Op1>::apply),
 ];
 
 pub(crate) const APPLY2: &[(&str, Apply2)] = &[
@@ -643,6 +648,10 @@ pub(crate) const APPLY2: &[(&str, Apply2)] = &[
     ("contains?", <Contains as Op2>::apply),
     ("conj!", <ConjBang as Op2>::apply),
     ("aget", <Aget as Op2>::apply),
+    ("unchecked-add", <UncheckedAdd as Op2>::apply),
+    ("unchecked-subtract", <UncheckedSub as Op2>::apply),
+    ("unchecked-multiply", <UncheckedMul as Op2>::apply),
+    ("compare", <CompareNum as Op2>::apply),
 ];
 
 /// Specialized regex matcher kept outside [`APPLY2`] so non-regex AOT binaries
@@ -735,6 +744,10 @@ const BINARY: &[Row2] = &[
     ),
     ("conj!", shape2::<ConjBang, AsValue>, None),
     ("aget", shape2::<Aget, AsValue>, None),
+    ("unchecked-add", shape2::<UncheckedAdd, AsValue>, None),
+    ("unchecked-subtract", shape2::<UncheckedSub, AsValue>, None),
+    ("unchecked-multiply", shape2::<UncheckedMul, AsValue>, None),
+    ("compare", shape2::<CompareNum, AsValue>, None),
     (
         "re-matches",
         shape2::<ReMatches, AsValue>,
@@ -802,6 +815,11 @@ const UNARY: &[Row1] = &[
     ("int", shape1::<IntCast, AsValue>, None),
     ("long", shape1::<LongCast, AsValue>, None),
     ("double", shape1::<DoubleCast, AsValue>, None),
+    ("unchecked-inc", shape1::<UncheckedInc, AsValue>, None),
+    ("unchecked-dec", shape1::<UncheckedDec, AsValue>, None),
+    ("unchecked-negate", shape1::<UncheckedNegate, AsValue>, None),
+    ("deref", shape1::<DerefCell, AsValue>, None),
+    ("char", shape1::<CharOf, AsValue>, None),
 ];
 
 /// The analyzed native's `clojure.core` name (its display).
@@ -1807,6 +1825,121 @@ impl Op1 for Dec {
 }
 
 /// `(bit-not x)` on an integer.
+/// `unchecked-add`/`-subtract`/`-multiply` over two longs (#271): the
+/// wrapping op (`(unchecked-add Long/MAX_VALUE 1)` is `Long/MIN_VALUE`);
+/// doubles and the tower are the native's.
+pub(crate) struct UncheckedAdd;
+pub(crate) struct UncheckedSub;
+pub(crate) struct UncheckedMul;
+
+impl Op2 for UncheckedAdd {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        wrapping2(a, b, i64::wrapping_add)
+    }
+}
+
+impl Op2 for UncheckedSub {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        wrapping2(a, b, i64::wrapping_sub)
+    }
+}
+
+impl Op2 for UncheckedMul {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        wrapping2(a, b, i64::wrapping_mul)
+    }
+}
+
+#[inline(always)]
+fn wrapping2(a: &Value, b: &Value, op: fn(i64, i64) -> i64) -> Option<Value> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Some(Value::Int(op(*x, *y))),
+        _ => None,
+    }
+}
+
+/// `unchecked-inc`/`-dec`/`-negate` over a long (#271): wrapping.
+pub(crate) struct UncheckedInc;
+pub(crate) struct UncheckedDec;
+pub(crate) struct UncheckedNegate;
+
+impl Op1 for UncheckedInc {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        wrapping1(a, |x| x.wrapping_add(1))
+    }
+}
+
+impl Op1 for UncheckedDec {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        wrapping1(a, |x| x.wrapping_sub(1))
+    }
+}
+
+impl Op1 for UncheckedNegate {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        wrapping1(a, i64::wrapping_neg)
+    }
+}
+
+#[inline(always)]
+fn wrapping1(a: &Value, op: fn(i64) -> i64) -> Option<Value> {
+    match a {
+        Value::Int(x) => Some(Value::Int(op(*x))),
+        _ => None,
+    }
+}
+
+/// `@atom`/`@volatile` (#271): the cell's value, read under its lock as
+/// the native reads it; every other derefable (refs, delays, futures,
+/// vars, the timeout arity) is the native's.
+pub(crate) struct DerefCell;
+
+impl Op1 for DerefCell {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        match a {
+            Value::Atom(c) => Some(c.lock().value.clone()),
+            Value::Volatile(v) => Some(v.lock().clone()),
+            _ => None,
+        }
+    }
+}
+
+/// `(char n)` for a long code point (#271): `char::from_u32` as the
+/// native narrows it; out of range (and every other shape) is the
+/// native's, error included.
+pub(crate) struct CharOf;
+
+impl Op1 for CharOf {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        let Value::Int(i) = a else {
+            return None;
+        };
+        u32::try_from(*i)
+            .ok()
+            .and_then(char::from_u32)
+            .map(Value::Char)
+    }
+}
+
+/// `compare` over longs and doubles (#271): `-1`/`0`/`1` from
+/// `jvm_compare`'s own numeric order; other operands are the native's.
+pub(crate) struct CompareNum;
+
+impl Op2 for CompareNum {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        crate::core::compare_long_double(a, b).map(|o| Value::Int(o as i64))
+    }
+}
+
 pub(crate) struct BitNot;
 
 impl Op1 for BitNot {
@@ -2462,6 +2595,45 @@ mod tests {
 #[cfg(test)]
 mod apply_tests {
     use super::{APPLY1, APPLY2, APPLY3, APPLYN, BINARY, NARY, RE_MATCHES_OP, TERNARY, UNARY};
+    use super::{
+        CharOf, CompareNum, DerefCell, Op1, Op2, UncheckedAdd, UncheckedDec, UncheckedInc,
+        UncheckedMul, UncheckedNegate, UncheckedSub,
+    };
+    use clj_value::Value;
+
+    #[test]
+    fn unchecked_deref_char_and_compare_ops_271() {
+        let (int, s) = (Value::Int, Value::Str(std::sync::Arc::from("s")));
+        assert_eq!(
+            UncheckedAdd::apply(&int(i64::MAX), &int(1)),
+            Some(int(i64::MIN))
+        );
+        assert_eq!(
+            UncheckedSub::apply(&int(i64::MIN), &int(1)),
+            Some(int(i64::MAX))
+        );
+        assert_eq!(UncheckedMul::apply(&int(i64::MAX), &int(2)), Some(int(-2)));
+        assert_eq!(UncheckedAdd::apply(&int(1), &Value::Double(1.0)), None);
+        assert_eq!(UncheckedInc::apply(&int(i64::MAX)), Some(int(i64::MIN)));
+        assert_eq!(UncheckedDec::apply(&int(i64::MIN)), Some(int(i64::MAX)));
+        assert_eq!(UncheckedNegate::apply(&int(i64::MIN)), Some(int(i64::MIN)));
+        assert_eq!(UncheckedInc::apply(&s), None);
+        let atom = Value::Atom(clj_value::Atom::new(int(3)));
+        let vol = Value::Volatile(clj_value::Volatile::new(int(4)));
+        assert_eq!(DerefCell::apply(&atom), Some(int(3)));
+        assert_eq!(DerefCell::apply(&vol), Some(int(4)));
+        assert_eq!(DerefCell::apply(&Value::Nil), None);
+        assert_eq!(CharOf::apply(&int(97)), Some(Value::Char('a')));
+        assert_eq!(CharOf::apply(&int(0xD800)), None);
+        assert_eq!(CharOf::apply(&int(-1)), None);
+        assert_eq!(CharOf::apply(&Value::Char('a')), None);
+        assert_eq!(
+            CompareNum::apply(&int(1), &Value::Double(2.5)),
+            Some(int(-1))
+        );
+        assert_eq!(CompareNum::apply(&int(2), &int(2)), Some(int(0)));
+        assert_eq!(CompareNum::apply(&s, &s), None);
+    }
 
     #[test]
     fn apply_tables_cover_every_specialized_op() {

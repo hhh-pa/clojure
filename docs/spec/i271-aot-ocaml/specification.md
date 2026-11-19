@@ -466,6 +466,19 @@ The corpus file `print_scalars.clj` pins every scalar shape (unicode, `NaN` and 
 
 Measured on macOS (kernel `write` included): `println` of a long 22.4K → 18.2K instructions; a two-argument `prn` 25.2K → 19.2K; `println` into `with-out-str` 13.4K → 9.4K.
 
+### 6.28 Slice 4w: unchecked arithmetic, `deref`, `char` and `compare` inline
+
+A core call with no inline op goes through `core_fallback`: the evaluator, the var's entry, cloned arguments and the native. That is about 240 Linux instructions even for `identity` (probe `identity_call`). A trace of these generic calls over the 348 tiny-input non-win cases counted 210K. Some of the most frequent were trivial: `unchecked-multiply` and `unchecked-add` (38.6K each, a pseudo-random generator), `deref` (14.3K, `@atom`), `char` (2.8K) and `compare` (1.7K).
+
+These are now VM inline ops, which the AOT's slow path reaches through `rt_n_op1`/`rt_n_op2` before any generic call:
+
+- `unchecked-add`, `-subtract`, `-multiply`, `-inc`, `-dec` and `-negate` over longs wrap. Doubles and the tower stay the natives'.
+- `deref` of an atom or a volatile reads the cell under its lock, as the native does. Refs, delays, futures, promises, vars and the timeout arity stay the native's.
+- `char` of a long code point narrows through `char::from_u32`. Out-of-range values (errors) and other shapes stay the native's.
+- `compare` of longs and doubles answers -1, 0 or 1 from `jvm_compare`'s numeric order. Other operands stay the native's.
+
+The corpus file `core_inline_ops.clj` pins the wrapping edges, double operands, every derefable, the `char` range errors and mixed compares against `run` and the previous binary.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

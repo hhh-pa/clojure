@@ -1332,7 +1332,7 @@ pub(crate) fn jvm_compare(x: &Value, y: &Value) -> Result<std::cmp::Ordering, Na
 /// cross-multiplied) on every compare, and `compare_vectors` per item.
 /// Exactly [`compare_numbers`]: longs order exactly, and a double on
 /// either side compares as `f64` (`NaN` ties). `None` for anything else.
-fn compare_long_double(x: &Value, y: &Value) -> Option<std::cmp::Ordering> {
+pub(crate) fn compare_long_double(x: &Value, y: &Value) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     let (a, b) = match (x, y) {
         (Value::Int(a), Value::Int(b)) => return Some(a.cmp(b)),
