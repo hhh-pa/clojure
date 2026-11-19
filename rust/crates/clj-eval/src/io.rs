@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use clj_reader::{EvalReadError, ReadCond, Reader, ReaderError, ReaderOpts};
 use clj_value::{ExtensionValue, ThrowClass, Value};
 
-use crate::core::{cce_err, cce_message, print_opts};
+use crate::core::{cce_err, cce_message};
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
 use crate::lazy::realize_deep;
@@ -496,8 +496,12 @@ fn print_impl(
 ) -> Result<Value, NativeError> {
     // Eager validation first (limits CCE before anything realizes
     // or writes, as before).
-    let opts = print_opts(eval, readably)?;
-    if print_scalars(eval, args, &opts, ln)? {
+    let snap = eval.print_snap()?;
+    let mut opts = snap.opts.clone();
+    if let Some(r) = readably {
+        opts.readably = r;
+    }
+    if print_scalars(eval, args, &opts, &snap, ln)? {
         return Ok(Value::Nil);
     }
     let mut vals = Vec::with_capacity(args.len());
@@ -542,20 +546,20 @@ fn print_scalars(
     eval: &mut Evaluator,
     args: &[Value],
     opts: &clj_value::PrintOpts,
+    snap: &crate::eval::PrintSnap,
     ln: bool,
 ) -> Result<bool, NativeError> {
     let plain = !args.is_empty() && args.iter().all(is_print_scalar);
-    if !plain || !eval.print_defaults_only || deref_core(eval, "*print-dup*").is_truthy() {
+    if !plain || !eval.print_defaults_only || snap.dup {
         return Ok(false);
     }
-    let out = deref_core(eval, "*out*");
-    check_writer(&out)?;
+    check_writer(&snap.out)?;
     let line = scalar_line(args, opts, ln);
     {
         let _emission = EmissionGuard::acquire();
-        write_to_writer(&out, &line)?;
+        write_to_writer(&snap.out, &line)?;
     }
-    if ln && deref_core(eval, "*flush-on-newline*").is_truthy() {
+    if ln && snap.flush {
         flush_out(eval)?;
     }
     Ok(true)

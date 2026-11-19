@@ -504,6 +504,14 @@ The corpus file `print_collections.clj` pins nested shapes, records, sorted and 
 
 Measured on macOS, instructions per call: `prn` of a 5-item vector into `with-out-str` 31.1K → 17.9K; `prn` of a map 39.5K → 29.1K (kernel `write` included).
 
+### 6.31 Slice 4z: print settings read once per binding state
+
+Even on the scalar path, a `println` still read nine core vars: the six behind `print_opts`, plus `*print-dup*`, `*out*` and `*flush-on-newline*`. On Linux that was about 950 of its 2690 instructions (`deref_core` and the cache slot lookup). Each collection level read the six again.
+
+The evaluator keeps a `PrintSnap`: the validated print options, `*print-dup*`, `*out*` and `*flush-on-newline*`, stamped with the lineage epoch and the binding version it was read under. Every binding push, pop and `set!` bumps the version, and every root write bumps the epoch, so a matching stamp means the vars still hold those values. `print_opts` and the scalar print path take the snapshot. A stale stamp reads afresh and keeps the result. An invalid `*print-length*` or `*print-level*` is never kept, so it errors on every call as before. `pr-on`'s own `*print-dup*` read is unchanged, so a user `print-method` that ignores the print options sees no new error.
+
+Measured on macOS, instructions per call: `println` of a long 18.0K → 16.6K; `prn` of a 3-item vector 25.6K → 23.5K (kernel `write` included). A print inside `with-out-str` rebinds `*out*` each time, so it misses: 9.2K → 9.5K. No snippet uses `with-out-str`.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

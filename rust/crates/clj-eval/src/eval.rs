@@ -195,6 +195,21 @@ pub(crate) struct LazyHooks {
     pub(crate) eval_expr: fn(&mut Evaluator, &Expr, &crate::env::Env) -> Result<Value, Signal>,
 }
 
+/// The print settings every `print`/`prn` reads (#271), as of a lineage
+/// epoch and binding version: [`crate::core::print_opts`] and the
+/// `*out*`/`*print-dup*`/`*flush-on-newline*` reads without nine core
+/// reads per call while neither moves (every binding push, pop and `set!`
+/// bumps the version; root writes bump the epoch).
+#[derive(Clone)]
+pub(crate) struct PrintSnap {
+    epoch: u64,
+    bindings: u64,
+    pub(crate) opts: clj_value::PrintOpts,
+    pub(crate) dup: bool,
+    pub(crate) out: Value,
+    pub(crate) flush: bool,
+}
+
 /// [`Evaluator::core_read`]'s cache: `(name, var id or none, root once
 /// read)` per probed `clojure.core` name, under the lineage epoch it
 /// was filled in, plus each name address's position in it (#271: the
@@ -304,6 +319,7 @@ pub struct Evaluator {
     /// and roots (#271: printing reads ~13 settings vars by name per
     /// call).
     core_reads: std::sync::Mutex<CoreReads>,
+    print_snap: std::sync::Mutex<Option<PrintSnap>>,
     /// The VM's per-site caches (`vm` numbers its global reads and
     /// direct calls): a value or a validation verdict, valid while
     /// both the lineage epoch and the bindings version match.
@@ -430,6 +446,7 @@ impl Evaluator {
             vm_direct: Vec::new(),
             root_epoch: 0,
             core_reads: std::sync::Mutex::default(),
+            print_snap: std::sync::Mutex::new(None),
             call_depth: 0,
             recur_pool: Vec::new(),
             eager_tier: false,
@@ -490,6 +507,7 @@ impl Evaluator {
             vm_direct: Vec::new(),
             root_epoch: self.registry.epoch(),
             core_reads: std::sync::Mutex::default(),
+            print_snap: std::sync::Mutex::new(None),
             // A fork starts unwound (its stack is its own).
             call_depth: 0,
             // A fork starts with an empty pool (buffers never
@@ -1274,6 +1292,33 @@ impl Evaluator {
             (self.registry).root_or_unbound(*id, &Symbol::new(Some("clojure.core"), name))
         })
         .clone()
+    }
+
+    /// The current print settings ([`PrintSnap`]): the stamped copy while
+    /// the epoch and binding version hold, else read fresh and kept (an
+    /// invalid `*print-length*`/`*print-level*` errors on every call).
+    pub(crate) fn print_snap(&self) -> Result<PrintSnap, NativeError> {
+        let (epoch, bindings) = (self.registry.epoch(), self.bindings.version());
+        {
+            let held = self.print_snap.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = held
+                .as_ref()
+                .filter(|s| s.epoch == epoch && s.bindings == bindings);
+            if let Some(s) = fresh {
+                return Ok(s.clone());
+            }
+        }
+        let opts = crate::core::read_print_opts(self)?;
+        let snap = PrintSnap {
+            epoch,
+            bindings,
+            dup: opts.dup,
+            opts,
+            out: self.core_read("*out*"),
+            flush: self.core_read("*flush-on-newline*").is_truthy(),
+        };
+        *self.print_snap.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap.clone());
+        Ok(snap)
     }
 
     /// `clojure.core/<name>`'s var id (`None` when there is no such var),

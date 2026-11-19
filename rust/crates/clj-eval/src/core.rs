@@ -2726,11 +2726,21 @@ pub fn print_opts(
     eval: &Evaluator,
     readably: Option<bool>,
 ) -> Result<clj_value::PrintOpts, NativeError> {
+    let mut opts = eval.print_snap()?.opts;
+    if let Some(r) = readably {
+        opts.readably = r;
+    }
+    Ok(opts)
+}
+
+/// [`print_opts`] read from the vars (the bound `*print-readably*`), for
+/// [`Evaluator::print_snap`] to keep.
+pub(crate) fn read_print_opts(eval: &Evaluator) -> Result<clj_value::PrintOpts, NativeError> {
     Ok(clj_value::PrintOpts {
         length: print_limit(&deref_core(eval, "*print-length*"), false)?,
         level: print_limit(&deref_core(eval, "*print-level*"), true)?,
         namespace_maps: deref_core(eval, "*print-namespace-maps*").is_truthy(),
-        readably: readably.unwrap_or_else(|| deref_core(eval, "*print-readably*").is_truthy()),
+        readably: deref_core(eval, "*print-readably*").is_truthy(),
         meta: deref_core(eval, "*print-meta*").is_truthy(),
         dup: deref_core(eval, "*print-dup*").is_truthy(),
         str_form: false,
