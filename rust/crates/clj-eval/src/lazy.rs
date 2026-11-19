@@ -3652,7 +3652,8 @@ fn first_direct_extension(v: &Value) -> Option<Value> {
 fn first_direct(v: &Value) -> Option<Value> {
     match v {
         Value::List(l) => Some(l.first().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(x) => Some(x.iter().next().unwrap_or(Value::Nil)),
+        // An indexed read: no trie iterator built for one item (#271).
+        Value::Vector(x) => Some(x.get(0).unwrap_or(Value::Nil)),
         Value::MapEntry { key, .. } => Some((**key).clone()),
         Value::Map(m) => Some(
             m.iter()

@@ -1148,9 +1148,16 @@ pub(crate) fn native_sort_owned(
     match comp {
         None => sort_default(&mut items)?,
         Some(comp) => {
+            // #271: the booted `compare` as `jvm_compare`, any other
+            // comparator through its prepared entry.
+            let prepared = crate::vm::Prepared::of(&comp, 2);
+            let default_compare = is_core_fn(&comp, "clojure.core/compare");
             sort_by_checked(&mut items, |a, b| {
-                let r = call_checked(eval, &comp, &[a.clone(), b.clone()])?;
-                afunction_order(r, || call_checked(eval, &comp, &[b.clone(), a.clone()]))
+                if default_compare {
+                    return crate::core::jvm_compare(a, b);
+                }
+                let r = sort_cmp(eval, prepared.as_ref(), &comp, a, b)?;
+                afunction_order(r, || sort_cmp(eval, prepared.as_ref(), &comp, b, a))
             })?;
         }
     }
@@ -1187,13 +1194,22 @@ pub(crate) fn native_sort_by_owned(
     let coll_idx = if args.len() == 2 { 1 } else { 2 };
     let coll = take_walk_coll(&mut args, coll_idx);
     let mut items = collect_all(eval, coll).map_err(signal_to_native)?;
+    // #271: the keyfn through its prepared entry, and the booted
+    // `compare` as `jvm_compare` itself (each was a checked general
+    // call, three per comparison).
+    let key = crate::vm::Prepared::of(&keyfn, 1);
+    let cmp = crate::vm::Prepared::of(&comp, 2);
+    let default_compare = is_core_fn(&comp, "clojure.core/compare");
     sort_by_checked(&mut items, |a, b| {
         // `(comp (keyfn x) (keyfn y))` directly (the keyfn runs per
         // comparison; no int mapping).
-        let ka = call_checked(eval, &keyfn, std::slice::from_ref(a))?;
-        let kb = call_checked(eval, &keyfn, std::slice::from_ref(b))?;
-        let r = call_checked(eval, &comp, &[ka.clone(), kb.clone()])?;
-        afunction_order(r, || call_checked(eval, &comp, &[kb, ka]))
+        let ka = sort_key(eval, key.as_ref(), &keyfn, a)?;
+        let kb = sort_key(eval, key.as_ref(), &keyfn, b)?;
+        if default_compare {
+            return crate::core::jvm_compare(&ka, &kb);
+        }
+        let r = sort_cmp(eval, cmp.as_ref(), &comp, &ka, &kb)?;
+        afunction_order(r, || sort_cmp(eval, cmp.as_ref(), &comp, &kb, &ka))
     })?;
     if items.is_empty() {
         return Ok(empty_list_value());
@@ -1205,6 +1221,44 @@ pub(crate) fn native_sort_by_owned(
         false,
         clj_value::SeqKind::Array,
     ))
+}
+
+/// `(keyfn x)` for `sort-by`: the prepared callee when the keyfn has one
+/// (a native or a fixed-arity closure), else the checked general call
+/// (keywords, maps, and the `IFn` error).
+fn sort_key(
+    eval: &mut Evaluator,
+    key: Option<&crate::vm::Prepared<'_>>,
+    keyfn: &Value,
+    x: &Value,
+) -> Result<Value, NativeError> {
+    match key {
+        Some(p) => p.call1(eval, x.clone()).map_err(signal_to_native),
+        None => call_checked(eval, keyfn, std::slice::from_ref(x)),
+    }
+}
+
+/// `(comp a b)` for the sorts: the prepared callee when there is one, else
+/// the checked general call.
+fn sort_cmp(
+    eval: &mut Evaluator,
+    p: Option<&crate::vm::Prepared<'_>>,
+    comp: &Value,
+    a: &Value,
+    b: &Value,
+) -> Result<Value, NativeError> {
+    match p {
+        Some(p) => p
+            .call2(eval, a.clone(), b.clone())
+            .map_err(signal_to_native),
+        None => call_checked(eval, comp, &[a.clone(), b.clone()]),
+    }
+}
+
+/// Whether `f` is the booted native named `display` (a rebound var holds
+/// something else).
+fn is_core_fn(f: &Value, display: &str) -> bool {
+    crate::ext::as_native(f).is_some_and(|n| &*n.display == display)
 }
 
 fn native_dorun(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

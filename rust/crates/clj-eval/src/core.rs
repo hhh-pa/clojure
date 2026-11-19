@@ -1485,7 +1485,13 @@ fn compare_vectors(
     if a.len() != b.len() {
         return Ok(a.len().cmp(&b.len()));
     }
-    for (u, v) in a.iter().zip(b.iter()) {
+    // Indexed reads (#271): sort keys are short tuples, where building
+    // two trie iterators per compare cost more than the items.
+    for i in 0..a.len() {
+        let (u, v) = (
+            a.get(i).unwrap_or(Value::Nil),
+            b.get(i).unwrap_or(Value::Nil),
+        );
         match jvm_compare(&u, &v)? {
             Ordering::Equal => {}
             ord => return Ok(ord),

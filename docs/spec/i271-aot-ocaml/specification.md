@@ -481,6 +481,19 @@ These are now VM inline ops, which the AOT's slow path reaches through `rt_n_op1
 
 The corpus file `core_inline_ops.clj` pins the wrapping edges, double operands, every derefable, the `char` range errors and mixed compares against `run` and the previous binary.
 
+### 6.29 Slice 4x: sorts call their functions directly
+
+`sort` with a comparator and `sort-by` made a checked general call (`check_ifn`, then `Evaluator::invoke`) for every key function and comparator call: three per comparison for `sort-by`. On Linux, `(sort-by first ts)` over 50 tuples cost 351K instructions.
+
+- The key function and any comparator go through their prepared entry (`vm::Prepared`: a native, or a closure of that fixed arity). Keywords, maps, vars and other callees keep the checked general call.
+- The booted `compare` (the native itself; a rebound var holds something else) orders through `jvm_compare` directly.
+- The key function still runs twice per comparison and the comparator once, as on the JVM. The corpus pins the call counts.
+- `first` of a vector and `compare_vectors` read items by index instead of building a trie iterator per call.
+
+The corpus file `sort_calls.clj` pins key functions (natives, closures, keywords, `juxt`), boolean and three-way comparators, var comparators, the error cases and the call counts against `run` and the previous binary.
+
+Measured on macOS, instructions per element: `sort >` 5665 → 2464; `sort-by` on a keyword key 1183 → 800; `sort-by first` on tuples 8442 → 4763; `sort-by` with a closure key 1502 → 1078.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
