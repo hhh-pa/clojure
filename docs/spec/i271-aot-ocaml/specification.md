@@ -282,6 +282,15 @@ The first suspect was the generator's name filter. `aot_order.py` kept only Rust
 
 Both orders come from the same 30 workload profiles. The one remaining difference is the layout: the committed order lists functions by how many workloads run them (`hot_text.py`), while `aot_order.py` packed 62 KiB windows of co-used functions. `regen-aot.sh` therefore lays out with `hot_text.py` itself, and `aot_order.py` is gone. The next h2h checks the result.
 
+**Third correction: coverage, not layout.** With `hot_text.py` itself, the h2h for fdc5a900 gave MEM 1037/612/94 (AOT median 2976 KB). After the next runtime slices, dd228091 dropped to 627/857/259 (3176 KB), while the master leg without an order stayed at 7196 KB. On macOS, which links no order, the worst-hit scripts used the same or less RSS at dd228091. The jump was text pages, not heap.
+
+Two fork probes on Linux (generic programs, no snippet inputs) settled the cause:
+
+- **Revision by order.** On the i259 corpus programs, dd228091 with a fresh order (2968 KB median) matched 90509c29 with its own orders (2996 fresh, 2968 committed). Code growth alone cost about 120 KB (3680 → 3800 KB with no order).
+- **Held-out training.** Orders trained on the workloads alone, and on the workloads plus half of the corpus, were measured on the other half of the corpus, which neither saw. The wider training cut median peak RSS by 508 KB there (p10 −576, p90 −256). It cost 62 KB on the workloads themselves.
+
+The snippets run runtime paths the 30 workloads never reach. Each such function sits in the cold text and faults in its own 64 KiB window. `regen-aot.sh` now also profiles the compiler's test corpus (`docs/spec/i259-native-compiler/corpus`, empty stdin): generic programs, still never the benchmark snippets or their inputs.
+
 **CI keeps it fresh.**
 
 - The h2h workflow's `hot-text` job regenerates each side's order (aot-from, aot-to) once, using this run's tooling and workloads, and the 32 measure shards link with it.

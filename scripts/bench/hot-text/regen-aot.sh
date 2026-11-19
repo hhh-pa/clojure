@@ -9,9 +9,14 @@
 # job of h2h-cpu-mem.yml).
 #
 # Training set: this directory's workloads/*.clj (empty stdin) and
-# aot-workloads/*.clj (stdin from NAME.in). These are small generic
+# aot-workloads/*.clj (stdin from NAME.in), plus the native compiler's
+# test corpus, docs/spec/i259-native-compiler/corpus/*.clj (empty stdin;
+# programs that do not build or that fail are skipped). These are generic
 # programs, never the benchmark snippets or their inputs, so the order
-# follows the runtime's own hot paths, whatever program links it.
+# follows the runtime's own hot paths, whatever program links it. The
+# corpus widens what the order covers: held out of training, half of it
+# measured 508 KB lower median peak RSS with an order trained on the
+# workloads and the other half than with the workloads alone (#271).
 #
 # Profiles: callgrind of each workload compiled against the revision's
 # runtime, linked with an empty order (callgrind attributes the
@@ -65,6 +70,16 @@ for w in "$here"/workloads/*.clj "$here"/aot-workloads/*.clj; do
   }
   echo "   $name"
 done
+
+echo "== profile the compiler corpus"
+corpus=$(cd "$here/../../../docs/spec/i259-native-compiler/corpus" && pwd)
+for c in "$corpus"/*.clj; do
+  name=corpus-$(basename "$c" .clj)
+  "$compiler" build "$c" -o "$work/prog" > /dev/null 2>&1 || continue
+  valgrind --tool=callgrind --demangle=no --dump-instr=no \
+    --callgrind-out-file="$work/cg/$name.cg" "$work/prog" < /dev/null > /dev/null 2>&1 || true
+done
+echo "   $(ls "$work"/cg/corpus-*.cg 2> /dev/null | wc -l) corpus profiles"
 
 echo "== order"
 python3 "$here/hot_text.py" "$work/prog" "$work/new.ld" "$work"/cg/*.cg
