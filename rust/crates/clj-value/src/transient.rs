@@ -90,6 +90,7 @@ const PACK_STR_MIN: usize = 256;
 #[derive(Clone, Debug)]
 enum TransientItems {
     Ints(Vec<i64>),
+    Doubles(Vec<f64>),
     Chars(Vec<char>),
     Strs(PackedStrings),
     Generic(Vec<Value>),
@@ -139,8 +140,26 @@ fn put_ints(x: &mut Vec<i64>, idx: usize, v: Value) -> Option<TransientItems> {
             put_at(x, idx, n);
             None
         }
+        Value::Double(d) if x.is_empty() => Some(TransientItems::Doubles(vec![d])),
         Value::Char(c) if x.is_empty() => Some(TransientItems::Chars(vec![c])),
         v => Some(TransientItems::Generic(boxed_with(x, Value::Int, idx, v))),
+    }
+}
+
+fn put_doubles(x: &mut Vec<f64>, idx: usize, v: Value) -> Option<TransientItems> {
+    match v {
+        Value::Double(d) => {
+            put_at(x, idx, d);
+            None
+        }
+        Value::Int(n) if x.is_empty() => Some(TransientItems::Ints(vec![n])),
+        Value::Char(c) if x.is_empty() => Some(TransientItems::Chars(vec![c])),
+        v => Some(TransientItems::Generic(boxed_with(
+            x,
+            Value::Double,
+            idx,
+            v,
+        ))),
     }
 }
 
@@ -151,6 +170,7 @@ fn put_chars(x: &mut Vec<char>, idx: usize, v: Value) -> Option<TransientItems> 
             None
         }
         Value::Int(n) if x.is_empty() => Some(TransientItems::Ints(vec![n])),
+        Value::Double(d) if x.is_empty() => Some(TransientItems::Doubles(vec![d])),
         v => Some(TransientItems::Generic(boxed_with(x, Value::Char, idx, v))),
     }
 }
@@ -177,6 +197,7 @@ impl TransientItems {
         let converted = match self {
             TransientItems::Generic(x) => put_generic(x, idx, v),
             TransientItems::Ints(x) => put_ints(x, idx, v),
+            TransientItems::Doubles(x) => put_doubles(x, idx, v),
             TransientItems::Chars(x) => put_chars(x, idx, v),
             TransientItems::Strs(ps) => put_strs(ps, idx, v),
         };
@@ -189,6 +210,7 @@ impl TransientItems {
     fn len(&self) -> usize {
         match self {
             TransientItems::Ints(x) => x.len(),
+            TransientItems::Doubles(x) => x.len(),
             TransientItems::Chars(x) => x.len(),
             TransientItems::Strs(ps) => ps.len(),
             TransientItems::Generic(x) => x.len(),
@@ -246,6 +268,7 @@ impl TransientVector {
     pub fn from_vector(v: &Vector) -> Self {
         let items = match v.typed_items() {
             Some(crate::value::TypedItems::Ints(x)) => TransientItems::Ints(x),
+            Some(crate::value::TypedItems::Doubles(x)) => TransientItems::Doubles(x),
             Some(crate::value::TypedItems::Chars(x)) => TransientItems::Chars(x),
             Some(crate::value::TypedItems::Strs(ps)) => TransientItems::Strs(ps),
             None => TransientItems::Generic(v.iter().collect()),
@@ -259,6 +282,7 @@ impl TransientVector {
     pub fn from_vector_owned(v: Vector) -> Self {
         let items = match v.into_typed_items() {
             Ok(crate::value::TypedItems::Ints(x)) => TransientItems::Ints(x),
+            Ok(crate::value::TypedItems::Doubles(x)) => TransientItems::Doubles(x),
             Ok(crate::value::TypedItems::Chars(x)) => TransientItems::Chars(x),
             Ok(crate::value::TypedItems::Strs(ps)) => TransientItems::Strs(ps),
             Err(v) => TransientItems::Generic(v.into_vec()),
@@ -289,6 +313,7 @@ impl TransientVector {
         self.check()?;
         let empty = match &mut self.items {
             TransientItems::Ints(x) => x.pop().is_none(),
+            TransientItems::Doubles(x) => x.pop().is_none(),
             TransientItems::Chars(x) => x.pop().is_none(),
             TransientItems::Strs(ps) => !ps.pop(),
             TransientItems::Generic(x) => x.pop().is_none(),
@@ -345,6 +370,7 @@ impl TransientVector {
         self.check()?;
         Ok(match &self.items {
             TransientItems::Ints(x) => x.get(idx).map(|n| Value::Int(*n)),
+            TransientItems::Doubles(x) => x.get(idx).map(|d| Value::Double(*d)),
             TransientItems::Chars(x) => x.get(idx).map(|c| Value::Char(*c)),
             TransientItems::Strs(ps) => ps.get_str(idx).map(|s| Value::Str(Arc::from(s))),
             TransientItems::Generic(x) => x.get(idx).cloned(),
@@ -364,8 +390,7 @@ impl TransientVector {
         Ok(self.len()? == 0)
     }
 
-    /// Whether the buffer is still packed (all-`Int` or all-char so
-    /// far).
+    /// Whether the buffer is still packed (all-`Int`, all-`Double`, all-char, or all-`Str`).
     #[must_use]
     /// Read index `idx` (`None` past the end or when invalidated).
     #[inline(always)]
@@ -375,6 +400,7 @@ impl TransientVector {
         }
         match &self.items {
             TransientItems::Ints(x) => x.get(idx).map(|n| Value::Int(*n)),
+            TransientItems::Doubles(x) => x.get(idx).map(|d| Value::Double(*d)),
             TransientItems::Chars(x) => x.get(idx).map(|c| Value::Char(*c)),
             TransientItems::Strs(ps) => ps.get_str(idx).map(|s| Value::Str(Arc::from(s))),
             TransientItems::Generic(x) => x.get(idx).cloned(),
@@ -392,6 +418,7 @@ impl TransientVector {
         }
         match &self.items {
             TransientItems::Ints(x) => f(&Value::Int(*x.get(idx)?)),
+            TransientItems::Doubles(x) => f(&Value::Double(*x.get(idx)?)),
             TransientItems::Chars(x) => f(&Value::Char(*x.get(idx)?)),
             TransientItems::Strs(ps) => f(&Value::Str(Arc::from(ps.get_str(idx)?))),
             TransientItems::Generic(x) => f(x.get(idx)?),
@@ -408,6 +435,7 @@ impl TransientVector {
         }
         match &self.items {
             TransientItems::Ints(x) => x.get(idx).copied().map(crate::ValueRef::Int),
+            TransientItems::Doubles(x) => x.get(idx).copied().map(crate::ValueRef::Double),
             TransientItems::Chars(x) => x.get(idx).copied().map(crate::ValueRef::Char),
             TransientItems::Strs(ps) => ps.get_str(idx).map(crate::ValueRef::Str),
             TransientItems::Generic(x) => x.get(idx).map(crate::ValueRef::Ref),
@@ -522,16 +550,33 @@ impl TransientVector {
         false
     }
 
-    /// Overwrite an existing `Double` slot in bounds (`false` when out of
-    /// bounds, non-generic buffer, non-double slot, or invalidated; zero
-    /// allocation, zero drop glue, panic-free for `clj-bc` bitcode).
+    /// Append a `Double` only when packed `Doubles` already has spare
+    /// capacity (`false` when reallocation, non-double buffer, or
+    /// invalidation occurs; zero allocation and panic-free for `clj-bc`).
+    #[inline(always)]
+    pub fn conj_double_no_grow(&mut self, d: f64) -> bool {
+        if !self.valid {
+            return false;
+        }
+        if let TransientItems::Doubles(x) = &mut self.items {
+            if x.len() < x.capacity() {
+                x.push(d);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Overwrite an existing packed `Double` slot in bounds (`false` when out
+    /// of bounds, non-double buffer, or invalidated; zero allocation, zero drop
+    /// glue, panic-free for `clj-bc` bitcode).
     #[inline(always)]
     pub fn assoc_double_in_bounds(&mut self, idx: usize, d: f64) -> bool {
         if !self.valid {
             return false;
         }
-        if let TransientItems::Generic(x) = &mut self.items {
-            if let Some(Value::Double(slot)) = x.get_mut(idx) {
+        if let TransientItems::Doubles(x) = &mut self.items {
+            if let Some(slot) = x.get_mut(idx) {
                 *slot = d;
                 return true;
             }
@@ -551,6 +596,18 @@ impl TransientVector {
         }
     }
 
+    /// Borrow the packed `f64` slice mutably when valid and packed-`Double`.
+    #[inline(always)]
+    pub fn doubles_mut(&mut self) -> Option<&mut [f64]> {
+        if !self.valid {
+            return None;
+        }
+        match &mut self.items {
+            TransientItems::Doubles(x) => Some(x.as_mut_slice()),
+            _ => None,
+        }
+    }
+
     /// Pop the last item from a packed scalar buffer (`false` when
     /// empty, generic, or invalidated; touches no `Value` drop glue).
     #[inline(always)]
@@ -560,6 +617,7 @@ impl TransientVector {
         }
         match &mut self.items {
             TransientItems::Ints(x) => x.pop().is_some(),
+            TransientItems::Doubles(x) => x.pop().is_some(),
             TransientItems::Chars(x) => x.pop().is_some(),
             TransientItems::Strs(_) | TransientItems::Generic(_) => false,
         }
@@ -581,6 +639,10 @@ impl TransientVector {
             TransientItems::Ints(mut x) => {
                 shed_slack(&mut x);
                 Vector::from_flat_ints(x)
+            }
+            TransientItems::Doubles(mut x) => {
+                shed_slack(&mut x);
+                Vector::from_flat_doubles(x)
             }
             TransientItems::Chars(mut x) => {
                 shed_slack(&mut x);
@@ -1095,6 +1157,25 @@ impl TransientLock {
         pair
     }
 
+    /// Acquire the lock and return the raw `(ptr, len)` of a valid,
+    /// non-empty packed-`Double` transient vector, holding the lock until
+    /// [`unlock_raw`](Self::unlock_raw).
+    #[inline]
+    pub fn lock_doubles_ptr(&self) -> Option<(*mut f64, usize)> {
+        let mut guard = self.lock();
+        let pair = match &mut *guard {
+            TransientKind::Vector(tv) => tv
+                .doubles_mut()
+                .filter(|s| !s.is_empty())
+                .map(|s| (s.as_mut_ptr(), s.len())),
+            _ => None,
+        };
+        if pair.is_some() {
+            std::mem::forget(guard);
+        }
+        pair
+    }
+
     /// Release a lock previously acquired via [`lock_ints_ptr`](Self::lock_ints_ptr).
     #[inline]
     pub fn unlock_raw(&self) {
@@ -1192,6 +1273,14 @@ impl Transient {
     #[inline]
     pub fn lock_ints_ptr(&self) -> Option<(*mut i64, usize)> {
         self.cell.lock_ints_ptr()
+    }
+
+    /// Acquire the buffer lock and return the raw `(ptr, len)` of a valid
+    /// packed-`Double` transient vector, holding the lock until
+    /// [`unlock_raw`](Self::unlock_raw).
+    #[inline]
+    pub fn lock_doubles_ptr(&self) -> Option<(*mut f64, usize)> {
+        self.cell.lock_doubles_ptr()
     }
 
     /// Release a lock previously acquired via [`lock_ints_ptr`](Self::lock_ints_ptr).
@@ -1600,19 +1689,83 @@ mod tests {
         let tv_owned = TransientVector::from_vector_owned(frozen);
         assert!(tv_owned.is_packed());
 
-        // assoc_double_in_bounds: generic double slot hit; OOB, non-double, packed, invalid miss
-        let mut tv_dbl = TransientVector::from_vector(&crate::Vector::from_vec(vec![
+        // Packed Double transient vector: retyping, ops, widening, fast bitcode helpers, lock
+        let mut tv_from_empty = TransientVector::new();
+        tv_from_empty.conj(Value::Double(1.0)).unwrap();
+        tv_from_empty.conj(Value::Double(2.0)).unwrap();
+        assert_eq!(tv_from_empty.len().unwrap(), 2);
+        assert_eq!(tv_from_empty.nth(0).unwrap(), Some(Value::Double(1.0)));
+        assert_eq!(tv_from_empty.nth_opt(1), Some(Value::Double(2.0)));
+        assert_eq!(
+            tv_from_empty.read_at(0, |v| Some(v.clone())),
+            Some(Value::Double(1.0))
+        );
+        assert!(matches!(
+            tv_from_empty.get_val_ref(1),
+            Some(crate::ValueRef::Double(x)) if x == 2.0
+        ));
+        assert!(tv_from_empty.doubles_mut().is_some());
+        assert!(tv_from_empty.assoc_double_in_bounds(0, 3.5));
+        assert_eq!(tv_from_empty.nth(0).unwrap(), Some(Value::Double(3.5)));
+        assert!(!tv_from_empty.assoc_double_in_bounds(9, 4.0));
+        assert!(tv_from_empty.pop_scalar_opt());
+        assert!(tv_from_empty.conj_double_no_grow(4.5));
+        tv_from_empty.pop().unwrap();
+        tv_from_empty.pop().unwrap();
+        assert!(tv_from_empty.pop().is_err());
+        // Empty Doubles retypes to Ints or Chars
+        tv_from_empty.conj(Value::Int(7)).unwrap();
+        assert!(tv_from_empty.ints_mut().is_some());
+
+        let mut tv_d_to_c = TransientVector::from_vector(&crate::Vector::from_doubles(vec![1.0]));
+        tv_d_to_c.pop().unwrap();
+        tv_d_to_c.conj(Value::Char('z')).unwrap();
+        tv_d_to_c.pop().unwrap();
+        // Empty Chars retypes to Doubles
+        tv_d_to_c.conj(Value::Double(2.25)).unwrap();
+        assert!(tv_d_to_c.doubles_mut().is_some());
+        // Non-empty Doubles widens to Generic on foreign item
+        tv_d_to_c.conj(Value::Int(9)).unwrap();
+        assert!(tv_d_to_c.doubles_mut().is_none());
+
+        // conj_double_no_grow misses: full capacity, non-double, invalid
+        let mut tv_full =
+            TransientVector::from_vector_owned(crate::Vector::from_doubles(vec![1.0, 2.0]));
+        assert!(tv_full.doubles_mut().is_some());
+        while tv_full.conj_double_no_grow(0.0) {}
+        assert!(!tv_full.conj_double_no_grow(0.0));
+        let frozen_d = tv_full.persistent().unwrap();
+        assert!(frozen_d.as_flat_doubles().is_some());
+        assert!(tv_full.doubles_mut().is_none());
+        assert!(!tv_full.conj_double_no_grow(1.0));
+        assert!(!tv_full.assoc_double_in_bounds(0, 5.0));
+
+        let mut tv_ints = TransientVector::from_vector(&crate::Vector::from_ints(vec![1, 2]));
+        assert!(!tv_ints.assoc_double_in_bounds(0, 1.0));
+        assert!(!tv_ints.conj_double_no_grow(1.0));
+        assert!(tv_ints.doubles_mut().is_none());
+        let mut tv_mixed = TransientVector::from_vector(&crate::Vector::from_vec(vec![
             Value::Double(1.0),
             Value::Int(2),
         ]));
-        assert!(tv_dbl.assoc_double_in_bounds(0, 3.5));
-        assert_eq!(tv_dbl.nth(0).unwrap(), Some(Value::Double(3.5)));
-        assert!(!tv_dbl.assoc_double_in_bounds(1, 4.0));
-        assert!(!tv_dbl.assoc_double_in_bounds(9, 4.0));
-        let _ = tv_dbl.persistent().unwrap();
-        assert!(!tv_dbl.assoc_double_in_bounds(0, 5.0));
-        let mut tv_ints = TransientVector::from_vector(&crate::Vector::from_ints(vec![1, 2]));
-        assert!(!tv_ints.assoc_double_in_bounds(0, 1.0));
+        assert!(!tv_mixed.assoc_double_in_bounds(0, 3.5));
+
+        // lock_doubles_ptr hit (non-empty Doubles) and misses (empty Doubles, Ints, Map)
+        let td = crate::Transient::new(crate::TransientKind::Vector(TransientVector::from_vector(
+            &crate::Vector::from_doubles(vec![1.5, 2.5]),
+        )));
+        let (dptr, dlen) = td.lock_doubles_ptr().expect("doubles lock");
+        assert!(!dptr.is_null());
+        assert_eq!(dlen, 2);
+        td.unlock_raw();
+        let td_empty = crate::Transient::new(crate::TransientKind::Vector({
+            let mut tv = TransientVector::from_vector(&crate::Vector::from_doubles(vec![1.0]));
+            tv.pop().unwrap();
+            tv
+        }));
+        assert!(td_empty.lock_doubles_ptr().is_none());
+        let tm = crate::Transient::new(crate::TransientKind::Map(crate::TransientMap::new()));
+        assert!(tm.lock_doubles_ptr().is_none());
 
         // push_tight 1.5x growth past 256 KiB via conj_int_opt and conj/put_at
         let mut tv_big_opt = TransientVector::new();

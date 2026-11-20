@@ -630,6 +630,7 @@ fn emit_stream_plain(
 enum StreamJoin<'a> {
     Packed(&'a clj_value::PackedStrings),
     Ints(&'a [i64]),
+    Doubles(&'a [f64]),
     Vals(&'a [Value]),
     Split(&'a clj_value::SplitVecValue),
 }
@@ -641,6 +642,9 @@ fn classify_stream_join(coll: &Value) -> Option<StreamJoin<'_>> {
         }
         if let Some(ints) = v.as_flat_ints() {
             return Some(StreamJoin::Ints(ints));
+        }
+        if let Some(dbls) = v.as_flat_doubles() {
+            return Some(StreamJoin::Doubles(dbls));
         }
         if let Some(xs) = v.as_flat_values() {
             if xs.iter().all(is_join_plain) {
@@ -717,6 +721,25 @@ fn stream_split_vec(
     Ok(())
 }
 
+fn stream_flat_doubles(
+    eval: &mut Evaluator,
+    out: &Value,
+    buf: &mut String,
+    sep: &str,
+    dbls: &[f64],
+) -> Result<(), NativeError> {
+    for (i, &d) in dbls.iter().enumerate() {
+        if i > 0 {
+            emit_stream_str(out, buf, sep)?;
+        }
+        crate::core::str_push(buf, eval, &Value::Double(d))?;
+        if buf.len() >= STREAM_CHUNK_BYTES {
+            flush_stream_buf(out, buf)?;
+        }
+    }
+    Ok(())
+}
+
 fn stream_join_kind(
     eval: &mut Evaluator,
     out: &Value,
@@ -727,6 +750,7 @@ fn stream_join_kind(
     match kind {
         StreamJoin::Packed(ps) => stream_packed_strs(out, buf, sep, ps),
         StreamJoin::Ints(ints) => stream_flat_ints(out, buf, sep, ints),
+        StreamJoin::Doubles(dbls) => stream_flat_doubles(eval, out, buf, sep, dbls),
         StreamJoin::Vals(xs) => stream_flat_values(eval, out, buf, sep, xs),
         StreamJoin::Split(sp) => stream_split_vec(out, buf, sep, sp),
     }
@@ -1252,6 +1276,15 @@ mod tests {
         assert!(hit);
         assert!(out.starts_with("0,1,2,3"));
         assert!(out.ends_with(",3999\n"));
+
+        // Flat doubles exceeding 16 KiB to exercise stream_flat_doubles and chunk flush
+        let dbls = Value::Vector(clj_value::Vector::from_flat_doubles(
+            (0..3500).map(|i| f64::from(i) + 0.5).collect(),
+        ));
+        let (hit, out) = run_stream(&mut eval, &comma, &dbls, 1);
+        assert!(hit);
+        assert!(out.starts_with("0.5,1.5,2.5"));
+        assert!(out.ends_with(",3499.5\n"));
 
         // Flat generic Values (all plain scalar kinds + >= 16 KiB flush in emit_stream_plain)
         let mut vals = vec![

@@ -1675,3 +1675,106 @@ fn native_emit_ir_streams_print_join_271() {
         "bitcode leaked a Rust panic symbol into emitted IR"
     );
 }
+
+#[test]
+fn native_emit_ir_packed_doubles_and_dtvec_271() {
+    let ir = tmp("native-packed-doubles.ll");
+    let src = "\
+(defn scan-max [q base na]
+  (loop [a 1 bv (nth q base)]
+    (if (>= a na)
+      bv
+      (let [v (nth q (+ base a))]
+        (recur (inc a) (if (> v bv) v bv))))))
+
+(defn update-dtvec [q n]
+  (loop [i 0 acc 0.0]
+    (if (< i n)
+      (let [v (+ (nth q i) acc)]
+        (assoc! q i v)
+        (recur (inc i) (+ acc 0.5)))
+      acc)))
+
+(defn grow-dtvec [q n x]
+  (loop [i 0 acc (double x)]
+    (if (< i n)
+      (do
+        (conj! q acc)
+        (assoc! q 0 acc)
+        (recur (inc i) (+ acc 1.0)))
+      acc)))
+
+(defn pure-int-dec [xs n]
+  (loop [j (dec n) acc 0]
+    (if (< j 0)
+      acc
+      (recur (dec j) (+ acc (nth xs j))))))
+
+(defn init-dbl-lit [xs n]
+  (loop [i 0 cur 0.0]
+    (if (< i n)
+      (recur (inc i) (nth xs i))
+      cur)))
+
+(let [tv (transient [1.0 2.0 3.0])]
+  (println (scan-max tv 0 3) (update-dtvec tv 3) (grow-dtvec tv 2 1) (pure-int-dec [1 2 3] 3) (init-dbl-lit [1.0 2.0] 2)))
+";
+    clj_aot::build_str(
+        src,
+        "f.clj",
+        &tmp("nope-packed-doubles"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+
+    let scan_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_scan_max("))
+        .expect("scan_max");
+    assert!(scan_body.contains("sc_nth_dvec"), "{scan_body}");
+    assert!(
+        scan_body.contains("rt_bc_scalar_dvec") || scan_body.contains("sc_dtv_try"),
+        "{scan_body}"
+    );
+
+    let upd_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_update_dtvec("))
+        .expect("update_dtvec");
+    assert!(upd_body.contains("rt_bc_scalar_dtvec_lock"), "{upd_body}");
+    assert!(upd_body.contains("sc_assoc_dchk"), "{upd_body}");
+    assert!(upd_body.contains("sc_assoc_tryd"), "{upd_body}");
+
+    let grow_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_grow_dtvec("))
+        .expect("grow_dtvec");
+    assert!(grow_body.contains("sc_conj_tryd"), "{grow_body}");
+    assert!(grow_body.contains("sc_assoc_tryd"), "{grow_body}");
+
+    let pure_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_pure_int_dec("))
+        .expect("pure_int_dec");
+    assert!(!pure_body.contains("sc_nth_dvec"), "{pure_body}");
+    assert!(!pure_body.contains("sc_dtv_try"), "{pure_body}");
+    assert!(!pure_body.contains("sc_assoc_dfast"), "{pure_body}");
+
+    let init_dbl_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_init_dbl_lit("))
+        .expect("init_dbl_lit");
+    assert!(init_dbl_body.contains("sc_nth_dvec"), "{init_dbl_body}");
+
+    assert!(
+        !text.contains("slice_error_fail") && !text.contains("9panicking"),
+        "bitcode leaked a Rust panic symbol into emitted IR"
+    );
+}

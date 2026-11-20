@@ -1315,6 +1315,9 @@ pub(crate) fn jvm_compare(x: &Value, y: &Value) -> Result<std::cmp::Ordering, Na
     if let Some(ord) = compare_long_double(x, y) {
         return Ok(ord);
     }
+    if let (Value::Vector(a), Value::Vector(b)) = (x, y) {
+        return compare_vectors(a, b);
+    }
     if let Some(ord) = compare_nil(x, y) {
         return Ok(ord);
     }
@@ -1420,7 +1423,6 @@ fn compare_same_type(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>,
         (Value::Bool(a), Value::Bool(b)) => Ok(Some(a.cmp(b))),
         (Value::Keyword(a), Value::Keyword(b)) => Ok(Some(compare_named(a, b))),
         (Value::Symbol(a), Value::Symbol(b)) => Ok(Some(compare_named(a, b))),
-        (Value::Vector(a), Value::Vector(b)) => Ok(Some(compare_vectors(a, b)?)),
         // S9 scalars order within their kind (the port takes the
         // sign; the JVM returns raw `compareTo` ints).
         (Value::Uuid(_), Value::Uuid(_))
@@ -1485,8 +1487,21 @@ fn compare_vectors(
     if a.len() != b.len() {
         return Ok(a.len().cmp(&b.len()));
     }
-    // Indexed reads (#271): sort keys are short tuples, where building
-    // two trie iterators per compare cost more than the items.
+    if let (Some(xs), Some(ys)) = (a.as_flat_ints(), b.as_flat_ints()) {
+        return Ok(xs.cmp(ys));
+    }
+    if let (Some(xs), Some(ys)) = (a.as_flat_doubles(), b.as_flat_doubles()) {
+        return Ok(compare_f64_slices(xs, ys));
+    }
+    if let (Some(xs), Some(ys)) = (a.as_flat_values(), b.as_flat_values()) {
+        for (u, v) in xs.iter().zip(ys.iter()) {
+            match jvm_compare(u, v)? {
+                Ordering::Equal => {}
+                ord => return Ok(ord),
+            }
+        }
+        return Ok(Ordering::Equal);
+    }
     for i in 0..a.len() {
         let (u, v) = (
             a.get(i).unwrap_or(Value::Nil),
@@ -1498,6 +1513,19 @@ fn compare_vectors(
         }
     }
     Ok(Ordering::Equal)
+}
+
+fn compare_f64_slices(xs: &[f64], ys: &[f64]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for (&x, &y) in xs.iter().zip(ys.iter()) {
+        if x < y {
+            return Ordering::Less;
+        }
+        if x > y {
+            return Ordering::Greater;
+        }
+    }
+    Ordering::Equal
 }
 
 /// `x.compareTo(y)`: checkcast `y` to `x`'s class (vectors name
@@ -5666,5 +5694,40 @@ mod tests {
         // The fake itself runs (its body counts as covered code).
         let mut eval = Evaluator::new_bare("user");
         assert!(matches!(fake(&mut eval, &[]), Ok(Value::Nil)));
+    }
+
+    #[test]
+    fn compare_vectors_fast_and_fallback_paths_271() {
+        use std::cmp::Ordering;
+        let vi1 = Value::Vector(clj_value::Vector::from_ints(vec![1, 2]));
+        let vi2 = Value::Vector(clj_value::Vector::from_ints(vec![1, 3]));
+        let vi_short = Value::Vector(clj_value::Vector::from_ints(vec![9]));
+        assert_eq!(jvm_compare(&vi_short, &vi1).unwrap(), Ordering::Less);
+        assert_eq!(jvm_compare(&vi1, &vi2).unwrap(), Ordering::Less);
+        assert_eq!(jvm_compare(&vi1, &vi1).unwrap(), Ordering::Equal);
+
+        let vd1 = Value::Vector(clj_value::Vector::from_doubles(vec![1.0, 2.0]));
+        let vd2 = Value::Vector(clj_value::Vector::from_doubles(vec![1.0, 3.0]));
+        let vd0 = Value::Vector(clj_value::Vector::from_doubles(vec![1.0, 1.0]));
+        let vd_nan = Value::Vector(clj_value::Vector::from_doubles(vec![f64::NAN, 2.0]));
+        assert_eq!(jvm_compare(&vd1, &vd2).unwrap(), Ordering::Less);
+        assert_eq!(jvm_compare(&vd1, &vd0).unwrap(), Ordering::Greater);
+        assert_eq!(jvm_compare(&vd1, &vd1).unwrap(), Ordering::Equal);
+        assert_eq!(jvm_compare(&vd_nan, &vd1).unwrap(), Ordering::Equal);
+
+        let vg1 = Value::Vector(clj_value::Vector::from_vec(vec![
+            Value::Int(1),
+            vi1.clone(),
+        ]));
+        let vg2 = Value::Vector(clj_value::Vector::from_vec(vec![
+            Value::Int(1),
+            vi2.clone(),
+        ]));
+        assert_eq!(jvm_compare(&vg1, &vg2).unwrap(), Ordering::Less);
+        assert_eq!(jvm_compare(&vg1, &vg1).unwrap(), Ordering::Equal);
+
+        // Cross-representation fallback (Ints vs Doubles)
+        assert_eq!(jvm_compare(&vi1, &vd1).unwrap(), Ordering::Equal);
+        assert_eq!(jvm_compare(&vi1, &vd2).unwrap(), Ordering::Less);
     }
 }

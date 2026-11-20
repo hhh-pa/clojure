@@ -1206,17 +1206,24 @@ pub fn repack_own_args(id: u32, args: &mut smallvec::SmallVec<[Value; 4]>) {
     }
 }
 
-/// A compiled loop's direct iteration plan (#271 Slice 4c): `(1, count,
-/// 0, 0)` for a persistent vector (items by index, [`vec_item`]), `(2,
-/// count, start, step)` for a long range (items `start`, `start + step`,
-/// …). `None`: the loop takes the general call, which walks the seq
-/// exactly as `run` does (lazy forcing order included).
+/// A compiled loop's direct iteration plan (#271 Slice 4c/5k): `(1, count,
+/// 0, 0)` for a persistent vector, subvector, or split vector (items by
+/// index, [`vec_item`]), `(2, count, start, step)` for a long range (items
+/// `start`, `start + step`, …). `None`: the loop takes the general call,
+/// which walks the seq exactly as `run` does (lazy forcing order included).
 #[must_use]
 pub fn iter_plan(coll: &Value) -> Option<(u8, i64, i64, i64)> {
     match coll {
         Value::Vector(v) => Some((1, i64::try_from(v.len()).ok()?, 0, 0)),
         Value::Extension(e) => {
-            let r = e.as_any().downcast_ref::<clj_value::RangeValue>()?;
+            let any = e.as_any();
+            if let Some(sv) = any.downcast_ref::<clj_value::SubVectorValue>() {
+                return Some((1, i64::try_from(sv.len()).ok()?, 0, 0));
+            }
+            if let Some(sp) = any.downcast_ref::<clj_value::SplitVecValue>() {
+                return Some((1, i64::try_from(sp.len()).ok()?, 0, 0));
+            }
+            let r = any.downcast_ref::<clj_value::RangeValue>()?;
             match (r.is_long(), r.count(), r.cur(), r.step()) {
                 (true, Some(n), RangeNum::Int(start), RangeNum::Int(step)) => {
                     Some((2, n, start, step))
@@ -1228,46 +1235,85 @@ pub fn iter_plan(coll: &Value) -> Option<(u8, i64, i64, i64)> {
     }
 }
 
-/// Item `i` of persistent vector `v` (an index below [`iter_plan`]'s
-/// count; anything else is nil).
+/// Item `i` of an indexed vector/subvector/split-vector (an index below
+/// [`iter_plan`]'s count; anything else is nil).
 #[must_use]
 pub fn vec_item(v: &Value, i: usize) -> Value {
     match v {
         Value::Vector(v) => v.get(i).unwrap_or(Value::Nil),
+        Value::Extension(e) => {
+            let any = e.as_any();
+            if let Some(sv) = any.downcast_ref::<clj_value::SubVectorValue>() {
+                return sv.nth(i).unwrap_or(Value::Nil);
+            }
+            if let Some(sp) = any.downcast_ref::<clj_value::SplitVecValue>() {
+                return sp.nth(i).unwrap_or(Value::Nil);
+            }
+            Value::Nil
+        }
         _ => Value::Nil,
     }
 }
 
+#[derive(Debug)]
+enum VecBuf {
+    Ints(Vec<i64>),
+    Doubles(Vec<f64>),
+    Generic(Vec<Value>),
+}
+
+impl Default for VecBuf {
+    fn default() -> Self {
+        Self::Ints(Vec::new())
+    }
+}
+
 /// A compiled `mapv` / `vec` / `into []` loop's accumulator (#271): items
-/// gather in a plain buffer, packed while every item is a long (the
-/// storage `mapv` itself freezes to), and become one persistent vector
-/// when the loop ends. Only the loop ever holds it, so pushes take no
-/// lock and no copy-on-write check.
+/// gather in a plain buffer, packed while every item is a long or every
+/// item is a double, and become one persistent vector when the loop ends.
+/// Only the loop ever holds it, so pushes take no lock and no copy-on-write check.
 #[derive(Debug, Default)]
 pub struct VecBuilder {
-    ints: Vec<i64>,
-    items: Vec<Value>,
-    boxed: bool,
+    buf: VecBuf,
 }
 
 impl VecBuilder {
     fn push(&mut self, v: Value) {
-        match (self.boxed, v) {
-            (false, Value::Int(n)) => self.ints.push(n),
-            (false, other) => {
-                self.items = self.ints.drain(..).map(Value::Int).collect();
-                self.items.push(other);
-                self.boxed = true;
+        let next = match (&mut self.buf, v) {
+            (VecBuf::Ints(xs), Value::Int(n)) => {
+                xs.push(n);
+                None
             }
-            (true, other) => self.items.push(other),
+            (VecBuf::Ints(xs), Value::Double(d)) if xs.is_empty() => Some(VecBuf::Doubles(vec![d])),
+            (VecBuf::Ints(xs), other) => {
+                let mut g: Vec<Value> = xs.drain(..).map(Value::Int).collect();
+                g.push(other);
+                Some(VecBuf::Generic(g))
+            }
+            (VecBuf::Doubles(xs), Value::Double(d)) => {
+                xs.push(d);
+                None
+            }
+            (VecBuf::Doubles(xs), other) => {
+                let mut g: Vec<Value> = xs.drain(..).map(Value::Double).collect();
+                g.push(other);
+                Some(VecBuf::Generic(g))
+            }
+            (VecBuf::Generic(xs), other) => {
+                xs.push(other);
+                None
+            }
+        };
+        if let Some(buf) = next {
+            self.buf = buf;
         }
     }
 
     fn freeze(&mut self) -> Vector {
-        if self.boxed {
-            Vector::from_vec(std::mem::take(&mut self.items))
-        } else {
-            Vector::from_ints(std::mem::take(&mut self.ints))
+        match std::mem::take(&mut self.buf) {
+            VecBuf::Ints(xs) => Vector::from_flat_ints(xs),
+            VecBuf::Doubles(xs) => Vector::from_flat_doubles(xs),
+            VecBuf::Generic(xs) => Vector::from_vec(xs),
         }
     }
 }
@@ -1372,9 +1418,9 @@ pub fn try_mapv_parse_num(coll: &Value, mode: u8) -> Option<Value> {
     if mode == 2 {
         let mut out = Vec::with_capacity(end - start);
         for i in start..end {
-            out.push(Value::Double(parse_double_str(str_item(coll, i)?)?));
+            out.push(parse_double_str(str_item(coll, i)?)?);
         }
-        return Some(Value::Vector(Vector::from_vec(out)));
+        return Some(Value::Vector(Vector::from_flat_doubles(out)));
     }
     let mut ints = Vec::with_capacity(end - start);
     for i in start..end {
@@ -1411,17 +1457,49 @@ fn dot_ints(mut acc: i64, v1: &Vector, v2: &Vector) -> Option<Value> {
     Some(Value::Int(acc))
 }
 
+fn num_val_as_f64(vr: clj_value::ValueRef<'_>) -> Option<f64> {
+    match vr {
+        clj_value::ValueRef::Double(d) => Some(d),
+        clj_value::ValueRef::Ref(Value::Double(d)) => Some(*d),
+        _ => None,
+    }
+}
+
+fn dot_doubles_flat(mut acc: f64, v1: &Vector, v2: &Vector) -> Option<Value> {
+    if let (Some(s1), Some(s2)) = (v1.as_flat_doubles(), v2.as_flat_doubles()) {
+        for (&x, &y) in s1.iter().zip(s2.iter()) {
+            acc += x * y;
+        }
+        return Some(Value::Double(acc));
+    }
+    if let (Some(s1), Some(s2)) = (v1.as_flat_doubles(), v2.as_flat_ints()) {
+        for (&x, &y) in s1.iter().zip(s2.iter()) {
+            acc += x * (y as f64);
+        }
+        return Some(Value::Double(acc));
+    }
+    if let (Some(s1), Some(s2)) = (v1.as_flat_ints(), v2.as_flat_doubles()) {
+        for (&x, &y) in s1.iter().zip(s2.iter()) {
+            acc += (x as f64) * y;
+        }
+        return Some(Value::Double(acc));
+    }
+    None
+}
+
 fn dot_doubles(mut acc: f64, v1: &Vector, v2: &Vector) -> Option<Value> {
+    if let Some(res) = dot_doubles_flat(acc, v1, v2) {
+        return Some(res);
+    }
     let n = v1.len().min(v2.len());
     for i in 0..n {
-        let prod = match (v1.get_val_ref(i)?, v2.get_val_ref(i)?) {
-            (
-                clj_value::ValueRef::Ref(Value::Double(x)),
-                clj_value::ValueRef::Ref(Value::Double(y)),
-            ) => x * y,
-            (clj_value::ValueRef::Ref(Value::Double(x)), y) => x * num_val_as_i64(y)? as f64,
-            (x, clj_value::ValueRef::Ref(Value::Double(y))) => num_val_as_i64(x)? as f64 * y,
-            (x, y) => num_val_as_i64(x)?.checked_mul(num_val_as_i64(y)?)? as f64,
+        let r1 = v1.get_val_ref(i)?;
+        let r2 = v2.get_val_ref(i)?;
+        let prod = match (num_val_as_f64(r1), num_val_as_f64(r2)) {
+            (Some(x), Some(y)) => x * y,
+            (Some(x), None) => x * num_val_as_i64(r2)? as f64,
+            (None, Some(y)) => num_val_as_i64(r1)? as f64 * y,
+            (None, None) => num_val_as_i64(r1)?.checked_mul(num_val_as_i64(r2)?)? as f64,
         };
         acc += prod;
     }
@@ -1873,10 +1951,19 @@ mod tests {
             try_dot_product(&Value::Int(0), &generic_ints, &non_num),
             None
         );
-        // dot_doubles: (Double, Double), (Double, Int), (Int, Double), (Int, Int), overflow/non-num miss
+        // dot_doubles: flat (Double, Double), (Double, Int), (Int, Double),
+        // generic/mixed fallback across all 4 combos, overflow/non-num miss
         assert_eq!(
             try_dot_product(&Value::Double(0.5), &dbls(&[2.0, 3.0]), &dbls(&[4.0, 5.0])),
             Some(Value::Double(23.5))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &dbls(&[2.0, 3.0]), &flat(&[4, 5])),
+            Some(Value::Double(23.0))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &flat(&[2, 3]), &dbls(&[4.0, 5.0])),
+            Some(Value::Double(23.0))
         );
         assert_eq!(
             try_dot_product(&Value::Double(0.0), &mixed, &flat(&[2, 3])),
@@ -1884,6 +1971,14 @@ mod tests {
         );
         assert_eq!(
             try_dot_product(&Value::Double(0.0), &flat(&[2, 3]), &mixed),
+            Some(Value::Double(15.0))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &mixed, &mixed),
+            Some(Value::Double(18.25))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &dbls(&[2.0, 3.0]), &mixed),
             Some(Value::Double(15.0))
         );
         assert_eq!(
@@ -1943,5 +2038,42 @@ mod tests {
         let mut hit = 9u8;
         try_print_join(&mut eval, &Value::Int(1), &Value::Nil, 3, &mut hit).expect("miss");
         assert_eq!(hit, 0);
+
+        // iter_plan + vec_item on SubVectorValue, SplitVecValue, and non-indexed Extension
+        let sub_v = Value::Extension(Arc::new(clj_value::SubVectorValue::new(
+            clj_value::Vector::from_ints(vec![10, 20, 30]),
+            1,
+            3,
+        )));
+        assert_eq!(iter_plan(&sub_v), Some((1, 2, 0, 0)));
+        assert_eq!(vec_item(&sub_v, 0), Value::Int(20));
+        assert_eq!(vec_item(&sub_v, 9), Value::Nil);
+        let sp_v = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from("x y"),
+            Arc::new(vec![(0, 1), (2, 1)]),
+        )));
+        assert_eq!(iter_plan(&sp_v), Some((1, 2, 0, 0)));
+        assert_eq!(vec_item(&sp_v, 1), Value::Str(Arc::from("y")));
+        assert_eq!(vec_item(&sp_v, 9), Value::Nil);
+        let rep_ext = Value::Extension(Arc::new(clj_value::RepeatValue::new(
+            Value::Int(1),
+            Some(2),
+        )));
+        assert_eq!(iter_plan(&rep_ext), None);
+        assert_eq!(vec_item(&rep_ext, 0), Value::Nil);
+
+        // VecBuilder: packed Doubles freeze, Doubles->Generic widening, and Debug across variants
+        let mut vb_d = VecBuilder::default();
+        assert!(format!("{vb_d:?}").contains("Ints"));
+        vb_d.push(Value::Double(1.5));
+        vb_d.push(Value::Double(2.5));
+        assert!(format!("{vb_d:?}").contains("Doubles"));
+        assert_eq!(vb_d.freeze().as_flat_doubles(), Some([1.5, 2.5].as_slice()));
+        let mut vb_dg = VecBuilder::default();
+        vb_dg.push(Value::Double(1.5));
+        vb_dg.push(Value::Int(2));
+        vb_dg.push(Value::Bool(true));
+        assert!(format!("{vb_dg:?}").contains("Generic"));
+        assert_eq!(vb_dg.freeze().len(), 3);
     }
 }

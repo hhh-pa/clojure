@@ -437,6 +437,13 @@ pub extern "C" fn rt_bc_scalar_assoc(tval: &Value, idx: i64, val: i64) -> i8 {
     i8::from(ops::scalar_assoc(tval, idx, val))
 }
 
+/// Unboxed effect-position `Double` `assoc!` entrypoint (`1` on hit).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_assoc_d(tval: &Value, idx: i64, bits: i64) -> i8 {
+    i8::from(ops::scalar_assoc_d(tval, idx, bits))
+}
+
 /// Unboxed effect-position `conj!` entrypoint (`1` on hit).
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
@@ -444,11 +451,25 @@ pub extern "C" fn rt_bc_scalar_conj(tval: &Value, val: i64) -> i8 {
     i8::from(ops::scalar_conj(tval, val))
 }
 
+/// Unboxed effect-position `Double` `conj!` entrypoint (`1` on hit).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_conj_d(tval: &Value, bits: i64) -> i8 {
+    i8::from(ops::scalar_conj_d(tval, bits))
+}
+
 /// Probe `v` as a flat packed integer vector (`1` on hit, writing `ptr_out` and `len_out`).
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_bc_scalar_ivec(v: &Value, ptr_out: &mut *const i64, len_out: &mut i64) -> i8 {
     i8::from(ops::scalar_ivec_probe(v, ptr_out, len_out))
+}
+
+/// Probe `v` as a flat packed `f64` vector (`1` on hit, writing `ptr_out` and `len_out`).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_dvec(v: &Value, ptr_out: &mut *const f64, len_out: &mut i64) -> i8 {
+    i8::from(ops::scalar_dvec_probe(v, ptr_out, len_out))
 }
 
 /// Probe `v` as a flat generic [`Value`] vector (`1` on hit, writing `ptr_out` and `len_out`).
@@ -478,6 +499,17 @@ pub extern "C" fn rt_bc_scalar_tvec_lock(
     len_out: &mut i64,
 ) -> i8 {
     i8::from(ops::scalar_tvec_lock(v, ptr_out, len_out))
+}
+
+/// Lock a packed-`Double` transient vector for a scalar loop (`1` on hit).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_scalar_dtvec_lock(
+    v: &Value,
+    ptr_out: &mut *mut f64,
+    len_out: &mut i64,
+) -> i8 {
+    i8::from(ops::scalar_dtvec_lock(v, ptr_out, len_out))
 }
 
 /// Release a transient lock acquired by [`rt_bc_scalar_tvec_lock`].
@@ -1238,5 +1270,55 @@ mod tests {
         let psv = Value::Vector(clj_value::Vector::from_packed_strs(ps));
         assert_eq!(run1(BcOp1::First, &psv), None);
         assert!(!ops::scalar_nth(&psv, 0, &mut k, &mut v, None, false));
+
+        // Packed Double vector & transient vector paths.
+        let dvec = Value::Vector(clj_value::Vector::from_doubles(vec![1.25, 2.5]));
+        assert_eq!(run1(BcOp1::First, &dvec), Some(Value::Double(1.25)));
+        assert_eq!(
+            run2(BcOp2::Nth, &dvec, &Value::Int(1)),
+            Some(Value::Double(2.5))
+        );
+        assert!(ops::scalar_nth(&dvec, 1, &mut k, &mut v, None, true));
+        assert_eq!((k, v), (3, 2.5_f64.to_bits() as i64));
+        assert!(!ops::scalar_nth(&dvec, 1, &mut k, &mut v, None, false));
+
+        let mut dptr = std::ptr::null();
+        let mut dlen = -1;
+        assert!(ops::scalar_dvec_probe(&dvec, &mut dptr, &mut dlen));
+        assert!(!dptr.is_null());
+        assert_eq!(dlen, 2);
+        assert!(!ops::scalar_dvec_probe(&ivec, &mut dptr, &mut dlen));
+        assert!(!ops::scalar_dvec_probe(&Value::Nil, &mut dptr, &mut dlen));
+
+        let mut dtv = TransientVector::from_vector(&clj_value::Vector::from_doubles(vec![1.5]));
+        dtv.conj(Value::Double(2.5)).unwrap();
+        let dtval = Value::Transient(Transient::new(TransientKind::Vector(dtv)));
+        assert!(ops::scalar_nth(&dtval, 0, &mut k, &mut v, None, true));
+        assert_eq!((k, v), (3, 1.5_f64.to_bits() as i64));
+        assert!(!ops::scalar_nth(&dtval, 0, &mut k, &mut v, None, false));
+        assert!(ops::scalar_assoc_d(&dtval, 1, 3.5_f64.to_bits() as i64));
+        assert!(!ops::scalar_assoc_d(&dtval, -1, 3.5_f64.to_bits() as i64));
+        assert!(!ops::scalar_assoc_d(&tmap, 0, 3.5_f64.to_bits() as i64));
+        assert!(!ops::scalar_assoc_d(
+            &Value::Nil,
+            0,
+            3.5_f64.to_bits() as i64
+        ));
+        assert!(ops::scalar_conj_d(&dtval, 4.5_f64.to_bits() as i64));
+        assert!(!ops::scalar_conj_d(&tmap, 4.5_f64.to_bits() as i64));
+        assert!(!ops::scalar_conj_d(&Value::Nil, 4.5_f64.to_bits() as i64));
+        assert_eq!(
+            run2(BcOp2::ConjBang, &dtval, &Value::Double(5.5)),
+            Some(dtval.clone())
+        );
+
+        let mut dmptr = std::ptr::null_mut();
+        assert!(ops::scalar_dtvec_lock(&dtval, &mut dmptr, &mut dlen));
+        assert!(!dmptr.is_null());
+        assert_eq!(dlen, 4);
+        ops::scalar_tvec_unlock(&dtval);
+        assert!(!ops::scalar_dtvec_lock(&tval, &mut dmptr, &mut dlen));
+        assert!(!ops::scalar_dtvec_lock(&tmap, &mut dmptr, &mut dlen));
+        assert!(!ops::scalar_dtvec_lock(&Value::Nil, &mut dmptr, &mut dlen));
     }
 }

@@ -26,9 +26,10 @@ use clj_bc::{
     rt_bc_2_rem, rt_bc_2_shl, rt_bc_2_shr, rt_bc_2_str_ends_with, rt_bc_2_str_includes,
     rt_bc_2_str_starts_with, rt_bc_2_sub, rt_bc_2_ushr, rt_bc_3_assoc_bang, rt_bc_3_assoc_bang_fx,
     rt_bc_3_get, rt_bc_3_nth, rt_bc_clone, rt_bc_deref, rt_bc_is_pod, rt_bc_scalar_assoc,
-    rt_bc_scalar_conj, rt_bc_scalar_count, rt_bc_scalar_gvec, rt_bc_scalar_ivec, rt_bc_scalar_nth,
-    rt_bc_scalar_nth2, rt_bc_scalar_pop, rt_bc_scalar_same_transient, rt_bc_scalar_str,
-    rt_bc_scalar_tvec_lock, rt_bc_scalar_tvec_unlock,
+    rt_bc_scalar_assoc_d, rt_bc_scalar_conj, rt_bc_scalar_conj_d, rt_bc_scalar_count,
+    rt_bc_scalar_dtvec_lock, rt_bc_scalar_dvec, rt_bc_scalar_gvec, rt_bc_scalar_ivec,
+    rt_bc_scalar_nth, rt_bc_scalar_nth2, rt_bc_scalar_pop, rt_bc_scalar_same_transient,
+    rt_bc_scalar_str, rt_bc_scalar_tvec_lock, rt_bc_scalar_tvec_unlock,
 };
 use clj_value::{BindCounts, FastVars, Transient, TransientKind, TransientVector, Value, Vector};
 
@@ -209,16 +210,25 @@ fn abi_shims_exercise_pod_ops_and_fallbacks() {
     assert_eq!(len, 3);
     assert_eq!(rt_bc_scalar_ivec(&s, &mut iptr, &mut len), 0);
 
-    let gv_vec = Vector::from_vec(vec![Value::Double(1.25), Value::Double(2.5)]);
-    let gv = Value::Vector(gv_vec.clone());
+    let dv_vec = Vector::from_vec(vec![Value::Double(1.25), Value::Double(2.5)]);
+    let dv = Value::Vector(dv_vec.clone());
+    let mut dptr = std::ptr::null();
+    assert_eq!(rt_bc_scalar_dvec(&dv, &mut dptr, &mut len), 1);
+    assert_eq!(len, 2);
+    assert_eq!(rt_bc_scalar_dvec(&iv, &mut dptr, &mut len), 0);
+    assert_eq!(rt_bc_scalar_dvec(&s, &mut dptr, &mut len), 0);
+
+    let gv_vec = Vector::from_vec(vec![Value::Double(1.25), Value::Int(2)]);
+    let gv = Value::Vector(gv_vec);
     let mut gptr = std::ptr::null();
     assert_eq!(rt_bc_scalar_gvec(&gv, &mut gptr, &mut len), 1);
     assert_eq!(len, 2);
     assert_eq!(rt_bc_scalar_gvec(&iv, &mut gptr, &mut len), 0);
+    assert_eq!(rt_bc_scalar_gvec(&dv, &mut gptr, &mut len), 0);
     assert_eq!(rt_bc_scalar_gvec(&s, &mut gptr, &mut len), 0);
 
     let dbl_tv = Value::Transient(Transient::new(TransientKind::Vector(
-        TransientVector::from_vector(&gv_vec),
+        TransientVector::from_vector(&dv_vec),
     )));
     assert_eq!(
         rt_bc_3_assoc_bang_fx(&mut raw, &dbl_tv, &Value::Int(0), &Value::Double(9.5)),
@@ -228,6 +238,17 @@ fn abi_shims_exercise_pod_ops_and_fallbacks() {
         rt_bc_3_assoc_bang_fx(&mut raw, &dbl_tv, &Value::Int(0), &Value::Bool(true)),
         0
     );
+    assert_eq!(
+        rt_bc_scalar_assoc_d(&dbl_tv, 1, 7.5_f64.to_bits() as i64),
+        1
+    );
+    assert_eq!(rt_bc_scalar_conj_d(&dbl_tv, 8.5_f64.to_bits() as i64), 1);
+    let mut dmptr = std::ptr::null_mut();
+    assert_eq!(rt_bc_scalar_dtvec_lock(&dbl_tv, &mut dmptr, &mut len), 1);
+    assert!(!dmptr.is_null());
+    assert_eq!(len, 3);
+    rt_bc_scalar_tvec_unlock(&dbl_tv);
+    assert_eq!(rt_bc_scalar_dtvec_lock(&fx_tval, &mut dmptr, &mut len), 0);
 
     assert_eq!(rt_bc_scalar_same_transient(&fx_tval, &fx_tval), 1);
     assert_eq!(rt_bc_scalar_same_transient(&fx_tval, &iv), 0);

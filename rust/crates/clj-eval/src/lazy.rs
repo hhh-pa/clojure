@@ -1869,7 +1869,7 @@ pub(crate) fn walk_sole_map(
 
 /// A sole unforced lazy seq's parts ([`walk_sole_map`]): `map`,
 /// `mapcat` (including multi-binding/`:when` `for`), `filter`,
-/// `remove`, `take`, and `concat` (#271).
+/// `remove`, `take`, `drop`, `take-while`, `drop-while`, and `concat` (#271).
 enum SoleMap {
     One(Value, Value),
     Vectors(Value, Vec<Vector>),
@@ -1881,6 +1881,18 @@ enum SoleMap {
     },
     Take {
         n: Value,
+        input: Value,
+    },
+    Drop {
+        n: Value,
+        input: Value,
+    },
+    TakeWhile {
+        f: Value,
+        input: Value,
+    },
+    DropWhile {
+        f: Value,
         input: Value,
     },
     Concat {
@@ -1913,6 +1925,9 @@ fn walk_parts(
         }
         SoleMap::Filter { f, input, invert } => walk_filter(eval, &f, input, invert, visit),
         SoleMap::Take { n, input } => walk_take(eval, &n, input, visit),
+        SoleMap::Drop { n, input } => walk_drop(eval, &n, input, visit),
+        SoleMap::TakeWhile { f, input } => walk_take_while(eval, &f, input, visit),
+        SoleMap::DropWhile { f, input } => walk_drop_while(eval, &f, input, visit),
         SoleMap::Concat {
             cur,
             rest,
@@ -2055,6 +2070,18 @@ fn sole_thunk_parts(thunk: &Thunk) -> Option<SoleMap> {
         }),
         Thunk::Take { n, input } => Some(SoleMap::Take {
             n: n.clone(),
+            input: input.clone(),
+        }),
+        Thunk::Drop { n, input } => Some(SoleMap::Drop {
+            n: n.clone(),
+            input: input.clone(),
+        }),
+        Thunk::TakeWhile { f, input } => Some(SoleMap::TakeWhile {
+            f: f.clone(),
+            input: input.clone(),
+        }),
+        Thunk::DropWhile { f, input } => Some(SoleMap::DropWhile {
+            f: f.clone(),
             input: input.clone(),
         }),
         Thunk::Concat {
@@ -2376,6 +2403,80 @@ fn walk_take(
         Ok(outer_go_on && rem > 0)
     };
     walk_all(eval, input, &mut limited)?;
+    Ok(outer_go_on)
+}
+
+fn walk_drop(
+    eval: &mut Evaluator,
+    n: &Value,
+    input: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let mut skip = crate::core::take_count(n)
+        .map_err(|e| eval.throw(e))?
+        .max(0);
+    let mut outer_go_on = true;
+    let mut skipped = |eval: &mut Evaluator, item: Value| -> Result<bool, Signal> {
+        if skip > 0 {
+            skip -= 1;
+            return Ok(true);
+        }
+        outer_go_on = visit(eval, item)?;
+        Ok(outer_go_on)
+    };
+    walk_all(eval, input, &mut skipped)?;
+    Ok(outer_go_on)
+}
+
+fn walk_take_while(
+    eval: &mut Evaluator,
+    f: &Value,
+    input: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let prep = filter_prep(f);
+    let mut checked = false;
+    let mut outer_go_on = true;
+    let mut taking = |eval: &mut Evaluator, item: Value| -> Result<bool, Signal> {
+        if !checked {
+            crate::core::check_ifn(eval, f)?;
+            checked = true;
+        }
+        if !test_filter_item(eval, f, prep.as_ref(), &item)? {
+            return Ok(false);
+        }
+        outer_go_on = visit(eval, item)?;
+        Ok(outer_go_on)
+    };
+    walk_all(eval, input, &mut taking)?;
+    Ok(outer_go_on)
+}
+
+fn walk_drop_while(
+    eval: &mut Evaluator,
+    f: &Value,
+    input: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let prep = filter_prep(f);
+    let mut checked = false;
+    let mut dropping = true;
+    let mut outer_go_on = true;
+    let mut run = |eval: &mut Evaluator, item: Value| -> Result<bool, Signal> {
+        if dropping {
+            if !checked {
+                crate::core::check_ifn(eval, f)?;
+                checked = true;
+            }
+            if test_filter_item(eval, f, prep.as_ref(), &item)? {
+                return Ok(true);
+            }
+            dropping = false;
+        }
+        outer_go_on = visit(eval, item)?;
+        Ok(outer_go_on)
+    };
+    walk_all(eval, input, &mut run)?;
     Ok(outer_go_on)
 }
 
@@ -4546,6 +4647,16 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, S
 /// A string, array, finite `repeat`, or counted `long` range built without
 /// walking its seq (#226: `(vec (repeat n 0))` builds DP tables and
 /// `(vec s)` builds char vectors; the items are exactly the seq's).
+fn collect_repeat(r: &clj_value::RepeatValue) -> Option<Vector> {
+    let n = usize::try_from(r.n()?.max(0)).ok()?;
+    Some(match r.x() {
+        Value::Int(x) => Vector::from_flat_ints(vec![*x; n]),
+        Value::Double(d) => Vector::from_flat_doubles(vec![*d; n]),
+        Value::Char(c) => Vector::from_flat_chars(vec![*c; n]),
+        x => Vector::from_vec(vec![x.clone(); n]),
+    })
+}
+
 fn collect_direct(v: &Value) -> Option<Vector> {
     if let Value::Str(s) = v {
         return Some(Vector::from_flat_chars(s.chars().collect()));
@@ -4559,12 +4670,7 @@ fn collect_direct(v: &Value) -> Option<Vector> {
     };
     let any = e.as_any();
     if let Some(r) = any.downcast_ref::<clj_value::RepeatValue>() {
-        let n = usize::try_from(r.n()?.max(0)).ok()?;
-        return Some(match r.x() {
-            Value::Int(x) => Vector::from_flat_ints(vec![*x; n]),
-            Value::Char(c) => Vector::from_flat_chars(vec![*c; n]),
-            x => Vector::from_vec(vec![x.clone(); n]),
-        });
+        return collect_repeat(r);
     }
     let r = any.downcast_ref::<clj_value::RangeValue>()?;
     let (clj_value::RangeNum::Int(cur), clj_value::RangeNum::Int(step), Some(n)) =
@@ -4585,6 +4691,14 @@ pub(crate) fn collect_all(eval: &mut Evaluator, v: Value) -> Result<Vec<Value>, 
         return Ok(x.iter().collect());
     }
     let mut out = Vec::new();
+    let mut push = |_: &mut Evaluator, item: Value| {
+        out.push(item);
+        Ok(true)
+    };
+    if let Some(done) = walk_sole_map(eval, &v, &mut push) {
+        done?;
+        return Ok(out);
+    }
     // Owned: the walk advances `cur` off the head (owned callers
     // nilled the arg slot, so memoized chunks free as it walks).
     let mut cur = v;
@@ -5907,5 +6021,47 @@ mod tests {
         let (chunk, tail) = super::chunked_realized_parts(&s).expect("non-empty splits");
         assert_eq!(chunk.items_arc().len(), 32);
         assert!(tail.is_some());
+    }
+
+    #[test]
+    fn sole_map_drop_take_while_drop_while_and_collect_all_271() {
+        let mut eval = crate::boot();
+        let out = eval
+            .eval_source(
+                "[(vec (drop 2 (map inc [0 1 2 3]))) \
+                  (vec (drop -1 '(1 2))) \
+                  (vec (take 1 (drop 1 '(10 20 30)))) \
+                  (vec (take-while #(< % 4) [1 2 3 4 5])) \
+                  (vec (take 2 (take-while #(< % 10) [1 2 3 4]))) \
+                  (vec (take-while pos? [])) \
+                  (vec (drop-while #(< % 3) [1 2 3 4 2])) \
+                  (vec (take 1 (drop-while zero? [0 0 5 6]))) \
+                  (vec (drop-while pos? [])) \
+                  (vec (repeat 3 1.5)) \
+                  (set (map inc [1 2 3])) \
+                  (sort (drop 1 '(4 3 1 2))) \
+                  (reverse (take-while #(< % 4) [1 2 3 4])) \
+                  (frequencies (drop-while zero? [0 1 2 1]))]",
+            )
+            .expect("eval")
+            .pop()
+            .expect("val");
+        let rep_d = eval
+            .eval_source("(vec (repeat 3 1.5))")
+            .expect("repeat d")
+            .pop()
+            .expect("val");
+        assert!(matches!(
+            &rep_d,
+            Value::Vector(v) if v.as_flat_doubles() == Some([1.5, 1.5, 1.5].as_slice())
+        ));
+        assert_eq!(
+            crate::native_abi::print_constant(&out),
+            "[[3 4] [1 2] [20] [1 2 3] [1 2] [] [3 4 2] [5] [] [1.5 1.5 1.5] #{2 3 4} (1 2 3) (3 2 1) {1 2, 2 1}]"
+        );
+        // Non-IFn and bad-count error paths in walk_drop / walk_take_while / walk_drop_while
+        assert!(eval.eval_source("(vec (take-while 42 [1 2]))").is_err());
+        assert!(eval.eval_source("(vec (drop-while 42 [1 2]))").is_err());
+        assert!(eval.eval_source("(vec (drop :bad '(1 2)))").is_err());
     }
 }

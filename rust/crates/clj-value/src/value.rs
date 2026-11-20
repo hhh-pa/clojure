@@ -533,6 +533,8 @@ impl DoubleEndedIterator for PackedStringsIter<'_> {
 pub enum ValueRef<'a> {
     /// Packed integer element.
     Int(i64),
+    /// Packed double element.
+    Double(f64),
     /// Packed character element.
     Char(char),
     /// Packed string slice element.
@@ -550,6 +552,7 @@ impl Vector {
         match &self.0.inner {
             VectorInner::Generic(t) => t.get(index).map(ValueRef::Ref),
             VectorInner::Ints(t) => t.get(index).copied().map(ValueRef::Int),
+            VectorInner::Doubles(t) => t.get(index).copied().map(ValueRef::Double),
             VectorInner::Chars(t) => t.get(index).copied().map(ValueRef::Char),
             VectorInner::Strs(ps) => ps.get_str(index).map(ValueRef::Str),
         }
@@ -561,6 +564,16 @@ impl Vector {
     pub fn as_flat_ints(&self) -> Option<&[i64]> {
         match &self.0.inner {
             VectorInner::Ints(t) => t.as_flat(),
+            _ => None,
+        }
+    }
+
+    /// Borrow the flat packed `f64` slice when this vector is backed by flat doubles.
+    #[inline(always)]
+    #[must_use]
+    pub fn as_flat_doubles(&self) -> Option<&[f64]> {
+        match &self.0.inner {
+            VectorInner::Doubles(t) => t.as_flat(),
             _ => None,
         }
     }
@@ -609,12 +622,13 @@ impl Vector {
     }
 }
 
-/// Vector storage: the generic trie of values, or packed `i64`, `char`,
+/// Vector storage: the generic trie of values, or packed `i64`, `f64`, `char`,
 /// or flat string storage (#226, #271).
 #[derive(Clone, Debug)]
 enum VectorInner {
     Generic(crate::trie::Packed<Value>),
     Ints(crate::trie::Packed<i64>),
+    Doubles(crate::trie::Packed<f64>),
     Chars(crate::trie::Packed<char>),
     Strs(Arc<PackedStrings>),
 }
@@ -627,6 +641,7 @@ pub struct VectorIter<'a> {
 enum VectorIterInner<'a> {
     Generic(crate::trie::PackedIter<'a, Value>),
     Ints(crate::trie::PackedIter<'a, i64>),
+    Doubles(crate::trie::PackedIter<'a, f64>),
     Chars(crate::trie::PackedIter<'a, char>),
     Strs(PackedStringsIter<'a>),
 }
@@ -638,6 +653,7 @@ impl Iterator for VectorIter<'_> {
         match &mut self.inner {
             VectorIterInner::Generic(it) => it.next().cloned(),
             VectorIterInner::Ints(it) => it.next().map(|n| Value::Int(*n)),
+            VectorIterInner::Doubles(it) => it.next().map(|d| Value::Double(*d)),
             VectorIterInner::Chars(it) => it.next().map(|c| Value::Char(*c)),
             VectorIterInner::Strs(it) => it.next(),
         }
@@ -649,6 +665,7 @@ impl Iterator for VectorIter<'_> {
         match &mut self.inner {
             VectorIterInner::Generic(it) => it.nth(n).cloned(),
             VectorIterInner::Ints(it) => it.nth(n).map(|n| Value::Int(*n)),
+            VectorIterInner::Doubles(it) => it.nth(n).map(|d| Value::Double(*d)),
             VectorIterInner::Chars(it) => it.nth(n).map(|c| Value::Char(*c)),
             VectorIterInner::Strs(it) => it.nth(n),
         }
@@ -658,6 +675,7 @@ impl Iterator for VectorIter<'_> {
         match &self.inner {
             VectorIterInner::Generic(it) => it.size_hint(),
             VectorIterInner::Ints(it) => it.size_hint(),
+            VectorIterInner::Doubles(it) => it.size_hint(),
             VectorIterInner::Chars(it) => it.size_hint(),
             VectorIterInner::Strs(it) => it.size_hint(),
         }
@@ -669,6 +687,7 @@ impl DoubleEndedIterator for VectorIter<'_> {
         match &mut self.inner {
             VectorIterInner::Generic(it) => it.next_back().cloned(),
             VectorIterInner::Ints(it) => it.next_back().map(|n| Value::Int(*n)),
+            VectorIterInner::Doubles(it) => it.next_back().map(|d| Value::Double(*d)),
             VectorIterInner::Chars(it) => it.next_back().map(|c| Value::Char(*c)),
             VectorIterInner::Strs(it) => it.next_back(),
         }
@@ -1170,37 +1189,15 @@ impl Vector {
     }
 
     /// Build a vector from items in order (packed when every item is
-    /// an `Int`, or every item a char; empty vectors start typed for
-    /// their first `conj`).
+    /// an `Int`, every item a `Double`, or every item a char; empty
+    /// vectors start typed for their first `conj`).
     #[must_use]
     pub fn from_vec(items: Vec<Value>) -> Self {
-        let typed = match items.first() {
-            None => return Self::new_sync(),
-            Some(Value::Int(_)) => items
-                .iter()
-                .map(|v| {
-                    if let Value::Int(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Option<Vec<i64>>>()
-                .map(Self::from_ints),
-            Some(Value::Char(_)) => items
-                .iter()
-                .map(|v| {
-                    if let Value::Char(c) = v {
-                        Some(*c)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Option<Vec<char>>>()
-                .map(Self::from_chars),
-            Some(_) => None,
-        };
-        typed.unwrap_or_else(|| Self::of(VectorInner::Generic(crate::trie::Packed::flat(items))))
+        if items.is_empty() {
+            return Self::new_sync();
+        }
+        pack_typed_vec(&items)
+            .unwrap_or_else(|| Self::of(VectorInner::Generic(crate::trie::Packed::flat(items))))
     }
 
     /// Build a packed `Int` vector from `i64`s in order (no scan — for
@@ -1214,6 +1211,18 @@ impl Vector {
     #[must_use]
     pub fn from_flat_ints(ints: Vec<i64>) -> Self {
         Self::of(VectorInner::Ints(crate::trie::Packed::flat(ints)))
+    }
+
+    /// Build a packed `Double` vector from `f64`s in order (no scan).
+    #[must_use]
+    pub fn from_doubles(doubles: Vec<f64>) -> Self {
+        Self::of(VectorInner::Doubles(crate::trie::Packed::flat(doubles)))
+    }
+
+    /// Build a packed `Double` vector from `f64`s in order (no scan).
+    #[must_use]
+    pub fn from_flat_doubles(doubles: Vec<f64>) -> Self {
+        Self::of(VectorInner::Doubles(crate::trie::Packed::flat(doubles)))
     }
 
     /// Build a packed char vector from `char`s in order (no scan).
@@ -1246,6 +1255,7 @@ impl Vector {
         match &self.0.inner {
             VectorInner::Generic(_) => None,
             VectorInner::Ints(t) => Some(TypedItems::Ints(t.iter().copied().collect())),
+            VectorInner::Doubles(t) => Some(TypedItems::Doubles(t.iter().copied().collect())),
             VectorInner::Chars(t) => Some(TypedItems::Chars(t.iter().copied().collect())),
             VectorInner::Strs(ps) => Some(TypedItems::Strs((**ps).clone())),
         }
@@ -1262,6 +1272,7 @@ impl Vector {
                 id: data.id,
             }))),
             VectorInner::Ints(t) => Ok(TypedItems::Ints(t.into_vec())),
+            VectorInner::Doubles(t) => Ok(TypedItems::Doubles(t.into_vec())),
             VectorInner::Chars(t) => Ok(TypedItems::Chars(t.into_vec())),
             VectorInner::Strs(ps) => Ok(TypedItems::Strs(Arc::unwrap_or_clone(ps))),
         }
@@ -1274,6 +1285,7 @@ impl Vector {
         match data.inner {
             VectorInner::Generic(pvec) => pvec.into_vec(),
             VectorInner::Ints(t) => t.into_vec().into_iter().map(Value::Int).collect(),
+            VectorInner::Doubles(t) => t.into_vec().into_iter().map(Value::Double).collect(),
             VectorInner::Chars(t) => t.into_vec().into_iter().map(Value::Char).collect(),
             VectorInner::Strs(ps) => ps.to_values(),
         }
@@ -1303,16 +1315,20 @@ impl Vector {
         if !self.is_packed() || !self.is_empty() {
             return;
         }
-        match (&self.0.inner, v) {
-            (VectorInner::Ints(_), Value::Char(_)) => {
-                Arc::make_mut(&mut self.0).inner =
-                    VectorInner::Chars(crate::trie::Packed::from_vec(Vec::new()));
+        let next = match (&self.0.inner, v) {
+            (VectorInner::Ints(_) | VectorInner::Doubles(_), Value::Char(_)) => Some(
+                VectorInner::Chars(crate::trie::Packed::from_vec(Vec::new())),
+            ),
+            (VectorInner::Chars(_) | VectorInner::Doubles(_), Value::Int(_)) => {
+                Some(VectorInner::Ints(crate::trie::Packed::from_vec(Vec::new())))
             }
-            (VectorInner::Chars(_), Value::Int(_)) => {
-                Arc::make_mut(&mut self.0).inner =
-                    VectorInner::Ints(crate::trie::Packed::from_vec(Vec::new()));
-            }
-            _ => {}
+            (VectorInner::Ints(_) | VectorInner::Chars(_), Value::Double(_)) => Some(
+                VectorInner::Doubles(crate::trie::Packed::from_vec(Vec::new())),
+            ),
+            _ => None,
+        };
+        if let Some(inner) = next {
+            Arc::make_mut(&mut self.0).inner = inner;
         }
     }
 
@@ -1325,37 +1341,7 @@ impl Vector {
         // which stays generic).
         self.retype_empty(&v);
         let data = Arc::make_mut(&mut self.0);
-        let generic = match (&mut data.inner, v) {
-            (VectorInner::Generic(t), v) => {
-                t.push(v);
-                None
-            }
-            (VectorInner::Ints(t), Value::Int(n)) => {
-                t.push(n);
-                None
-            }
-            (VectorInner::Chars(t), Value::Char(c)) => {
-                t.push(c);
-                None
-            }
-            (VectorInner::Strs(ps), Value::Str(s)) => {
-                let shared_big = Arc::strong_count(ps) > 1 && ps.len() > crate::trie::FLAT_MAX;
-                if !shared_big && Arc::make_mut(ps).try_push(&s) {
-                    None
-                } else {
-                    let mut g = crate::trie::Packed::from_vec(ps.to_values());
-                    g.push(Value::Str(s));
-                    Some(g)
-                }
-            }
-            (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| g.push(v))),
-            (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| g.push(v))),
-            (VectorInner::Strs(ps), v) => {
-                let mut g = crate::trie::Packed::from_vec(ps.to_values());
-                g.push(v);
-                Some(g)
-            }
-        };
+        let generic = push_inner(&mut data.inner, v);
         if let Some(g) = generic {
             data.inner = VectorInner::Generic(g);
         }
@@ -1389,31 +1375,7 @@ impl Vector {
             return None;
         }
         let data = Arc::make_mut(&mut self.0);
-        let generic = match (&mut data.inner, v) {
-            (VectorInner::Generic(t), v) => {
-                t.set(index, v);
-                None
-            }
-            (VectorInner::Ints(t), Value::Int(n)) => {
-                t.set(index, n);
-                None
-            }
-            (VectorInner::Chars(t), Value::Char(c)) => {
-                t.set(index, c);
-                None
-            }
-            (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| {
-                g.set(index, v);
-            })),
-            (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| {
-                g.set(index, v);
-            })),
-            (VectorInner::Strs(ps), v) => {
-                let mut g = crate::trie::Packed::from_vec(ps.to_values());
-                g.set(index, v);
-                Some(g)
-            }
-        };
+        let generic = set_inner(&mut data.inner, index, v);
         if let Some(g) = generic {
             data.inner = VectorInner::Generic(g);
         }
@@ -1456,6 +1418,7 @@ impl Vector {
         let popped = match &mut data.inner {
             VectorInner::Generic(t) => t.pop(),
             VectorInner::Ints(t) => t.pop(),
+            VectorInner::Doubles(t) => t.pop(),
             VectorInner::Chars(t) => t.pop(),
             VectorInner::Strs(ps) => {
                 if Arc::strong_count(ps) > 1 && ps.len() > crate::trie::FLAT_MAX {
@@ -1481,6 +1444,7 @@ impl Vector {
             inner: match &self.0.inner {
                 VectorInner::Generic(t) => VectorIterInner::Generic(t.iter()),
                 VectorInner::Ints(t) => VectorIterInner::Ints(t.iter()),
+                VectorInner::Doubles(t) => VectorIterInner::Doubles(t.iter()),
                 VectorInner::Chars(t) => VectorIterInner::Chars(t.iter()),
                 VectorInner::Strs(ps) => VectorIterInner::Strs(ps.iter()),
             },
@@ -1495,6 +1459,7 @@ impl Vector {
         match &self.0.inner {
             VectorInner::Generic(t) => t.get(index).cloned(),
             VectorInner::Ints(t) => t.get(index).copied().map(Value::Int),
+            VectorInner::Doubles(t) => t.get(index).copied().map(Value::Double),
             VectorInner::Chars(t) => t.get(index).copied().map(Value::Char),
             VectorInner::Strs(ps) => ps.get_str(index).map(|s| Value::Str(Arc::from(s))),
         }
@@ -1508,6 +1473,7 @@ impl Vector {
         match &self.0.inner {
             VectorInner::Generic(t) => f(t.get(index)?),
             VectorInner::Ints(t) => f(&Value::Int(*t.get(index)?)),
+            VectorInner::Doubles(t) => f(&Value::Double(*t.get(index)?)),
             VectorInner::Chars(t) => f(&Value::Char(*t.get(index)?)),
             VectorInner::Strs(ps) => f(&Value::Str(Arc::from(ps.get_str(index)?))),
         }
@@ -1537,6 +1503,12 @@ impl Vector {
             VectorInner::Ints(t) => {
                 Cow::Owned(t.chunk_from(index).iter().map(|n| Value::Int(*n)).collect())
             }
+            VectorInner::Doubles(t) => Cow::Owned(
+                t.chunk_from(index)
+                    .iter()
+                    .map(|d| Value::Double(*d))
+                    .collect(),
+            ),
             VectorInner::Chars(t) => Cow::Owned(
                 t.chunk_from(index)
                     .iter()
@@ -1590,8 +1562,113 @@ fn vector_inner_len(inner: &VectorInner) -> usize {
     match inner {
         VectorInner::Generic(t) => t.len(),
         VectorInner::Ints(t) => t.len(),
+        VectorInner::Doubles(t) => t.len(),
         VectorInner::Chars(t) => t.len(),
         VectorInner::Strs(ps) => ps.len(),
+    }
+}
+
+fn pack_typed_vec(items: &[Value]) -> Option<Vector> {
+    match items.first() {
+        Some(Value::Int(_)) => pack_slice(items, |v| match v {
+            Value::Int(n) => Some(*n),
+            _ => None,
+        })
+        .map(Vector::from_ints),
+        Some(Value::Double(_)) => pack_slice(items, |v| match v {
+            Value::Double(d) => Some(*d),
+            _ => None,
+        })
+        .map(Vector::from_doubles),
+        Some(Value::Char(_)) => pack_slice(items, |v| match v {
+            Value::Char(c) => Some(*c),
+            _ => None,
+        })
+        .map(Vector::from_chars),
+        _ => None,
+    }
+}
+
+fn pack_slice<T>(items: &[Value], extract: impl Fn(&Value) -> Option<T>) -> Option<Vec<T>> {
+    items.iter().map(extract).collect()
+}
+
+fn push_packed_str(ps: &mut Arc<PackedStrings>, s: Arc<str>) -> Option<crate::trie::Packed<Value>> {
+    let shared_big = Arc::strong_count(ps) > 1 && ps.len() > crate::trie::FLAT_MAX;
+    if !shared_big && Arc::make_mut(ps).try_push(&s) {
+        return None;
+    }
+    let mut g = crate::trie::Packed::from_vec(ps.to_values());
+    g.push(Value::Str(s));
+    Some(g)
+}
+
+fn push_inner(inner: &mut VectorInner, v: Value) -> Option<crate::trie::Packed<Value>> {
+    match (inner, v) {
+        (VectorInner::Generic(t), v) => {
+            t.push(v);
+            None
+        }
+        (VectorInner::Ints(t), Value::Int(n)) => {
+            t.push(n);
+            None
+        }
+        (VectorInner::Doubles(t), Value::Double(d)) => {
+            t.push(d);
+            None
+        }
+        (VectorInner::Chars(t), Value::Char(c)) => {
+            t.push(c);
+            None
+        }
+        (VectorInner::Strs(ps), Value::Str(s)) => push_packed_str(ps, s),
+        (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| g.push(v))),
+        (VectorInner::Doubles(t), v) => Some(boxed(t, Value::Double, |g| g.push(v))),
+        (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| g.push(v))),
+        (VectorInner::Strs(ps), v) => {
+            let mut g = crate::trie::Packed::from_vec(ps.to_values());
+            g.push(v);
+            Some(g)
+        }
+    }
+}
+
+fn set_inner(
+    inner: &mut VectorInner,
+    index: usize,
+    v: Value,
+) -> Option<crate::trie::Packed<Value>> {
+    match (inner, v) {
+        (VectorInner::Generic(t), v) => {
+            t.set(index, v);
+            None
+        }
+        (VectorInner::Ints(t), Value::Int(n)) => {
+            t.set(index, n);
+            None
+        }
+        (VectorInner::Doubles(t), Value::Double(d)) => {
+            t.set(index, d);
+            None
+        }
+        (VectorInner::Chars(t), Value::Char(c)) => {
+            t.set(index, c);
+            None
+        }
+        (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| {
+            g.set(index, v);
+        })),
+        (VectorInner::Doubles(t), v) => Some(boxed(t, Value::Double, |g| {
+            g.set(index, v);
+        })),
+        (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| {
+            g.set(index, v);
+        })),
+        (VectorInner::Strs(ps), v) => {
+            let mut g = crate::trie::Packed::from_vec(ps.to_values());
+            g.set(index, v);
+            Some(g)
+        }
     }
 }
 
@@ -1611,6 +1688,7 @@ fn boxed<T: Copy>(
 /// A typed vector's items, copied out for a transient.
 pub(crate) enum TypedItems {
     Ints(Vec<i64>),
+    Doubles(Vec<f64>),
     Chars(Vec<char>),
     Strs(PackedStrings),
 }
@@ -2595,17 +2673,48 @@ impl Hash for List {
 
 impl PartialEq for Vector {
     fn eq(&self, other: &Self) -> bool {
-        self.iter().eq(other.iter())
+        vector_eq(self, other)
     }
 }
 
 impl Eq for Vector {}
 
+#[inline]
+fn packed_for_each<T: Clone>(p: &crate::trie::Packed<T>, mut f: impl FnMut(&T)) {
+    if let Some(xs) = p.as_flat() {
+        for x in xs {
+            f(x);
+        }
+    } else {
+        for x in p.iter() {
+            f(x);
+        }
+    }
+}
+
 impl Hash for Vector {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_usize(self.len());
-        for v in self.iter() {
-            v.hash(state);
+        match &self.0.inner {
+            VectorInner::Generic(t) => packed_for_each(t, |v| v.hash(state)),
+            VectorInner::Ints(t) => packed_for_each(t, |&i| {
+                state.write_u8(2);
+                state.write_i64(i);
+            }),
+            VectorInner::Doubles(t) => packed_for_each(t, |&d| {
+                state.write_u8(3);
+                state.write_u64(double_hash_bits(d));
+            }),
+            VectorInner::Chars(t) => packed_for_each(t, |&c| {
+                state.write_u8(5);
+                c.hash(state);
+            }),
+            VectorInner::Strs(ps) => {
+                for i in 0..ps.len() {
+                    state.write_u8(4);
+                    ps.get_str(i).unwrap_or("").hash(state);
+                }
+            }
         }
     }
 }
@@ -3127,9 +3236,33 @@ fn list_eq(a: &List, b: &List) -> bool {
     Arc::ptr_eq(&a.0, &b.0) || a.iter().eq(b.iter())
 }
 
-/// Vector equality: the same vector without a walk (see [`list_eq`]).
+#[inline]
+fn packed_eq<T: Clone + PartialEq>(x: &crate::trie::Packed<T>, y: &crate::trie::Packed<T>) -> bool {
+    if let (Some(xs), Some(ys)) = (x.as_flat(), y.as_flat()) {
+        return xs == ys;
+    }
+    x.iter().eq(y.iter())
+}
+
+/// Vector equality: the same vector without a walk (see [`list_eq`]), then
+/// zero-clone slice comparisons for matching packed/flat representations.
 fn vector_eq(a: &Vector, b: &Vector) -> bool {
-    Arc::ptr_eq(&a.0, &b.0) || a.iter().eq(b.iter())
+    if Arc::ptr_eq(&a.0, &b.0) {
+        return true;
+    }
+    if a.len() != b.len() {
+        return false;
+    }
+    match (&a.0.inner, &b.0.inner) {
+        (VectorInner::Ints(x), VectorInner::Ints(y)) => packed_eq(x, y),
+        (VectorInner::Doubles(x), VectorInner::Doubles(y)) => packed_eq(x, y),
+        (VectorInner::Chars(x), VectorInner::Chars(y)) => packed_eq(x, y),
+        (VectorInner::Generic(x), VectorInner::Generic(y)) => packed_eq(x, y),
+        (VectorInner::Strs(x), VectorInner::Strs(y)) => {
+            (0..x.len()).all(|i| x.get_str(i) == y.get_str(i))
+        }
+        _ => a.iter().eq(b.iter()),
+    }
 }
 
 /// List/vector cross equality (split for the budget): lists
@@ -5388,9 +5521,13 @@ mod tests {
         assert!(empty_v.as_flat_values().is_none());
         assert!(empty_v.drop_last_owned().is_none());
 
-        // as_flat_values: generic flat hits; packed ints/chars/strs miss
-        let fv = Vector::from_vec(vec![Value::Double(1.5), Value::Double(2.5)]);
+        // as_flat_values / as_flat_doubles: generic flat vs packed ints/doubles/chars/strs
+        let fv = Vector::from_vec(vec![Value::Double(1.5), Value::Int(2)]);
         assert_eq!(fv.as_flat_values().map(<[Value]>::len), Some(2));
+        assert!(fv.as_flat_doubles().is_none());
+        let dv = Vector::from_vec(vec![Value::Double(1.5), Value::Double(2.5)]);
+        assert_eq!(dv.as_flat_doubles(), Some([1.5, 2.5].as_slice()));
+        assert!(dv.as_flat_values().is_none());
         assert!(Vector::from_ints(vec![1, 2]).as_flat_values().is_none());
         assert!(Vector::from_chars(vec!['a']).as_flat_values().is_none());
 
@@ -5440,5 +5577,155 @@ mod tests {
 
         let non_strs = Vector::from_ints(vec![1, 2]);
         assert!(non_strs.into_packed_strs().is_err());
+    }
+
+    #[test]
+    fn packed_doubles_vector_and_fast_eq_hash() {
+        use super::{List, PackedStrings, TypedItems, Value, ValueRef, Vector};
+
+        // Empty push retypes into Doubles; push/set preserve or widen cleanly.
+        let d0 = Vector::new_sync().push_back(Value::Double(1.25));
+        assert_eq!(d0.as_flat_doubles(), Some([1.25].as_slice()));
+        let d1 = d0.push_back(Value::Double(2.5));
+        assert_eq!(d1.as_flat_doubles(), Some([1.25, 2.5].as_slice()));
+        assert_eq!(d1.get(1), Some(Value::Double(2.5)));
+        assert_eq!(d1.get(9), None);
+        assert!(matches!(d1.get_val_ref(0), Some(ValueRef::Double(x)) if x == 1.25));
+        assert_eq!(d1.read_at(1, |v| Some(v.clone())), Some(Value::Double(2.5)));
+        assert_eq!(d1.read_at(9, |_| Some(Value::Nil)), None);
+        assert_eq!(
+            d1.chunk_from(0),
+            vec![Value::Double(1.25), Value::Double(2.5)]
+        );
+        assert!(matches!(d1.typed_items(), Some(TypedItems::Doubles(_))));
+
+        // Double-ended iterator + size_hint + nth on Doubles
+        let mut it = d1.iter();
+        assert_eq!(it.size_hint(), (2, Some(2)));
+        assert_eq!(it.next_back(), Some(Value::Double(2.5)));
+        assert_eq!(it.next(), Some(Value::Double(1.25)));
+        assert_eq!(it.next(), None);
+        assert_eq!(d1.iter().nth(1), Some(Value::Double(2.5)));
+
+        // set_nth_owned: same-type keeps Doubles, foreign widens to Generic
+        let d2 = d1
+            .clone()
+            .set_nth_owned(0, Value::Double(3.75))
+            .expect("set");
+        assert_eq!(d2.as_flat_doubles(), Some([3.75, 2.5].as_slice()));
+        let g_set = d1
+            .clone()
+            .set_nth_owned(0, Value::Int(7))
+            .expect("widen set");
+        assert!(g_set.as_flat_values().is_some());
+        let g_push = d1.clone().push_back(Value::Int(9));
+        assert!(g_push.as_flat_values().is_some());
+
+        // Ints/Chars widening via set_inner / push_inner
+        let i_widen = Vector::from_ints(vec![1])
+            .set_nth_owned(0, Value::Double(1.0))
+            .expect("i");
+        assert!(i_widen.as_flat_values().is_some());
+        let c_widen = Vector::from_chars(vec!['a'])
+            .set_nth_owned(0, Value::Double(1.0))
+            .expect("c");
+        assert!(c_widen.as_flat_values().is_some());
+
+        // drop_last_owned, into_vec (unique and shared), into_typed_items (unique and shared)
+        let d_popped = d1.clone().drop_last_owned().expect("pop");
+        assert_eq!(d_popped.as_flat_doubles(), Some([1.25].as_slice()));
+        let empty_d = d_popped.drop_last_owned().expect("pop to empty");
+        assert!(empty_d.drop_last_owned().is_none());
+        let d_shared = d1.clone();
+        assert_eq!(d1.clone().into_vec().len(), 2);
+        assert!(matches!(d1.into_typed_items(), Ok(TypedItems::Doubles(_))));
+        assert_eq!(d_shared.clone().into_vec().len(), 2);
+        assert!(matches!(
+            d_shared.into_typed_items(),
+            Ok(TypedItems::Doubles(_))
+        ));
+
+        // Shared push past FLAT_MAX = 1024 promotes to Trie (exercises non-flat as_flat_doubles, eq, hash)
+        let base_d = Vector::from_doubles((0..1025).map(f64::from).collect());
+        let big_d1 = base_d.clone().push_back(Value::Double(1025.0));
+        let big_d2 = Vector::from_flat_doubles((0..1026).map(f64::from).collect());
+        assert!(big_d1.as_flat_doubles().is_none());
+        assert_eq!(big_d1, big_d2);
+        assert_eq!(
+            hash_of(&Value::Vector(big_d1)),
+            hash_of(&Value::Vector(big_d2))
+        );
+        drop(base_d);
+
+        let base_i = Vector::from_ints((0..1025_i64).collect());
+        let big_i1 = base_i.clone().push_back(Value::Int(1025));
+        let big_i2 = Vector::from_ints((0..1026_i64).collect());
+        assert_eq!(big_i1, big_i2);
+        assert_eq!(
+            hash_of(&Value::Vector(big_i1)),
+            hash_of(&Value::Vector(big_i2))
+        );
+        drop(base_i);
+
+        // Fast eq & hash consistency across all 5 VectorInner variants + mismatched kinds/lengths
+        let v_int = Vector::from_ints(vec![1, 2]);
+        let v_dbl = Vector::from_doubles(vec![1.0, 2.0]);
+        let v_chr = Vector::from_chars(vec!['a', 'b']);
+        let v_gen = Vector::from_vec(vec![Value::Int(1), Value::Double(2.0)]);
+        let mut ps = PackedStrings::new();
+        assert!(ps.try_push("a"));
+        assert!(ps.try_push("b"));
+        let v_str = Vector::from_packed_strs(ps);
+        let mut ps2 = PackedStrings::new();
+        assert!(ps2.try_push("a"));
+        assert!(ps2.try_push("b"));
+        let v_str2 = Vector::from_packed_strs(ps2);
+
+        assert_eq!(v_int, Vector::from_ints(vec![1, 2]));
+        assert_eq!(v_dbl, Vector::from_doubles(vec![1.0, 2.0]));
+        assert_eq!(v_chr, Vector::from_chars(vec!['a', 'b']));
+        assert_eq!(
+            v_gen,
+            Vector::from_vec(vec![Value::Int(1), Value::Double(2.0)])
+        );
+        assert_eq!(v_str, v_str2);
+        assert_ne!(v_int, Vector::from_ints(vec![1]));
+        assert_ne!(v_int, v_dbl);
+
+        assert_eq!(
+            hash_of(&Value::Vector(v_int)),
+            hash_of(&Value::List(List::from_vec(vec![
+                Value::Int(1),
+                Value::Int(2)
+            ])))
+        );
+        assert_eq!(
+            hash_of(&Value::Vector(v_dbl)),
+            hash_of(&Value::List(List::from_vec(vec![
+                Value::Double(1.0),
+                Value::Double(2.0)
+            ])))
+        );
+        assert_eq!(
+            hash_of(&Value::Vector(v_chr)),
+            hash_of(&Value::List(List::from_vec(vec![
+                Value::Char('a'),
+                Value::Char('b')
+            ])))
+        );
+        assert_eq!(
+            hash_of(&Value::Vector(v_gen)),
+            hash_of(&Value::List(List::from_vec(vec![
+                Value::Int(1),
+                Value::Double(2.0)
+            ])))
+        );
+        assert_eq!(
+            hash_of(&Value::Vector(v_str)),
+            hash_of(&Value::List(List::from_vec(vec![
+                Value::Str(Arc::from("a")),
+                Value::Str(Arc::from("b")),
+            ])))
+        );
     }
 }

@@ -35,9 +35,9 @@ const _: () = assert!(std::mem::size_of::<Value>() == 32);
 
 /// Cached preheader metadata for one invariant collection.
 ///
-/// `str_len`, `ivec_len`, and `gvec_len` are `0` when the corresponding fast
-/// path is inactive, so a single unsigned `idx < len` check validates both
-/// availability and bounds without a separate ok flag.
+/// `str_len`, `ivec_len`, `dvec_len`, and `gvec_len` are `0` when the
+/// corresponding fast path is inactive, so a single unsigned `idx < len` check
+/// validates both availability and bounds without a separate ok flag.
 struct CollCache<'ctx> {
     slot: PointerValue<'ctx>,
     mutated: bool,
@@ -45,6 +45,7 @@ struct CollCache<'ctx> {
     str_len: PointerValue<'ctx>,
     ivec_ptr: PointerValue<'ctx>,
     ivec_len: PointerValue<'ctx>,
+    dvec: Option<(PointerValue<'ctx>, PointerValue<'ctx>)>,
     gvec_ptr: PointerValue<'ctx>,
     gvec_len: PointerValue<'ctx>,
     tvec_locked: Option<PointerValue<'ctx>>,
@@ -367,7 +368,12 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(false);
         }
         let (bound, targets) = self.bind_scalar_loop_inits(f, bindings)?;
-        let allow_fp = scan.has_fp;
+        let read_only_nth = !scan.has_effects && !scan.read_nth.is_empty();
+        let allow_fp = scan.has_fp
+            || bindings
+                .iter()
+                .zip(&ast.scalar)
+                .any(|((_, init), &is_sc)| is_sc && init_needs_fp(init, read_only_nth));
         let sc_hdr = self.ctx.append_basic_block(f.func, "sc_hdr");
         let deopt_bb = self.ctx.append_basic_block(f.func, "sc_deopt");
         let boxed_hdr = self.ctx.append_basic_block(f.func, "sc_boxed");
@@ -693,7 +699,7 @@ impl<'ctx> Lowerer<'ctx> {
             colls.push(self.probe_coll(f, loc, scan, allow_fp));
         }
         for i in 0..colls.len() {
-            self.try_lock_tvec(f, &colls, i);
+            self.try_lock_tvec(f, &colls, i, allow_fp);
         }
         self.builder.build_unconditional_branch(sc_hdr).expect("br");
         ScalarSession {
@@ -728,6 +734,12 @@ impl<'ctx> Lowerer<'ctx> {
         let str_len = self.entry_alloca(f, self.i64t, "strn");
         let ivec_ptr = self.entry_alloca(f, self.ptr, "ivp");
         let ivec_len = self.entry_alloca(f, self.i64t, "ivn");
+        let dvec = allow_fp.then(|| {
+            (
+                self.entry_alloca(f, self.ptr, "dvp"),
+                self.entry_alloca(f, self.i64t, "dvn"),
+            )
+        });
         let gvec_ptr = self.entry_alloca(f, self.ptr, "gvp");
         let gvec_len = self.entry_alloca(f, self.i64t, "gvn");
         let lockable = !grows && (mutated || needs_nth);
@@ -738,6 +750,9 @@ impl<'ctx> Lowerer<'ctx> {
         let z64 = self.i64t.const_zero();
         self.builder.build_store(str_len, z64).expect("store");
         self.builder.build_store(ivec_len, z64).expect("store");
+        if let Some((_, dvec_len)) = dvec {
+            self.builder.build_store(dvec_len, z64).expect("store");
+        }
         self.builder.build_store(gvec_len, z64).expect("store");
         self.builder.build_store(cnt_ok, z8).expect("store");
         if let Some(tl) = tvec_locked {
@@ -759,7 +774,12 @@ impl<'ctx> Lowerer<'ctx> {
                     Some(self.i8t),
                     &[slot.into(), ivec_ptr.into(), ivec_len.into()],
                 );
-                if allow_fp {
+                if let Some((dvec_ptr, dvec_len)) = dvec {
+                    self.call(
+                        "rt_bc_scalar_dvec",
+                        Some(self.i8t),
+                        &[slot.into(), dvec_ptr.into(), dvec_len.into()],
+                    );
                     self.call(
                         "rt_bc_scalar_gvec",
                         Some(self.i8t),
@@ -785,6 +805,7 @@ impl<'ctx> Lowerer<'ctx> {
             str_len,
             ivec_ptr,
             ivec_len,
+            dvec,
             gvec_ptr,
             gvec_len,
             tvec_locked,
@@ -793,7 +814,13 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
-    fn try_lock_tvec(&self, f: &FnCtx<'ctx>, colls: &[CollCache<'ctx>], idx: usize) {
+    fn try_lock_tvec(
+        &self,
+        f: &FnCtx<'ctx>,
+        colls: &[CollCache<'ctx>],
+        idx: usize,
+        allow_fp: bool,
+    ) {
         let c = &colls[idx];
         let Some(tl) = c.tvec_locked else {
             return;
@@ -801,13 +828,19 @@ impl<'ctx> Lowerer<'ctx> {
         let done_bb = self.ctx.append_basic_block(f.func, "sc_tv_done");
         if !c.mutated {
             let next_bb = self.ctx.append_basic_block(f.func, "sc_tv_chk");
-            let a1 = self
+            let mut already = self
                 .builder
                 .build_or(self.load_i64(c.str_len), self.load_i64(c.ivec_len), "alr1")
                 .expect("or");
-            let already = self
+            if let Some((_, dvec_len)) = c.dvec {
+                already = self
+                    .builder
+                    .build_or(already, self.load_i64(dvec_len), "alr2")
+                    .expect("or");
+            }
+            already = self
                 .builder
-                .build_or(a1, self.load_i64(c.gvec_len), "alr")
+                .build_or(already, self.load_i64(c.gvec_len), "alr")
                 .expect("or");
             let skip = self
                 .builder
@@ -826,11 +859,56 @@ impl<'ctx> Lowerer<'ctx> {
                 .expect("br");
             self.builder.position_at_end(lock_bb);
         }
+        let dvec_try = if allow_fp {
+            c.dvec
+                .map(|d| (d, self.ctx.append_basic_block(f.func, "sc_dtv_try")))
+        } else {
+            None
+        };
+        let miss_bb = dvec_try.map_or(done_bb, |(_, bb)| bb);
+        self.emit_lock_tvec_kind(
+            f,
+            c,
+            tl,
+            "rt_bc_scalar_tvec_lock",
+            c.ivec_ptr,
+            c.ivec_len,
+            miss_bb,
+            done_bb,
+        );
+        if let Some(((dvec_ptr, dvec_len), try_bb)) = dvec_try {
+            self.builder.position_at_end(try_bb);
+            self.emit_lock_tvec_kind(
+                f,
+                c,
+                tl,
+                "rt_bc_scalar_dtvec_lock",
+                dvec_ptr,
+                dvec_len,
+                done_bb,
+                done_bb,
+            );
+        }
+        self.builder.position_at_end(done_bb);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_lock_tvec_kind(
+        &self,
+        f: &FnCtx<'ctx>,
+        c: &CollCache<'ctx>,
+        tl: PointerValue<'ctx>,
+        helper: &str,
+        ptr_slot: PointerValue<'ctx>,
+        len_slot: PointerValue<'ctx>,
+        miss_bb: BasicBlock<'ctx>,
+        done_bb: BasicBlock<'ctx>,
+    ) {
         let ok = self
             .call(
-                "rt_bc_scalar_tvec_lock",
+                helper,
                 Some(self.i8t),
-                &[c.slot.into(), c.ivec_ptr.into(), c.ivec_len.into()],
+                &[c.slot.into(), ptr_slot.into(), len_slot.into()],
             )
             .expect("tlk");
         let hit = self
@@ -839,18 +917,17 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("cmp");
         let ok_bb = self.ctx.append_basic_block(f.func, "sc_tv_ok");
         self.builder
-            .build_conditional_branch(hit, ok_bb, done_bb)
+            .build_conditional_branch(hit, ok_bb, miss_bb)
             .expect("br");
         self.builder.position_at_end(ok_bb);
         let one = self.i8t.const_int(1, false);
         self.builder.build_store(tl, one).expect("st");
         self.builder.build_store(c.cnt_ok, one).expect("st");
-        let len = self.load_i64(c.ivec_len);
+        let len = self.load_i64(len_slot);
         self.builder.build_store(c.cnt_val, len).expect("st");
         self.builder
             .build_unconditional_branch(done_bb)
             .expect("br");
-        self.builder.position_at_end(done_bb);
     }
 
     fn check_coll_aliased(&self, colls: &[CollCache<'ctx>], idx: usize) -> IntValue<'ctx> {
@@ -894,10 +971,12 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.position_at_end(rel_bb);
         self.call("rt_bc_scalar_tvec_unlock", None, &[c.slot.into()]);
         let zero = self.i8t.const_zero();
+        let z64 = self.i64t.const_zero();
         self.builder.build_store(tl, zero).expect("st");
-        self.builder
-            .build_store(c.ivec_len, self.i64t.const_zero())
-            .expect("st");
+        self.builder.build_store(c.ivec_len, z64).expect("st");
+        if let Some((_, dvec_len)) = c.dvec {
+            self.builder.build_store(dvec_len, z64).expect("st");
+        }
         self.builder.build_store(c.cnt_ok, zero).expect("st");
         self.builder
             .build_unconditional_branch(cont_bb)
@@ -1195,28 +1274,23 @@ impl<'ctx> Lowerer<'ctx> {
         let try_bb = self.ctx.append_basic_block(f.func, "sc_conj_try");
         let slow_bb = self.ctx.append_basic_block(f.func, "sc_conj_slow");
         let done_bb = self.ctx.append_basic_block(f.func, "sc_conj_done");
-        let is_i = self
-            .builder
-            .build_int_compare(IntPredicate::EQ, vk, self.i8t.const_zero(), "ci")
-            .expect("cmp");
+        let non_i_bb = if s.allow_fp {
+            self.ctx.append_basic_block(f.func, "sc_conj_cd")
+        } else {
+            slow_bb
+        };
         self.builder
-            .build_conditional_branch(is_i, try_bb, slow_bb)
+            .build_conditional_branch(self.is_k_int(vk), try_bb, non_i_bb)
             .expect("br");
-        self.builder.position_at_end(try_bb);
-        let ok = self
-            .call(
-                "rt_bc_scalar_conj",
-                Some(self.i8t),
-                &[c_slot.into(), vv.into()],
-            )
-            .expect("ok");
-        let hit = self
-            .builder
-            .build_int_compare(IntPredicate::NE, ok, self.i8t.const_zero(), "hit")
-            .expect("cmp");
-        self.builder
-            .build_conditional_branch(hit, done_bb, slow_bb)
-            .expect("br");
+        self.emit_sc_conj_call(try_bb, "rt_bc_scalar_conj", c_slot, vv, done_bb, slow_bb);
+        if s.allow_fp {
+            self.builder.position_at_end(non_i_bb);
+            let try_d = self.ctx.append_basic_block(f.func, "sc_conj_tryd");
+            self.builder
+                .build_conditional_branch(self.is_k_dbl(vk), try_d, slow_bb)
+                .expect("br");
+            self.emit_sc_conj_call(try_d, "rt_bc_scalar_conj_d", c_slot, vv, done_bb, slow_bb);
+        }
         self.builder.position_at_end(slow_bb);
         self.unlock_all_tvecs(f, s);
         let tv = self.slot(f);
@@ -1248,6 +1322,28 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(())
     }
 
+    fn emit_sc_conj_call(
+        &self,
+        bb: BasicBlock<'ctx>,
+        helper: &str,
+        c_slot: PointerValue<'ctx>,
+        vv: IntValue<'ctx>,
+        done_bb: BasicBlock<'ctx>,
+        slow_bb: BasicBlock<'ctx>,
+    ) {
+        self.builder.position_at_end(bb);
+        let ok = self
+            .call(helper, Some(self.i8t), &[c_slot.into(), vv.into()])
+            .expect("ok");
+        let hit = self
+            .builder
+            .build_int_compare(IntPredicate::NE, ok, self.i8t.const_zero(), "hit")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(hit, done_bb, slow_bb)
+            .expect("br");
+    }
+
     fn lower_sc_assoc(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -1261,30 +1357,50 @@ impl<'ctx> Lowerer<'ctx> {
         let c = &s.colls[s.coll_idx(loc)];
         let c_slot = c.slot;
         let try_bb = self.ctx.append_basic_block(f.func, "sc_assoc_try");
+        let try_d_bb = s
+            .allow_fp
+            .then(|| self.ctx.append_basic_block(f.func, "sc_assoc_tryd"));
         let slow_bb = self.ctx.append_basic_block(f.func, "sc_assoc_slow");
         let slow_ok = self.ctx.append_basic_block(f.func, "sc_assoc_ok");
         let done_bb = self.ctx.append_basic_block(f.func, "sc_assoc_done");
-        let b_or = self.builder.build_or(ik, vk, "ikvk").expect("or");
-        let both_i = self
-            .builder
-            .build_int_compare(IntPredicate::EQ, b_or, self.i8t.const_zero(), "bi")
-            .expect("cmp");
-        self.emit_sc_assoc_fast(f, c, both_i, iv, vv, try_bb, slow_bb, done_bb);
-        self.builder.position_at_end(try_bb);
-        let ok = self
-            .call(
-                "rt_bc_scalar_assoc",
-                Some(self.i8t),
-                &[c_slot.into(), iv.into(), vv.into()],
-            )
-            .expect("ok");
-        let hit = self
-            .builder
-            .build_int_compare(IntPredicate::NE, ok, self.i8t.const_zero(), "hit")
-            .expect("cmp");
-        self.builder
-            .build_conditional_branch(hit, done_bb, slow_bb)
-            .expect("br");
+        let both_i = self.is_k_int(self.builder.build_or(ik, vk, "ikvk").expect("or"));
+        let idx_i_val_d = s.allow_fp.then(|| {
+            self.builder
+                .build_and(self.is_k_int(ik), self.is_k_dbl(vk), "iid")
+                .expect("and")
+        });
+        self.emit_sc_assoc_fast(
+            f,
+            c,
+            both_i,
+            idx_i_val_d,
+            iv,
+            vv,
+            try_bb,
+            try_d_bb,
+            slow_bb,
+            done_bb,
+        );
+        self.emit_sc_assoc_call(
+            try_bb,
+            "rt_bc_scalar_assoc",
+            c_slot,
+            iv,
+            vv,
+            done_bb,
+            slow_bb,
+        );
+        if let Some(tdb) = try_d_bb {
+            self.emit_sc_assoc_call(
+                tdb,
+                "rt_bc_scalar_assoc_d",
+                c_slot,
+                iv,
+                vv,
+                done_bb,
+                slow_bb,
+            );
+        }
         self.builder.position_at_end(slow_bb);
         self.unlock_all_tvecs(f, s);
         let ti = self.slot(f);
@@ -1316,45 +1432,125 @@ impl<'ctx> Lowerer<'ctx> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn emit_sc_assoc_call(
+        &self,
+        bb: BasicBlock<'ctx>,
+        helper: &str,
+        c_slot: PointerValue<'ctx>,
+        iv: IntValue<'ctx>,
+        vv: IntValue<'ctx>,
+        done_bb: BasicBlock<'ctx>,
+        slow_bb: BasicBlock<'ctx>,
+    ) {
+        self.builder.position_at_end(bb);
+        let ok = self
+            .call(
+                helper,
+                Some(self.i8t),
+                &[c_slot.into(), iv.into(), vv.into()],
+            )
+            .expect("ok");
+        let hit = self
+            .builder
+            .build_int_compare(IntPredicate::NE, ok, self.i8t.const_zero(), "hit")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(hit, done_bb, slow_bb)
+            .expect("br");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_sc_assoc_dispatch(
+        &self,
+        f: &FnCtx<'ctx>,
+        both_i: IntValue<'ctx>,
+        idx_i_val_d: Option<IntValue<'ctx>>,
+        try_bb: BasicBlock<'ctx>,
+        try_d_bb: Option<BasicBlock<'ctx>>,
+        slow_bb: BasicBlock<'ctx>,
+    ) {
+        if let (Some(iid), Some(tdb)) = (idx_i_val_d, try_d_bb) {
+            let chk_d = self.ctx.append_basic_block(f.func, "sc_assoc_cd");
+            self.builder
+                .build_conditional_branch(both_i, try_bb, chk_d)
+                .expect("br");
+            self.builder.position_at_end(chk_d);
+            self.builder
+                .build_conditional_branch(iid, tdb, slow_bb)
+                .expect("br");
+        } else {
+            self.builder
+                .build_conditional_branch(both_i, try_bb, slow_bb)
+                .expect("br");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_sc_assoc_fast_store(
+        &self,
+        kind_ok: IntValue<'ctx>,
+        ptr_slot: PointerValue<'ctx>,
+        len_slot: PointerValue<'ctx>,
+        iv: IntValue<'ctx>,
+        vv: IntValue<'ctx>,
+        fast_bb: BasicBlock<'ctx>,
+        miss_bb: BasicBlock<'ctx>,
+        done_bb: BasicBlock<'ctx>,
+    ) {
+        let in_b = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, iv, self.load_i64(len_slot), "ainb")
+            .expect("cmp");
+        let fast = self.builder.build_and(kind_ok, in_b, "afast").expect("and");
+        self.builder
+            .build_conditional_branch(fast, fast_bb, miss_bb)
+            .expect("br");
+        self.builder.position_at_end(fast_bb);
+        let ep = self.ivec_elem_ptr(ptr_slot, iv);
+        self.builder.build_store(ep, vv).expect("st");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_sc_assoc_fast(
         &self,
         f: &FnCtx<'ctx>,
         c: &CollCache<'ctx>,
         both_i: IntValue<'ctx>,
+        idx_i_val_d: Option<IntValue<'ctx>>,
         iv: IntValue<'ctx>,
         vv: IntValue<'ctx>,
         try_bb: BasicBlock<'ctx>,
+        try_d_bb: Option<BasicBlock<'ctx>>,
         slow_bb: BasicBlock<'ctx>,
         done_bb: BasicBlock<'ctx>,
     ) {
         if c.tvec_locked.is_none() {
-            self.builder
-                .build_conditional_branch(both_i, try_bb, slow_bb)
-                .expect("br");
+            self.emit_sc_assoc_dispatch(f, both_i, idx_i_val_d, try_bb, try_d_bb, slow_bb);
             return;
         }
-        // `c` is mutated (`assoc!`), so `ivec_len` is non-zero iff locked.
-        let in_b = self
-            .builder
-            .build_int_compare(IntPredicate::ULT, iv, self.load_i64(c.ivec_len), "ainb")
-            .expect("cmp");
-        let fast = self.builder.build_and(both_i, in_b, "afast").expect("and");
+        // `c` is mutated (`assoc!`), so `ivec_len`/`dvec_len` is non-zero iff locked.
         let fast_bb = self.ctx.append_basic_block(f.func, "sc_assoc_fast");
         let miss_bb = self.ctx.append_basic_block(f.func, "sc_assoc_miss");
-        self.builder
-            .build_conditional_branch(fast, fast_bb, miss_bb)
-            .expect("br");
-        self.builder.position_at_end(fast_bb);
-        let ep = self.ivec_elem_ptr(c.ivec_ptr, iv);
-        self.builder.build_store(ep, vv).expect("st");
-        self.builder
-            .build_unconditional_branch(done_bb)
-            .expect("br");
+        let dvec_branch = idx_i_val_d
+            .zip(c.dvec)
+            .map(|(iid, d)| (iid, d, self.ctx.append_basic_block(f.func, "sc_assoc_dchk")));
+        let after_i = dvec_branch.map_or(miss_bb, |(_, _, bb)| bb);
+        self.emit_sc_assoc_fast_store(
+            both_i, c.ivec_ptr, c.ivec_len, iv, vv, fast_bb, after_i, done_bb,
+        );
+        if let Some((iid, (dvec_ptr, dvec_len), dchk_bb)) = dvec_branch {
+            let dfast_bb = self.ctx.append_basic_block(f.func, "sc_assoc_dfast");
+            self.builder.position_at_end(dchk_bb);
+            self.emit_sc_assoc_fast_store(
+                iid, dvec_ptr, dvec_len, iv, vv, dfast_bb, miss_bb, done_bb,
+            );
+        }
         self.builder.position_at_end(miss_bb);
         self.unlock_coll_tvec(f, c);
-        self.builder
-            .build_conditional_branch(both_i, try_bb, slow_bb)
-            .expect("br");
+        self.emit_sc_assoc_dispatch(f, both_i, idx_i_val_d, try_bb, try_d_bb, slow_bb);
     }
 
     fn lower_sc_pop(
@@ -2483,14 +2679,46 @@ impl<'ctx> Lowerer<'ctx> {
         } else {
             self.emit_sc_nth_str(f, c, iv, res_k, res_v, ivec_chk_bb, done_bb);
         }
-        let after_ivec = if !c.mutated && s.allow_fp {
-            self.ctx.append_basic_block(f.func, "sc_nth_gchk")
+        let after_ivec = if c.dvec.is_some() {
+            self.ctx.append_basic_block(f.func, "sc_nth_dchk")
         } else {
             bc_bb
         };
-        self.emit_sc_nth_ivec(f, c, iv, res_k, res_v, ivec_chk_bb, after_ivec, done_bb);
-        if !c.mutated && s.allow_fp {
-            self.emit_sc_nth_gvec(f, c, iv, res_k, res_v, after_ivec, bc_bb, done_bb);
+        self.emit_sc_nth_packed64(
+            f,
+            c.ivec_ptr,
+            c.ivec_len,
+            0,
+            "sc_nth_ivec",
+            iv,
+            res_k,
+            res_v,
+            ivec_chk_bb,
+            after_ivec,
+            done_bb,
+        );
+        if let Some((dvec_ptr, dvec_len)) = c.dvec {
+            let after_dvec = if !c.mutated {
+                self.ctx.append_basic_block(f.func, "sc_nth_gchk")
+            } else {
+                bc_bb
+            };
+            self.emit_sc_nth_packed64(
+                f,
+                dvec_ptr,
+                dvec_len,
+                3,
+                "sc_nth_dvec",
+                iv,
+                res_k,
+                res_v,
+                after_ivec,
+                after_dvec,
+                done_bb,
+            );
+            if !c.mutated {
+                self.emit_sc_nth_gvec(f, c, iv, res_k, res_v, after_dvec, bc_bb, done_bb);
+            }
         }
         self.builder.position_at_end(bc_bb);
         self.unlock_coll_tvec(f, c);
@@ -2587,10 +2815,13 @@ impl<'ctx> Lowerer<'ctx> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn emit_sc_nth_ivec(
+    fn emit_sc_nth_packed64(
         &self,
         f: &FnCtx<'ctx>,
-        c: &CollCache<'ctx>,
+        ptr_slot: PointerValue<'ctx>,
+        len_slot: PointerValue<'ctx>,
+        kind: u64,
+        bb_name: &str,
         iv: IntValue<'ctx>,
         res_k: PointerValue<'ctx>,
         res_v: PointerValue<'ctx>,
@@ -2601,17 +2832,17 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.position_at_end(chk_bb);
         let fast = self
             .builder
-            .build_int_compare(IntPredicate::ULT, iv, self.load_i64(c.ivec_len), "fiv")
+            .build_int_compare(IntPredicate::ULT, iv, self.load_i64(len_slot), "fp64")
             .expect("cmp");
-        let ivec_bb = self.ctx.append_basic_block(f.func, "sc_nth_ivec");
+        let hit_bb = self.ctx.append_basic_block(f.func, bb_name);
         self.builder
-            .build_conditional_branch(fast, ivec_bb, miss_bb)
+            .build_conditional_branch(fast, hit_bb, miss_bb)
             .expect("br");
-        self.builder.position_at_end(ivec_bb);
-        let ep = self.ivec_elem_ptr(c.ivec_ptr, iv);
+        self.builder.position_at_end(hit_bb);
+        let ep = self.ivec_elem_ptr(ptr_slot, iv);
         let val = self.load_i64(ep);
         self.builder
-            .build_store(res_k, self.i8t.const_zero())
+            .build_store(res_k, self.i8t.const_int(kind, false))
             .expect("st");
         self.builder.build_store(res_v, val).expect("st");
         self.builder
@@ -2809,6 +3040,17 @@ impl<'ctx> Lowerer<'ctx> {
     ) {
         let both = self.builder.build_or(k1, k2, "req_or").expect("or");
         self.require_int(f, both, fail);
+    }
+}
+
+fn init_needs_fp(e: &Expr, read_only_nth: bool) -> bool {
+    match e {
+        Expr::Literal(Value::Double(_)) => true,
+        Expr::DirectNative(dc) => {
+            let name = dc.var.sym.name();
+            name == "double" || (read_only_nth && matches!(name, "nth" | "first" | "get"))
+        }
+        _ => false,
     }
 }
 
