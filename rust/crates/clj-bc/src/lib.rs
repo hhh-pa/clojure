@@ -397,8 +397,16 @@ pub extern "C" fn rt_bc_scalar_nth(
     k_out: &mut u8,
     v_out: &mut i64,
     str_ascii: Option<StrAsciiFn>,
+    allow_fp: u8,
 ) -> i8 {
-    i8::from(ops::scalar_nth(coll, idx, k_out, v_out, str_ascii))
+    i8::from(ops::scalar_nth(
+        coll,
+        idx,
+        k_out,
+        v_out,
+        str_ascii,
+        allow_fp != 0,
+    ))
 }
 
 /// Unboxed 2D `nth` entrypoint (`coll[idx][item]`, `1` on hit).
@@ -410,8 +418,16 @@ pub extern "C" fn rt_bc_scalar_nth2(
     item: i64,
     k_out: &mut u8,
     v_out: &mut i64,
+    allow_fp: u8,
 ) -> i8 {
-    i8::from(ops::scalar_nth2(coll, idx, item, k_out, v_out))
+    i8::from(ops::scalar_nth2(
+        coll,
+        idx,
+        item,
+        k_out,
+        v_out,
+        allow_fp != 0,
+    ))
 }
 
 /// Unboxed effect-position `assoc!` entrypoint (`1` on hit).
@@ -1115,12 +1131,12 @@ mod tests {
         let mut k = 99;
         let mut v = -1;
         let ivec = Value::Vector(clj_value::Vector::from_ints(vec![10, 20]));
-        assert!(ops::scalar_nth(&ivec, 1, &mut k, &mut v, None));
+        assert!(ops::scalar_nth(&ivec, 1, &mut k, &mut v, None, false));
         assert_eq!((k, v), (0, 20));
-        assert!(!ops::scalar_nth(&ivec, -1, &mut k, &mut v, None));
+        assert!(!ops::scalar_nth(&ivec, -1, &mut k, &mut v, None, false));
 
         let cvec = Value::Vector(clj_value::Vector::from_chars(vec!['a']));
-        assert!(ops::scalar_nth(&cvec, 0, &mut k, &mut v, None));
+        assert!(ops::scalar_nth(&cvec, 0, &mut k, &mut v, None, false));
         assert_eq!((k, v), (1, i64::from(b'a')));
 
         let gvec = Value::Vector(clj_value::Vector::from_vec(vec![
@@ -1130,25 +1146,33 @@ mod tests {
             Value::Double(1.5),
             str_val("no"),
         ]));
-        assert!(ops::scalar_nth(&gvec, 0, &mut k, &mut v, None));
+        assert!(ops::scalar_nth(&gvec, 0, &mut k, &mut v, None, true));
         assert_eq!((k, v), (0, 3));
-        assert!(ops::scalar_nth(&gvec, 1, &mut k, &mut v, None));
+        assert!(ops::scalar_nth(&gvec, 1, &mut k, &mut v, None, true));
         assert_eq!((k, v), (1, i64::from(b'z')));
-        assert!(ops::scalar_nth(&gvec, 2, &mut k, &mut v, None));
+        assert!(ops::scalar_nth(&gvec, 2, &mut k, &mut v, None, true));
         assert_eq!((k, v), (2, 1));
-        assert!(ops::scalar_nth(&gvec, 3, &mut k, &mut v, None));
+        assert!(ops::scalar_nth(&gvec, 3, &mut k, &mut v, None, true));
         assert_eq!((k, v), (3, 1.5_f64.to_bits() as i64));
-        assert!(!ops::scalar_nth(&gvec, 4, &mut k, &mut v, None));
+        assert!(!ops::scalar_nth(&gvec, 3, &mut k, &mut v, None, false));
+        assert!(!ops::scalar_nth(&gvec, 4, &mut k, &mut v, None, true));
 
         let s = str_val("ab");
-        assert!(ops::scalar_nth(&s, 1, &mut k, &mut v, None));
+        assert!(ops::scalar_nth(&s, 1, &mut k, &mut v, None, false));
         assert_eq!((k, v), (1, i64::from(b'b')));
-        assert!(!ops::scalar_nth(&Value::Nil, 0, &mut k, &mut v, None));
+        assert!(!ops::scalar_nth(
+            &Value::Nil,
+            0,
+            &mut k,
+            &mut v,
+            None,
+            false
+        ));
 
         let mut tv = TransientVector::new();
         tv.conj(Value::Int(5)).unwrap();
         let tval = Value::Transient(Transient::new(TransientKind::Vector(tv)));
-        assert!(ops::scalar_nth(&tval, 0, &mut k, &mut v, None));
+        assert!(ops::scalar_nth(&tval, 0, &mut k, &mut v, None, false));
         assert_eq!((k, v), (0, 5));
         assert!(ops::scalar_conj(&tval, 6));
         assert!(ops::scalar_assoc(&tval, 1, 7));
@@ -1156,7 +1180,7 @@ mod tests {
         assert!(ops::scalar_pop(&tval));
 
         let tmap = Value::Transient(Transient::new(TransientKind::Map(TransientMap::new())));
-        assert!(!ops::scalar_nth(&tmap, 0, &mut k, &mut v, None));
+        assert!(!ops::scalar_nth(&tmap, 0, &mut k, &mut v, None, false));
         assert!(!ops::scalar_assoc(&tmap, 0, 1));
         assert!(!ops::scalar_conj(&tmap, 1));
         assert!(!ops::scalar_pop(&tmap));
@@ -1166,15 +1190,19 @@ mod tests {
 
         let nested = Value::Vector(clj_value::Vector::from_vec(vec![
             ivec.clone(),
+            gvec.clone(),
             str_val("x"),
         ]));
-        assert!(ops::scalar_nth2(&nested, 0, 1, &mut k, &mut v));
+        assert!(ops::scalar_nth2(&nested, 0, 1, &mut k, &mut v, false));
         assert_eq!((k, v), (0, 20));
-        assert!(!ops::scalar_nth2(&nested, 0, 5, &mut k, &mut v));
-        assert!(!ops::scalar_nth2(&nested, 1, 0, &mut k, &mut v));
-        assert!(!ops::scalar_nth2(&nested, -1, 0, &mut k, &mut v));
-        assert!(!ops::scalar_nth2(&nested, 0, -1, &mut k, &mut v));
-        assert!(!ops::scalar_nth2(&Value::Nil, 0, 0, &mut k, &mut v));
+        assert!(ops::scalar_nth2(&nested, 1, 3, &mut k, &mut v, true));
+        assert_eq!((k, v), (3, 1.5_f64.to_bits() as i64));
+        assert!(!ops::scalar_nth2(&nested, 1, 3, &mut k, &mut v, false));
+        assert!(!ops::scalar_nth2(&nested, 0, 5, &mut k, &mut v, false));
+        assert!(!ops::scalar_nth2(&nested, 2, 0, &mut k, &mut v, false));
+        assert!(!ops::scalar_nth2(&nested, -1, 0, &mut k, &mut v, false));
+        assert!(!ops::scalar_nth2(&nested, 0, -1, &mut k, &mut v, false));
+        assert!(!ops::scalar_nth2(&Value::Nil, 0, 0, &mut k, &mut v, false));
 
         let mut iptr = std::ptr::null();
         let mut ilen = -1;
@@ -1209,6 +1237,6 @@ mod tests {
         assert!(ps.try_push("hi"));
         let psv = Value::Vector(clj_value::Vector::from_packed_strs(ps));
         assert_eq!(run1(BcOp1::First, &psv), None);
-        assert!(!ops::scalar_nth(&psv, 0, &mut k, &mut v, None));
+        assert!(!ops::scalar_nth(&psv, 0, &mut k, &mut v, None, false));
     }
 }

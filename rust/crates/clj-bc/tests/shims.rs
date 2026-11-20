@@ -190,7 +190,7 @@ fn abi_shims_exercise_pod_ops_and_fallbacks() {
     let mut k = 0;
     let mut val = 0;
     assert_eq!(
-        rt_bc_scalar_nth(&s, 1, &mut k, &mut val, Some(test_str_ascii)),
+        rt_bc_scalar_nth(&s, 1, &mut k, &mut val, Some(test_str_ascii), 0),
         1
     );
     assert_eq!((k, val), (1, i64::from(b'b')));
@@ -200,7 +200,7 @@ fn abi_shims_exercise_pod_ops_and_fallbacks() {
     let nested = Value::Vector(Vector::from_vec(vec![Value::Vector(Vector::from_ints(
         vec![42],
     ))]));
-    assert_eq!(rt_bc_scalar_nth2(&nested, 0, 0, &mut k, &mut val), 1);
+    assert_eq!(rt_bc_scalar_nth2(&nested, 0, 0, &mut k, &mut val, 0), 1);
     assert_eq!((k, val), (0, 42));
 
     let iv = Value::Vector(Vector::from_ints(vec![10, 20, 30]));

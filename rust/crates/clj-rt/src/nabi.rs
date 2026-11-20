@@ -394,6 +394,16 @@ pub extern "C" fn rt_n_dot(out: &mut Value, init: &Value, c1: &Value, c2: &Value
     1
 }
 
+/// Streaming fast path for `(println|print (clojure.string/join sep coll))`:
+/// sets `*hit = 1` when streamed directly to `*out*`, `0` when fallback is needed;
+/// returns `0` on `Ok` and `1` on runtime error.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_print_join(hit: &mut u8, sep: &Value, coll: &Value, flags: u8) -> i32 {
+    native::status(with_active(|eval| {
+        native_abi::try_print_join(eval, sep, coll, flags, hit)
+    }))
+}
+
 /// Fold `res` (taken: left nil) into `acc` using `clojure.core/+` for a
 /// compiled `(reduce + [init] (map F ...))` loop.
 #[unsafe(no_mangle)]
@@ -1295,6 +1305,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_unreduce,
         rt_n_mapv_parse_num,
         rt_n_dot,
+        rt_n_print_join,
         rt_n_add_acc,
         rt_n_regex,
         rt_n_static_field,

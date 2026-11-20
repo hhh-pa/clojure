@@ -1610,3 +1610,68 @@ fn native_emit_ir_lowers_double_scalar_loops_and_gvec_271() {
         "bitcode leaked a Rust panic symbol into emitted IR"
     );
 }
+
+#[test]
+fn native_emit_ir_streams_print_join_271() {
+    let ir = tmp("native-print-join.ll");
+    let src = "\
+(require '[clojure.string :as str])
+(defn emit-ln [xs] (println (str/join \",\" xs)))
+(defn emit-raw [xs] (print (str/join \",\" xs)))
+(defn emit-str-nl [xs] (print (str (str/join \",\" xs) \"\\n\")))
+(defn non-matching [xs]
+  (println (str/join xs))
+  (println \"a\" \"b\")
+  (println (inc 1))
+  (print (str (str/join \",\" xs) \"x\"))
+  (print (str \"a\" \"\\n\"))
+  (print (str (str/join \",\" xs)))
+  (print (inc 1))
+  (print xs)
+  (prn (str/join \",\" xs)))
+(emit-ln [\"a\" \"b\"])
+(emit-raw [\"a\" \"b\"])
+(emit-str-nl [\"a\" \"b\"])
+(non-matching [\"a\" \"b\"])
+";
+    clj_aot::build_str(
+        src,
+        "f.clj",
+        &tmp("nope-print-join"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    for (fname, flag) in [
+        ("user_emit_ln(", "i8 3"),
+        ("user_emit_raw(", "i8 0"),
+        ("user_emit_str_nl(", "i8 1"),
+    ] {
+        let body = text
+            .split("\ndefine ")
+            .find(|d| d.contains(fname))
+            .unwrap_or_else(|| panic!("missing {fname}"));
+        assert!(
+            body.contains("@rt_n_print_join") && body.contains(flag),
+            "{fname} expected @rt_n_print_join with {flag}:\n{body}"
+        );
+    }
+    let nm_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_non_matching("))
+        .expect("non_matching fn");
+    assert!(
+        !nm_body.contains("@rt_n_print_join"),
+        "non_matching unexpectedly emitted @rt_n_print_join:\n{nm_body}"
+    );
+    assert!(
+        !text.contains("slice_error_fail") && !text.contains("9panicking"),
+        "bitcode leaked a Rust panic symbol into emitted IR"
+    );
+}

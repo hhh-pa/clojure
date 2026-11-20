@@ -1442,6 +1442,19 @@ pub fn try_dot_product(init: &Value, c1: &Value, c2: &Value) -> Option<Value> {
     }
 }
 
+/// Streaming fast path for `(println|print (clojure.string/join sep coll))`.
+pub fn try_print_join(
+    eval: &mut Evaluator,
+    sep: &Value,
+    coll: &Value,
+    flags: u8,
+    hit: &mut u8,
+) -> Result<(), Signal> {
+    let h = crate::io::try_print_join(eval, sep, coll, flags).map_err(|e| eval.throw(e))?;
+    *hit = u8::from(h);
+    Ok(())
+}
+
 /// Fold `res` into `acc` using `clojure.core/+` for a compiled
 /// `(reduce + [init] (map F ...))` loop.
 pub fn add_acc(eval: &mut Evaluator, acc: &mut Value, res: Value) -> Result<(), Signal> {
@@ -1925,5 +1938,10 @@ mod tests {
             print_constant(&split_walk),
             "[[\"\" \"ab\"] (\\a \\b) [\"ab\" \"c\"] [\"x\"] (\\x)]"
         );
+
+        // native_abi::try_print_join thin wrapper
+        let mut hit = 9u8;
+        try_print_join(&mut eval, &Value::Int(1), &Value::Nil, 3, &mut hit).expect("miss");
+        assert_eq!(hit, 0);
     }
 }

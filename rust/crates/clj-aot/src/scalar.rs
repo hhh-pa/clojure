@@ -367,15 +367,7 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(false);
         }
         let (bound, targets) = self.bind_scalar_loop_inits(f, bindings)?;
-        let allow_fp = scan.has_fp
-            || !scan.globals.is_empty()
-            || bindings.iter().enumerate().any(|(p, (_, init))| {
-                ast.scalar[p]
-                    && !matches!(
-                        init,
-                        Expr::Literal(Value::Int(_) | Value::Char(_) | Value::Bool(_))
-                    )
-            });
+        let allow_fp = scan.has_fp;
         let sc_hdr = self.ctx.append_basic_block(f.func, "sc_hdr");
         let deopt_bb = self.ctx.append_basic_block(f.func, "sc_deopt");
         let boxed_hdr = self.ctx.append_basic_block(f.func, "sc_boxed");
@@ -508,7 +500,7 @@ impl<'ctx> Lowerer<'ctx> {
         p
     }
 
-    fn load_i8(&self, ptr: PointerValue<'ctx>) -> IntValue<'ctx> {
+    pub(super) fn load_i8(&self, ptr: PointerValue<'ctx>) -> IntValue<'ctx> {
         self.builder
             .build_load(self.i8t, ptr, "k")
             .expect("load")
@@ -2516,6 +2508,7 @@ impl<'ctx> Lowerer<'ctx> {
                     s.scratch_k.into(),
                     s.scratch_v.into(),
                     probe.into(),
+                    self.i8t.const_int(u64::from(s.allow_fp), false).into(),
                 ],
             )
             .expect("ok");
@@ -2527,24 +2520,15 @@ impl<'ctx> Lowerer<'ctx> {
             .build_conditional_branch(hit, bc_ok_bb, slow_bb)
             .expect("br");
         self.builder.position_at_end(bc_ok_bb);
-        let bk = self.load_i8(s.scratch_k);
-        self.builder.build_store(res_k, bk).expect("st");
+        self.builder
+            .build_store(res_k, self.load_i8(s.scratch_k))
+            .expect("st");
         self.builder
             .build_store(res_v, self.load_i64(s.scratch_v))
             .expect("st");
-        if s.allow_fp {
-            self.builder
-                .build_unconditional_branch(done_bb)
-                .expect("br");
-        } else {
-            let not_d = self
-                .builder
-                .build_int_compare(IntPredicate::NE, bk, self.i8t.const_int(3, false), "nd")
-                .expect("cmp");
-            self.builder
-                .build_conditional_branch(not_d, done_bb, s.deopt_bb)
-                .expect("br");
-        }
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
         self.emit_sc_nth_slow(f, s, c_slot, iv, res_k, res_v, slow_bb, done_bb);
         self.builder.position_at_end(done_bb);
         Ok((self.load_i8(res_k), self.load_i64(res_v)))
@@ -2736,6 +2720,7 @@ impl<'ctx> Lowerer<'ctx> {
                     jv.into(),
                     s.scratch_k.into(),
                     s.scratch_v.into(),
+                    self.i8t.const_int(u64::from(s.allow_fp), false).into(),
                 ],
             )
             .expect("ok");
@@ -2748,19 +2733,7 @@ impl<'ctx> Lowerer<'ctx> {
             .build_conditional_branch(hit, ok_bb, s.deopt_bb)
             .expect("br");
         self.builder.position_at_end(ok_bb);
-        let rk = self.load_i8(s.scratch_k);
-        if !s.allow_fp {
-            let not_d = self
-                .builder
-                .build_int_compare(IntPredicate::NE, rk, self.i8t.const_int(3, false), "nd")
-                .expect("cmp");
-            let ok2 = self.ctx.append_basic_block(f.func, "sc_nth2_nd");
-            self.builder
-                .build_conditional_branch(not_d, ok2, s.deopt_bb)
-                .expect("br");
-            self.builder.position_at_end(ok2);
-        }
-        Ok((rk, self.load_i64(s.scratch_v)))
+        Ok((self.load_i8(s.scratch_k), self.load_i64(s.scratch_v)))
     }
 
     fn is_k_int(&self, k: IntValue<'ctx>) -> IntValue<'ctx> {

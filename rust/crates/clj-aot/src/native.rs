@@ -3016,7 +3016,7 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        if self.try_lower_dot_product(f, call, dest)? {
+        if self.try_lower_dot_product(f, call, dest)? || self.try_lower_print_join(f, call, dest)? {
             return Ok(true);
         }
         let Some(hl) = hof_loop(call) else {
@@ -3079,6 +3079,72 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
         self.free_slots(f, &[plus_s, init_s, star_s, c1_s, c2_s, seq]);
+        Ok(true)
+    }
+
+    fn try_lower_print_join(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        let Some(pj) = print_join_call(call) else {
+            return Ok(false);
+        };
+        let sep_s = self.slot(f);
+        self.lower(f, pj.sep, sep_s)?;
+        let coll_s = self.slot(f);
+        self.lower(f, pj.coll, coll_s)?;
+        let hit_slot = self.entry_alloca(f, self.i8t, "pjh");
+        let st = self
+            .call(
+                "rt_n_print_join",
+                Some(self.i32t),
+                &[
+                    hit_slot.into(),
+                    sep_s.into(),
+                    coll_s.into(),
+                    self.i8t.const_int(u64::from(pj.flags), false).into(),
+                ],
+            )
+            .expect("st");
+        self.check(f, st);
+        let fast = self.ctx.append_basic_block(f.func, "pj_fast");
+        let slow = self.ctx.append_basic_block(f.func, "pj_slow");
+        let done = self.ctx.append_basic_block(f.func, "pj_done");
+        let hit = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                self.load_i8(hit_slot),
+                self.i8t.const_zero(),
+                "pj_ok",
+            )
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(hit, fast, slow)
+            .expect("br");
+        self.builder.position_at_end(fast);
+        self.drop_v(f.func, dest);
+        self.write_tag(dest, 0);
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(slow);
+        let joined = self.slot(f);
+        self.core_call_owned(f, pj.join, &[sep_s, coll_s], joined);
+        if let Some((str_call, nl_expr)) = pj.str_call {
+            let nl_s = self.slot(f);
+            self.lower(f, nl_expr, nl_s)?;
+            let out_s = self.slot(f);
+            self.core_call_owned(f, str_call, &[joined, nl_s], out_s);
+            self.core_call_owned(f, call, &[out_s], dest);
+            self.free_slots(f, &[nl_s, out_s]);
+        } else {
+            self.core_call_owned(f, call, &[joined], dest);
+        }
+        self.free_slots(f, &[joined]);
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        self.free_slots(f, &[sep_s, coll_s]);
         Ok(true)
     }
 
@@ -6356,6 +6422,72 @@ fn dot_product_call(
         return None;
     };
     is_core_global(star, "*").then_some((plus, init, m, star, c1, c2))
+}
+
+struct PrintJoin<'a> {
+    join: &'a clj_eval::expr::DirectCall,
+    str_call: Option<(&'a clj_eval::expr::DirectCall, &'a Expr)>,
+    sep: &'a Expr,
+    coll: &'a Expr,
+    flags: u8,
+}
+
+fn is_str_join(e: &Expr) -> Option<(&clj_eval::expr::DirectCall, &Expr, &Expr)> {
+    let Expr::DirectNative(j) = e else {
+        return None;
+    };
+    if j.var.sym.namespace() != Some("clojure.string") || j.var.sym.name() != "join" {
+        return None;
+    }
+    let [sep, coll] = j.args.as_slice() else {
+        return None;
+    };
+    Some((j, sep, coll))
+}
+
+fn print_str_join_nl(arg: &Expr) -> Option<PrintJoin<'_>> {
+    let Expr::DirectNative(s) = arg else {
+        return None;
+    };
+    if s.var.sym.namespace() != Some("clojure.core") || s.var.sym.name() != "str" {
+        return None;
+    }
+    let [inner, nl @ Expr::Literal(Value::Str(nl_s))] = s.args.as_slice() else {
+        return None;
+    };
+    if nl_s.as_ref() != "\n" {
+        return None;
+    }
+    let (join, sep, coll) = is_str_join(inner)?;
+    Some(PrintJoin {
+        join,
+        str_call: Some((s, nl)),
+        sep,
+        coll,
+        flags: 1,
+    })
+}
+
+fn print_join_call(call: &clj_eval::expr::DirectCall) -> Option<PrintJoin<'_>> {
+    if call.var.sym.namespace() != Some("clojure.core") {
+        return None;
+    }
+    let [arg] = call.args.as_slice() else {
+        return None;
+    };
+    let name = call.var.sym.name();
+    if (name == "println" || name == "print")
+        && let Some((join, sep, coll)) = is_str_join(arg)
+    {
+        return Some(PrintJoin {
+            join,
+            str_call: None,
+            sep,
+            coll,
+            flags: if name == "println" { 3 } else { 0 },
+        });
+    }
+    (name == "print").then(|| print_str_join_nl(arg)).flatten()
 }
 
 fn parse_num_arity(arity: &Arity, base: usize) -> Option<u8> {

@@ -203,11 +203,22 @@ fn boxed_with<T: Copy>(x: &[T], box_item: fn(T) -> Value, idx: usize, v: Value) 
     g
 }
 
+/// Append `v` with 1.5x growth past 256 KiB so large transients avoid
+/// 2x doubling spikes without fragmenting smaller allocator size classes.
+#[inline]
+fn push_tight<T>(x: &mut Vec<T>, v: T) {
+    let min_cap = (256 * 1024) / std::mem::size_of::<T>().max(1);
+    if x.len() == x.capacity() && x.capacity() >= min_cap {
+        x.reserve_exact(x.capacity() / 2);
+    }
+    x.push(v);
+}
+
 /// Set `x[idx]`, or append at `idx == len`.
 #[inline]
 fn put_at<T>(x: &mut Vec<T>, idx: usize, v: T) {
     if idx == x.len() {
-        x.push(v);
+        push_tight(x, v);
     } else {
         x[idx] = v;
     }
@@ -466,7 +477,7 @@ impl TransientVector {
         }
         match &mut self.items {
             TransientItems::Ints(x) => {
-                x.push(n);
+                push_tight(x, n);
                 true
             }
             _ => self.conj(Value::Int(n)).is_ok(),
@@ -1602,5 +1613,18 @@ mod tests {
         assert!(!tv_dbl.assoc_double_in_bounds(0, 5.0));
         let mut tv_ints = TransientVector::from_vector(&crate::Vector::from_ints(vec![1, 2]));
         assert!(!tv_ints.assoc_double_in_bounds(0, 1.0));
+
+        // push_tight 1.5x growth past 256 KiB via conj_int_opt and conj/put_at
+        let mut tv_big_opt = TransientVector::new();
+        for i in 0..=32_768_i64 {
+            assert!(tv_big_opt.conj_int_opt(i));
+        }
+        assert_eq!(tv_big_opt.len().unwrap(), 32_769);
+
+        let mut tv_big_conj = TransientVector::new();
+        for i in 0..=32_768_i64 {
+            tv_big_conj.conj(Value::Int(i)).unwrap();
+        }
+        assert_eq!(tv_big_conj.len().unwrap(), 32_769);
     }
 }

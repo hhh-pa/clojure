@@ -542,6 +542,15 @@ fn print_impl(
 /// override) and no per-arg dispatch; the `*out*` check, the emission
 /// lock and the flush stay. `false` leaves the call to the general road
 /// (other args, live print methods, `*print-dup*`, no args).
+fn write_plain_str(out: &Value, s: &str, ln: bool) -> Result<(), NativeError> {
+    let _emission = EmissionGuard::acquire();
+    write_to_writer(out, s)?;
+    if ln {
+        write_to_writer(out, "\n")?;
+    }
+    Ok(())
+}
+
 fn print_scalars(
     eval: &mut Evaluator,
     args: &[Value],
@@ -554,12 +563,206 @@ fn print_scalars(
         return Ok(false);
     }
     check_writer(&snap.out)?;
-    let line = scalar_line(args, opts, ln);
-    {
-        let _emission = EmissionGuard::acquire();
-        write_to_writer(&snap.out, &line)?;
+    match (opts.readably, args) {
+        (false, [Value::Str(s)]) => write_plain_str(&snap.out, s, ln)?,
+        _ => {
+            let line = scalar_line(args, opts, ln);
+            let _emission = EmissionGuard::acquire();
+            write_to_writer(&snap.out, &line)?;
+        }
     }
     if ln && snap.flush {
+        flush_out(eval)?;
+    }
+    Ok(true)
+}
+
+const STREAM_CHUNK_BYTES: usize = 16 * 1024;
+
+fn is_join_plain(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Str(_)
+            | Value::Int(_)
+            | Value::Char(_)
+            | Value::Bool(_)
+            | Value::Double(_)
+            | Value::Nil
+    )
+}
+
+fn flush_stream_buf(out: &Value, buf: &mut String) -> Result<(), NativeError> {
+    if !buf.is_empty() {
+        write_to_writer(out, buf)?;
+        buf.clear();
+    }
+    Ok(())
+}
+
+fn emit_stream_str(out: &Value, buf: &mut String, s: &str) -> Result<(), NativeError> {
+    if s.len() >= STREAM_CHUNK_BYTES {
+        flush_stream_buf(out, buf)?;
+        return write_to_writer(out, s);
+    }
+    buf.push_str(s);
+    if buf.len() >= STREAM_CHUNK_BYTES {
+        flush_stream_buf(out, buf)?;
+    }
+    Ok(())
+}
+
+fn emit_stream_plain(
+    eval: &mut Evaluator,
+    out: &Value,
+    buf: &mut String,
+    v: &Value,
+) -> Result<(), NativeError> {
+    if let Value::Str(s) = v {
+        return emit_stream_str(out, buf, s);
+    }
+    crate::core::str_push(buf, eval, v)?;
+    if buf.len() >= STREAM_CHUNK_BYTES {
+        flush_stream_buf(out, buf)?;
+    }
+    Ok(())
+}
+
+enum StreamJoin<'a> {
+    Packed(&'a clj_value::PackedStrings),
+    Ints(&'a [i64]),
+    Vals(&'a [Value]),
+    Split(&'a clj_value::SplitVecValue),
+}
+
+fn classify_stream_join(coll: &Value) -> Option<StreamJoin<'_>> {
+    if let Value::Vector(v) = coll {
+        if let Some(ps) = v.as_packed_strs() {
+            return Some(StreamJoin::Packed(ps));
+        }
+        if let Some(ints) = v.as_flat_ints() {
+            return Some(StreamJoin::Ints(ints));
+        }
+        if let Some(xs) = v.as_flat_values() {
+            if xs.iter().all(is_join_plain) {
+                return Some(StreamJoin::Vals(xs));
+            }
+        }
+        return None;
+    }
+    crate::lazy::as_splitvec(coll).map(StreamJoin::Split)
+}
+
+fn stream_packed_strs(
+    out: &Value,
+    buf: &mut String,
+    sep: &str,
+    ps: &clj_value::PackedStrings,
+) -> Result<(), NativeError> {
+    for i in 0..ps.len() {
+        if i > 0 {
+            emit_stream_str(out, buf, sep)?;
+        }
+        emit_stream_str(out, buf, ps.get_str(i).unwrap_or(""))?;
+    }
+    Ok(())
+}
+
+fn stream_flat_ints(
+    out: &Value,
+    buf: &mut String,
+    sep: &str,
+    ints: &[i64],
+) -> Result<(), NativeError> {
+    use std::fmt::Write;
+    for (i, &n) in ints.iter().enumerate() {
+        if i > 0 {
+            emit_stream_str(out, buf, sep)?;
+        }
+        let _ = write!(buf, "{n}");
+        if buf.len() >= STREAM_CHUNK_BYTES {
+            flush_stream_buf(out, buf)?;
+        }
+    }
+    Ok(())
+}
+
+fn stream_flat_values(
+    eval: &mut Evaluator,
+    out: &Value,
+    buf: &mut String,
+    sep: &str,
+    xs: &[Value],
+) -> Result<(), NativeError> {
+    for (i, item) in xs.iter().enumerate() {
+        if i > 0 {
+            emit_stream_str(out, buf, sep)?;
+        }
+        emit_stream_plain(eval, out, buf, item)?;
+    }
+    Ok(())
+}
+
+fn stream_split_vec(
+    out: &Value,
+    buf: &mut String,
+    sep: &str,
+    sp: &clj_value::SplitVecValue,
+) -> Result<(), NativeError> {
+    for i in 0..sp.len() {
+        if i > 0 {
+            emit_stream_str(out, buf, sep)?;
+        }
+        emit_stream_str(out, buf, sp.piece_str(i).unwrap_or(""))?;
+    }
+    Ok(())
+}
+
+fn stream_join_kind(
+    eval: &mut Evaluator,
+    out: &Value,
+    buf: &mut String,
+    sep: &str,
+    kind: StreamJoin<'_>,
+) -> Result<(), NativeError> {
+    match kind {
+        StreamJoin::Packed(ps) => stream_packed_strs(out, buf, sep, ps),
+        StreamJoin::Ints(ints) => stream_flat_ints(out, buf, sep, ints),
+        StreamJoin::Vals(xs) => stream_flat_values(eval, out, buf, sep, xs),
+        StreamJoin::Split(sp) => stream_split_vec(out, buf, sep, sp),
+    }
+}
+
+/// Stream `(println|print (clojure.string/join sep coll))` directly to `*out*`
+/// without allocating a full joined `String` / `Arc<str>` (#271).
+/// `flags`: bit 0 = append `\n`, bit 1 = flush when `*flush-on-newline*` is set.
+/// Returns `Ok(false)` without writing anything when a general fallback is needed.
+pub(crate) fn try_print_join(
+    eval: &mut Evaluator,
+    sep: &Value,
+    coll: &Value,
+    flags: u8,
+) -> Result<bool, NativeError> {
+    let Some(sep_str) = crate::stdlib_natives::fast_join_sep(sep) else {
+        return Ok(false);
+    };
+    let Some(kind) = classify_stream_join(coll) else {
+        return Ok(false);
+    };
+    let snap = eval.print_snap()?;
+    if !eval.print_defaults_only || snap.dup {
+        return Ok(false);
+    }
+    check_writer(&snap.out)?;
+    let mut buf = String::new();
+    {
+        let _emission = EmissionGuard::acquire();
+        stream_join_kind(eval, &snap.out, &mut buf, &sep_str, kind)?;
+        if (flags & 1) != 0 {
+            buf.push('\n');
+        }
+        flush_stream_buf(&snap.out, &mut buf)?;
+    }
+    if (flags & 2) != 0 && snap.flush {
         flush_out(eval)?;
     }
     Ok(true)
@@ -988,5 +1191,126 @@ mod tests {
             ),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn print_plain_str_and_try_print_join_paths() {
+        let mut eval = crate::boot();
+        eval.print_defaults_only = true;
+        // print_scalars single-string fast path (`print`/`println`) vs `pr`/`prn`/multi-arg
+        let res = eval
+            .eval_source(
+                "[(with-out-str (print \"hi\")) \
+                  (with-out-str (println \"hi\")) \
+                  (with-out-str (pr \"hi\")) \
+                  (with-out-str (prn \"hi\")) \
+                  (with-out-str (println 1 \"a\"))]",
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            crate::native_abi::print_constant(&res),
+            "[\"hi\" \"hi\\n\" \"\\\"hi\\\"\" \"\\\"hi\\\"\\n\" \"1 a\\n\"]"
+        );
+
+        let run_stream =
+            |eval: &mut Evaluator, sep: &Value, coll: &Value, flags: u8| -> (bool, String) {
+                let w = Value::Extension(Arc::new(Writer {
+                    id: eval.next_id(),
+                    kind: WriterKind::Buffer(Arc::new(Mutex::new(String::new()))),
+                }));
+                let out_id = crate::ns::core_var(eval, "*out*").expect("*out*");
+                let depth =
+                    eval.push_binding(crate::ns::core_var_handle(out_id, "*out*"), w.clone());
+                let hit = try_print_join(eval, sep, coll, flags).unwrap();
+                eval.pop_bindings(depth);
+                (hit, writer_contents(&w).unwrap_or_default())
+            };
+
+        let comma = Value::Str(Arc::from(","));
+
+        // PackedStrings: small items, chunk-flush >= 16 KiB, and single piece >= 16 KiB
+        let mut ps = clj_value::PackedStrings::new();
+        assert!(ps.try_push("head"));
+        let big = "X".repeat(STREAM_CHUNK_BYTES);
+        assert!(ps.try_push(&big));
+        let med = "m".repeat(5000);
+        for _ in 0..4 {
+            assert!(ps.try_push(&med));
+        }
+        let ps_val = Value::Vector(clj_value::Vector::from_packed_strs(ps));
+        let (hit, out) = run_stream(&mut eval, &comma, &ps_val, 3);
+        assert!(hit);
+        assert!(out.starts_with("head,XXX"));
+        assert!(out.ends_with('\n'));
+        assert_eq!(out.len(), 4 + 1 + STREAM_CHUNK_BYTES + 4 * (1 + 5000) + 1);
+
+        // Flat ints exceeding 16 KiB to exercise chunk flush in stream_flat_ints
+        let ints = Value::Vector(clj_value::Vector::from_ints((0..4000_i64).collect()));
+        let (hit, out) = run_stream(&mut eval, &comma, &ints, 1);
+        assert!(hit);
+        assert!(out.starts_with("0,1,2,3"));
+        assert!(out.ends_with(",3999\n"));
+
+        // Flat generic Values (all plain scalar kinds + >= 16 KiB flush in emit_stream_plain)
+        let mut vals = vec![
+            Value::Str(Arc::from("s")),
+            Value::Int(7),
+            Value::Char('c'),
+            Value::Bool(true),
+            Value::Double(1.5),
+            Value::Nil,
+        ];
+        for i in 0..4000_i64 {
+            vals.push(Value::Int(i));
+        }
+        let gvec = Value::Vector(clj_value::Vector::from_vec(vals));
+        let (hit, out) = run_stream(&mut eval, &comma, &gvec, 0);
+        assert!(hit);
+        assert!(out.starts_with("s,7,c,true,1.5,,0,1"));
+        assert!(!out.ends_with('\n'));
+
+        // Empty vector with flags = 0 exercises empty flush_stream_buf
+        let empty_v = Value::Vector(clj_value::Vector::from_ints(vec![]));
+        let (hit, out) = run_stream(&mut eval, &comma, &empty_v, 0);
+        assert!(hit);
+        assert!(out.is_empty());
+
+        // SplitVecValue
+        let sp = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from("alpha beta gamma"),
+            Arc::new(vec![(0, 5), (6, 4), (11, 5)]),
+        )));
+        let (hit, out) = run_stream(&mut eval, &Value::Char('-'), &sp, 1);
+        assert!(hit);
+        assert_eq!(out, "alpha-beta-gamma\n");
+
+        // Misses: non-fast sep, non-streamable coll (Nil, Chars, Vector with Map), *print-dup*
+        let (hit, _) = run_stream(&mut eval, &Value::Int(1), &sp, 3);
+        assert!(!hit);
+        let (hit, _) = run_stream(&mut eval, &comma, &Value::Nil, 3);
+        assert!(!hit);
+        let cvec = Value::Vector(clj_value::Vector::from_chars(vec!['a']));
+        let (hit, _) = run_stream(&mut eval, &comma, &cvec, 3);
+        assert!(!hit);
+        let non_plain = Value::Vector(clj_value::Vector::from_vec(vec![Value::Map(
+            clj_value::Map::from_kvs_last_wins(vec![]),
+        )]));
+        let (hit, _) = run_stream(&mut eval, &comma, &non_plain, 3);
+        assert!(!hit);
+
+        let dup_id = crate::ns::core_var(&eval, "*print-dup*").expect("*print-dup*");
+        let depth = eval.push_binding(
+            crate::ns::core_var_handle(dup_id, "*print-dup*"),
+            Value::Bool(true),
+        );
+        let (hit, _) = run_stream(&mut eval, &comma, &sp, 3);
+        eval.pop_bindings(depth);
+        assert!(!hit);
+
+        eval.print_defaults_only = false;
+        let (hit, _) = run_stream(&mut eval, &comma, &sp, 3);
+        assert!(!hit);
     }
 }

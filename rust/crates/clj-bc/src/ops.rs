@@ -818,14 +818,14 @@ pub(crate) fn assoc_bang_fast<O: OutSlot>(
 }
 
 #[inline]
-fn scalar_val_ref(vr: ValueRef<'_>) -> Option<(u8, i64)> {
+fn scalar_val_ref(vr: ValueRef<'_>, allow_fp: bool) -> Option<(u8, i64)> {
     match vr {
         ValueRef::Int(n) => Some((0, n)),
         ValueRef::Char(c) => Some((1, i64::from(u32::from(c)))),
         ValueRef::Ref(Value::Int(n)) => Some((0, *n)),
         ValueRef::Ref(Value::Char(c)) => Some((1, i64::from(u32::from(*c)))),
         ValueRef::Ref(Value::Bool(b)) => Some((2, i64::from(*b))),
-        ValueRef::Ref(Value::Double(d)) => Some((3, d.to_bits() as i64)),
+        ValueRef::Ref(Value::Double(d)) if allow_fp => Some((3, d.to_bits() as i64)),
         ValueRef::Str(_) | ValueRef::Ref(_) => None,
     }
 }
@@ -859,7 +859,8 @@ pub(crate) fn scalar_count(v: &Value, len_out: &mut i64, str_ascii: Option<StrAs
     true
 }
 
-/// Unboxed `nth` fast path writing `(k_out, v_out)` (`0 = Int, 1 = Char, 2 = Bool`).
+/// Unboxed `nth` fast path writing `(k_out, v_out)` (`0 = Int, 1 = Char, 2 = Bool`,
+/// plus `3 = Double` when `allow_fp`).
 #[inline]
 pub(crate) fn scalar_nth(
     coll: &Value,
@@ -867,16 +868,17 @@ pub(crate) fn scalar_nth(
     k_out: &mut u8,
     v_out: &mut i64,
     str_ascii: Option<StrAsciiFn>,
+    allow_fp: bool,
 ) -> bool {
     let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
         return false;
     };
     let pair = match coll {
-        Value::Vector(v) => v.get_val_ref(i).and_then(scalar_val_ref),
+        Value::Vector(v) => v.get_val_ref(i).and_then(|vr| scalar_val_ref(vr, allow_fp)),
         Value::Str(s) => nth_str_fast(coll, s, i, str_ascii)
             .flatten()
             .map(|c| (1, i64::from(u32::from(c)))),
-        Value::Transient(t) => scalar_nth_transient(t, i),
+        Value::Transient(t) => scalar_nth_transient(t, i, allow_fp),
         _ => None,
     };
     let Some((k, val)) = pair else {
@@ -888,12 +890,13 @@ pub(crate) fn scalar_nth(
 }
 
 #[inline]
-fn scalar_nth_transient(t: &clj_value::Transient, i: usize) -> Option<(u8, i64)> {
+fn scalar_nth_transient(t: &clj_value::Transient, i: usize, allow_fp: bool) -> Option<(u8, i64)> {
     let guard = t.lock();
     let TransientKind::Vector(tv) = &*guard else {
         return None;
     };
-    tv.get_val_ref(i).and_then(scalar_val_ref)
+    tv.get_val_ref(i)
+        .and_then(|vr| scalar_val_ref(vr, allow_fp))
 }
 
 /// Unboxed nested `nth` (`coll[idx][item]`) for destructured tuple vectors.
@@ -904,6 +907,7 @@ pub(crate) fn scalar_nth2(
     item: i64,
     k_out: &mut u8,
     v_out: &mut i64,
+    allow_fp: bool,
 ) -> bool {
     let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
         return false;
@@ -917,7 +921,10 @@ pub(crate) fn scalar_nth2(
     }) else {
         return false;
     };
-    let Some((k, val)) = inner.get_val_ref(j).and_then(scalar_val_ref) else {
+    let Some((k, val)) = inner
+        .get_val_ref(j)
+        .and_then(|vr| scalar_val_ref(vr, allow_fp))
+    else {
         return false;
     };
     *k_out = k;

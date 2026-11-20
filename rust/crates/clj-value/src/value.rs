@@ -355,6 +355,9 @@ impl PackedStrings {
                 .reserve_exact((self.buf.capacity() / 2).max(s.len()));
         }
         self.buf.push_str(s);
+        if self.ends.len() == self.ends.capacity() && self.ends.capacity() >= 64 * 1024 {
+            self.ends.reserve_exact(self.ends.capacity() / 2);
+        }
         self.ends.push(self.buf.len() as u32);
         true
     }
@@ -409,6 +412,44 @@ impl PackedStrings {
             start = end;
         }
         out
+    }
+
+    /// Join every stored string with `sep` in place inside `self.buf`, dropping
+    /// `self.ends` before returning so peak RSS avoids holding both the packed
+    /// strings buffer and a second output buffer simultaneously.
+    #[must_use]
+    pub fn into_joined(self, sep: &str) -> String {
+        let n = self.ends.len();
+        if n == 0 {
+            return String::new();
+        }
+        if sep.is_empty() {
+            return self.buf;
+        }
+        let sep_bytes = sep.as_bytes();
+        let total = self
+            .buf
+            .len()
+            .saturating_add(sep_bytes.len().saturating_mul(n - 1));
+        if total > self.buf.capacity() {
+            return self.join(sep);
+        }
+        let mut bytes = self.buf.into_bytes();
+        bytes.resize(total, 0);
+        let mut write = total;
+        for i in (0..n).rev() {
+            let end = self.ends[i] as usize;
+            let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+            let len = end - start;
+            write -= len;
+            bytes.copy_within(start..end, write);
+            if i > 0 {
+                write -= sep_bytes.len();
+                bytes[write..write + sep_bytes.len()].copy_from_slice(sep_bytes);
+            }
+        }
+        drop(self.ends);
+        String::from_utf8(bytes).unwrap_or_default()
     }
 
     /// Box all items into a `Vec<Value>`.
@@ -542,6 +583,28 @@ impl Vector {
         match &self.0.inner {
             VectorInner::Strs(ps) => Some(ps),
             _ => None,
+        }
+    }
+
+    /// Unwrap uniquely owned packed string storage, returning `Err(self)` when
+    /// shared or backed by another vector representation.
+    pub fn into_packed_strs(self) -> Result<PackedStrings, Self> {
+        let data = Arc::try_unwrap(self.0).map_err(Self)?;
+        let VectorData { id, inner, meta } = data;
+        match inner {
+            VectorInner::Strs(ps) => match Arc::try_unwrap(ps) {
+                Ok(owned) => Ok(owned),
+                Err(shared) => Err(Self(Arc::new(VectorData {
+                    id,
+                    inner: VectorInner::Strs(shared),
+                    meta,
+                }))),
+            },
+            other => Err(Self(Arc::new(VectorData {
+                id,
+                inner: other,
+                meta,
+            }))),
         }
     }
 }
@@ -5330,5 +5393,52 @@ mod tests {
         assert_eq!(fv.as_flat_values().map(<[Value]>::len), Some(2));
         assert!(Vector::from_ints(vec![1, 2]).as_flat_values().is_none());
         assert!(Vector::from_chars(vec!['a']).as_flat_values().is_none());
+
+        // ends 1.5x growth past 64K entries
+        let mut many_ends = PackedStrings::new();
+        for _ in 0..=65_536 {
+            assert!(many_ends.try_push("a"));
+        }
+        assert_eq!(many_ends.len(), 65_537);
+
+        // into_joined: empty, empty sep, in-place (fits in cap), fallback (exceeds cap)
+        assert_eq!(PackedStrings::new().into_joined(","), "");
+        let mut p_empty_sep = PackedStrings::with_capacity(2, 8);
+        assert!(p_empty_sep.try_push("hi"));
+        assert!(p_empty_sep.try_push("lo"));
+        assert_eq!(p_empty_sep.into_joined(""), "hilo");
+
+        let mut p_inplace = PackedStrings::with_capacity(3, 16);
+        assert!(p_inplace.try_push("aa"));
+        assert!(p_inplace.try_push("bbb"));
+        assert!(p_inplace.try_push("c"));
+        assert_eq!(p_inplace.into_joined("-"), "aa-bbb-c");
+
+        let mut p_grow = PackedStrings::with_capacity(2, 2);
+        assert!(p_grow.try_push("a"));
+        assert!(p_grow.try_push("b"));
+        assert_eq!(p_grow.into_joined("--------"), "a--------b");
+
+        // Vector::into_packed_strs: unique Ok, shared outer Err, shared inner via with_meta Err, non-Strs Err
+        let mut ps_u = PackedStrings::new();
+        assert!(ps_u.try_push("ok"));
+        let vu = Vector::from_packed_strs(ps_u);
+        assert_eq!(vu.into_packed_strs().expect("unique").join(","), "ok");
+
+        let mut ps_s = PackedStrings::new();
+        assert!(ps_s.try_push("s"));
+        let vs_outer = Vector::from_packed_strs(ps_s);
+        let vs_clone = vs_outer.clone();
+        let vs_back = vs_outer.into_packed_strs().expect_err("shared outer");
+        assert_eq!(vs_back.len(), 1);
+        let vs_meta = vs_clone
+            .clone()
+            .with_meta(Some(crate::Map::from_kvs_last_wins(vec![])));
+        let vs_meta_back = vs_meta.into_packed_strs().expect_err("shared inner");
+        assert_eq!(vs_meta_back.len(), 1);
+        drop(vs_clone);
+
+        let non_strs = Vector::from_ints(vec![1, 2]);
+        assert!(non_strs.into_packed_strs().is_err());
     }
 }

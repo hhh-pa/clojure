@@ -190,13 +190,26 @@ fn native_includes(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
     }
 }
 
-fn fast_join_sep(sep: &Value) -> Option<Cow<'_, str>> {
+pub(crate) fn fast_join_sep(sep: &Value) -> Option<Cow<'_, str>> {
     match sep {
         Value::Str(s) => Some(Cow::Borrowed(s)),
         Value::Char(c) => Some(Cow::Owned(c.to_string())),
         Value::Nil => Some(Cow::Borrowed("")),
         _ => None,
     }
+}
+
+/// Zero-copy fast path for joining a 1-element vector holding a single string.
+fn single_str_join(v: &clj_value::Vector) -> Option<Value> {
+    if v.len() != 1 {
+        return None;
+    }
+    if let Some(xs) = v.as_flat_values() {
+        if let Value::Str(s) = &xs[0] {
+            return Some(Value::Str(Arc::clone(s)));
+        }
+    }
+    None
 }
 
 fn exact_join_cap(v: &clj_value::Vector, sep_len: usize) -> Option<usize> {
@@ -284,6 +297,9 @@ fn native_join(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         return upstream(eval, "join", args, |e| lite_join(e, args));
     }
     if let Value::Vector(v) = coll {
+        if let Some(s) = single_str_join(v) {
+            return Ok(s);
+        }
         return Ok(Value::Str(Arc::from(join_vector_buf(eval, &sep, v)?)));
     }
     join_seq(eval, &sep, coll)
@@ -299,11 +315,20 @@ pub(crate) fn native_join_owned(
     if args.len() == 2 {
         let coll = args.pop().unwrap_or(Value::Nil);
         let sep_val = args.pop().unwrap_or(Value::Nil);
-        if let (Some(sep), Value::Vector(v)) = (fast_join_sep(&sep_val), &coll) {
-            let out = join_vector_buf(eval, sep.as_ref(), v)?;
-            drop(coll);
-            drop(sep_val);
-            return Ok(Value::Str(Arc::from(out.as_str())));
+        if let Value::Vector(v) = coll {
+            if let Some(sep) = fast_join_sep(&sep_val) {
+                if let Some(s) = single_str_join(&v) {
+                    return Ok(s);
+                }
+                let out = match v.into_packed_strs() {
+                    Ok(ps) => ps.into_joined(sep.as_ref()),
+                    Err(v) => join_vector_buf(eval, sep.as_ref(), &v)?,
+                };
+                drop(sep);
+                drop(sep_val);
+                return Ok(Value::Str(Arc::from(out.as_str())));
+            }
+            return native_join(eval, &[sep_val, Value::Vector(v)]);
         }
         return native_join(eval, &[sep_val, coll]);
     }
@@ -467,6 +492,66 @@ mod tests {
 
         let out_one = native_join_owned(&mut eval, SmallVec::from_iter([small])).unwrap();
         assert_eq!(out_one, Value::Str(Arc::from("12")));
+
+        // single_str_join hits (both native_join and native_join_owned) and misses
+        let one_str = Value::Vector(Vector::from_vec(vec![Value::Str(Arc::from("solo"))]));
+        assert_eq!(
+            native_join(&mut eval, &[Value::Str(Arc::from(",")), one_str.clone()]).unwrap(),
+            Value::Str(Arc::from("solo"))
+        );
+        assert_eq!(
+            native_join_owned(
+                &mut eval,
+                SmallVec::from_iter([Value::Str(Arc::from(",")), one_str])
+            )
+            .unwrap(),
+            Value::Str(Arc::from("solo"))
+        );
+        let one_int = Value::Vector(Vector::from_vec(vec![Value::Int(42)]));
+        assert_eq!(
+            native_join(&mut eval, &[Value::Str(Arc::from(",")), one_int]).unwrap(),
+            Value::Str(Arc::from("42"))
+        );
+        let one_bool = Value::Vector(Vector::from_vec(vec![Value::Bool(true)]));
+        assert_eq!(
+            native_join(&mut eval, &[Value::Str(Arc::from(",")), one_bool]).unwrap(),
+            Value::Str(Arc::from("true"))
+        );
+
+        // native_join_owned on unique PackedStrings (into_joined) and shared PackedStrings (fallback)
+        let mut ps_u = clj_value::PackedStrings::new();
+        assert!(ps_u.try_push("foo"));
+        assert!(ps_u.try_push("bar"));
+        let v_ps = Vector::from_packed_strs(ps_u);
+        assert_eq!(
+            native_join_owned(
+                &mut eval,
+                SmallVec::from_iter([Value::Str(Arc::from(":")), Value::Vector(v_ps)])
+            )
+            .unwrap(),
+            Value::Str(Arc::from("foo:bar"))
+        );
+
+        let mut ps_s = clj_value::PackedStrings::new();
+        assert!(ps_s.try_push("p"));
+        assert!(ps_s.try_push("q"));
+        let v_shared = Vector::from_packed_strs(ps_s);
+        let _keep = v_shared.clone();
+        assert_eq!(
+            native_join_owned(
+                &mut eval,
+                SmallVec::from_iter([Value::Str(Arc::from("-")), Value::Vector(v_shared)])
+            )
+            .unwrap(),
+            Value::Str(Arc::from("p-q"))
+        );
+
+        // Non-fast separator with a Vector argument falls back through native_join
+        let v_two = Value::Vector(Vector::from_vec(vec![Value::Int(1), Value::Int(2)]));
+        assert_eq!(
+            native_join_owned(&mut eval, SmallVec::from_iter([Value::Int(0), v_two])).unwrap(),
+            Value::Str(Arc::from("102"))
+        );
     }
 
     #[test]
