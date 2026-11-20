@@ -21,7 +21,7 @@ use smallvec::SmallVec;
 use crate::core::{as_reduced, cce_err, check_ifn, jvm_compare, repeat_count, take_count};
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
-use crate::ext::{FastArith, NativeFn, NativeImpl};
+use crate::ext::{DisplayName, FastArith, NativeFn, NativeImpl, NativeTarget};
 use crate::lazy::{
     StepUnit, as_subvector, collect_all, collect_packed, concat_thunk, cycle_thunk, dedupe_thunk,
     distinct_thunk, drop_value, drop_while_thunk, empty_list_value, filter_thunk, interleave_thunk,
@@ -68,11 +68,12 @@ fn native_fn(
 ) -> Value {
     Value::Extension(Arc::new(NativeFn {
         id: eval.next_id(),
-        display: Arc::from(display),
-        func: Arc::new(func) as Arc<NativeImpl>,
+        display: DisplayName::shared(display),
+        func: NativeTarget::Dyn(Arc::new(func) as Arc<NativeImpl>),
         owned: None,
         meta: None,
         fast: FastArith::None,
+        compiled: None,
     }))
 }
 
@@ -89,6 +90,9 @@ pub(crate) fn walk_seq(
     mut visit: impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
 ) -> Result<(), NativeError> {
     if let Some(done) = walk_direct(eval, &coll, &mut visit) {
+        return done;
+    }
+    if let Some(done) = walk_sole_map(eval, &coll, &mut visit) {
         return done;
     }
     let mut seq = seq_value(eval, &coll).map_err(signal_to_native)?;
@@ -123,6 +127,28 @@ pub(crate) fn walk_seq(
     }
 }
 
+/// Walk a sole unforced `map` seq without its lazy cells (#271, see
+/// [`crate::lazy::walk_sole_map`]; `None`: walk the seq).
+fn walk_sole_map(
+    eval: &mut Evaluator,
+    coll: &Value,
+    visit: &mut impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
+) -> Option<Result<(), NativeError>> {
+    let mut failed = None;
+    let mut sole = |eval: &mut Evaluator, head: Value| match visit(eval, &head) {
+        Ok(walk) => Ok(matches!(walk, Walk::Continue)),
+        Err(e) => {
+            failed = Some(e);
+            Ok(false)
+        }
+    };
+    let done = crate::lazy::walk_sole_map(eval, coll, &mut sole)?;
+    Some(
+        done.map_err(signal_to_native)
+            .and(failed.map_or(Ok(()), Err)),
+    )
+}
+
 /// Walk a vector, a finite repeat, or a counted `long` range in
 /// place (#226): no chunk seq copies the items 32 at a time — the
 /// order and items are the seq's (`None`: walk the seq).
@@ -141,6 +167,9 @@ fn walk_direct(
     };
     if let Value::Vector(v) = coll {
         return Some(each(&mut v.iter()));
+    }
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Some(each(&mut sp.iter()));
     }
     if let Some(sv) = crate::lazy::as_subvector(coll) {
         return Some(each(&mut sv.vec().iter().skip(sv.start()).take(sv.len())));
@@ -169,7 +198,7 @@ fn finite_repeat(coll: &Value) -> Option<(Value, i64)> {
 
 /// A counted `long` range's start, step, and count (items stay in
 /// `i64`: the range's own bound checked its last item).
-fn long_range(coll: &Value) -> Option<(i64, i64, i64)> {
+pub(crate) fn long_range(coll: &Value) -> Option<(i64, i64, i64)> {
     let Value::Extension(e) = coll else {
         return None;
     };
@@ -554,6 +583,144 @@ fn reduce_step(
             call_checked_owned(eval, f, step_args)
         }
     }
+}
+
+fn reduce_kv_step(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &mut Value,
+    k: Value,
+    v: Value,
+) -> Result<bool, NativeError> {
+    let mut step_args = SmallVec::new();
+    step_args.push(std::mem::replace(acc, Value::Nil));
+    step_args.push(k);
+    step_args.push(v);
+    // `core.clj`'s `(f acc k v)` is a plain invoke: a non-fn `f` raises
+    // the interpreter's own invoke error, never the `IFn` pre-check's.
+    let next = eval.call_owned(f, step_args).map_err(signal_to_native)?;
+    if let Some(inner) = as_reduced(&next) {
+        *acc = inner.clone();
+        return Ok(true);
+    }
+    *acc = next;
+    Ok(false)
+}
+
+fn native_reduce_kv(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    native_reduce_kv_owned(eval, args.iter().cloned().collect())
+}
+
+fn reduce_kv_vector(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &mut Value,
+    v: &Vector,
+) -> Result<(), NativeError> {
+    for (i, elem) in v.iter().enumerate() {
+        if reduce_kv_step(eval, f, acc, Value::Int(i as i64), elem)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// `core.clj`'s index loop for every other `vector?` (subvecs and
+/// `vector-of` vectors): `(f acc i (nth coll i))` for `i` below `(count coll)`.
+fn reduce_kv_indexed(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &mut Value,
+    coll: &Value,
+) -> Result<(), NativeError> {
+    let n = crate::coll::count_of(eval, coll)?;
+    for i in 0..n {
+        let elem = crate::coll::native_nth(eval, &[coll.clone(), Value::Int(i)])?;
+        if reduce_kv_step(eval, f, acc, Value::Int(i), elem)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// `core.clj`'s `:else` arm: `(reduce (fn [acc e] (f acc (key e) (val e)))
+/// init coll)` over the coll's seq (records, entries, lists, sorted maps,
+/// and non-colls alike — each head must be a real map entry).
+fn reduce_kv_seq(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &mut Value,
+    coll: Value,
+) -> Result<(), NativeError> {
+    walk_seq(eval, coll, |eval, head| {
+        let k = crate::coll::entry_key(head)?;
+        let v = crate::coll::entry_val(head)?;
+        if reduce_kv_step(eval, f, acc, k, v)? {
+            return Ok(Walk::Stop);
+        }
+        Ok(Walk::Continue)
+    })
+}
+
+pub(crate) fn native_reduce_kv_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/reduce-kv", &args, &[3])?;
+    let f = args[0].clone();
+    let mut acc = std::mem::replace(&mut args[1], Value::Nil);
+    let coll = take_walk_coll(&mut args, 2);
+    match &coll {
+        Value::Nil => Ok(acc),
+        Value::Vector(v) => {
+            reduce_kv_vector(eval, &f, &mut acc, v)?;
+            Ok(acc)
+        }
+        Value::Map(m) => {
+            for (k, v) in m.iter() {
+                if reduce_kv_step(eval, &f, &mut acc, k.clone(), v.clone())? {
+                    break;
+                }
+            }
+            Ok(acc)
+        }
+        c if crate::core::is_vector(c) && !matches!(c, Value::MapEntry { .. }) => {
+            reduce_kv_indexed(eval, &f, &mut acc, c)?;
+            Ok(acc)
+        }
+        _ => {
+            reduce_kv_seq(eval, &f, &mut acc, coll)?;
+            Ok(acc)
+        }
+    }
+}
+
+fn native_run_bang(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    native_run_bang_owned(eval, args.iter().cloned().collect())
+}
+
+pub(crate) fn native_run_bang_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_arity("clojure.core/run!", &args, &[2])?;
+    let f = args[0].clone();
+    let coll = take_walk_coll(&mut args, 1);
+    let prepared = crate::vm::Prepared::of(&f, 1);
+    walk_seq(eval, coll, |eval, head| {
+        let res = match prepared.as_ref() {
+            Some(p) => p.call1(eval, head.clone()).map_err(signal_to_native)?,
+            // `#(proc %2)` invokes `proc` directly (see `reduce_kv_step`).
+            None => eval
+                .call(&f, std::slice::from_ref(head))
+                .map_err(signal_to_native)?,
+        };
+        if as_reduced(&res).is_some() {
+            return Ok(Walk::Stop);
+        }
+        Ok(Walk::Continue)
+    })?;
+    Ok(Value::Nil)
 }
 
 fn native_take_last(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -984,9 +1151,16 @@ pub(crate) fn native_sort_owned(
     match comp {
         None => sort_default(&mut items)?,
         Some(comp) => {
+            // #271: the booted `compare` as `jvm_compare`, any other
+            // comparator through its prepared entry.
+            let prepared = crate::vm::Prepared::of(&comp, 2);
+            let default_compare = is_core_fn(&comp, "clojure.core/compare");
             sort_by_checked(&mut items, |a, b| {
-                let r = call_checked(eval, &comp, &[a.clone(), b.clone()])?;
-                afunction_order(r, || call_checked(eval, &comp, &[b.clone(), a.clone()]))
+                if default_compare {
+                    return crate::core::jvm_compare(a, b);
+                }
+                let r = sort_cmp(eval, prepared.as_ref(), &comp, a, b)?;
+                afunction_order(r, || sort_cmp(eval, prepared.as_ref(), &comp, b, a))
             })?;
         }
     }
@@ -1023,13 +1197,22 @@ pub(crate) fn native_sort_by_owned(
     let coll_idx = if args.len() == 2 { 1 } else { 2 };
     let coll = take_walk_coll(&mut args, coll_idx);
     let mut items = collect_all(eval, coll).map_err(signal_to_native)?;
+    // #271: the keyfn through its prepared entry, and the booted
+    // `compare` as `jvm_compare` itself (each was a checked general
+    // call, three per comparison).
+    let key = crate::vm::Prepared::of(&keyfn, 1);
+    let cmp = crate::vm::Prepared::of(&comp, 2);
+    let default_compare = is_core_fn(&comp, "clojure.core/compare");
     sort_by_checked(&mut items, |a, b| {
         // `(comp (keyfn x) (keyfn y))` directly (the keyfn runs per
         // comparison; no int mapping).
-        let ka = call_checked(eval, &keyfn, std::slice::from_ref(a))?;
-        let kb = call_checked(eval, &keyfn, std::slice::from_ref(b))?;
-        let r = call_checked(eval, &comp, &[ka.clone(), kb.clone()])?;
-        afunction_order(r, || call_checked(eval, &comp, &[kb, ka]))
+        let ka = sort_key(eval, key.as_ref(), &keyfn, a)?;
+        let kb = sort_key(eval, key.as_ref(), &keyfn, b)?;
+        if default_compare {
+            return crate::core::jvm_compare(&ka, &kb);
+        }
+        let r = sort_cmp(eval, cmp.as_ref(), &comp, &ka, &kb)?;
+        afunction_order(r, || sort_cmp(eval, cmp.as_ref(), &comp, &kb, &ka))
     })?;
     if items.is_empty() {
         return Ok(empty_list_value());
@@ -1041,6 +1224,44 @@ pub(crate) fn native_sort_by_owned(
         false,
         clj_value::SeqKind::Array,
     ))
+}
+
+/// `(keyfn x)` for `sort-by`: the prepared callee when the keyfn has one
+/// (a native or a fixed-arity closure), else the checked general call
+/// (keywords, maps, and the `IFn` error).
+fn sort_key(
+    eval: &mut Evaluator,
+    key: Option<&crate::vm::Prepared<'_>>,
+    keyfn: &Value,
+    x: &Value,
+) -> Result<Value, NativeError> {
+    match key {
+        Some(p) => p.call1(eval, x.clone()).map_err(signal_to_native),
+        None => call_checked(eval, keyfn, std::slice::from_ref(x)),
+    }
+}
+
+/// `(comp a b)` for the sorts: the prepared callee when there is one, else
+/// the checked general call.
+fn sort_cmp(
+    eval: &mut Evaluator,
+    p: Option<&crate::vm::Prepared<'_>>,
+    comp: &Value,
+    a: &Value,
+    b: &Value,
+) -> Result<Value, NativeError> {
+    match p {
+        Some(p) => p
+            .call2(eval, a.clone(), b.clone())
+            .map_err(signal_to_native),
+        None => call_checked(eval, comp, &[a.clone(), b.clone()]),
+    }
+}
+
+/// Whether `f` is the booted native named `display` (a rebound var holds
+/// something else).
+fn is_core_fn(f: &Value, display: &str) -> bool {
+    crate::ext::as_native(f).is_some_and(|n| &*n.display == display)
 }
 
 fn native_dorun(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -1179,7 +1400,7 @@ pub(crate) fn native_mapv_owned(
             return Ok(res);
         }
     }
-    // One input under a VM fn walks it in place (#226): no lazy map
+    // One input under a VM/native fn walks it in place (#226): no lazy map
     // in between, the fn resolved once.
     if let ([_], Some(p)) = (&inputs[..], crate::vm::Prepared::of(&args[0], 1)) {
         let input = inputs.into_iter().next().unwrap_or(Value::Nil);
@@ -1192,6 +1413,16 @@ pub(crate) fn native_mapv_owned(
         let vec = tv.persistent().expect("fresh transient is valid at freeze");
         return Ok(Value::Vector(vec));
     }
+    // Two inputs starting with a vector under a prepared 2-arity fn walk
+    // without allocating a lazy `map` cell (#271).
+    let mut inputs = inputs;
+    if let [Value::Vector(v1), second] = &mut inputs[..] {
+        if let Some(p) = crate::vm::Prepared::of(&args[0], 2) {
+            let v1 = v1.clone();
+            let second = std::mem::replace(second, Value::Nil);
+            return mapv_two_prepared(eval, &p, v1, second);
+        }
+    }
     let mapped = map_thunk(args[0].clone(), inputs);
     // Packed streaming (#227): no intermediate `Vec<Value>`, and
     // all-`Int` results freeze to packed storage zero-copy.
@@ -1199,12 +1430,48 @@ pub(crate) fn native_mapv_owned(
     Ok(Value::Vector(vec))
 }
 
+fn mapv_two_prepared(
+    eval: &mut Evaluator,
+    p: &crate::vm::Prepared<'_>,
+    v1: Vector,
+    second: Value,
+) -> Result<Value, NativeError> {
+    if v1.is_empty() {
+        return Ok(Value::Vector(Vector::new_sync()));
+    }
+    let mut tv = clj_value::TransientVector::new();
+    if let Value::Vector(v2) = second {
+        for (a, b) in v1.iter().zip(v2.iter()) {
+            let out = p.call2(eval, a, b).map_err(signal_to_native)?;
+            tv.conj(out).expect("fresh transient accepts conj");
+        }
+        return Ok(Value::Vector(
+            tv.persistent().expect("fresh transient is valid at freeze"),
+        ));
+    }
+    let mut a_iter = v1.iter();
+    let mut rem = v1.len();
+    walk_seq(eval, second, |eval, b| {
+        let a = a_iter.next().expect("remaining count matches iterator");
+        let out = p.call2(eval, a, b.clone()).map_err(signal_to_native)?;
+        tv.conj(out).expect("fresh transient accepts conj");
+        rem -= 1;
+        Ok(if rem == 0 { Walk::Stop } else { Walk::Continue })
+    })?;
+    Ok(Value::Vector(
+        tv.persistent().expect("fresh transient is valid at freeze"),
+    ))
+}
+
 fn filterv_vector(eval: &mut Evaluator, f: &Value, v: Vector) -> Result<Value, NativeError> {
     if v.is_empty() {
         return Ok(Value::Vector(v.with_meta(None)));
     }
     crate::core::check_ifn(eval, f).map_err(signal_to_native)?;
-    let prep = crate::vm::Prepared::of(f, 1);
+    // `seq` tests emptiness without building a seq, as the lazy `filter`
+    // does: `(filterv seq tokens)` after a split allocated a string seq
+    // per token (#271).
+    let prep = crate::lazy::filter_prep(f);
     let mut tv: Option<clj_value::TransientVector> = None;
     for i in 0..v.len() {
         let item = v.get(i).expect("index in bounds");
@@ -1250,6 +1517,9 @@ pub(crate) fn native_filterv_owned(
     // Split vectors materialize once into the vector lane (the
     // lazy filter thunk steps per item through pending machinery).
     if let Some(sp) = crate::lazy::as_splitvec(&input) {
+        if crate::ext::as_native(&args[0]).is_some_and(|n| &*n.display == "clojure.core/seq") {
+            return Ok(Value::Extension(Arc::new(sp.filter_non_empty())));
+        }
         let v = clj_value::Vector::from_vec(sp.items());
         return filterv_vector(eval, &args[0], v);
     }
@@ -1787,7 +2057,9 @@ pub(crate) const SEQS_NATIVES: &[(&str, NativeFnPtr)] = &[
     ("keys", native_keys),
     ("vals", native_vals),
     ("reduce", native_reduce),
+    ("reduce-kv", native_reduce_kv),
     ("reverse", native_reverse),
+    ("run!", native_run_bang),
     ("rseq", native_rseq),
     ("sort", native_sort),
     ("sort-by", native_sort_by),
@@ -1932,5 +2204,225 @@ mod sort_fast_path_tests {
             direct.sort_by(cmp_str_int_pair);
             assert_eq!(by_index, direct, "n={n}");
         }
+    }
+}
+
+#[cfg(test)]
+mod sole_map_walk_tests {
+    use super::{Walk, walk_seq};
+    use crate::error::NativeError;
+    use crate::eval::Evaluator;
+    use crate::lazy::{collect_packed, filter_thunk, map_thunk, mapcat_thunk, seq_value};
+    use clj_value::{Value, Vector};
+
+    fn source(eval: &mut Evaluator, text: &str) -> Value {
+        eval.eval_source(text)
+            .expect("evaluates")
+            .pop()
+            .expect("a value")
+    }
+
+    fn ints(xs: &[i64]) -> Value {
+        Value::Vector(Vector::from_vec(
+            xs.iter().map(|n| Value::Int(*n)).collect(),
+        ))
+    }
+
+    /// The items a walk visits (stopping after `stop_after`).
+    fn walked(eval: &mut Evaluator, coll: Value, stop_after: usize) -> Result<Value, NativeError> {
+        let mut out = Vec::new();
+        walk_seq(eval, coll, |_, v| {
+            out.push(v.clone());
+            Ok(if out.len() >= stop_after {
+                Walk::Stop
+            } else {
+                Walk::Continue
+            })
+        })?;
+        Ok(Value::Vector(Vector::from_vec(out)))
+    }
+
+    /// #271: a sole unforced `mapcat` (`for` over several bindings) walks
+    /// without its cells: realized results splice, lazy ones walk (fused
+    /// again when sole), an early stop ends the whole walk, and a
+    /// non-seqable result fails as forcing it would.
+    #[test]
+    fn sole_mapcat_seqs_walk_like_their_cells() {
+        let mut eval = crate::ns::boot();
+        let shapes = source(
+            &mut eval,
+            "(fn [x] (case (int (mod x 6)) 0 [x x] 1 (list x) 2 nil 3 (map inc [x]) 4 (cons x (lazy-seq [x])) \"ab\"))",
+        );
+        let nested = source(&mut eval, "(fn [x] (mapcat (fn [y] [x y]) [1 2]))");
+        let same = source(&mut eval, "(fn [x] x)");
+        let mut walk = |coll: Value, stop: usize| walked(&mut eval, coll, stop);
+        let all = walk(
+            mapcat_thunk(shapes.clone(), vec![ints(&[0, 1, 2, 3, 4, 5])]),
+            99,
+        );
+        let want: Vec<Value> = [0, 0, 1, 4, 4, 4]
+            .iter()
+            .map(|n| Value::Int(*n))
+            .chain([Value::Char('a'), Value::Char('b')])
+            .collect();
+        assert_eq!(
+            all.expect("walks"),
+            Value::Vector(Vector::from_vec(want.clone()))
+        );
+        // An early stop inside a result walked through its seq ends it all.
+        let stopped = walk(
+            mapcat_thunk(shapes.clone(), vec![ints(&[0, 1, 2, 3, 4, 5])]),
+            7,
+        );
+        let first7 = Value::Vector(Vector::from_vec(want[..7].to_vec()));
+        assert_eq!(stopped.expect("walks"), first7);
+        assert_eq!(
+            walk(mapcat_thunk(nested.clone(), vec![ints(&[5, 6])]), 3).expect("walks"),
+            ints(&[5, 1, 5])
+        );
+        assert_eq!(
+            walk(mapcat_thunk(nested, vec![ints(&[5, 6])]), 99).expect("walks"),
+            ints(&[5, 1, 5, 2, 6, 1, 6, 2])
+        );
+        assert!(walk(mapcat_thunk(same, vec![ints(&[1])]), 99).is_err());
+        let shared = mapcat_thunk(shapes, vec![ints(&[0])]);
+        assert_eq!(walk(shared.clone(), 99).expect("walks"), ints(&[0, 0]));
+        drop(shared);
+    }
+
+    /// #271: a sole unforced `map` seq walks without building its lazy
+    /// cells; the items, early stops, and errors are the seq's own.
+    #[test]
+    fn sole_map_seqs_walk_like_their_cells() {
+        let mut eval = crate::ns::boot();
+        let inc = source(&mut eval, "inc");
+        let add = source(&mut eval, "+");
+        let list = source(&mut eval, "'(1 2)");
+        let odd = source(&mut eval, "odd?");
+        let kw = source(&mut eval, "[:a]");
+        let mut walk = |coll: Value, stop: usize| walked(&mut eval, coll, stop).expect("walks");
+        // One input: vector chunks, list items, nothing; an early stop.
+        assert_eq!(
+            walk(map_thunk(inc.clone(), vec![ints(&[1, 2, 3])]), 9),
+            ints(&[2, 3, 4])
+        );
+        assert_eq!(
+            walk(map_thunk(inc.clone(), vec![list.clone()]), 9),
+            ints(&[2, 3])
+        );
+        assert_eq!(walk(map_thunk(inc.clone(), vec![ints(&[])]), 9), ints(&[]));
+        assert_eq!(
+            walk(map_thunk(inc.clone(), vec![ints(&[1, 2, 3])]), 1),
+            ints(&[2])
+        );
+        // Vector inputs: one call per item, the shortest bounds the walk.
+        let both = || map_thunk(add.clone(), vec![ints(&[1, 2, 3]), ints(&[10, 20])]);
+        assert_eq!(walk(both(), 9), ints(&[11, 22]));
+        assert_eq!(walk(both(), 1), ints(&[11]));
+        // Not sole: shared, forced, other thunks, a non-vector input among
+        // several, a plain list — each walks through the seq itself.
+        let shared = map_thunk(inc.clone(), vec![ints(&[1])]);
+        assert_eq!(walk(shared.clone(), 9), ints(&[2]));
+        drop(shared);
+        assert_eq!(
+            walk(filter_thunk(odd, ints(&[1, 2, 3]), false), 9),
+            ints(&[1, 3])
+        );
+        assert_eq!(
+            walk(map_thunk(add.clone(), vec![ints(&[1, 2]), list.clone()]), 9),
+            ints(&[2, 4])
+        );
+        assert_eq!(walk(list.clone(), 9), ints(&[1, 2]));
+        let forced = map_thunk(inc.clone(), vec![ints(&[1])]);
+        seq_value(&mut eval, &forced).expect("forces");
+        assert_eq!(walked(&mut eval, forced, 9).expect("walks"), ints(&[2]));
+        // The map fn's errors and the visitor's surface.
+        assert!(walked(&mut eval, map_thunk(inc.clone(), vec![kw]), 9).is_err());
+        let mut calls = 0;
+        let failed = walk_seq(
+            &mut eval,
+            map_thunk(add.clone(), vec![ints(&[1, 2]), ints(&[3, 4])]),
+            |_, _| {
+                calls += 1;
+                Err(NativeError::arity("visit", 0))
+            },
+        );
+        assert!(failed.is_err() && calls == 1);
+        // `collect_packed` (`mapv`) takes the same walk.
+        let two = collect_packed(
+            &mut eval,
+            map_thunk(add, vec![ints(&[1, 2]), ints(&[3, 4])]),
+        );
+        assert_eq!(Value::Vector(two.expect("collects")), ints(&[4, 6]));
+        let one = collect_packed(&mut eval, map_thunk(inc, vec![ints(&[5])]));
+        assert_eq!(Value::Vector(one.expect("collects")), ints(&[6]));
+    }
+
+    /// #271: sole `filter`, `remove`, `take`, `concat`, `repeat`, `range`,
+    /// 2-vector `map`/`mapv`, `count` fusion, and `Prepared` double arith.
+    #[test]
+    fn sole_combinators_walk_like_their_cells() {
+        let mut eval = crate::ns::boot();
+        let cases = [
+            ("(vec (map inc (range 5)))", "[1 2 3 4 5]"),
+            ("(vec (map inc (range 0)))", "[]"),
+            ("(some #{3} (map inc (range 5)))", "3"),
+            ("(some #{2} (map inc (list 1 2 3)))", "2"),
+            ("(vec (map :a [{:a 1} {:a 2}]))", "[1 2]"),
+            ("(vec (map #'inc [1 2]))", "[2 3]"),
+            ("(vec (map + [] [1 2]))", "[]"),
+            ("(vec (map + [1 2] [10 20] [100 200]))", "[111 222]"),
+            ("(some #{111} (map + [1 2] [10 20] [100 200]))", "111"),
+            ("(vec (map {:a 1 :b 2} [:a :c] [9 8]))", "[1 8]"),
+            ("(some #{1} (map {:a 1 :b 2} [:a :b] [9 8]))", "1"),
+            ("(vec (filter even? [1 2 3 4]))", "[2 4]"),
+            ("(vec (filter even? []))", "[]"),
+            ("(some #{2} (filter even? [1 2 3 4]))", "2"),
+            ("(vec (remove even? (range 5)))", "[1 3]"),
+            ("(vec (remove even? (range 0)))", "[]"),
+            ("(some #{1} (remove even? (range 5)))", "1"),
+            ("(vec (filter odd? (list 1 2 3 4)))", "[1 3]"),
+            ("(some #{1} (filter odd? (list 1 2 3 4)))", "1"),
+            ("(vec (filter odd? (drop 1 (range 6))))", "[1 3 5]"),
+            ("(some #{3} (filter odd? (drop 1 (range 6))))", "3"),
+            ("(vec (filter odd? (list)))", "[]"),
+            ("(vec (take 0 [1 2]))", "[]"),
+            ("(vec (take 3 (repeat 7)))", "[7 7 7]"),
+            ("(vec (take 2 (repeat 5 7)))", "[7 7]"),
+            (
+                "(vec (concat [1] (repeat 2 0.0) (subvec [10 20 30] 1 3) (range 2)))",
+                "[1 0.0 0.0 20 30 0 1]",
+            ),
+            (
+                "(vec (concat (concat [1] [2]) (concat [3] [4]) [5]))",
+                "[1 2 3 4 5]",
+            ),
+            ("(vec (concat (concat [1] [2])))", "[1 2]"),
+            (
+                "(let [s (mapcat identity [(concat (concat [1] [2]) [3] [4])])] [(vec s) (vec s)])",
+                "[[1 2 3 4] [1 2 3 4]]",
+            ),
+            ("(some #{2} (concat [1 2] [3 4]))", "2"),
+            ("(count (filter #(= % 2) [1 2 3 2]))", "2"),
+            ("(count (remove odd? (range 6)))", "3"),
+            ("(count (take 4 (concat [1 2] (repeat 9))))", "4"),
+            ("(vec (drop 1 [1 2 3]))", "[2 3]"),
+            ("(mapv + [] (range 3))", "[]"),
+            ("(mapv + [1 2] [3 4])", "[4 6]"),
+            ("(mapv + [1 2] (map inc [10 20 30]))", "[12 23]"),
+            ("(reduce + 0.0 [1.5 2.5])", "4.0"),
+            ("(reduce + 0.0 [1 2])", "3.0"),
+            ("(reduce + 1 [2.5])", "3.5"),
+            ("(mapv inc [1.5 2.5])", "[2.5 3.5]"),
+            ("(mapv dec [2.5 3.5])", "[1.5 2.5]"),
+        ];
+        for (expr, want) in cases {
+            let got = source(&mut eval, expr);
+            let exp = source(&mut eval, want);
+            assert_eq!(got, exp, "expr={expr}");
+        }
+        // Unfused pending thunk (drop) hits the `_ => None` arm in sole_thunk_parts.
+        let dropped = source(&mut eval, "(drop 1 [1 2 3])");
+        assert_eq!(walked(&mut eval, dropped, 9).expect("walks"), ints(&[2, 3]));
     }
 }

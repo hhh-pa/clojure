@@ -396,8 +396,42 @@ fn system_clocks_are_positive_and_nondecreasing() {
 
 #[test]
 fn system_getenv_reads_the_process_environment() {
-    // A unique name (parallel tests share the process environment).
-    unsafe { std::env::set_var("CLJ_ALGO_EMU_PROBE_205", "probe-value") };
+    // Set/unset rows spawn this test binary with `Command::env`/
+    // `env_remove` (safe, child-only) instead of in-process `set_var`.
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .arg("system_getenv_reads_the_process_environment_child")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("__CLJ_ALGO_EMU_CHILD", "1")
+        .env("CLJ_ALGO_EMU_PROBE_205", "probe-value")
+        .env_remove("CLJ_ALGO_EMU_ABSENT_205")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "child system_getenv_reads_the_process_environment_child failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut eval = boot();
+    assert_eq!(
+        run(&mut eval, r#"(System/getenv "CLJ_ALGO_EMU_ABSENT_205")"#),
+        "nil"
+    );
+    assert!(uncaught(&mut eval, "(System/getenv nil)").contains("NullPointerException"));
+    assert!(uncaught(&mut eval, "(System/getenv 1)").contains("ClassCastException"));
+    assert_eq!(
+        compile_err(&mut eval, r#"(System/getenv "A" "B")"#),
+        "java.lang.IllegalArgumentException | No matching method getenv found taking 2 args for class java.lang.System"
+    );
+}
+
+#[test]
+fn system_getenv_reads_the_process_environment_child() {
+    if std::env::var("__CLJ_ALGO_EMU_CHILD").unwrap_or_default() != "1" {
+        return;
+    }
     let mut eval = boot();
     assert_eq!(
         run(&mut eval, r#"(System/getenv "CLJ_ALGO_EMU_PROBE_205")"#),
@@ -406,13 +440,6 @@ fn system_getenv_reads_the_process_environment() {
     assert_eq!(
         run(&mut eval, r#"(System/getenv "CLJ_ALGO_EMU_ABSENT_205")"#),
         "nil"
-    );
-    unsafe { std::env::remove_var("CLJ_ALGO_EMU_PROBE_205") };
-    assert!(uncaught(&mut eval, "(System/getenv nil)").contains("NullPointerException"));
-    assert!(uncaught(&mut eval, "(System/getenv 1)").contains("ClassCastException"));
-    assert_eq!(
-        compile_err(&mut eval, r#"(System/getenv "A" "B")"#),
-        "java.lang.IllegalArgumentException | No matching method getenv found taking 2 args for class java.lang.System"
     );
 }
 

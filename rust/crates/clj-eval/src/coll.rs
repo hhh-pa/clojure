@@ -17,14 +17,14 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 
 use clj_value::{
-    ConsValue, Keyword, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass,
-    Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value,
-    Vector, new_map, new_set,
+    Array, ConsValue, Keyword, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue,
+    ThrowClass, Transient, TransientError, TransientKind, TransientMap, TransientSet,
+    TransientVector, Value, Vector, new_map, new_set,
 };
 use smallvec::SmallVec;
 
 use crate::core::{cce_err, cce_message, is_counted, jvm_compare, nth_index};
-use crate::error::{NativeError, jvm_class_of, simple_name_of};
+use crate::error::{NativeError, Signal, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
 use crate::ext::as_native;
 use crate::lazy::{
@@ -112,11 +112,24 @@ pub(crate) fn lookup_present(
         // `f-get-*`, `e-get-*`).
         Value::Array(a) => Ok(lookup_array_slot(a, key)),
         Value::PrimitiveVector(p) => Ok(lookup_pv_slot(p, key)),
-        Value::Set(s) if s.is_sorted() => Ok(sorted_lookup_set(eval, s, key)?),
-        Value::Set(s) => Ok(s.get(key).cloned()),
+        Value::Set(s) => lookup_set_slot(eval, s, key),
         Value::Str(s) => Ok(lookup_str_slot(s, key)),
         Value::Transient(t) => transient_get(t, key),
         other => lookup_present_fallback(other, key),
+    }
+}
+
+/// A set slot (sorted sets resolve through the comparator; split from
+/// [`lookup_present`] for the complexity budget).
+fn lookup_set_slot(
+    eval: &mut Evaluator,
+    s: &Set,
+    key: &Value,
+) -> Result<Option<Value>, NativeError> {
+    if s.is_sorted() {
+        Ok(sorted_lookup_set(eval, s, key)?)
+    } else {
+        Ok(s.get(key).cloned())
     }
 }
 
@@ -708,6 +721,14 @@ fn assoc3(eval: &mut Evaluator, coll: Value, k: &Value, v: Value) -> Result<Valu
 /// Walk a seq counting items (hangs on infinite seqs, like the JVM).
 fn walk_count(eval: &mut Evaluator, v: &Value) -> Result<usize, NativeError> {
     let mut n = 0usize;
+    let mut bump = |_: &mut Evaluator, _: Value| {
+        n += 1;
+        Ok(true)
+    };
+    if let Some(done) = crate::lazy::walk_sole_map(eval, v, &mut bump) {
+        done.map_err(signal_to_native)?;
+        return Ok(n);
+    }
     let mut cur = v.clone();
     loop {
         match step_unit(eval, &cur).map_err(signal_to_native)? {
@@ -1486,31 +1507,37 @@ fn native_contains(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
         Value::Map(m) => contains_map(eval, m, key),
         Value::Vector(x) => Ok(Value::Bool(contains_vector(x, key))),
         // Entries contain integer keys 0 and 1 (Oracle FX2 `contains`).
-        Value::MapEntry { .. } => {
-            Ok(Value::Bool(int_key(key).is_some_and(|i| {
-                usize::try_from(i as i32).is_ok_and(|idx| idx < 2)
-            })))
-        }
+        Value::MapEntry { .. } => Ok(Value::Bool(contains_entry(key))),
         Value::Set(s) => contains_set(eval, s, key),
         Value::Str(s) => contains_str(s, coll, key),
         Value::Transient(t) => Ok(Value::Bool(transient_get(t, key)?.is_some())),
-        // Arrays: `Number` keys narrow (`intValue`) to a bounds
-        // check, anything else is unsupported (S15 oracles
-        // `b-contains`, `f-contains-*`, `e-contains-nil`).
-        Value::Array(a) => {
-            let Some(i) = crate::arrays::array_intvalue_key(key) else {
-                return Err(NativeError::new(
-                    ThrowClass::IllegalArgumentException,
-                    format!("contains? not supported on type: {}", jvm_class_of(coll)),
-                ));
-            };
-            Ok(Value::Bool(
-                usize::try_from(i).is_ok_and(|idx| idx < a.len()),
-            ))
-        }
+        Value::Array(a) => contains_array(a, coll, key),
         Value::PrimitiveVector(p) => Ok(Value::Bool(contains_pv(p, key))),
         _ => contains_fallback(coll, key),
     }
+}
+
+/// `contains?` over an entry (split from [`native_contains`] for
+/// the complexity budget): integer keys 0 and 1 (Oracle FX2
+/// `contains`).
+fn contains_entry(key: &Value) -> bool {
+    int_key(key).is_some_and(|i| usize::try_from(i as i32).is_ok_and(|idx| idx < 2))
+}
+
+/// `contains?` over an array (split from [`native_contains`] for
+/// the complexity budget): `Number` keys narrow (`intValue`) to a
+/// bounds check, anything else is unsupported (S15 oracles
+/// `b-contains`, `f-contains-*`, `e-contains-nil`).
+fn contains_array(a: &Array, coll: &Value, key: &Value) -> Result<Value, NativeError> {
+    let Some(i) = crate::arrays::array_intvalue_key(key) else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("contains? not supported on type: {}", jvm_class_of(coll)),
+        ));
+    };
+    Ok(Value::Bool(
+        usize::try_from(i).is_ok_and(|idx| idx < a.len()),
+    ))
 }
 
 fn native_find(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2175,21 +2202,91 @@ fn native_get_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 
 fn native_zipmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/zipmap", args, &[2])?;
+    if let Some(map) = zipmap_chars_longs(&args[0], &args[1]) {
+        return Ok(Value::Map(map));
+    }
     let mut ks = seq_value(eval, &args[0]).map_err(signal_to_native)?;
     let mut vs = seq_value(eval, &args[1]).map_err(signal_to_native)?;
-    let mut out = new_map();
-    loop {
-        if matches!(ks, Value::Nil) || matches!(vs, Value::Nil) {
-            return Ok(Value::Map(out));
+    let mut out = ZipmapBuild::default();
+    while let Some((k, v)) = zipmap_next(eval, &mut ks, &mut vs).map_err(signal_to_native)? {
+        out.push(k, v);
+    }
+    Ok(Value::Map(out.finish()))
+}
+
+/// `(zipmap "0123456789" (range))` (most snippets) without the walk
+/// (#271): a string's chars against the core `(range)` iterate or a
+/// counted long range run no user code and memoize nothing anyone else
+/// sees, so the pairs are the walk's own, fed to the same build. `None`:
+/// anything else, or a value past the long range (the walk promotes or
+/// throws there).
+fn zipmap_chars_longs(keys: &Value, vals: &Value) -> Option<Map> {
+    let Value::Str(s) = keys else {
+        return None;
+    };
+    let (start, step, count) = crate::lazy::core_long_iterate_head(vals)
+        .map(|start| (start, 1, i64::MAX))
+        .or_else(|| crate::seqs::long_range(vals))?;
+    let mut out = ZipmapBuild::default();
+    for (i, c) in (0..count).zip(s.chars()) {
+        let v = i.checked_mul(step).and_then(|d| start.checked_add(d))?;
+        out.push(Value::Char(c), Value::Int(v));
+    }
+    Some(out.finish())
+}
+
+/// `zipmap`'s next pair, forcing like `core.clj`'s loop: both heads,
+/// then both tails (`None` once either side runs out).
+fn zipmap_next(
+    eval: &mut Evaluator,
+    ks: &mut Value,
+    vs: &mut Value,
+) -> Result<Option<(Value, Value)>, Signal> {
+    if matches!(ks, Value::Nil) || matches!(vs, Value::Nil) {
+        return Ok(None);
+    }
+    let k = first_value(eval, ks)?;
+    let v = first_value(eval, vs)?;
+    let k = crate::lazy::realize_key(eval, &k)?;
+    *ks = next_value(eval, ks)?;
+    *vs = next_value(eval, vs)?;
+    Ok(Some((k, v)))
+}
+
+/// `zipmap`'s result under construction: pairs first and one build
+/// after (the `assoc` chain's exact map — a small result interns its
+/// key shape once instead of once per key; `(zipmap "0123456789"
+/// (range))` opens most snippets), in-place inserts past
+/// [`ZIPMAP_BULK`] pairs.
+#[derive(Default)]
+struct ZipmapBuild {
+    pairs: Vec<(Value, Value)>,
+    map: Option<Map>,
+}
+
+impl ZipmapBuild {
+    fn push(&mut self, k: Value, v: Value) {
+        match &mut self.map {
+            Some(map) => map.insert_mut(k, v),
+            None if self.pairs.len() < ZIPMAP_BULK => self.pairs.push((k, v)),
+            None => {
+                let mut map = Map::from_kvs_last_wins(std::mem::take(&mut self.pairs));
+                map.insert_mut(k, v);
+                self.map = Some(map);
+            }
         }
-        let k = first_value(eval, &ks).map_err(signal_to_native)?;
-        let v = first_value(eval, &vs).map_err(signal_to_native)?;
-        let k = crate::lazy::realize_key(eval, &k).map_err(signal_to_native)?;
-        out = out.insert(k, v);
-        ks = next_value(eval, &ks).map_err(signal_to_native)?;
-        vs = next_value(eval, &vs).map_err(signal_to_native)?;
+    }
+
+    fn finish(self) -> Map {
+        self.map
+            .unwrap_or_else(|| Map::from_kvs_last_wins(self.pairs))
     }
 }
+
+/// The pairs [`ZipmapBuild`] builds in one step (the shaped-map
+/// ceiling: `from_kvs_last_wins` dedupes by scanning, fine this
+/// small); longer inputs continue with in-place inserts.
+const ZIPMAP_BULK: usize = 64;
 
 fn native_array_map(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.len() % 2 == 1 {
@@ -2854,11 +2951,9 @@ fn native_distinctp(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 /// entry-shaped inputs work, anything else fails exactly like the
 /// same `nth`. (On the JVM, non-entries fail the `Map$Entry` cast
 /// instead — the one observable edge of the missing type.)
-fn native_key(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/key", args, &[1])?;
-    // Only real entries answer (`key-vec`, `key-nil`): 2-vectors
-    // are NOT entries on the JVM.
-    match &args[0] {
+/// Extract the key from a `MapEntry`, or raise the JVM's `Map$Entry` error.
+pub(crate) fn entry_key(v: &Value) -> Result<Value, NativeError> {
+    match v {
         Value::MapEntry { key, .. } => Ok((**key).clone()),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
@@ -2868,9 +2963,9 @@ fn native_key(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     }
 }
 
-fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/val", args, &[1])?;
-    match &args[0] {
+/// Extract the value from a `MapEntry`, or raise the JVM's `Map$Entry` error.
+pub(crate) fn entry_val(v: &Value) -> Result<Value, NativeError> {
+    match v {
         Value::MapEntry { val, .. } => Ok((**val).clone()),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
@@ -2878,6 +2973,18 @@ fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         )),
         other => Err(cce_err(other, "java.util.Map$Entry")),
     }
+}
+
+fn native_key(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/key", args, &[1])?;
+    // Only real entries answer (`key-vec`, `key-nil`): 2-vectors
+    // are NOT entries on the JVM.
+    entry_key(&args[0])
+}
+
+fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/val", args, &[1])?;
+    entry_val(&args[0])
 }
 
 /// The S5D collection natives installed into `clojure.core` by
@@ -2912,17 +3019,21 @@ enum SortPos {
     Insert(usize),
 }
 
-fn sort_position(
+/// Binary search a sorted collection's `len` keys (`key_at`) for `k`,
+/// in place (no snapshot of the order sidecar).
+fn sort_position<'a>(
     eval: &mut Evaluator,
     spec: &SortSpec,
-    keys: &[Value],
+    len: usize,
+    key_at: impl Fn(usize) -> Option<&'a Value>,
     k: &Value,
 ) -> Result<SortPos, NativeError> {
     let mut lo = 0usize;
-    let mut hi = keys.len();
+    let mut hi = len;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        match compare_sort_keys(eval, spec, &keys[mid], k)? {
+        let key = key_at(mid).expect("sorted position in range");
+        match compare_sort_keys(eval, spec, key, k)? {
             Ordering::Less => lo = mid + 1,
             Ordering::Greater => hi = mid,
             Ordering::Equal => return Ok(SortPos::Found(mid)),
@@ -2935,32 +3046,33 @@ fn sort_position(
 /// the original key object (probe `sorted-keyobj`); a miss
 /// inserts at the sort position.
 fn sorted_assoc_map(eval: &mut Evaluator, m: &Map, k: Value, v: Value) -> Result<Map, NativeError> {
+    Ok(match map_position(eval, m, &k)? {
+        SortPos::Found(i) => m.clone().insert(map_key_at(m, i), v),
+        SortPos::Insert(i) => m.clone().insert_sorted_at(i, k, v),
+    })
+}
+
+/// `k`'s position in sorted map `m`.
+fn map_position(eval: &mut Evaluator, m: &Map, k: &Value) -> Result<SortPos, NativeError> {
     let spec = m
         .sort_spec()
         .cloned()
-        .expect("sorted assoc needs a sort order");
-    let mut entries: Vec<(Value, Value)> = m.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
-    match sort_position(eval, &spec, &m.ordered_keys(), &k)? {
-        SortPos::Found(i) => entries[i].1 = v,
-        SortPos::Insert(i) => entries.insert(i, (k, v)),
-    }
-    Ok(m.clone().with_ordered_entries(entries))
+        .expect("a sorted map has a sort order");
+    sort_position(eval, &spec, m.sorted_len(), |i| m.sorted_key(i), k)
+}
+
+/// The stored key at a found sorted position.
+fn map_key_at(m: &Map, i: usize) -> Value {
+    m.sorted_key(i).cloned().expect("found position in range")
 }
 
 /// Sorted `dissoc`: the found stored key drives the removal, so
 /// compare-0-but-unequal keys still drop.
 fn sorted_without_map(eval: &mut Evaluator, m: &Map, k: &Value) -> Result<Map, NativeError> {
-    let spec = m
-        .sort_spec()
-        .cloned()
-        .expect("sorted dissoc needs a sort order");
-    match sort_position(eval, &spec, &m.ordered_keys(), k)? {
-        SortPos::Found(i) => {
-            let found = m.ordered_keys()[i].clone();
-            Ok(m.clone().without(&found))
-        }
-        SortPos::Insert(_) => Ok(m.clone()),
-    }
+    Ok(match map_position(eval, m, k)? {
+        SortPos::Found(i) => m.clone().without(&map_key_at(m, i)),
+        SortPos::Insert(_) => m.clone(),
+    })
 }
 
 /// Sorted `get`: compare-0 search, then the stored entry.
@@ -2969,56 +3081,39 @@ fn sorted_lookup_map(
     m: &Map,
     k: &Value,
 ) -> Result<Option<Value>, NativeError> {
-    let spec = m
-        .sort_spec()
-        .cloned()
-        .expect("sorted get needs a sort order");
-    match sort_position(eval, &spec, &m.ordered_keys(), k)? {
-        SortPos::Found(i) => Ok(m.get(&m.ordered_keys()[i]).cloned()),
-        SortPos::Insert(_) => Ok(None),
-    }
+    Ok(match map_position(eval, m, k)? {
+        SortPos::Found(i) => m.get(&map_key_at(m, i)).cloned(),
+        SortPos::Insert(_) => None,
+    })
 }
 
 /// Sorted `conj`: a compare-0 hit is a no-op (the member stays).
 fn sorted_conj_set(eval: &mut Evaluator, s: &Set, v: Value) -> Result<Set, NativeError> {
+    Ok(match set_position(eval, s, &v)? {
+        SortPos::Found(_) => s.clone(),
+        SortPos::Insert(i) => s.clone().insert_sorted_at(i, v),
+    })
+}
+
+/// `v`'s position in sorted set `s`.
+fn set_position(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<SortPos, NativeError> {
     let spec = s
         .sort_spec()
         .cloned()
-        .expect("sorted conj needs a sort order");
-    match sort_position(eval, &spec, &s.ordered_members(), &v)? {
-        SortPos::Found(_) => Ok(s.clone()),
-        SortPos::Insert(i) => {
-            let mut members = s.ordered_members();
-            members.insert(i, v);
-            Ok(s.clone().with_ordered_members(members))
-        }
-    }
+        .expect("a sorted set has a sort order");
+    sort_position(eval, &spec, s.sorted_len(), |i| s.sorted_member(i), v)
 }
 
 /// Sorted `disj` / `contains?` through the stored member.
 fn sorted_without_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<Set, NativeError> {
-    let spec = s
-        .sort_spec()
-        .cloned()
-        .expect("sorted disj needs a sort order");
-    match sort_position(eval, &spec, &s.ordered_members(), v)? {
-        SortPos::Found(i) => {
-            let found = s.ordered_members()[i].clone();
-            Ok(s.clone().without(&found))
-        }
-        SortPos::Insert(_) => Ok(s.clone()),
-    }
+    Ok(match set_position(eval, s, v)? {
+        SortPos::Found(i) => s.clone().without_sorted_at(i),
+        SortPos::Insert(_) => s.clone(),
+    })
 }
 
 fn sorted_contains_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<bool, NativeError> {
-    let spec = s
-        .sort_spec()
-        .cloned()
-        .expect("sorted contains needs a sort order");
-    match sort_position(eval, &spec, &s.ordered_members(), v)? {
-        SortPos::Found(_) => Ok(true),
-        SortPos::Insert(_) => Ok(false),
-    }
+    Ok(matches!(set_position(eval, s, v)?, SortPos::Found(_)))
 }
 
 /// Sorted `get` on sets: the stored member, like `Set::get`.
@@ -3027,14 +3122,10 @@ fn sorted_lookup_set(
     s: &Set,
     v: &Value,
 ) -> Result<Option<Value>, NativeError> {
-    let spec = s
-        .sort_spec()
-        .cloned()
-        .expect("sorted set get needs a sort order");
-    match sort_position(eval, &spec, &s.ordered_members(), v)? {
-        SortPos::Found(i) => Ok(Some(s.ordered_members()[i].clone())),
-        SortPos::Insert(_) => Ok(None),
-    }
+    Ok(match set_position(eval, s, v)? {
+        SortPos::Found(i) => s.sorted_member(i).cloned(),
+        SortPos::Insert(_) => None,
+    })
 }
 
 /// The odd-argument error for map constructors (JVM `RT.map` text).
@@ -3377,6 +3468,29 @@ pub(crate) const COLL_NATIVES: &[(&str, NativeFnPtr)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zipmap_builds_small_maps_at_once_and_grows_past_the_bulk() {
+        let mut eval = crate::boot();
+        let show = |eval: &mut Evaluator, src: &str| {
+            let out = eval.eval_source(src).expect(src);
+            clj_value::pr_to_string(out.last().expect("a form"), &clj_value::PrintOpts::pr())
+        };
+        assert_eq!(
+            show(&mut eval, "(zipmap [:a :b :a] [1 2 3])"),
+            "{:a 3, :b 2}"
+        );
+        assert_eq!(show(&mut eval, "(zipmap [] [])"), "{}");
+        // Past the bulk: in-place inserts, a key repeated after it wins.
+        assert_eq!(
+            show(&mut eval, "(count (zipmap (range 100) (range)))"),
+            "100"
+        );
+        assert_eq!(
+            show(&mut eval, "((zipmap (concat (range 70) [3]) (range)) 3)"),
+            "70"
+        );
+    }
 
     #[test]
     fn str_scan_global_cache_answers_memo_evictions() {

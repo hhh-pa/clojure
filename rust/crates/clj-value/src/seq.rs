@@ -866,7 +866,7 @@ impl crate::ExtensionValue for SubVectorValue {
 /// [`SubVectorValue`] view.
 pub struct SplitVecValue {
     base: Arc<str>,
-    spans: Arc<[(u32, u32)]>,
+    spans: Arc<Vec<(u32, u32)>>,
     /// Span window: pieces are `spans[off..off + len]`.
     off: usize,
     len: usize,
@@ -879,20 +879,16 @@ pub struct SplitVecValue {
 
 fn cached_num_str(s: &str) -> Option<Value> {
     let bytes = s.as_bytes();
-    if bytes.len() >= 2 && bytes.len() <= 4 && bytes.iter().all(|b| b.is_ascii_digit()) {
-        static NUM_CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
-        let cache = NUM_CACHE.get_or_init(|| {
-            (0..=1024)
-                .map(|n| Arc::from(n.to_string().as_str()))
-                .collect()
-        });
+    // Only canonical renderings may come from the cache (no leading
+    // zero: a piece like "010" must stay verbatim, never become "10").
+    if (2..=4).contains(&bytes.len()) && bytes[0] != b'0' && bytes.iter().all(u8::is_ascii_digit) {
+        // Each entry fills on first use: building all 1,025 up front
+        // cost ~400K instructions, most of a small input's run (#271).
+        static NUM_CACHE: [std::sync::OnceLock<Arc<str>>; 1025] =
+            [const { std::sync::OnceLock::new() }; 1025];
         let n: usize = s.parse().ok()?;
-        // Only the canonical rendering may come from the cache: a
-        // piece like "010" must stay verbatim, never become "10".
-        return cache
-            .get(n)
-            .filter(|arc| arc.as_ref() == s)
-            .map(|arc| Value::Str(Arc::clone(arc)));
+        let entry = NUM_CACHE.get(n)?;
+        return Some(Value::Str(Arc::clone(entry.get_or_init(|| Arc::from(s)))));
     }
     None
 }
@@ -905,13 +901,11 @@ fn cached_num_str(s: &str) -> Option<Value> {
 #[must_use]
 pub fn piece_value(s: &str) -> Value {
     if s.len() == 1 {
-        static CACHE: std::sync::OnceLock<Vec<Arc<str>>> = std::sync::OnceLock::new();
-        let cache = CACHE.get_or_init(|| {
-            (0u8..128)
-                .map(|b| Arc::from(char::from(b).to_string().as_str()))
-                .collect()
-        });
-        return Value::Str(cache[s.as_bytes()[0] as usize].clone());
+        // (One byte of UTF-8 is ASCII; each entry fills on first use.)
+        static CACHE: [std::sync::OnceLock<Arc<str>>; 128] =
+            [const { std::sync::OnceLock::new() }; 128];
+        let entry = &CACHE[usize::from(s.as_bytes()[0])];
+        return Value::Str(Arc::clone(entry.get_or_init(|| Arc::from(s))));
     }
     if let Some(v) = cached_num_str(s) {
         return v;
@@ -923,7 +917,7 @@ impl SplitVecValue {
     /// Pieces of `base` at `(start, len)` byte spans (the caller
     /// upholds UTF-8 boundaries, as split match offsets do).
     #[must_use]
-    pub fn new(base: Arc<str>, spans: Arc<[(u32, u32)]>) -> Self {
+    pub fn new(base: Arc<str>, spans: Arc<Vec<(u32, u32)>>) -> Self {
         let len = spans.len();
         Self {
             base,
@@ -966,6 +960,27 @@ impl SplitVecValue {
             view: std::sync::OnceLock::new(),
             meta: self.meta.clone(),
         }
+    }
+
+    /// A fresh split vector (JVM class `PersistentVector`, no metadata)
+    /// keeping only the non-empty spans (`(filterv seq split-vec)`).
+    #[must_use]
+    pub fn filter_non_empty(&self) -> Self {
+        let ws = self.window_spans();
+        let start = usize::from(ws.first().is_some_and(|&(_, l)| l == 0));
+        if ws[start..].iter().all(|&(_, l)| l > 0) {
+            return Self {
+                base: Arc::clone(&self.base),
+                spans: Arc::clone(&self.spans),
+                off: self.off + start,
+                len: self.len - start,
+                sub: false,
+                view: std::sync::OnceLock::new(),
+                meta: None,
+            };
+        }
+        let spans: Vec<(u32, u32)> = ws.iter().copied().filter(|&(_, l)| l > 0).collect();
+        Self::new(Arc::clone(&self.base), Arc::new(spans))
     }
 
     /// Whether this value is a `subvec` window (JVM class
@@ -2262,7 +2277,7 @@ mod tests {
     #[test]
     fn splitvec_helpers_and_fallbacks() {
         let base: Arc<str> = Arc::from("10 010 7");
-        let spans: Arc<[(u32, u32)]> = Arc::from([(0, 2), (3, 3), (7, 1)]);
+        let spans: Arc<Vec<(u32, u32)>> = Arc::new(vec![(0, 2), (3, 3), (7, 1)]);
         let sp = super::SplitVecValue::new(Arc::clone(&base), Arc::clone(&spans));
         assert_eq!(sp.len(), 3);
         assert!(!sp.is_empty());
@@ -2328,6 +2343,13 @@ mod tests {
             Value::Str(Arc::from("7")),
         ]));
         assert_eq!(hv(&v), hv(&plain));
+        assert_eq!(sp.filter_non_empty().len(), 3);
+        let sp_lead =
+            super::SplitVecValue::new(Arc::from(" 10 7"), Arc::new(vec![(0, 0), (1, 2), (4, 1)]));
+        assert_eq!(sp_lead.filter_non_empty().len(), 2);
+        let sp_mid =
+            super::SplitVecValue::new(Arc::from("10,,7"), Arc::new(vec![(0, 2), (3, 0), (4, 1)]));
+        assert_eq!(sp_mid.filter_non_empty().len(), 2);
     }
 
     #[test]

@@ -77,6 +77,7 @@ pub enum BcOp2 {
     StrStartsWith = 24,
     StrEndsWith = 25,
     StrIncludes = 26,
+    ConjBang = 27,
 }
 
 /// Ternary bitcode opcodes.
@@ -143,6 +144,7 @@ pub(crate) const OP2_SYMBOLS: &[(&str, &str)] = &[
     ("nth", "rt_bc_2_nth"),
     ("get", "rt_bc_2_get"),
     ("contains?", "rt_bc_2_contains"),
+    ("conj!", "rt_bc_2_conj_bang"),
 ];
 
 pub(crate) const OP3_SYMBOLS: &[(&str, &str)] = &[
@@ -188,6 +190,7 @@ pub fn bc_ns_op_symbol(ns: Option<&str>, name: &str, arity: usize) -> Option<&'s
 pub fn bc_fx_symbol(name: &str, arity: usize) -> Option<&'static str> {
     match (name, arity) {
         ("pop!", 1) => Some("rt_bc_1_pop_bang_fx"),
+        ("conj!", 2) => Some("rt_bc_2_conj_bang_fx"),
         ("assoc!", 3) => Some("rt_bc_3_assoc_bang_fx"),
         _ => None,
     }
@@ -223,7 +226,9 @@ fn finish_bang<O: OutSlot>(out: &mut O, ok: bool, tval: &Value, keep_ret: bool) 
 fn write_val_ref<O: OutSlot>(out: &mut O, vr: ValueRef<'_>) -> bool {
     match vr {
         ValueRef::Int(n) => write_val(out, Value::Int(n)),
+        ValueRef::Double(d) => write_val(out, Value::Double(d)),
         ValueRef::Char(c) => write_val(out, Value::Char(c)),
+        ValueRef::Str(_) => false,
         ValueRef::Ref(v) => clone_fast(out, v),
     }
 }
@@ -399,6 +404,31 @@ pub(crate) fn pop_bang_fast<O: OutSlot>(out: &mut O, a: &Value, keep_ret: bool) 
     finish_bang(out, ok, a, keep_ret)
 }
 
+#[inline]
+pub(crate) fn conj_bang_fast<O: OutSlot>(
+    out: &mut O,
+    a: &Value,
+    b: &Value,
+    keep_ret: bool,
+) -> bool {
+    let Some(t) = is_transient_vec(a) else {
+        return false;
+    };
+    let ok = {
+        let mut guard = t.lock();
+        if let TransientKind::Vector(tv) = &mut *guard {
+            match b {
+                Value::Int(n) => tv.conj_int_no_grow(*n),
+                Value::Double(d) => tv.conj_double_no_grow(*d),
+                _ => false,
+            }
+        } else {
+            false
+        }
+    };
+    finish_bang(out, ok, a, keep_ret)
+}
+
 #[inline(always)]
 pub(crate) fn apply2<O: OutSlot>(
     out: &mut O,
@@ -428,6 +458,7 @@ pub(crate) fn apply2<O: OutSlot>(
         BcOp2::StrStartsWith | BcOp2::StrEndsWith | BcOp2::StrIncludes => {
             apply2_str_pred(out, op, a, b)
         }
+        BcOp2::ConjBang => conj_bang_fast(out, a, b, true),
     }
 }
 
@@ -776,16 +807,299 @@ pub(crate) fn assoc_bang_fast<O: OutSlot>(
     let Some(idx) = index_i32(key) else {
         return false;
     };
-    let Value::Int(n) = val else {
-        return false;
-    };
     let ok = {
         let mut guard = t.lock();
         if let TransientKind::Vector(tv) = &mut *guard {
-            tv.assoc_int_in_bounds(idx, *n)
+            match val {
+                Value::Int(n) => tv.assoc_int_in_bounds(idx, *n),
+                Value::Double(d) => tv.assoc_double_in_bounds(idx, *d),
+                _ => false,
+            }
         } else {
             false
         }
     };
     finish_bang(out, ok, tval, keep_ret)
+}
+
+#[inline]
+fn scalar_val_ref(vr: ValueRef<'_>, allow_fp: bool) -> Option<(u8, i64)> {
+    match vr {
+        ValueRef::Int(n) => Some((0, n)),
+        ValueRef::Double(d) if allow_fp => Some((3, d.to_bits() as i64)),
+        ValueRef::Char(c) => Some((1, i64::from(u32::from(c)))),
+        ValueRef::Ref(Value::Int(n)) => Some((0, *n)),
+        ValueRef::Ref(Value::Char(c)) => Some((1, i64::from(u32::from(*c)))),
+        ValueRef::Ref(Value::Bool(b)) => Some((2, i64::from(*b))),
+        ValueRef::Ref(Value::Double(d)) if allow_fp => Some((3, d.to_bits() as i64)),
+        ValueRef::Double(_) | ValueRef::Str(_) | ValueRef::Ref(_) => None,
+    }
+}
+
+/// Probe `v` as an ASCII string, writing its byte pointer and byte length.
+#[inline]
+pub(crate) fn scalar_str_probe(
+    v: &Value,
+    ptr_out: &mut *const u8,
+    len_out: &mut i64,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
+    let Value::Str(s) = v else {
+        return false;
+    };
+    if !is_ascii_cached(v, s, str_ascii) {
+        return false;
+    }
+    *ptr_out = s.as_ptr();
+    *len_out = s.len() as i64;
+    true
+}
+
+/// Unboxed `count` fast path writing `len_out`.
+#[inline]
+pub(crate) fn scalar_count(v: &Value, len_out: &mut i64, str_ascii: Option<StrAsciiFn>) -> bool {
+    let Some(n) = coll_count(v, str_ascii).and_then(|n| i64::try_from(n).ok()) else {
+        return false;
+    };
+    *len_out = n;
+    true
+}
+
+/// Unboxed `nth` fast path writing `(k_out, v_out)` (`0 = Int, 1 = Char, 2 = Bool`,
+/// plus `3 = Double` when `allow_fp`).
+#[inline]
+pub(crate) fn scalar_nth(
+    coll: &Value,
+    idx: i64,
+    k_out: &mut u8,
+    v_out: &mut i64,
+    str_ascii: Option<StrAsciiFn>,
+    allow_fp: bool,
+) -> bool {
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let pair = match coll {
+        Value::Vector(v) => v.get_val_ref(i).and_then(|vr| scalar_val_ref(vr, allow_fp)),
+        Value::Str(s) => nth_str_fast(coll, s, i, str_ascii)
+            .flatten()
+            .map(|c| (1, i64::from(u32::from(c)))),
+        Value::Transient(t) => scalar_nth_transient(t, i, allow_fp),
+        _ => None,
+    };
+    let Some((k, val)) = pair else {
+        return false;
+    };
+    *k_out = k;
+    *v_out = val;
+    true
+}
+
+#[inline]
+fn scalar_nth_transient(t: &clj_value::Transient, i: usize, allow_fp: bool) -> Option<(u8, i64)> {
+    let guard = t.lock();
+    let TransientKind::Vector(tv) = &*guard else {
+        return None;
+    };
+    tv.get_val_ref(i)
+        .and_then(|vr| scalar_val_ref(vr, allow_fp))
+}
+
+/// Unboxed nested `nth` (`coll[idx][item]`) for destructured tuple vectors.
+#[inline]
+pub(crate) fn scalar_nth2(
+    coll: &Value,
+    idx: i64,
+    item: i64,
+    k_out: &mut u8,
+    v_out: &mut i64,
+    allow_fp: bool,
+) -> bool {
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let Ok(j) = usize::try_from(item) else {
+        return false;
+    };
+    let Some(ValueRef::Ref(Value::Vector(inner))) = (match coll {
+        Value::Vector(v) => v.get_val_ref(i),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let Some((k, val)) = inner
+        .get_val_ref(j)
+        .and_then(|vr| scalar_val_ref(vr, allow_fp))
+    else {
+        return false;
+    };
+    *k_out = k;
+    *v_out = val;
+    true
+}
+
+/// Unboxed effect-position `assoc!` on a transient integer vector.
+#[inline]
+pub(crate) fn scalar_assoc(tval: &Value, idx: i64, val: i64) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.assoc_int_in_bounds(i, val)
+    } else {
+        false
+    }
+}
+
+/// Unboxed effect-position `assoc!` on a transient `Double` vector.
+#[inline]
+pub(crate) fn scalar_assoc_d(tval: &Value, idx: i64, bits: i64) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.assoc_double_in_bounds(i, f64::from_bits(bits as u64))
+    } else {
+        false
+    }
+}
+
+/// Unboxed effect-position `conj!` on a transient integer vector.
+#[inline]
+pub(crate) fn scalar_conj(tval: &Value, val: i64) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.conj_int_no_grow(val)
+    } else {
+        false
+    }
+}
+
+/// Unboxed effect-position `conj!` on a transient `Double` vector.
+#[inline]
+pub(crate) fn scalar_conj_d(tval: &Value, bits: i64) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.conj_double_no_grow(f64::from_bits(bits as u64))
+    } else {
+        false
+    }
+}
+
+/// Probe `v` as a flat packed integer vector, writing its element pointer and length.
+#[inline]
+pub(crate) fn scalar_ivec_probe(v: &Value, ptr_out: &mut *const i64, len_out: &mut i64) -> bool {
+    let Value::Vector(vec) = v else {
+        return false;
+    };
+    let Some(slice) = vec.as_flat_ints() else {
+        return false;
+    };
+    *ptr_out = slice.as_ptr();
+    *len_out = slice.len() as i64;
+    true
+}
+
+/// Probe `v` as a flat packed `f64` vector, writing its element pointer and length.
+#[inline]
+pub(crate) fn scalar_dvec_probe(v: &Value, ptr_out: &mut *const f64, len_out: &mut i64) -> bool {
+    let Value::Vector(vec) = v else {
+        return false;
+    };
+    let Some(slice) = vec.as_flat_doubles() else {
+        return false;
+    };
+    *ptr_out = slice.as_ptr();
+    *len_out = slice.len() as i64;
+    true
+}
+
+/// Probe `v` as a flat generic [`Value`] vector, writing its element pointer and length.
+#[inline]
+pub(crate) fn scalar_gvec_probe(v: &Value, ptr_out: &mut *const Value, len_out: &mut i64) -> bool {
+    let Value::Vector(vec) = v else {
+        return false;
+    };
+    let Some(slice) = vec.as_flat_values() else {
+        return false;
+    };
+    *ptr_out = slice.as_ptr();
+    *len_out = slice.len() as i64;
+    true
+}
+
+/// Whether `a` and `b` alias the same transient cell.
+#[inline]
+pub(crate) fn scalar_same_transient(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Transient(ta), Value::Transient(tb)) => ta.same_cell(tb),
+        _ => false,
+    }
+}
+
+/// Acquire a packed-`Int` transient vector lock for a scalar loop, writing its
+/// mutable element pointer and length (`false` on any other value).
+#[inline]
+pub(crate) fn scalar_tvec_lock(v: &Value, ptr_out: &mut *mut i64, len_out: &mut i64) -> bool {
+    let Some(t) = is_transient_vec(v) else {
+        return false;
+    };
+    let Some((ptr, len)) = t.lock_ints_ptr() else {
+        return false;
+    };
+    *ptr_out = ptr;
+    *len_out = len as i64;
+    true
+}
+
+/// Acquire a packed-`Double` transient vector lock for a scalar loop, writing its
+/// mutable element pointer and length (`false` on any other value).
+#[inline]
+pub(crate) fn scalar_dtvec_lock(v: &Value, ptr_out: &mut *mut f64, len_out: &mut i64) -> bool {
+    let Some(t) = is_transient_vec(v) else {
+        return false;
+    };
+    let Some((ptr, len)) = t.lock_doubles_ptr() else {
+        return false;
+    };
+    *ptr_out = ptr;
+    *len_out = len as i64;
+    true
+}
+
+/// Release a transient lock previously acquired via [`scalar_tvec_lock`] or
+/// [`scalar_dtvec_lock`].
+#[inline]
+pub(crate) fn scalar_tvec_unlock(v: &Value) {
+    if let Some(t) = is_transient_vec(v) {
+        t.unlock_raw();
+    }
+}
+
+/// Unboxed effect-position `pop!` on a transient scalar vector.
+#[inline]
+pub(crate) fn scalar_pop(tval: &Value) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.pop_scalar_opt()
+    } else {
+        false
+    }
 }

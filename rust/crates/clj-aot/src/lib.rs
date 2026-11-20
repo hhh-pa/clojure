@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use clj_eval::{plan_mixed, plan_source};
 use inkwell::context::Context;
 
-use link::{LinkError, current_platform, find_archive, link_command, run_link};
+use link::{LinkError, current_platform, find_archive, link_command};
 
 /// Emit options: `--emit-ir` / `--emit-obj` paths (either one skips
 /// linking; both write and skip).
@@ -233,8 +233,8 @@ pub(crate) fn native_module_with_helpers<'ctx>(
     let mut eval = clj_eval::boot();
     let front = clj_eval::aot_front::front_end(&mut eval, source, source_path)
         .map_err(|e| NativeFail::Program(clj_eval::script::run_diagnostic(source_path, &e)))?;
-    let defns = front
-        .units
+    // The program's own definitions (spliced library units aside, #271).
+    let defns = front.units[front.lib_units..]
         .iter()
         .filter(|u| matches!(&u.expr, clj_eval::expr::Expr::Def { init: Some(_), .. }))
         .count();
@@ -370,11 +370,24 @@ fn finish(
     let platform = current_platform();
     let archive = find_archive(&link.exe_dir, link.runtime_archive.as_deref(), platform)
         .map_err(CompileError::Link)?;
+    let linux = cfg!(target_os = "linux");
+    let script_path = tmp.with_extension("ld");
+    let script =
+        link::write_layout_script(&script_path, linux).map_err(|e| io_err(&script_path, e))?;
     let mut cmd = link_command(platform, &tmp, &archive, out, link.linker.as_deref());
-    cmd.args
-        .extend(link::layout_args(&archive, cfg!(target_os = "linux")));
-    let linked = run_link(&cmd).map_err(CompileError::Link);
+    cmd.args.extend(link::layout_args(script, linux));
+    cmd.args.extend(link::gc_section_args(
+        cfg!(target_os = "linux"),
+        cfg!(target_os = "macos"),
+    ));
+    // Linux tries the static link first (see `link::static_args`); the
+    // plain command stays the fallback (and the only attempt elsewhere).
+    let mut attempts = vec![cmd.clone()];
+    attempts[0].args.extend(link::static_args(linux));
+    attempts.push(cmd);
+    let linked = link::run_link_first(&attempts).map_err(CompileError::Link);
     let _removed = std::fs::remove_file(&tmp);
+    let _removed = script.map(std::fs::remove_file);
     linked
 }
 

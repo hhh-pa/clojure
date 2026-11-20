@@ -22,9 +22,9 @@ use num_traits::ToPrimitive;
 use smallvec::SmallVec;
 
 use clj_value::{
-    CHUNK_SIZE, ConsValue, CycleValue, ExtensionValue, IterateValue, KeySeqValue, List, Map,
-    RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set, SplitVecValue,
-    SubVectorValue, ThrowClass, TransientVector, ValSeqValue, Value, Vector,
+    Array, CHUNK_SIZE, ConsValue, CycleValue, ExtensionValue, IterateValue, KeySeqValue, List, Map,
+    PrimitiveVector, RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set,
+    SplitVecValue, SubVectorValue, ThrowClass, TransientVector, ValSeqValue, Value, Vector,
 };
 
 use crate::core::Num;
@@ -42,13 +42,27 @@ use crate::ns::{NativeFnPtr, check_arity, signal_to_native};
 pub(crate) enum LazyKind {
     LazySeq,
     ChunkedCons,
+    /// A `LazySeq` whose body conses one item per step (`take`,
+    /// `interpose`) but forces a realized run of them at once (no
+    /// user code runs between the items): its rests stay `LazySeq`s,
+    /// never `ChunkedCons`, as the JVM's per-item cells do.
+    ConsRun,
 }
 
 impl LazyKind {
     fn jvm_name(self) -> &'static str {
         match self {
-            LazyKind::LazySeq => "clojure.lang.LazySeq",
+            LazyKind::LazySeq | LazyKind::ConsRun => "clojure.lang.LazySeq",
             LazyKind::ChunkedCons => "clojure.lang.ChunkedCons",
+        }
+    }
+
+    /// The kind of a forced chunk's `rest` cell: a `ChunkedCons` (the
+    /// JVM's `more` of a chunk), except within a cons run.
+    fn rest_kind(self) -> LazyKind {
+        match self {
+            LazyKind::ConsRun => LazyKind::ConsRun,
+            LazyKind::LazySeq | LazyKind::ChunkedCons => LazyKind::ChunkedCons,
         }
     }
 }
@@ -359,6 +373,11 @@ impl PendingSeq {
     /// `chunk-cons`).
     pub(crate) fn pending_chunked_cons(thunk: Thunk) -> Value {
         Self::pending_kind(thunk, LazyKind::ChunkedCons)
+    }
+
+    /// A cons-run pending seq (see [`LazyKind::ConsRun`]).
+    fn pending_cons_run(thunk: Thunk) -> Value {
+        Self::pending_kind(thunk, LazyKind::ConsRun)
     }
 
     /// A metadata-carrying clone with a FRESH memo cell (like the
@@ -930,21 +949,37 @@ pub(crate) fn step_unit(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Sig
         Value::Map(m) => step_map_unit(m),
         Value::Set(s) => step_set_unit(s),
         Value::Str(s) => step_str_unit(s),
-        Value::Array(a) => step_realized(&a.snapshot(), false).map_or_else(
-            || Ok(StepUnit::Empty),
-            |s| step_seq(&s, true, false, SeqKind::Array, None),
-        ),
-        Value::PrimitiveVector(p) => step_realized(&p.items(), true).map_or_else(
-            || Ok(StepUnit::Empty),
-            |s| step_seq(&s, true, true, SeqKind::Chunked, None),
-        ),
-        // Map-like hosts step their content entries (like
-        // `seq_value`; anything else host has no seq).
-        Value::HostType(_) => match crate::types::maplike_inst(v) {
-            Some(i) => step_map_unit(&i.content),
-            None => Err(eval.throw(iseq_err(v))),
-        },
+        Value::Array(a) => step_array_unit(a),
+        Value::PrimitiveVector(p) => step_pv_unit(p),
+        Value::HostType(_) => step_maplike_unit(eval, v),
         _ => Err(eval.throw(iseq_err(v))),
+    }
+}
+
+/// Step an array (eager snapshot; split from [`step_unit`] for the
+/// complexity budget).
+fn step_array_unit(a: &Array) -> Result<StepUnit, Signal> {
+    step_realized(&a.snapshot(), false).map_or_else(
+        || Ok(StepUnit::Empty),
+        |s| step_seq(&s, true, false, SeqKind::Array, None),
+    )
+}
+
+/// Step a primitive vector (chunked, like vectors; split from
+/// [`step_unit`] for the complexity budget).
+fn step_pv_unit(p: &PrimitiveVector) -> Result<StepUnit, Signal> {
+    step_realized(&p.items(), true).map_or_else(
+        || Ok(StepUnit::Empty),
+        |s| step_seq(&s, true, true, SeqKind::Chunked, None),
+    )
+}
+
+/// Step a map-like host (content entries like `seq_value`; split from
+/// [`step_unit`] for the complexity budget).
+fn step_maplike_unit(eval: &mut Evaluator, v: &Value) -> Result<StepUnit, Signal> {
+    match crate::types::maplike_inst(v) {
+        Some(i) => step_map_unit(&i.content),
+        None => Err(eval.throw(iseq_err(v))),
     }
 }
 
@@ -1128,10 +1163,44 @@ fn iterate_seed(eval: &mut Evaluator, it: &IterateValue) -> Result<Value, Signal
                 .to_owned(),
         )));
     }
-    crate::core::check_ifn(eval, it.f())?;
-    let seed = eval.call(it.f(), std::slice::from_ref(it.prev()))?;
+    // `(range)` is `(iterate inc' 0)` (#271): the core `inc'` / `inc`
+    // native on a long below the max answers `n + 1` (the max takes
+    // the call: `inc'` promotes, `inc` throws).
+    let seed = match long_successor(it.f(), it.prev()) {
+        Some(next) => next,
+        None => {
+            crate::core::check_ifn(eval, it.f())?;
+            eval.call(it.f(), std::slice::from_ref(it.prev()))?
+        }
+    };
     it.store_seed(seed.clone());
     Ok(seed)
+}
+
+/// The first item of `v` when it is a core `inc'` / `inc` iterate over
+/// longs (`(range)`), read without calling anything (`None`: anything
+/// else).
+pub(crate) fn core_long_iterate_head(v: &Value) -> Option<i64> {
+    let it = as_iterate(v)?;
+    long_successor(it.f(), &Value::Int(0))?;
+    match it
+        .seed_opt()
+        .or_else(|| long_successor(it.f(), it.prev()))?
+    {
+        Value::Int(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// `(f n)` for the core `inc'` / `inc` natives on a long `n` below the
+/// max, computed in place (`None`: call `f`).
+fn long_successor(f: &Value, prev: &Value) -> Option<Value> {
+    let Value::Int(n) = prev else {
+        return None;
+    };
+    let name = &*crate::ext::as_native(f)?.display;
+    let core_inc = name == "clojure.core/inc'" || name == "clojure.core/inc";
+    core_inc.then(|| n.checked_add(1).map(Value::Int))?
 }
 
 /// Step an iterate: realize this head (at most one `f` call, like
@@ -1445,18 +1514,50 @@ fn step_value_forced(eval: &mut Evaluator, v: &Value) -> Result<Forced, Signal> 
     }
 }
 
-/// Step one head plus its remainder (chunk remainders re-chain
-/// ahead of the tail; step chunks are never empty).
+/// Step one head plus its remainder (step chunks are never empty). A
+/// chunk's remainder is a cursor cell sharing the chunk, and a cursor
+/// cell steps in place, so walking a chunk item by item copies nothing
+/// (#271: re-chaining the remainder copied O(chunk) values per item).
 fn step_head(eval: &mut Evaluator, input: &Value) -> Result<Option<(Value, Value)>, Signal> {
+    if let Some(stepped) = as_pending(input).and_then(step_cursor) {
+        return Ok(Some(stepped));
+    }
     // Step chunks are never empty, so one step decides (no loop).
     match step_unit(eval, input)? {
         StepUnit::Empty => Ok(None),
         StepUnit::One { head, tail } => Ok(Some((head, tail))),
         StepUnit::Chunk { items, tail } => {
-            let (head, rest) = items.split_first().expect("step chunks are non-empty");
-            Ok(Some((head.clone(), chain_tail(rest, &tail))))
+            let head = items[0].clone();
+            Ok(Some((head, chunk_cursor(items, 1, tail))))
         }
     }
+}
+
+/// A memoized chunk cell's head and the cursor one past it (`None`
+/// unless the cell holds a forced chunk: pending cells force first).
+fn step_cursor(p: &PendingSeq) -> Option<(Value, Value)> {
+    let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+    let SeqState::Chunk { items, pos, tail } = &*state else {
+        return None;
+    };
+    Some((
+        items[*pos].clone(),
+        chunk_cursor(Arc::clone(items), *pos + 1, tail.clone()),
+    ))
+}
+
+/// `items[pos..]` then `tail`, sharing `items` (`tail` itself past the
+/// end): a forced cell, as `rest` advances one (no metadata, the
+/// `LazySeq` class the re-chained remainder had).
+fn chunk_cursor(items: Arc<[Value]>, pos: usize, tail: Value) -> Value {
+    if pos >= items.len() {
+        return tail;
+    }
+    Value::Extension(Arc::new(PendingSeq {
+        state: Mutex::new(SeqState::Chunk { items, pos, tail }),
+        meta: None,
+        kind: LazyKind::LazySeq,
+    }))
 }
 
 /// Whether `drop`/`nthrest` take the eager `IDrop` path: vectors,
@@ -1714,18 +1815,30 @@ fn step_map_one(eval: &mut Evaluator, f: &Value, input: Value) -> Result<Forced,
         StepUnit::One { head, tail } => (Arc::from([head]), tail),
         StepUnit::Chunk { items, tail } => (items, tail),
     };
+    let out = map_unit(eval, f, &items)?;
+    Ok(Forced::Chunk {
+        items: Arc::from(out),
+        tail: PendingSeq::pending(Thunk::Map {
+            f: f.clone(),
+            inputs: vec![tail],
+        }),
+    })
+}
+
+/// Apply single-input `map`'s `f` to one stepped unit, in order.
+fn map_unit(eval: &mut Evaluator, f: &Value, items: &[Value]) -> Result<Vec<Value>, Signal> {
     crate::core::check_ifn(eval, f)?;
     let mut out = Vec::with_capacity(items.len());
     // The fn resolves once per chunk (#226): a VM fn takes each item
     // straight into its register, a native runs its entry.
     match crate::vm::Prepared::of(f, 1) {
         Some(p) => {
-            for item in items.iter() {
+            for item in items {
                 out.push(p.call1(eval, crate::vm::clone_value(item))?);
             }
         }
         None => {
-            for item in items.iter() {
+            for item in items {
                 let slice = std::slice::from_ref(item);
                 let val = match crate::vm::invoke_lookup(f, slice) {
                     Some(v) => v,
@@ -1735,13 +1848,677 @@ fn step_map_one(eval: &mut Evaluator, f: &Value, input: Value) -> Result<Forced,
             }
         }
     }
-    Ok(Forced::Chunk {
-        items: Arc::from(out),
-        tail: PendingSeq::pending(Thunk::Map {
+    Ok(out)
+}
+
+/// Walk an unforced `map` seq that `coll` alone holds (#271) without
+/// building its lazy cells: nothing else can see them, and every step
+/// runs exactly what forcing it would — a single input maps one
+/// stepped unit (`f` over the whole unit, then its items visit), and
+/// vector inputs step one item per call, as multi-input `map` forces.
+/// `visit` answers whether to go on. `None`: not such a seq (other
+/// inputs force through the seq itself).
+pub(crate) fn walk_sole_map(
+    eval: &mut Evaluator,
+    coll: &Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Option<Result<(), Signal>> {
+    let parts = sole_map_parts(coll)?;
+    Some(walk_parts(eval, parts, visit).map(|_| ()))
+}
+
+/// A sole unforced lazy seq's parts ([`walk_sole_map`]): `map`,
+/// `mapcat` (including multi-binding/`:when` `for`), `filter`,
+/// `remove`, `take`, `drop`, `take-while`, `drop-while`, and `concat` (#271).
+enum SoleMap {
+    One(Value, Value),
+    Vectors(Value, Vec<Vector>),
+    Cat(Box<SoleMap>),
+    Filter {
+        f: Value,
+        input: Value,
+        invert: bool,
+    },
+    Take {
+        n: Value,
+        input: Value,
+    },
+    Drop {
+        n: Value,
+        input: Value,
+    },
+    TakeWhile {
+        f: Value,
+        input: Value,
+    },
+    DropWhile {
+        f: Value,
+        input: Value,
+    },
+    Concat {
+        cur: Value,
+        rest: Arc<Vec<Value>>,
+        idx: usize,
+        outer: ConcatStack,
+    },
+}
+
+/// Walk [`SoleMap`] parts; answers whether `visit` let the walk reach
+/// the end. Every variant preserves the exact chunking and forcing
+/// order of its `step_*` counterpart without allocating lazy cells.
+fn walk_parts(
+    eval: &mut Evaluator,
+    parts: SoleMap,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    match parts {
+        SoleMap::One(f, input) => walk_map_one(eval, &f, input, visit),
+        SoleMap::Vectors(f, inputs) => walk_map_vectors(eval, &f, &inputs, visit),
+        SoleMap::Cat(outer) => {
+            let mut go_on = true;
+            let mut each = |eval: &mut Evaluator, r: Value| -> Result<bool, Signal> {
+                go_on = walk_all(eval, r, visit)?;
+                Ok(go_on)
+            };
+            walk_parts(eval, *outer, &mut each)?;
+            Ok(go_on)
+        }
+        SoleMap::Filter { f, input, invert } => walk_filter(eval, &f, input, invert, visit),
+        SoleMap::Take { n, input } => walk_take(eval, &n, input, visit),
+        SoleMap::Drop { n, input } => walk_drop(eval, &n, input, visit),
+        SoleMap::TakeWhile { f, input } => walk_take_while(eval, &f, input, visit),
+        SoleMap::DropWhile { f, input } => walk_drop_while(eval, &f, input, visit),
+        SoleMap::Concat {
+            cur,
+            rest,
+            idx,
+            outer,
+        } => walk_concat(eval, cur, rest, idx, outer, visit),
+    }
+}
+
+/// Walk every item of one collection in seq order without allocating
+/// lazy cells for sole unforced combinators, vectors, lists, subvectors,
+/// repeats, or counted long ranges. Answers whether `visit` let the
+/// walk reach the end.
+fn walk_all(
+    eval: &mut Evaluator,
+    coll: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if let Some(parts) = sole_map_parts(&coll) {
+        return walk_parts(eval, parts, visit);
+    }
+    match coll {
+        Value::Nil => Ok(true),
+        Value::List(l) => visit_all(eval, l.iter().cloned(), visit),
+        Value::Vector(v) => visit_all(eval, v.iter(), visit),
+        other => walk_all_other(eval, other, visit),
+    }
+}
+
+fn walk_all_other(
+    eval: &mut Evaluator,
+    other: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if let Some(sp) = as_splitvec(&other) {
+        return visit_all(eval, sp.iter(), visit);
+    }
+    if let Some(sv) = as_subvector(&other) {
+        return visit_all(eval, sv.vec().iter().skip(sv.start()).take(sv.len()), visit);
+    }
+    if let Some(r) = as_repeat(&other) {
+        return walk_repeat(eval, r, visit);
+    }
+    if let Some((cur, step, n)) = crate::seqs::long_range(&other) {
+        return visit_all(eval, (0..n).map(|k| Value::Int(cur + k * step)), visit);
+    }
+    let s = seq_value(eval, &other)?;
+    walk_units(eval, s, visit)
+}
+
+fn walk_repeat(
+    eval: &mut Evaluator,
+    r: &clj_value::RepeatValue,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let x = r.x();
+    match r.n() {
+        Some(n) => {
+            for _ in 0..n.max(0) {
+                if !visit(eval, x.clone())? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        None => loop {
+            if !visit(eval, x.clone())? {
+                return Ok(false);
+            }
+        },
+    }
+}
+
+/// Walk a seq unit by unit, forcing each as its cells would; answers
+/// whether `visit` let the walk reach the end.
+fn walk_units(
+    eval: &mut Evaluator,
+    mut cur: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    loop {
+        let (go_on, tail) = match step_unit(eval, &cur)? {
+            StepUnit::Empty => return Ok(true),
+            StepUnit::One { head, tail } => (visit(eval, head)?, tail),
+            StepUnit::Chunk { items, tail } => {
+                (visit_all(eval, items.iter().cloned(), visit)?, tail)
+            }
+        };
+        if !go_on {
+            return Ok(false);
+        }
+        cur = tail;
+    }
+}
+
+/// Visit `items` in order; answers whether `visit` let them all through.
+fn visit_all(
+    eval: &mut Evaluator,
+    items: impl Iterator<Item = Value>,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    for item in items {
+        if !visit(eval, item)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `coll`'s parts when it is an unforced combinator seq with no other
+/// handle (`map`, `mapcat`, `filter`, `remove`, `take`, `concat`).
+fn sole_map_parts(coll: &Value) -> Option<SoleMap> {
+    let Value::Extension(e) = coll else {
+        return None;
+    };
+    let p = as_pending(coll)?;
+    if Arc::strong_count(e) != 1 {
+        return None;
+    }
+    let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+    let SeqState::Pending(thunk) = &*state else {
+        return None;
+    };
+    sole_thunk_parts(thunk)
+}
+
+fn sole_thunk_parts(thunk: &Thunk) -> Option<SoleMap> {
+    match thunk {
+        Thunk::Map { f, inputs } => sole_map_inputs(f, inputs),
+        Thunk::MapCat { outer } => sole_map_parts(outer).map(|parts| SoleMap::Cat(Box::new(parts))),
+        Thunk::Filter { f, input } => Some(SoleMap::Filter {
             f: f.clone(),
-            inputs: vec![tail],
+            input: input.clone(),
+            invert: false,
         }),
-    })
+        Thunk::Remove { f, input } => Some(SoleMap::Filter {
+            f: f.clone(),
+            input: input.clone(),
+            invert: true,
+        }),
+        Thunk::Take { n, input } => Some(SoleMap::Take {
+            n: n.clone(),
+            input: input.clone(),
+        }),
+        Thunk::Drop { n, input } => Some(SoleMap::Drop {
+            n: n.clone(),
+            input: input.clone(),
+        }),
+        Thunk::TakeWhile { f, input } => Some(SoleMap::TakeWhile {
+            f: f.clone(),
+            input: input.clone(),
+        }),
+        Thunk::DropWhile { f, input } => Some(SoleMap::DropWhile {
+            f: f.clone(),
+            input: input.clone(),
+        }),
+        Thunk::Concat {
+            cur,
+            rest,
+            idx,
+            outer,
+        } => Some(SoleMap::Concat {
+            cur: cur.clone(),
+            rest: Arc::clone(rest),
+            idx: *idx,
+            outer: outer.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn sole_map_inputs(f: &Value, inputs: &[Value]) -> Option<SoleMap> {
+    if let [input] = inputs {
+        return Some(SoleMap::One(f.clone(), input.clone()));
+    }
+    let vectors = inputs
+        .iter()
+        .map(|v| match v {
+            Value::Vector(x) => Some(x.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(SoleMap::Vectors(f.clone(), vectors))
+}
+
+fn call_map1(
+    eval: &mut Evaluator,
+    f: &Value,
+    prep: Option<&crate::vm::Prepared<'_>>,
+    item: Value,
+) -> Result<Value, Signal> {
+    if let Some(p) = prep {
+        return p.call1(eval, item);
+    }
+    let slice = std::slice::from_ref(&item);
+    match crate::vm::invoke_lookup(f, slice) {
+        Some(v) => Ok(v),
+        None => eval.call(f, slice),
+    }
+}
+
+fn walk_map_vector(
+    eval: &mut Evaluator,
+    f: &Value,
+    v: &Vector,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if v.is_empty() {
+        return Ok(true);
+    }
+    crate::core::check_ifn(eval, f)?;
+    let prep = crate::vm::Prepared::of(f, 1);
+    let mut buf: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
+    let mut iter = v.iter();
+    loop {
+        buf.clear();
+        for item in iter.by_ref().take(CHUNK_SIZE) {
+            buf.push(call_map1(eval, f, prep.as_ref(), item)?);
+        }
+        if buf.is_empty() {
+            return Ok(true);
+        }
+        if !visit_all(eval, buf.drain(..), visit)? {
+            return Ok(false);
+        }
+    }
+}
+
+fn walk_map_range(
+    eval: &mut Evaluator,
+    f: &Value,
+    start: i64,
+    step: i64,
+    n: i64,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    crate::core::check_ifn(eval, f)?;
+    let prep = crate::vm::Prepared::of(f, 1);
+    let mut buf: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
+    let mut k = 0i64;
+    while k < n {
+        buf.clear();
+        let end = (k + CHUNK_SIZE as i64).min(n);
+        while k < end {
+            buf.push(call_map1(
+                eval,
+                f,
+                prep.as_ref(),
+                Value::Int(start + k * step),
+            )?);
+            k += 1;
+        }
+        if !visit_all(eval, buf.drain(..), visit)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// [`walk_sole_map`] over one input: unit by unit, like `step_map_one`.
+fn walk_map_one(
+    eval: &mut Evaluator,
+    f: &Value,
+    mut cur: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if let Value::Vector(v) = &cur {
+        return walk_map_vector(eval, f, v, visit);
+    }
+    if let Some((start, step, n)) = crate::seqs::long_range(&cur) {
+        return walk_map_range(eval, f, start, step, n, visit);
+    }
+    loop {
+        let out = match step_unit(eval, &cur)? {
+            StepUnit::Empty => return Ok(true),
+            StepUnit::One { head, tail } => {
+                cur = tail;
+                map_unit(eval, f, std::slice::from_ref(&head))?
+            }
+            StepUnit::Chunk { items, tail } => {
+                cur = tail;
+                map_unit(eval, f, &items)?
+            }
+        };
+        if !visit_all(eval, out.into_iter(), visit)? {
+            return Ok(false);
+        }
+    }
+}
+
+/// [`walk_sole_map`] over vector inputs: one call per item (the
+/// shortest input bounds the walk), like multi-input `step_map`.
+fn walk_map_vectors(
+    eval: &mut Evaluator,
+    f: &Value,
+    inputs: &[Vector],
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let n = inputs.iter().map(Vector::len).min().unwrap_or(0);
+    if n == 0 {
+        return Ok(true);
+    }
+    crate::core::check_ifn(eval, f)?;
+    if let [a, b] = inputs {
+        return walk_map_two_vectors(eval, f, a, b, visit);
+    }
+    let mut iters: Vec<_> = inputs.iter().map(Vector::iter).collect();
+    let mut heads = Vec::with_capacity(iters.len());
+    for _ in 0..n {
+        heads.clear();
+        heads.extend(iters.iter_mut().map(|it| it.next().unwrap_or(Value::Nil)));
+        let out = eval.call(f, &heads)?;
+        if !visit(eval, out)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn walk_map_two_vectors(
+    eval: &mut Evaluator,
+    f: &Value,
+    a: &Vector,
+    b: &Vector,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    match crate::vm::Prepared::of(f, 2) {
+        Some(p) => {
+            for (x, y) in a.iter().zip(b.iter()) {
+                let out = p.call2(eval, x, y)?;
+                if !visit(eval, out)? {
+                    return Ok(false);
+                }
+            }
+        }
+        None => {
+            for (x, y) in a.iter().zip(b.iter()) {
+                let out = eval.call(f, &[x, y])?;
+                if !visit(eval, out)? {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn walk_filter(
+    eval: &mut Evaluator,
+    f: &Value,
+    input: Value,
+    invert: bool,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if let Value::Vector(v) = &input {
+        return walk_filter_vector(eval, f, v, invert, visit);
+    }
+    if let Some((start, step, n)) = crate::seqs::long_range(&input) {
+        return walk_filter_range(eval, f, start, step, n, invert, visit);
+    }
+    walk_filter_units(eval, f, input, invert, visit)
+}
+
+fn walk_filter_vector(
+    eval: &mut Evaluator,
+    f: &Value,
+    v: &Vector,
+    invert: bool,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if v.is_empty() {
+        return Ok(true);
+    }
+    crate::core::check_ifn(eval, f)?;
+    let prep = filter_prep(f);
+    let mut kept: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
+    let mut iter = v.iter();
+    loop {
+        kept.clear();
+        let mut saw = false;
+        for item in iter.by_ref().take(CHUNK_SIZE) {
+            saw = true;
+            if test_filter_item(eval, f, prep.as_ref(), &item)? != invert {
+                kept.push(item);
+            }
+        }
+        if !saw {
+            return Ok(true);
+        }
+        if !visit_all(eval, kept.drain(..), visit)? {
+            return Ok(false);
+        }
+    }
+}
+
+fn walk_filter_range(
+    eval: &mut Evaluator,
+    f: &Value,
+    start: i64,
+    step: i64,
+    n: i64,
+    invert: bool,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    crate::core::check_ifn(eval, f)?;
+    let prep = filter_prep(f);
+    let mut kept: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
+    let mut k = 0i64;
+    while k < n {
+        kept.clear();
+        let end = (k + CHUNK_SIZE as i64).min(n);
+        while k < end {
+            let item = Value::Int(start + k * step);
+            if test_filter_item(eval, f, prep.as_ref(), &item)? != invert {
+                kept.push(item);
+            }
+            k += 1;
+        }
+        if !visit_all(eval, kept.drain(..), visit)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn walk_filter_units(
+    eval: &mut Evaluator,
+    f: &Value,
+    mut cur: Value,
+    invert: bool,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let prep = filter_prep(f);
+    let mut checked = false;
+    let mut kept: SmallVec<[Value; CHUNK_SIZE]> = SmallVec::new();
+    loop {
+        let (one, chunk, tail) = match step_unit(eval, &cur)? {
+            StepUnit::Empty => return Ok(true),
+            StepUnit::One { head, tail } => (Some(head), None, tail),
+            StepUnit::Chunk { items, tail } => (None, Some(items), tail),
+        };
+        if !checked {
+            crate::core::check_ifn(eval, f)?;
+            checked = true;
+        }
+        cur = tail;
+        kept.clear();
+        for item in one.iter().chain(chunk.iter().flat_map(|c| c.iter())) {
+            if test_filter_item(eval, f, prep.as_ref(), item)? != invert {
+                kept.push(item.clone());
+            }
+        }
+        if !visit_all(eval, kept.drain(..), visit)? {
+            return Ok(false);
+        }
+    }
+}
+
+fn walk_take(
+    eval: &mut Evaluator,
+    n: &Value,
+    input: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let mut rem = crate::core::take_count(n).map_err(|e| eval.throw(e))?;
+    if rem <= 0 {
+        return Ok(true);
+    }
+    let mut outer_go_on = true;
+    let mut limited = |eval: &mut Evaluator, item: Value| -> Result<bool, Signal> {
+        outer_go_on = visit(eval, item)?;
+        rem -= 1;
+        Ok(outer_go_on && rem > 0)
+    };
+    walk_all(eval, input, &mut limited)?;
+    Ok(outer_go_on)
+}
+
+fn walk_drop(
+    eval: &mut Evaluator,
+    n: &Value,
+    input: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let mut skip = crate::core::take_count(n)
+        .map_err(|e| eval.throw(e))?
+        .max(0);
+    let mut outer_go_on = true;
+    let mut skipped = |eval: &mut Evaluator, item: Value| -> Result<bool, Signal> {
+        if skip > 0 {
+            skip -= 1;
+            return Ok(true);
+        }
+        outer_go_on = visit(eval, item)?;
+        Ok(outer_go_on)
+    };
+    walk_all(eval, input, &mut skipped)?;
+    Ok(outer_go_on)
+}
+
+fn walk_take_while(
+    eval: &mut Evaluator,
+    f: &Value,
+    input: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let prep = filter_prep(f);
+    let mut checked = false;
+    let mut outer_go_on = true;
+    let mut taking = |eval: &mut Evaluator, item: Value| -> Result<bool, Signal> {
+        if !checked {
+            crate::core::check_ifn(eval, f)?;
+            checked = true;
+        }
+        if !test_filter_item(eval, f, prep.as_ref(), &item)? {
+            return Ok(false);
+        }
+        outer_go_on = visit(eval, item)?;
+        Ok(outer_go_on)
+    };
+    walk_all(eval, input, &mut taking)?;
+    Ok(outer_go_on)
+}
+
+fn walk_drop_while(
+    eval: &mut Evaluator,
+    f: &Value,
+    input: Value,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    let prep = filter_prep(f);
+    let mut checked = false;
+    let mut dropping = true;
+    let mut outer_go_on = true;
+    let mut run = |eval: &mut Evaluator, item: Value| -> Result<bool, Signal> {
+        if dropping {
+            if !checked {
+                crate::core::check_ifn(eval, f)?;
+                checked = true;
+            }
+            if test_filter_item(eval, f, prep.as_ref(), &item)? {
+                return Ok(true);
+            }
+            dropping = false;
+        }
+        outer_go_on = visit(eval, item)?;
+        Ok(outer_go_on)
+    };
+    walk_all(eval, input, &mut run)?;
+    Ok(outer_go_on)
+}
+
+fn walk_concat(
+    eval: &mut Evaluator,
+    mut cur: Value,
+    mut rest: Arc<Vec<Value>>,
+    mut idx: usize,
+    mut outer: ConcatStack,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    loop {
+        while let Some((icur, irest, iidx, _)) = unforced_concat_parts(&cur) {
+            if rest.get(idx).is_some() {
+                outer = Some(Arc::new(ConcatFrame {
+                    rest,
+                    idx,
+                    parent: outer,
+                }));
+            }
+            cur = icur;
+            rest = irest;
+            idx = iidx;
+        }
+        if !walk_all(eval, cur, visit)? {
+            return Ok(false);
+        }
+        loop {
+            if let Some(next) = rest.get(idx) {
+                cur = next.clone();
+                idx += 1;
+                break;
+            }
+            match pop_concat_frame(&mut outer) {
+                Some((orest, oidx)) => {
+                    rest = orest;
+                    idx = oidx;
+                }
+                None => return Ok(true),
+            }
+        }
+    }
 }
 
 /// Re-chain an unconsumed remainder ahead of its tail.
@@ -1769,6 +2546,18 @@ pub(crate) fn filter_pred(eval: &mut Evaluator, f: &Value, item: &Value) -> Resu
     Ok(eval.call(f, slice)?.is_truthy())
 }
 
+/// A filter predicate resolved once: `None` for `seq`, so
+/// [`filter_pred`] tests emptiness without building a seq, else `f`
+/// prepared for one argument.
+pub(crate) fn filter_prep(f: &Value) -> Option<crate::vm::Prepared<'_>> {
+    let is_seq = crate::ext::as_native(f).is_some_and(|n| &*n.display == "clojure.core/seq");
+    if is_seq {
+        None
+    } else {
+        crate::vm::Prepared::of(f, 1)
+    }
+}
+
 fn test_filter_item(
     eval: &mut Evaluator,
     f: &Value,
@@ -1789,12 +2578,7 @@ fn step_filter(
     mut input: Value,
     invert: bool,
 ) -> Result<Forced, Signal> {
-    let is_seq = crate::ext::as_native(f).is_some_and(|n| &*n.display == "clojure.core/seq");
-    let prep = if is_seq {
-        None
-    } else {
-        crate::vm::Prepared::of(f, 1)
-    };
+    let prep = filter_prep(f);
     loop {
         let (items, tail): (Arc<[Value]>, Value) = match step_unit(eval, &input)? {
             StepUnit::Empty => return Ok(Forced::Empty),
@@ -1832,19 +2616,33 @@ fn step_filter(
 
 /// `take`: one step consumes the head of the current unit.
 fn step_take(eval: &mut Evaluator, n: &Value, input: Value) -> Result<Forced, Signal> {
-    // `(pos? n)` per step (the count re-validates every force);
-    // one item per step (the body `cons`es).
+    // `(pos? n)` per step (the count re-validates every force); the
+    // input steps by unit (one item, or a whole realized chunk — no
+    // user code runs here, so taking a realized unit at once forces
+    // exactly what stepping the input forces).
     let n = crate::core::take_count(n).map_err(|e| eval.throw(e))?;
     if n <= 0 {
         return Ok(Forced::Empty);
     }
-    let Some((head, tail)) = step_head(eval, &input)? else {
-        return Ok(Forced::Empty);
+    let (items, tail): (Arc<[Value]>, Value) = match step_unit(eval, &input)? {
+        StepUnit::Empty => return Ok(Forced::Empty),
+        StepUnit::One { head, tail } => (Arc::from([head]), tail),
+        StepUnit::Chunk { items, tail } => (items, tail),
     };
+    let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
+    if len >= n {
+        // The count ends inside this unit: the input's tail is never
+        // touched again.
+        let cut = usize::try_from(n).unwrap_or(usize::MAX);
+        return Ok(Forced::Chunk {
+            items: Arc::from(&items[..cut]),
+            tail: Value::Nil,
+        });
+    }
     Ok(Forced::Chunk {
-        items: Arc::from(vec![head]),
-        tail: PendingSeq::pending(Thunk::Take {
-            n: Value::Int(n - 1),
+        items,
+        tail: PendingSeq::pending_cons_run(Thunk::Take {
+            n: Value::Int(n - len),
             input: tail,
         }),
     })
@@ -2133,37 +2931,35 @@ fn step_interleave(
     })
 }
 
-/// `interpose`: the head alone first, then one item per step
-/// (a separator, then its head — no trailing separator).
+/// `interpose`: the input steps by unit (one item, or a whole realized
+/// chunk) and each unit comes out with its separators (none before the
+/// first item, none trailing). No user code runs here, so emitting a
+/// realized unit at once forces exactly what stepping the input forces.
 fn step_interpose(
     eval: &mut Evaluator,
     sep: Value,
     input: Value,
     first: bool,
 ) -> Result<Forced, Signal> {
-    let Some((head, tail)) = step_head(eval, &input)? else {
-        return Ok(Forced::Empty);
+    let (items, tail) = match step_unit(eval, &input)? {
+        StepUnit::Empty => return Ok(Forced::Empty),
+        StepUnit::One { head, tail } => (vec![head], tail),
+        StepUnit::Chunk { items, tail } => (items.to_vec(), tail),
     };
-    if first {
-        return Ok(Forced::Chunk {
-            items: Arc::from(vec![head]),
-            tail: PendingSeq::pending(Thunk::Interpose {
-                sep,
-                input: tail,
-                first: false,
-            }),
-        });
+    let mut out = Vec::with_capacity(items.len() * 2);
+    for (i, item) in items.into_iter().enumerate() {
+        if i > 0 || !first {
+            out.push(sep.clone());
+        }
+        out.push(item);
     }
     Ok(Forced::Chunk {
-        items: Arc::from(vec![sep.clone()]),
-        tail: chain_tail(
-            std::slice::from_ref(&head),
-            &PendingSeq::pending(Thunk::Interpose {
-                sep,
-                input: tail,
-                first: false,
-            }),
-        ),
+        items: Arc::from(out),
+        tail: PendingSeq::pending_cons_run(Thunk::Interpose {
+            sep,
+            input: tail,
+            first: false,
+        }),
     })
 }
 
@@ -2345,7 +3141,7 @@ fn step_partition_collect(
         let Some(pad) = pad else {
             return Ok(Forced::Empty);
         };
-        let padded = PendingSeq::pending(Thunk::Take {
+        let padded = PendingSeq::pending_cons_run(Thunk::Take {
             n: n.clone(),
             input: PendingSeq::pending(Thunk::Concat {
                 cur: lazy_window(eval, window)?,
@@ -2801,11 +3597,17 @@ fn step_reductions(
 /// `recur` re-invokes the body (the zero-arg `fn` boundary, like the
 /// JVM closure); nested loops consume their own first.
 fn step_thunk0(eval: &mut Evaluator, body: &[Expr], env: &Env) -> Result<Forced, Signal> {
+    let Some(hooks) = eval.lazy_hooks else {
+        return Err(eval.throw(NativeError::new(
+            ThrowClass::UnsupportedOperationException,
+            "lazy-seq body requires full boot".to_owned(),
+        )));
+    };
     loop {
         let mut value = Value::Nil;
         let mut recurred = false;
         for expr in body {
-            match eval.eval(expr, env) {
+            match (hooks.eval_expr)(eval, expr, env) {
                 Ok(v) => value = v,
                 Err(Signal::Recur(args)) if args.is_empty() => {
                     recurred = true;
@@ -3295,11 +4097,17 @@ pub(crate) fn seq_value(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal
         // Records seq their content entries (oracle `rec-seq`);
         // structs likewise (S12 oracle `sm-seq`); anything else
         // host has no seq (oracle `i-seq`).
-        Value::HostType(_) => match crate::types::maplike_inst(v) {
-            Some(i) => Ok(seq_map(&i.content)),
-            None => Err(eval.throw(iseq_err(v))),
-        },
+        Value::HostType(_) => seq_maplike(eval, v),
         _ => Err(eval.throw(iseq_err(v))),
+    }
+}
+
+/// `seq` of a map-like host (split from [`seq_value`] for the
+/// complexity budget).
+fn seq_maplike(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    match crate::types::maplike_inst(v) {
+        Some(i) => Ok(seq_map(&i.content)),
+        None => Err(eval.throw(iseq_err(v))),
     }
 }
 
@@ -3322,7 +4130,8 @@ fn first_direct_extension(v: &Value) -> Option<Value> {
 fn first_direct(v: &Value) -> Option<Value> {
     match v {
         Value::List(l) => Some(l.first().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(x) => Some(x.iter().next().unwrap_or(Value::Nil)),
+        // An indexed read: no trie iterator built for one item (#271).
+        Value::Vector(x) => Some(x.get(0).unwrap_or(Value::Nil)),
         Value::MapEntry { key, .. } => Some((**key).clone()),
         Value::Map(m) => Some(
             m.iter()
@@ -3332,15 +4141,20 @@ fn first_direct(v: &Value) -> Option<Value> {
         ),
         Value::Set(s) => Some(s.iter().next().cloned().unwrap_or(Value::Nil)),
         Value::Str(s) => Some(s.chars().next().map(Value::Char).unwrap_or(Value::Nil)),
+        other => first_direct_wide(other),
+    }
+}
+
+/// The wide arms of [`first_direct`] (split for the complexity budget):
+/// arrays, primitive vectors, map-like hosts, and extensions.
+fn first_direct_wide(v: &Value) -> Option<Value> {
+    match v {
         Value::Array(a) => Some(if a.is_empty() {
             Value::Nil
         } else {
             crate::arrays::array_read(a, 0)
         }),
         Value::PrimitiveVector(p) => Some(p.get(0).cloned().unwrap_or(Value::Nil)),
-        // Records read their first content entry (empty reads nil,
-        // like `{}`); structs likewise (S12); other host values
-        // keep the `ISeq` error.
         Value::HostType(_) => crate::types::maplike_inst(v).map(|i| {
             i.content
                 .iter()
@@ -3492,35 +4306,57 @@ fn rest_pending_chunk(
 }
 
 /// `rest` of a pending seq (a memoized chunk rests by advancing
-/// its cursor — a new cell sharing the items, like the JVM's
-/// `ChunkedCons`, with no per-element chunk copy; anything else
-/// forces one step).
+/// its cursor; anything else forces one step — a cons run then
+/// rests from its new memo).
 fn rest_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Value, Signal> {
-    {
-        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let SeqState::Chunk { items, pos, tail } = &*state {
-            if *pos + 1 < items.len() {
-                // `ChunkedCons` class, like the forcing path below
-                // (JVM `more()`; pinned by `lazy_chunked_cons_*`).
-                return Ok(Value::Extension(Arc::new(PendingSeq {
-                    state: Mutex::new(SeqState::Chunk {
-                        items: Arc::clone(items),
-                        pos: *pos + 1,
-                        tail: tail.clone(),
-                    }),
-                    meta: p.meta.clone(),
-                    kind: LazyKind::ChunkedCons,
-                })));
-            }
-            let tail = tail.clone();
-            drop(state);
-            return rest_chunk_tail(eval, &tail);
-        }
+    if let Some(rest) = rest_memoized(eval, p)? {
+        return Ok(rest);
     }
     match force_pending(eval, p)? {
         Forced::Empty => Ok(empty_list_value()),
+        Forced::Chunk { .. } if p.kind == LazyKind::ConsRun => {
+            Ok(rest_memoized(eval, p)?.expect("a forced run is memoized"))
+        }
         Forced::Chunk { items, tail } => rest_pending_chunk(eval, &items, tail),
     }
+}
+
+/// `rest` of a pending seq's memoized chunk (`None` while unforced):
+/// a cursor advance — a new cell sharing the items, like the JVM's
+/// `ChunkedCons`, with no per-element chunk copy. A cons run links
+/// its head to that cell instead, so every `rest` (and `next`)
+/// answers the same cell, like the JVM's per-item conses.
+fn rest_memoized(eval: &mut Evaluator, p: &PendingSeq) -> Result<Option<Value>, Signal> {
+    let mut state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+    let SeqState::Chunk { items, pos, tail } = &*state else {
+        return Ok(None);
+    };
+    if *pos + 1 < items.len() {
+        // `ChunkedCons` class (a cons run keeps its own), like
+        // `rest_pending_chunk` (JVM `more()`; pinned by
+        // `lazy_chunked_cons_*`).
+        let cell = Value::Extension(Arc::new(PendingSeq {
+            state: Mutex::new(SeqState::Chunk {
+                items: Arc::clone(items),
+                pos: *pos + 1,
+                tail: tail.clone(),
+            }),
+            meta: p.meta.clone(),
+            kind: p.kind.rest_kind(),
+        }));
+        if p.kind == LazyKind::ConsRun {
+            let head = items[*pos].clone();
+            *state = SeqState::Chunk {
+                items: Arc::from([head]),
+                pos: 0,
+                tail: cell.clone(),
+            };
+        }
+        return Ok(Some(cell));
+    }
+    let tail = tail.clone();
+    drop(state);
+    rest_chunk_tail(eval, &tail).map(Some)
 }
 
 /// `rest` of a realized seq (shifting, preserving kind; `StringSeq`
@@ -3778,6 +4614,14 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, S
         return Ok(direct);
     }
     let mut tv = TransientVector::new();
+    let mut push = |_: &mut Evaluator, item: Value| {
+        tv.conj(item).expect("fresh transient accepts conj");
+        Ok(true)
+    };
+    if let Some(done) = walk_sole_map(eval, &v, &mut push) {
+        done?;
+        return Ok(tv.persistent().expect("fresh transient is valid at freeze"));
+    }
     // Owned: the walk advances `cur` off the head (owned callers
     // nilled the arg slot, so memoized chunks free as it walks).
     let mut cur = v;
@@ -3803,6 +4647,16 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, S
 /// A string, array, finite `repeat`, or counted `long` range built without
 /// walking its seq (#226: `(vec (repeat n 0))` builds DP tables and
 /// `(vec s)` builds char vectors; the items are exactly the seq's).
+fn collect_repeat(r: &clj_value::RepeatValue) -> Option<Vector> {
+    let n = usize::try_from(r.n()?.max(0)).ok()?;
+    Some(match r.x() {
+        Value::Int(x) => Vector::from_flat_ints(vec![*x; n]),
+        Value::Double(d) => Vector::from_flat_doubles(vec![*d; n]),
+        Value::Char(c) => Vector::from_flat_chars(vec![*c; n]),
+        x => Vector::from_vec(vec![x.clone(); n]),
+    })
+}
+
 fn collect_direct(v: &Value) -> Option<Vector> {
     if let Value::Str(s) = v {
         return Some(Vector::from_flat_chars(s.chars().collect()));
@@ -3816,12 +4670,7 @@ fn collect_direct(v: &Value) -> Option<Vector> {
     };
     let any = e.as_any();
     if let Some(r) = any.downcast_ref::<clj_value::RepeatValue>() {
-        let n = usize::try_from(r.n()?.max(0)).ok()?;
-        return Some(match r.x() {
-            Value::Int(x) => Vector::from_flat_ints(vec![*x; n]),
-            Value::Char(c) => Vector::from_flat_chars(vec![*c; n]),
-            x => Vector::from_vec(vec![x.clone(); n]),
-        });
+        return collect_repeat(r);
     }
     let r = any.downcast_ref::<clj_value::RangeValue>()?;
     let (clj_value::RangeNum::Int(cur), clj_value::RangeNum::Int(step), Some(n)) =
@@ -3842,6 +4691,14 @@ pub(crate) fn collect_all(eval: &mut Evaluator, v: Value) -> Result<Vec<Value>, 
         return Ok(x.iter().collect());
     }
     let mut out = Vec::new();
+    let mut push = |_: &mut Evaluator, item: Value| {
+        out.push(item);
+        Ok(true)
+    };
+    if let Some(done) = walk_sole_map(eval, &v, &mut push) {
+        done?;
+        return Ok(out);
+    }
     // Owned: the walk advances `cur` off the head (owned callers
     // nilled the arg slot, so memoized chunks free as it walks).
     let mut cur = v;
@@ -4193,10 +5050,32 @@ fn realize_deep_set(eval: &mut Evaluator, s: &Set) -> Result<Value, Signal> {
     Ok(Value::Set(out.with_meta(s.meta().cloned())))
 }
 
+/// Scalars that can never hold a pending seq (no spine, no fields):
+/// [`realize_deep`] returns them as-is without the unbounded-seq and
+/// record probes (every other variant — records and structs included —
+/// takes the full walk).
+#[inline]
+fn is_atomic(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Nil
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Double(_)
+            | Value::Char(_)
+            | Value::Str(_)
+            | Value::Keyword(_)
+            | Value::Symbol(_)
+    )
+}
+
 /// Deep-realize pending seqs into realized ones (for printing,
 /// `str`, and `=`); realized seqs rebuild with realized items and
 /// preserved metadata.
 pub(crate) fn realize_deep(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
+    if is_atomic(v) {
+        return Ok(v.clone());
+    }
     // Unbounded seqs are preserved, never expanded: expanding them
     // hangs, `hash`'s post-check (like the JVM's `hasheq` overrides)
     // must SEE them to throw `UnsupportedOperationException`, and
@@ -4286,7 +5165,7 @@ pub(crate) fn filter_thunk(f: Value, input: Value, invert: bool) -> Value {
 /// A `Thunk::Take` tail value (the count stays raw — invalid
 /// counts fail when forced, like the JVM's lazy `pos?`).
 pub(crate) fn take_thunk(n: Value, input: Value) -> Value {
-    pending_value(Thunk::Take { n, input })
+    PendingSeq::pending_cons_run(Thunk::Take { n, input })
 }
 
 /// A `Thunk::Concat` tail value.
@@ -4563,7 +5442,7 @@ pub(crate) fn keys_thunk(eval: &mut Evaluator, input: Value, keys: bool) -> Resu
 
 /// A `Thunk::Interpose` tail value.
 pub(crate) fn interpose_thunk(sep: Value, input: Value) -> Value {
-    pending_value(Thunk::Interpose {
+    PendingSeq::pending_cons_run(Thunk::Interpose {
         sep,
         input,
         first: true,
@@ -4720,6 +5599,31 @@ mod tests {
 
     use super::*;
     use clj_value::new_map;
+
+    #[test]
+    fn chain_tail_of_nothing_is_the_tail() {
+        // An exhausted remainder re-chains nothing: the tail itself.
+        assert_eq!(chain_tail(&[], &Value::Int(7)), Value::Int(7));
+    }
+
+    #[test]
+    fn chunk_cursors_step_in_place() {
+        // A chunk's remainder shares the chunk (a forced cursor cell);
+        // stepping a cursor peels its head without forcing or copying,
+        // and the last item steps to the tail itself.
+        let items: Arc<[Value]> = Arc::from(vec![Value::Int(1), Value::Int(2)]);
+        let cursor = chunk_cursor(Arc::clone(&items), 1, Value::Nil);
+        let p = as_pending(&cursor).expect("cursor cell");
+        let (head, rest) = step_cursor(p).expect("forced cursor");
+        assert_eq!(head, Value::Int(2));
+        assert_eq!(rest, Value::Nil);
+        assert_eq!(chunk_cursor(items, 2, Value::Int(9)), Value::Int(9));
+        let unforced = PendingSeq::pending(Thunk::Chain {
+            head: vec![Value::Int(3)],
+            tail: Value::Nil,
+        });
+        assert!(step_cursor(as_pending(&unforced).expect("pending")).is_none());
+    }
 
     fn pending_seq(state: SeqState, kind: LazyKind) -> PendingSeq {
         PendingSeq {
@@ -5117,5 +6021,47 @@ mod tests {
         let (chunk, tail) = super::chunked_realized_parts(&s).expect("non-empty splits");
         assert_eq!(chunk.items_arc().len(), 32);
         assert!(tail.is_some());
+    }
+
+    #[test]
+    fn sole_map_drop_take_while_drop_while_and_collect_all_271() {
+        let mut eval = crate::boot();
+        let out = eval
+            .eval_source(
+                "[(vec (drop 2 (map inc [0 1 2 3]))) \
+                  (vec (drop -1 '(1 2))) \
+                  (vec (take 1 (drop 1 '(10 20 30)))) \
+                  (vec (take-while #(< % 4) [1 2 3 4 5])) \
+                  (vec (take 2 (take-while #(< % 10) [1 2 3 4]))) \
+                  (vec (take-while pos? [])) \
+                  (vec (drop-while #(< % 3) [1 2 3 4 2])) \
+                  (vec (take 1 (drop-while zero? [0 0 5 6]))) \
+                  (vec (drop-while pos? [])) \
+                  (vec (repeat 3 1.5)) \
+                  (set (map inc [1 2 3])) \
+                  (sort (drop 1 '(4 3 1 2))) \
+                  (reverse (take-while #(< % 4) [1 2 3 4])) \
+                  (frequencies (drop-while zero? [0 1 2 1]))]",
+            )
+            .expect("eval")
+            .pop()
+            .expect("val");
+        let rep_d = eval
+            .eval_source("(vec (repeat 3 1.5))")
+            .expect("repeat d")
+            .pop()
+            .expect("val");
+        assert!(matches!(
+            &rep_d,
+            Value::Vector(v) if v.as_flat_doubles() == Some([1.5, 1.5, 1.5].as_slice())
+        ));
+        assert_eq!(
+            crate::native_abi::print_constant(&out),
+            "[[3 4] [1 2] [20] [1 2 3] [1 2] [] [3 4 2] [5] [] [1.5 1.5 1.5] #{2 3 4} (1 2 3) (3 2 1) {1 2, 2 1}]"
+        );
+        // Non-IFn and bad-count error paths in walk_drop / walk_take_while / walk_drop_while
+        assert!(eval.eval_source("(vec (take-while 42 [1 2]))").is_err());
+        assert!(eval.eval_source("(vec (drop-while 42 [1 2]))").is_err());
+        assert!(eval.eval_source("(vec (drop :bad '(1 2)))").is_err());
     }
 }

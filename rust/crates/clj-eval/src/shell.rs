@@ -38,8 +38,7 @@ pub(crate) const SHELL_NATIVES: &[(&str, NativeFnPtr)] = &[("proc", native_proc)
 pub(crate) fn install_shell_ns(eval: &mut Evaluator) {
     eval.registry.ensure_ns(SHELL_NS);
     for (name, f) in SHELL_NATIVES {
-        let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
-        eval.install_native(SHELL_NS, name, func);
+        eval.install_native_ptr(SHELL_NS, name, *f);
     }
 }
 

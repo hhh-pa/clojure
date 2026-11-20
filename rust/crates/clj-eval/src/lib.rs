@@ -26,6 +26,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+pub mod aot_boot;
 pub mod aot_front;
 pub mod aot_subset;
 pub mod arrays;
@@ -104,5 +105,18 @@ pub use eval::{Evaluator, LiveForms, SourceError};
 pub use expr::{
     Analyzer, Arity, Catch, Expr, FunExpr, KeyBinding, MapPattern, Pattern, VecPattern,
 };
-pub use ext::{Closure, NativeFn, NativeImpl, NsHandle, as_closure, as_native, as_ns, munge};
+pub use ext::{
+    Closure, CompiledDispatch, DisplayName, NativeFn, NativeImpl, NativeTarget, NsHandle,
+    OwnedTarget, as_closure, as_native, as_ns, munge,
+};
 pub use ns::{boot, load_native, load_text_as_file};
+pub use vm::and_or_test;
+
+pub mod aot_scalar {
+    pub use crate::vm::Loc;
+    pub use crate::vm_ops::{IntOp1, IntOp2, IntTest1, IntTest2};
+    pub use crate::vm_scalar::{
+        Calc, Cast, Cmp, Cond, Ctl, Effect, ExitVal, FpCalc, IExpr, Inner, K, Leaf, MATH_BINARY,
+        MATH_UNARY, MathOp1, MathOp2, Node, ScalarAst, Stmt, Sv, compile_aot_loop,
+    };
+}

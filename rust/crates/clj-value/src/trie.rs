@@ -317,9 +317,15 @@ impl<T: Clone> PVec<T> {
     /// Items front to back.
     #[must_use]
     pub fn iter(&self) -> Iter<'_, T> {
+        self.iter_from(0)
+    }
+
+    /// Items from index `start` (clamped to the length) to the back.
+    #[must_use]
+    pub fn iter_from(&self, start: usize) -> Iter<'_, T> {
         Iter {
             vec: self,
-            front: 0,
+            front: start.min(self.len),
             back: self.len,
             front_leaf: &[],
             front_base: 0,
@@ -485,6 +491,14 @@ impl<T: Clone> Packed<T> {
     }
 
     #[inline]
+    pub(crate) fn as_flat(&self) -> Option<&[T]> {
+        match self {
+            Packed::Flat(a) => Some(a.as_slice()),
+            Packed::Trie(_) => None,
+        }
+    }
+
+    #[inline]
     pub(crate) fn get(&self, i: usize) -> Option<&T> {
         match self {
             Packed::Flat(a) => a.get(i),
@@ -595,6 +609,13 @@ impl<'a, T: Clone> Iterator for PackedIter<'a, T> {
         match self {
             PackedIter::Flat(it) => it.next(),
             PackedIter::Trie(it) => it.next(),
+        }
+    }
+
+    fn nth(&mut self, n: usize) -> Option<&'a T> {
+        match self {
+            PackedIter::Flat(it) => it.nth(n),
+            PackedIter::Trie(it) => it.nth(n),
         }
     }
 
@@ -711,6 +732,7 @@ mod tests {
     fn packed_runs_go_flat_then_trie() {
         let mut p: Packed<i64> = Packed::from_vec((0..FLAT_MAX as i64).collect());
         assert!(matches!(p, Packed::Flat(_)));
+        assert_eq!(p.as_flat().map(<[i64]>::len), Some(FLAT_MAX));
         assert_eq!(p.get(5), Some(&5));
         assert!(p.set(5, -5) && p.get(5) == Some(&-5));
         assert!(!p.set(FLAT_MAX, 0));
@@ -722,6 +744,7 @@ mod tests {
         p.push(7);
         p.push(8);
         assert!(matches!(p, Packed::Trie(_)));
+        assert!(p.as_flat().is_none());
         assert_eq!(p.len(), FLAT_MAX + 1);
         assert_eq!(p.get(FLAT_MAX), Some(&8));
         assert!(p.set(0, 9) && p.get(0) == Some(&9));

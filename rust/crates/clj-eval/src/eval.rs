@@ -27,9 +27,12 @@ use crate::coll::native_nth;
 use crate::env::{Bindings, Env, FxHashMap, SharedRegistry};
 use crate::error::{CompileError, NativeError, Signal, jvm_class_of, span_of};
 use crate::expr::{
-    Analyzer, CaseTest, Catch, DirectCall, Expr, MapPattern, Pattern, pattern_names,
+    Analyzer, CaseTest, Catch, DirectCall, Expr, MapPattern, NsClause, Pattern, pattern_names,
 };
-use crate::ext::{Closure, FastArith, NativeFn, NsHandle, as_closure, as_native};
+use crate::ext::{
+    Closure, DisplayName, FastArith, NativeFn, NativeTarget, NsHandle, OwnedTarget, as_closure,
+    as_native,
+};
 
 /// A form-by-form live read of one source text (see
 /// [`Evaluator::live_forms`]).
@@ -159,6 +162,106 @@ pub(crate) fn case_shift_mask(key: i32, shift: i32, mask: i32) -> i32 {
     }
 }
 
+/// Hook signature for evaluating a `(ns ...)` form in full boot mode.
+pub(crate) type EvalNsHook =
+    fn(&mut Evaluator, &str, Option<&str>, Option<&Map>, &[NsClause]) -> Result<Value, Signal>;
+/// Hook signature for borrowed VM invocation.
+pub(crate) type VmCallHook = fn(&mut Evaluator, &Value, &[Value]) -> Option<Result<Value, Signal>>;
+/// Hook signature for moved-args VM invocation.
+pub(crate) type VmApplyMovedHook =
+    fn(&mut Evaluator, &Value, &mut SmallVec<[Value; 4]>) -> Option<Result<Value, Signal>>;
+
+/// Indirect hooks into `crate::core_lazy`, `crate::vm`, and interpreter
+/// closure/ns evaluation installed only by full [`crate::ns::boot`], keeping
+/// embedded stdlib sources, the VM, and interpreter eval out of Lite AOT links.
+pub(crate) struct LazyHooks {
+    pub(crate) force: fn(&mut Evaluator, u64) -> bool,
+    pub(crate) force_meta: fn(&mut Evaluator, u64) -> bool,
+    pub(crate) interpreted: fn(&mut Evaluator, u64) -> Option<Value>,
+    pub(crate) eval_ns: EvalNsHook,
+    pub(crate) apply_closure: fn(&mut Evaluator, &Closure, &[Value]) -> Result<Value, Signal>,
+    pub(crate) vm_call: VmCallHook,
+    pub(crate) vm_apply_moved: VmApplyMovedHook,
+    pub(crate) vm_call1: fn(
+        &mut Evaluator,
+        &crate::vm::VmCode,
+        &crate::vm::CompiledArity,
+        Value,
+    ) -> Result<Value, Signal>,
+    pub(crate) vm_call2: fn(
+        &mut Evaluator,
+        &crate::vm::VmCode,
+        &crate::vm::CompiledArity,
+        Value,
+        Value,
+    ) -> Result<Value, Signal>,
+    pub(crate) eval_expr: fn(&mut Evaluator, &Expr, &crate::env::Env) -> Result<Value, Signal>,
+}
+
+/// The print settings every `print`/`prn` reads (#271), as of a lineage
+/// epoch and binding version: [`crate::core::print_opts`] and the
+/// `*out*`/`*print-dup*`/`*flush-on-newline*` reads without nine core
+/// reads per call while neither moves (every binding push, pop and `set!`
+/// bumps the version; root writes bump the epoch).
+#[derive(Clone)]
+pub(crate) struct PrintSnap {
+    epoch: u64,
+    bindings: u64,
+    pub(crate) opts: clj_value::PrintOpts,
+    pub(crate) dup: bool,
+    pub(crate) out: Value,
+    pub(crate) flush: bool,
+}
+
+/// [`Evaluator::core_read`]'s cache: `(name, var id or none, root once
+/// read)` per probed `clojure.core` name, under the lineage epoch it
+/// was filled in, plus each name address's position in it (#271: the
+/// position scan cost every `println` and `format` ~2.2K instructions,
+/// a dozen probes deep into some 50 names).
+#[derive(Default)]
+pub(crate) struct CoreReads {
+    epoch: u64,
+    vars: Vec<(&'static str, Option<u64>, Option<Value>)>,
+    by_addr: CoreReadWays,
+}
+
+/// Direct-mapped `(name address, position in vars)` pairs (address 0
+/// marks an empty way). Call sites pass their literal, so a probe
+/// almost always hits; a collision only falls back to the scan.
+struct CoreReadWays([(usize, u32); 64]);
+
+impl Default for CoreReadWays {
+    fn default() -> Self {
+        Self([(0, 0); 64])
+    }
+}
+
+impl CoreReads {
+    /// `name`'s position in `vars` under lineage `epoch` (cleared when it
+    /// moved on), resolving and appending the var on its first probe.
+    fn slot(&mut self, registry: &SharedRegistry, epoch: u64, name: &'static str) -> usize {
+        if self.epoch != epoch {
+            self.vars.clear();
+            self.by_addr = CoreReadWays::default();
+            self.epoch = epoch;
+        }
+        let addr = name.as_ptr() as usize;
+        let way = addr.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (usize::BITS - 6);
+        let (at, pos) = self.by_addr.0[way];
+        if at == addr {
+            return pos as usize;
+        }
+        let found = (self.vars.iter()).position(|(n, _, _)| std::ptr::eq(*n, name) || *n == name);
+        let pos = found.unwrap_or_else(|| {
+            let id = registry.lookup_str("clojure.core", name);
+            self.vars.push((name, id, None));
+            self.vars.len() - 1
+        });
+        self.by_addr.0[way] = (addr, pos as u32);
+        pos
+    }
+}
+
 /// The evaluator: shared lineage state (namespace registry plus
 /// identity counters), per-thread bindings, load path, spawned
 /// future threads, and the ambient native call span. `Send + Sync`
@@ -215,6 +318,11 @@ pub struct Evaluator {
     root_cache: FxHashMap<u64, Value>,
     /// The lineage epoch [`root_cache`](Self::root_cache) was filled under.
     root_epoch: u64,
+    /// [`core_read`](Self::core_read)'s `clojure.core` names → var ids
+    /// and roots (#271: printing reads ~13 settings vars by name per
+    /// call).
+    core_reads: std::sync::Mutex<CoreReads>,
+    print_snap: std::sync::Mutex<Option<PrintSnap>>,
     /// The VM's per-site caches (`vm` numbers its global reads and
     /// direct calls): a value or a validation verdict, valid while
     /// both the lineage epoch and the bindings version match.
@@ -241,6 +349,19 @@ pub struct Evaluator {
     /// its first entry rather than once it runs hot (see
     /// [`set_eager_tier`](Self::set_eager_tier)).
     pub(crate) eager_tier: bool,
+    /// Skip synthesizing default var metadata maps in [`def_finish`]
+    /// when `BootMode::Lite` verified no metadata readers exist (#271).
+    pub(crate) skip_var_meta: bool,
+    /// The namespace name [`install_native_inner`](Self::install_native_inner)
+    /// last qualified a native with (boot installs whole namespaces in
+    /// a row: their symbols share it instead of copying it).
+    install_home: Option<Arc<str>>,
+    /// Optional `core_lazy`/interpreter dispatch hooks (`None` in Lite AOT boot).
+    pub(crate) lazy_hooks: Option<&'static LazyHooks>,
+    /// Lazy `BootMode::Lite` internal helper tables (`Some` when
+    /// `seq_helpers` are deferred until a native actually reads one via
+    /// [`Self::core_read`], #271).
+    pub(crate) lite_helpers: Option<Arc<crate::aot_boot::LiteHelperTables>>,
 }
 
 /// Pooled `recur` buffers retained per evaluator (see
@@ -298,7 +419,8 @@ impl Evaluator {
     /// registry from [`new_bare`](Self::new_bare) instead).
     #[must_use]
     pub fn new(source: &str) -> Self {
-        let this = Self::new_bare(source);
+        let mut this = Self::new_bare(source);
+        this.lazy_hooks = Some(&crate::ns::FULL_LAZY_HOOKS);
         this.registry.ensure_ns("user");
         this.registry.set_current("user");
         this
@@ -330,9 +452,15 @@ impl Evaluator {
             vm_sites: Vec::new(),
             vm_direct: Vec::new(),
             root_epoch: 0,
+            core_reads: std::sync::Mutex::default(),
+            print_snap: std::sync::Mutex::new(None),
             call_depth: 0,
             recur_pool: Vec::new(),
             eager_tier: false,
+            skip_var_meta: false,
+            install_home: None,
+            lazy_hooks: None,
+            lite_helpers: None,
         }
     }
 
@@ -386,12 +514,18 @@ impl Evaluator {
             vm_sites: Vec::new(),
             vm_direct: Vec::new(),
             root_epoch: self.registry.epoch(),
+            core_reads: std::sync::Mutex::default(),
+            print_snap: std::sync::Mutex::new(None),
             // A fork starts unwound (its stack is its own).
             call_depth: 0,
             // A fork starts with an empty pool (buffers never
             // cross threads).
             recur_pool: Vec::new(),
             eager_tier: self.eager_tier,
+            skip_var_meta: self.skip_var_meta,
+            install_home: None,
+            lazy_hooks: self.lazy_hooks,
+            lite_helpers: self.lite_helpers.clone(),
         }
     }
 
@@ -1022,7 +1156,13 @@ impl Evaluator {
         name: &str,
         func: Arc<crate::ext::NativeImpl>,
     ) -> Value {
-        self.install_native_inner(ns, name, func, FastArith::None)
+        self.install_native_inner(
+            ns,
+            name,
+            NativeTarget::Dyn(func),
+            FastArith::None,
+            crate::ns::owned_entry(name).map(OwnedTarget::Ptr),
+        )
     }
 
     /// Install a table-driven `fn`-pointer native (like
@@ -1030,8 +1170,40 @@ impl Evaluator {
     /// integer tag reads off the installing pointer — only the
     /// genuine core arith/compare fns tag, never lookalikes).
     pub fn install_native_ptr(&mut self, ns: &str, name: &str, f: crate::ns::NativeFnPtr) -> Value {
-        let func: Arc<crate::ext::NativeImpl> = Arc::new(f);
-        self.install_native_inner(ns, name, func, crate::core::fast_arith_for(f))
+        let owned = crate::ns::owned_entry(name);
+        self.install_native_ptr_with_owned(ns, name, f, owned)
+    }
+
+    /// Install a namespace's table-driven natives in one registry pass
+    /// (Lite boot: the namespace resolves once and the registry takes one
+    /// mutation for the batch, instead of per native).
+    pub(crate) fn install_native_rows(&mut self, ns: &str, rows: Vec<NativeRow>) {
+        let home: Arc<str> = Arc::from(ns);
+        let mut roots = Vec::with_capacity(rows.len());
+        for (name, f, owned) in rows {
+            let native = make_native_ptr_value(self.next_id(), ns, name, f, owned);
+            let sym = Symbol::from_shared(Some(Arc::clone(&home)), Arc::from(name));
+            roots.push((sym, native));
+        }
+        self.registry.intern_roots(ns, roots);
+    }
+
+    /// Install a table-driven `fn`-pointer native with an explicit owned-args
+    /// handler (`None` for borrow-only or stripped `Lite` builds).
+    pub(crate) fn install_native_ptr_with_owned(
+        &mut self,
+        ns: &str,
+        name: &str,
+        f: crate::ns::NativeFnPtr,
+        owned: Option<crate::ns::OwnedNativeFnPtr>,
+    ) -> Value {
+        self.install_native_inner(
+            ns,
+            name,
+            NativeTarget::Ptr(f),
+            crate::core::fast_arith_for(f),
+            owned.map(OwnedTarget::Ptr),
+        )
     }
 
     /// Install one native root (shared by the `Arc` and
@@ -1040,24 +1212,25 @@ impl Evaluator {
         &mut self,
         ns: &str,
         name: &str,
-        func: Arc<crate::ext::NativeImpl>,
+        func: NativeTarget,
         fast: FastArith,
+        owned: Option<OwnedTarget>,
     ) -> Value {
         let id = self.next_id();
-        let sym = Symbol::new(Some(ns), name);
-        // Built by hand: boot installs ~700 of these, and `format!`
-        // costs several times the copy.
-        let mut display = String::with_capacity(ns.len() + 1 + name.len());
-        display.push_str(ns);
-        display.push('/');
-        display.push_str(name);
+        let home = match self.install_home.take() {
+            Some(home) if *home == *ns => home,
+            _ => Arc::from(ns),
+        };
+        let sym = Symbol::from_shared(Some(Arc::clone(&home)), Arc::from(name));
+        self.install_home = Some(home);
         let native = Value::Extension(Arc::new(NativeFn {
             id,
-            display: Arc::from(display),
+            display: DisplayName::Shared(qualified_display(ns, name)),
             func,
-            owned: crate::ns::owned_entry(name),
+            owned,
             meta: None,
             fast,
+            compiled: None,
         }));
         self.registry.intern_with_root(&sym, native.clone());
         native
@@ -1104,6 +1277,73 @@ impl Evaluator {
     /// [`deref_var`](Self::deref_var) for shared-borrow readers of
     /// boot-installed vars (never lazy `core.clj` ones, so nothing
     /// to force).
+    /// `clojure.core/<name>`'s visible value, unforced, like
+    /// [`deref_var_unforced`](Self::deref_var_unforced) over a by-name
+    /// lookup (`Nil` when no such var). Each name's id (or absence) and
+    /// root are kept while the lineage epoch holds: every root write,
+    /// namespace mutation and new var bumps it, and ids are never
+    /// reused. Names are literals, so most probes match by address.
+    pub(crate) fn core_read(&self, name: &'static str) -> Value {
+        let epoch = self.registry.epoch();
+        let mut reads = self.core_reads.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = reads.slot(&self.registry, epoch, name);
+        let (_, id, root) = &mut reads.vars[slot];
+        let Some(id) = id else {
+            drop(reads);
+            return self.try_install_lite_helper(name).unwrap_or(Value::Nil);
+        };
+        if let Some(v) = self.bindings.get(*id) {
+            return v.clone();
+        }
+        root.get_or_insert_with(|| {
+            (self.registry).root_or_unbound(*id, &Symbol::new(Some("clojure.core"), name))
+        })
+        .clone()
+    }
+
+    /// Lazily install a `BootMode::Lite` internal helper (`conj`, `transient`, …)
+    /// when a native first reads it through [`Self::core_read`] (#271).
+    fn try_install_lite_helper(&self, name: &str) -> Option<Value> {
+        let helpers = self.lite_helpers.as_deref()?;
+        crate::aot_boot::install_lite_helper(&self.registry, name, helpers)
+    }
+
+    /// The current print settings ([`PrintSnap`]): the stamped copy while
+    /// the epoch and binding version hold, else read fresh and kept (an
+    /// invalid `*print-length*`/`*print-level*` errors on every call).
+    pub(crate) fn print_snap(&self) -> Result<PrintSnap, NativeError> {
+        let (epoch, bindings) = (self.registry.epoch(), self.bindings.version());
+        {
+            let held = self.print_snap.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = held
+                .as_ref()
+                .filter(|s| s.epoch == epoch && s.bindings == bindings);
+            if let Some(s) = fresh {
+                return Ok(s.clone());
+            }
+        }
+        let opts = crate::core::read_print_opts(self)?;
+        let snap = PrintSnap {
+            epoch,
+            bindings,
+            dup: opts.dup,
+            opts,
+            out: self.core_read("*out*"),
+            flush: self.core_read("*flush-on-newline*").is_truthy(),
+        };
+        *self.print_snap.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap.clone());
+        Ok(snap)
+    }
+
+    /// `clojure.core/<name>`'s var id (`None` when there is no such var),
+    /// through [`Self::core_read`]'s cache.
+    pub(crate) fn core_var_id(&self, name: &'static str) -> Option<u64> {
+        let epoch = self.registry.epoch();
+        let mut reads = self.core_reads.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = reads.slot(&self.registry, epoch, name);
+        reads.vars[slot].1
+    }
+
     pub(crate) fn deref_var_unforced(&self, id: u64, sym: &Symbol) -> Value {
         if let Some(v) = self.bindings.get(id) {
             return v.clone();
@@ -1275,7 +1515,20 @@ impl Evaluator {
     /// this call evaluated its form. A lock-free miss for every
     /// other var.
     pub(crate) fn force_lazy(&mut self, id: u64) -> bool {
-        self.registry.is_lazy(id) && crate::core_lazy::force(self, id)
+        self.registry.is_lazy(id) && self.lazy_hooks.is_some_and(|h| (h.force)(self, id))
+    }
+
+    /// Force a native-backed var's `core.clj` metadata when full boot installed
+    /// lazy hooks (`false` in Lite mode).
+    pub(crate) fn force_meta(&mut self, id: u64) -> bool {
+        self.lazy_hooks.is_some_and(|h| (h.force_meta)(self, id))
+    }
+
+    /// Evaluate the upstream interpreted fallback for native var `id`, if full
+    /// boot installed lazy hooks.
+    pub(crate) fn lazy_interpreted(&mut self, id: u64) -> Option<Value> {
+        let hooks = self.lazy_hooks?;
+        (hooks.interpreted)(self, id)
     }
 
     /// Swap the source name (spans and `:file` metadata), returning
@@ -1301,12 +1554,63 @@ impl Evaluator {
     pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
         match expr {
             Expr::Literal(v) | Expr::Quote(v) => Ok(v.clone()),
-            Expr::VecLit(elems, meta) => self.eval_vec(elems, meta.clone(), env),
-            Expr::MapLit(pairs, meta) => self.eval_map_lit(pairs, meta.clone(), env),
-            Expr::SetLit(elems, meta) => self.eval_set_lit(elems, meta.clone(), env),
             Expr::Global(var) => Ok(self.deref_var_cached(var.id, &var.sym)),
             Expr::Local(idx) => Ok(env.get(*idx)),
             Expr::VarRef(var) => Ok(Value::Var(var.clone())),
+            Expr::If { test, then, els } => self.eval_if(test, then, els, env),
+            Expr::Do(exprs) => self.eval_body(exprs, env),
+            Expr::Let { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
+            Expr::Loop { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
+            Expr::Recur(args) => self.eval_recur_expr(args, env),
+            Expr::Invoke { head, args, span } => self.eval_invoke_expr(head, args, *span, env),
+            Expr::DirectNative(call) => self.eval_direct_native(call, env),
+            other => self.eval_non_hot(other, env),
+        }
+    }
+
+    #[inline]
+    fn eval_recur_expr(&mut self, args: &[Expr], env: &Env) -> Result<Value, Signal> {
+        // Pooled arg buffer (see `recur_pool`): steady-state loops
+        // never allocate here.
+        let mut values = self.recur_pool.pop().unwrap_or_default();
+        values.clear();
+        values.reserve(args.len());
+        for arg in args {
+            values.push(self.eval(arg, env)?);
+        }
+        Err(Signal::Recur(values))
+    }
+
+    #[inline]
+    fn eval_invoke_expr(
+        &mut self,
+        head: &Expr,
+        args: &[Expr],
+        span: Span,
+        env: &Env,
+    ) -> Result<Value, Signal> {
+        let callee = self.eval(head, env)?;
+        // Stack-inline arg buffer (spills past 4 args, like the old
+        // heap `Vec`): calls never escape this buffer, so most
+        // arities allocate nothing.
+        let mut values: SmallVec<[Value; 4]> = SmallVec::new();
+        for arg in args {
+            values.push(self.eval(arg, env)?);
+        }
+        self.invoke_args(&callee, values, span)
+    }
+
+    /// Literal collections, fns, defs, and control flow off the fast
+    /// scalar/call path (split from [`Evaluator::eval`] for the
+    /// complexity budget).
+    #[inline]
+    fn eval_non_hot(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        match expr {
+            Expr::VecLit(elems, meta) => self.eval_vec(elems, meta.clone(), env),
+            Expr::MapLit(pairs, meta) => self.eval_map_lit(pairs, meta.clone(), env),
+            Expr::SetLit(elems, meta) => self.eval_set_lit(elems, meta.clone(), env),
+            Expr::Fn(fun) => Ok(Value::Extension(Arc::new(self.make_closure(fun, env)))),
+            Expr::LetFn { fns, body } => self.eval_letfn(fns, body, env),
             Expr::Def {
                 sym,
                 doc,
@@ -1321,23 +1625,7 @@ impl Evaluator {
                 *span,
                 env,
             ),
-            Expr::If { test, then, els } => self.eval_if(test, then, els, env),
-            Expr::Do(exprs) => self.eval_body(exprs, env),
-            Expr::Let { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
-            Expr::Loop { bindings, body } => self.eval_let_or_loop(expr, bindings, body, env),
-            Expr::LetFn { fns, body } => self.eval_letfn(fns, body, env),
-            Expr::Fn(fun) => Ok(Value::Extension(Arc::new(self.make_closure(fun, env)))),
-            Expr::Recur(args) => {
-                // Pooled arg buffer (see `recur_pool`): steady-state
-                // loops never allocate here.
-                let mut values = self.recur_pool.pop().unwrap_or_default();
-                values.clear();
-                values.reserve(args.len());
-                for arg in args {
-                    values.push(self.eval(arg, env)?);
-                }
-                Err(Signal::Recur(values))
-            }
+            Expr::Set { var, val } => self.eval_set(var, val, env),
             Expr::Throw(inner) => self.eval_throw(inner, env),
             Expr::NewThrowable { class, message } => Ok(Value::Throwable(Arc::new(Throwable {
                 id: self.next_id(),
@@ -1351,7 +1639,14 @@ impl Evaluator {
                 catches,
                 finally_body,
             } => self.eval_try(body, catches, finally_body, env),
-            Expr::Set { var, val } => self.eval_set(var, val, env),
+            other => self.eval_scope_form(other, env),
+        }
+    }
+
+    /// Dynamic-binding, namespace, and macro forms (split from
+    /// [`Evaluator::eval`] for the complexity budget).
+    fn eval_scope_form(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        match expr {
             Expr::Binding { pairs, body } => self.eval_binding(pairs, body, env),
             Expr::WithRedefs { pairs, body } => self.eval_with_redefs(pairs, body, env),
             Expr::WithBindings { map, body } => self.eval_with_bindings(map, body, env),
@@ -1380,7 +1675,7 @@ impl Evaluator {
                 doc,
                 attr,
                 clauses,
-            } => crate::ns::eval_ns_form(self, name, doc.as_deref(), attr.as_ref(), clauses),
+            } => self.eval_ns_hook(name, doc.as_deref(), attr.as_ref(), clauses),
             Expr::Assert {
                 test,
                 message,
@@ -1388,6 +1683,30 @@ impl Evaluator {
             } => self.eval_assert(test, message.as_deref(), form, env),
             Expr::Time { expr } => self.eval_time(expr, env),
             Expr::WithOutStr { out, body } => self.eval_with_out_str(out, body, env),
+            other => self.eval_tail_form(other, env),
+        }
+    }
+
+    fn eval_ns_hook(
+        &mut self,
+        name: &str,
+        doc: Option<&str>,
+        attr: Option<&Map>,
+        clauses: &[crate::expr::NsClause],
+    ) -> Result<Value, Signal> {
+        let Some(hooks) = self.lazy_hooks else {
+            return Err(self.throw(NativeError::new(
+                ThrowClass::IllegalStateException,
+                "ns requires full boot".to_owned(),
+            )));
+        };
+        (hooks.eval_ns)(self, name, doc, attr, clauses)
+    }
+
+    /// Leaf stream/tx/dispatch forms (split from [`Evaluator::eval`]
+    /// for the complexity budget).
+    fn eval_tail_form(&mut self, expr: &Expr, env: &Env) -> Result<Value, Signal> {
+        match expr {
             Expr::WithInStr { input, s, body } => self.eval_with_in_str(input, s, body, env),
             Expr::LazySeqStar { body } => {
                 Ok(crate::lazy::thunk0_value(Arc::clone(body), env.clone()))
@@ -1406,18 +1725,7 @@ impl Evaluator {
                 skip,
                 test,
             } => self.eval_case_star(expr, *shift, *mask, default, cases, skip, *test, env),
-            Expr::Invoke { head, args, span } => {
-                let callee = self.eval(head, env)?;
-                // Stack-inline arg buffer (spills past 4 args, like
-                // the old heap `Vec`): calls never escape this
-                // buffer, so most arities allocate nothing.
-                let mut values: SmallVec<[Value; 4]> = SmallVec::new();
-                for arg in args {
-                    values.push(self.eval(arg, env)?);
-                }
-                self.invoke_args(&callee, values, *span)
-            }
-            Expr::DirectNative(call) => self.eval_direct_native(call, env),
+            _ => unreachable!("eval_tail_form partition"),
         }
     }
 
@@ -1443,6 +1751,20 @@ impl Evaluator {
     /// analyzer heads and VM-internal bindings reach here;
     /// analyzer-captured paths (`Global`/`VarRef`/`Set`/`Binding`/
     /// `WithRedefs`) carry their ids and never re-resolve (#79).
+    /// A `with-out-str`/`with-in-str` stream var (`*out*`, `*in*`): the
+    /// name as the current namespace maps it, so a user shadow wins
+    /// like a `binding` target, else `clojure.core`'s. Under `run`,
+    /// `user` refers `clojure.core`. A compiled (Lite) program refers
+    /// nothing, and the miss would intern a fresh, non-dynamic var
+    /// (#271).
+    fn stream_var_id(&mut self, sym: &Symbol) -> u64 {
+        let unmapped = sym.namespace().is_none() && self.registry.lookup(sym).is_none();
+        unmapped
+            .then(|| (self.registry).lookup(&Symbol::new(Some("clojure.core"), sym.name())))
+            .flatten()
+            .unwrap_or_else(|| self.var_id(sym))
+    }
+
     pub(crate) fn var_id(&mut self, sym: &Symbol) -> u64 {
         self.registry
             .lookup(sym)
@@ -1691,7 +2013,7 @@ impl Evaluator {
     ) -> Result<Value, Signal> {
         let writer = crate::io::string_writer(self);
         let var = Var {
-            id: self.var_id(out),
+            id: self.stream_var_id(out),
             sym: out.clone(),
         };
         crate::native_abi::binding_call_with(self, vec![(var, writer.clone())], body)?;
@@ -1726,7 +2048,7 @@ impl Evaluator {
         };
         let reader = crate::reader::string_reader(self, text);
         let var = Var {
-            id: self.var_id(input),
+            id: self.stream_var_id(input),
             sym: input.clone(),
         };
         crate::native_abi::binding_call_with(self, vec![(var, reader)], body)
@@ -2162,6 +2484,13 @@ impl Evaluator {
     /// reason).
     pub(crate) fn def_begin(&mut self, sym: &Symbol) -> u64 {
         let id = self.registry.intern_def_target(sym);
+        self.def_begin_id(id)
+    }
+
+    /// [`def_begin`](Self::def_begin) past the intern (a compiled plain
+    /// def's target is its already-interned var slot): a lazily
+    /// installed root forced, pending metadata taken.
+    pub(crate) fn def_begin_id(&mut self, id: u64) -> u64 {
         self.force_lazy(id);
         self.registry.take_meta_lazy(id);
         id
@@ -2179,12 +2508,20 @@ impl Evaluator {
         span: Span,
     ) -> Value {
         let dynamic = Self::dynamic_of(sym);
-        let meta = self.def_var_meta(sym, name_meta.as_ref(), doc, span);
+        // Nothing reads var metadata in a `skip_var_meta` (Lite) program:
+        // only the name's own keys stay (`refer` consults `:private`),
+        // without the auto keys (#271).
+        let meta = match name_meta {
+            name_meta if self.skip_var_meta => name_meta,
+            name_meta => Some(self.def_var_meta(sym, name_meta.as_ref(), doc, span)),
+        };
         self.registry.with_state_mut(id, |state| {
             if let Some(v) = value {
                 state.root = Some(v);
             }
-            state.meta = Some(meta);
+            if let Some(m) = meta {
+                state.meta = Some(m);
+            }
             state.dynamic = dynamic;
         });
         Value::Var(Var {
@@ -2421,8 +2758,10 @@ impl Evaluator {
     pub(crate) fn call(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         // A VM closure's fixed arity runs directly (#226: natives
         // call back per item; no apply dispatch, no arg buffer).
-        if let Some((code, arity)) = crate::vm::fixed_target(callee, args.len()) {
-            return crate::vm::call_borrowed(self, code, arity, args);
+        if let Some(hooks) = self.lazy_hooks {
+            if let Some(result) = (hooks.vm_call)(self, callee, args) {
+                return result;
+            }
         }
         self.invoke(callee, args)
     }
@@ -2447,15 +2786,14 @@ impl Evaluator {
     pub(crate) fn invoke_args(
         &mut self,
         callee: &Value,
-        args: SmallVec<[Value; 4]>,
+        mut args: SmallVec<[Value; 4]>,
         span: Span,
     ) -> Result<Value, Signal> {
         // VM closures take the buffer by move (accumulators stay
         // uniquely owned through `reduce`-style step calls).
-        if let Some(closure) = crate::ext::as_closure(callee) {
-            if let (Some(code), None) = (&closure.vm, &closure.conveyed) {
-                let mut args = args;
-                return crate::vm::apply_moved(self, closure, code, &mut args);
+        if let Some(hooks) = self.lazy_hooks {
+            if let Some(result) = (hooks.vm_apply_moved)(self, callee, &mut args) {
+                return result;
             }
         }
         // The call site stays visible to natives for the
@@ -2480,10 +2818,7 @@ impl Evaluator {
         native: &NativeFn,
         args: SmallVec<[Value; 4]>,
     ) -> Result<Value, Signal> {
-        match &native.owned {
-            Some(owned) => owned(self, args).map_err(|e| self.throw(e)),
-            None => (native.func)(self, &args).map_err(|e| self.throw(e)),
-        }
+        native.call_owned(self, args).map_err(|e| self.throw(e))
     }
 
     /// A direct-threaded native call (see [`Expr::DirectNative`]):
@@ -2552,8 +2887,10 @@ impl Evaluator {
     ) -> Result<Value, Signal> {
         let saved = self.native_call_span.replace(call.span);
         let out = match &call.owned {
-            Some(owned) => owned(self, std::mem::take(values)).map_err(|e| self.throw(e)),
-            None => (call.func)(self, values).map_err(|e| self.throw(e)),
+            Some(owned) => owned
+                .call(self, std::mem::take(values))
+                .map_err(|e| self.throw(e)),
+            None => call.func.call(self, values).map_err(|e| self.throw(e)),
         };
         self.native_call_span = saved;
         out
@@ -2638,6 +2975,28 @@ impl Evaluator {
             FastArith::Add => x.checked_add(y).map(Value::Int),
             FastArith::Sub => x.checked_sub(y).map(Value::Int),
             FastArith::Mul => x.checked_mul(y).map(Value::Int),
+            FastArith::Div => {
+                if y != 0 && x != i64::MIN && y != i64::MIN && x % y == 0 {
+                    Some(Value::Int(x / y))
+                } else {
+                    None
+                }
+            }
+            FastArith::Lt => Some(Value::Bool(x < y)),
+            FastArith::Lte => Some(Value::Bool(x <= y)),
+            FastArith::Gt => Some(Value::Bool(x > y)),
+            FastArith::Gte => Some(Value::Bool(x >= y)),
+            FastArith::None | FastArith::Inc | FastArith::Dec => None,
+        }
+    }
+
+    /// Inline binary `Double` arithmetic/comparison for `Prepared::call2` (#271).
+    pub(crate) fn fast_double2(op: FastArith, x: f64, y: f64) -> Option<Value> {
+        match op {
+            FastArith::Add => Some(Value::Double(x + y)),
+            FastArith::Sub => Some(Value::Double(x - y)),
+            FastArith::Mul => Some(Value::Double(x * y)),
+            FastArith::Div => Some(Value::Double(x / y)),
             FastArith::Lt => Some(Value::Bool(x < y)),
             FastArith::Lte => Some(Value::Bool(x <= y)),
             FastArith::Gt => Some(Value::Bool(x > y)),
@@ -2657,7 +3016,7 @@ impl Evaluator {
         args: &[Value],
     ) -> Result<Value, Signal> {
         let saved = self.native_call_span.replace(call.span);
-        let out = (call.func)(self, args).map_err(|e| self.throw(e));
+        let out = call.func.call(self, args).map_err(|e| self.throw(e));
         self.native_call_span = saved;
         out
     }
@@ -2672,10 +3031,6 @@ impl Evaluator {
             return self.invoke_map(callee, args);
         }
         match callee {
-            Value::Nil => Err(self.throw(NativeError::new(
-                ThrowClass::NullPointerException,
-                "Cannot invoke nil as a function".to_owned(),
-            ))),
             Value::Extension(_) => self.invoke_extension(callee, args),
             Value::Keyword(_) | Value::Symbol(_) => self.invoke_keyed_name(callee, args),
             Value::Vector(v) => self.invoke_vector(v, args),
@@ -2684,12 +3039,24 @@ impl Evaluator {
             Value::Map(_) => self.invoke_map(callee, args),
             Value::Set(s) => self.invoke_set(s, args),
             Value::Var(v) => self.invoke_var(v, args),
+            Value::Promise(p) => self.invoke_promise(p, args),
+            Value::MultiFn(m) => crate::multi::invoke_multifn(self, m, args),
+            other => self.invoke_fallback(other, args),
+        }
+    }
+
+    /// Cold invoke arms (split from [`Evaluator::invoke`] for the
+    /// complexity budget): nil/unbound throws, `Ref` deref, and `IFn` cast.
+    fn invoke_fallback(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
+        match callee {
+            Value::Nil => Err(self.throw(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke nil as a function".to_owned(),
+            ))),
             Value::Unbound(u) => Err(self.throw(NativeError::new(
                 ThrowClass::IllegalStateException,
                 format!("Attempting to call unbound fn: #'{}", u.sym),
             ))),
-            Value::Promise(p) => self.invoke_promise(p, args),
-            Value::MultiFn(m) => crate::multi::invoke_multifn(self, m, args),
             Value::Ref(r) => {
                 let value = crate::stm::tx_deref(self, r);
                 self.invoke(&value, args)
@@ -2758,10 +3125,16 @@ impl Evaluator {
     fn invoke_extension(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Signal> {
         if let Some(native) = as_native(callee) {
             // The caller holds `callee` for the call (no `Arc` bump).
-            return (native.func)(self, args).map_err(|e| self.throw(e));
+            return native.func.call(self, args).map_err(|e| self.throw(e));
         }
         if let Some(closure) = as_closure(callee) {
-            return self.apply_closure(closure, args);
+            let Some(hooks) = self.lazy_hooks else {
+                return Err(self.throw(NativeError::new(
+                    ThrowClass::UnsupportedOperationException,
+                    "Closure invocation requires full boot".to_owned(),
+                )));
+            };
+            return (hooks.apply_closure)(self, closure, args);
         }
         if let Some(sv) = crate::lazy::as_subvector(callee) {
             return self.invoke_subvector(sv, args);
@@ -2951,7 +3324,11 @@ impl Evaluator {
     /// closure re-pushes its conveyed bindings as one frame around
     /// the call (popped in a `finally`, like the JVM's
     /// `resetThreadBindingFrame`).
-    fn apply_closure(&mut self, closure: &Closure, args: &[Value]) -> Result<Value, Signal> {
+    pub(crate) fn apply_closure(
+        &mut self,
+        closure: &Closure,
+        args: &[Value],
+    ) -> Result<Value, Signal> {
         // The #205 call-depth guard: infinite recursion throws
         // the catchable `StackOverflowError` (like the JVM)
         // instead of aborting the process. Every unbounded
@@ -3519,39 +3896,38 @@ impl Evaluator {
             }
             Value::Vector(v) => {
                 let items: Vec<Value> = v.iter().collect();
-                match items.as_slice() {
-                    [k, val] => Ok(map.insert(k.clone(), val.clone())),
-                    _ => Err(self.throw(NativeError::new(
-                        ThrowClass::IllegalArgumentException,
-                        "Vector arg to map conj must be a pair".to_owned(),
-                    ))),
-                }
+                self.conj_map_pair(map, &items)
             }
             // `Vec` is an `IPersistentVector`: pairs assoc like vectors.
-            Value::PrimitiveVector(p) => match p.items().as_slice() {
-                [k, val] => Ok(map.insert(k.clone(), val.clone())),
-                _ => Err(self.throw(NativeError::new(
-                    ThrowClass::IllegalArgumentException,
-                    "Vector arg to map conj must be a pair".to_owned(),
-                ))),
-            },
+            Value::PrimitiveVector(p) => self.conj_map_pair(map, &p.items()),
             Value::MapEntry { key, val, .. } => Ok(map.insert(*key, *val)),
-            other => match self.seq_opt(&other)? {
-                None => Ok(map),
-                Some(l) => {
-                    // One pair per entry (Oracle FX2
-                    // `conj-seq-entries`); the first non-entry is
-                    // the `Map$Entry` cast error.
-                    for head in l.iter() {
-                        let Value::MapEntry { key, val, .. } = head else {
-                            return Err(self.throw(cast_entry(head)));
-                        };
-                        map = map.insert((**key).clone(), (**val).clone());
-                    }
-                    Ok(map)
-                }
-            },
+            other => self.conj_map_seq(map, &other),
         }
+    }
+
+    fn conj_map_pair(&mut self, map: Map, items: &[Value]) -> Result<Map, Signal> {
+        match items {
+            [k, val] => Ok(map.insert(k.clone(), val.clone())),
+            _ => Err(self.throw(NativeError::new(
+                ThrowClass::IllegalArgumentException,
+                "Vector arg to map conj must be a pair".to_owned(),
+            ))),
+        }
+    }
+
+    fn conj_map_seq(&mut self, mut map: Map, other: &Value) -> Result<Map, Signal> {
+        let Some(l) = self.seq_opt(other)? else {
+            return Ok(map);
+        };
+        // One pair per entry (Oracle FX2 `conj-seq-entries`); the
+        // first non-entry is the `Map$Entry` cast error.
+        for head in l.iter() {
+            let Value::MapEntry { key, val, .. } = head else {
+                return Err(self.throw(cast_entry(head)));
+            };
+            map = map.insert((**key).clone(), (**val).clone());
+        }
+        Ok(map)
     }
 
     /// `seq-to-map-for-destructuring`: only lists convert (S4 has no
@@ -3801,7 +4177,7 @@ fn cast_entry(entry: &Value) -> NativeError {
 
 /// `get` without the not-found: maps, int-keyed vectors/strings
 /// (in range), sets (membership), else `None` (§E12). Never throws.
-fn lookup(coll: &Value, key: &Value) -> Option<Value> {
+pub(crate) fn lookup(coll: &Value, key: &Value) -> Option<Value> {
     // Records read their content map (oracle `h-destructure`
     // rides this path); structs likewise (S12); every other host
     // value misses.
@@ -3852,7 +4228,7 @@ fn lookup_string(s: &str, key: &Value) -> Option<Value> {
 
 /// Set membership: the key when present (`get` returns the equal
 /// key; ours is identical by construction).
-fn member(s: &clj_value::Set, key: &Value) -> Option<Value> {
+pub(crate) fn member(s: &clj_value::Set, key: &Value) -> Option<Value> {
     s.contains(key).then(|| key.clone())
 }
 
@@ -4007,9 +4383,64 @@ fn or_mapped(pat: &MapPattern, defaults: &Map) -> Map {
     dm
 }
 
+/// One table-driven native to install: name, entry, owned-args entry.
+pub(crate) type NativeRow<'a> = (
+    &'a str,
+    crate::ns::NativeFnPtr,
+    Option<crate::ns::OwnedNativeFnPtr>,
+);
+
+/// Build a table-driven [`NativeFn`] value without allocating `Arc<dyn Fn>`
+/// wrappers (#271).
+pub(crate) fn make_native_ptr_value(
+    id: u64,
+    ns: &str,
+    name: &str,
+    f: crate::ns::NativeFnPtr,
+    owned: Option<crate::ns::OwnedNativeFnPtr>,
+) -> Value {
+    Value::Extension(Arc::new(NativeFn {
+        id,
+        display: DisplayName::Shared(qualified_display(ns, name)),
+        func: NativeTarget::Ptr(f),
+        owned: owned.map(OwnedTarget::Ptr),
+        meta: None,
+        fast: crate::core::fast_arith_for(f),
+        compiled: None,
+    }))
+}
+
+/// `ns/name` as one shared string, built in a stack buffer (boot
+/// qualifies every native it installs: the heap `String` a `format!`
+/// would copy from is a second allocation).
+fn qualified_display(ns: &str, name: &str) -> Arc<str> {
+    let mut buf = [0u8; 128];
+    let len = ns.len() + 1 + name.len();
+    match buf.get_mut(..len) {
+        Some(out) => {
+            let (head, tail) = out.split_at_mut(ns.len());
+            head.copy_from_slice(ns.as_bytes());
+            tail[0] = b'/';
+            tail[1..].copy_from_slice(name.as_bytes());
+            Arc::from(std::str::from_utf8(out).unwrap_or_default())
+        }
+        None => Arc::from(format!("{ns}/{name}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualified_display_joins_short_and_long_names() {
+        assert_eq!(
+            &*qualified_display("clojure.core", "inc"),
+            "clojure.core/inc"
+        );
+        let long = "x".repeat(200);
+        assert_eq!(&*qualified_display("user", &long), format!("user/{long}"));
+    }
 
     #[test]
     fn elapsed_millis_digits_match_jvm() {
@@ -4248,10 +4679,15 @@ mod tests {
 
     #[test]
     fn fast_int2_rows() {
-        use FastArith::{Add, Dec, Gt, Gte, Inc, Lt, Lte, Mul, Sub};
+        use FastArith::{Add, Dec, Div, Gt, Gte, Inc, Lt, Lte, Mul, Sub};
         assert_eq!(Evaluator::fast_int2(Add, 1, 2), Some(Value::Int(3)));
         assert_eq!(Evaluator::fast_int2(Sub, 5, 3), Some(Value::Int(2)));
         assert_eq!(Evaluator::fast_int2(Mul, 4, -3), Some(Value::Int(-12)));
+        assert_eq!(Evaluator::fast_int2(Div, 6, -2), Some(Value::Int(-3)));
+        assert_eq!(Evaluator::fast_int2(Div, 5, 2), None);
+        assert_eq!(Evaluator::fast_int2(Div, 5, 0), None);
+        assert_eq!(Evaluator::fast_int2(Div, i64::MIN, 2), None);
+        assert_eq!(Evaluator::fast_int2(Div, 2, i64::MIN), None);
         assert_eq!(Evaluator::fast_int2(Lt, 1, 2), Some(Value::Bool(true)));
         assert_eq!(Evaluator::fast_int2(Lt, 2, 2), Some(Value::Bool(false)));
         assert_eq!(Evaluator::fast_int2(Lte, 2, 2), Some(Value::Bool(true)));
@@ -4267,6 +4703,42 @@ mod tests {
         assert_eq!(Evaluator::fast_int2(FastArith::None, 1, 2), None);
         assert_eq!(Evaluator::fast_int2(Inc, 1, 2), None);
         assert_eq!(Evaluator::fast_int2(Dec, 1, 2), None);
+        // Double binary fast path.
+        assert_eq!(
+            Evaluator::fast_double2(Add, 1.5, 2.25),
+            Some(Value::Double(3.75))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Sub, 5.0, 2.5),
+            Some(Value::Double(2.5))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Mul, 2.5, -2.0),
+            Some(Value::Double(-5.0))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Div, 5.0, 2.0),
+            Some(Value::Double(2.5))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Lt, 1.0, 2.0),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Lte, 2.0, 2.0),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Gt, 3.0, 2.0),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            Evaluator::fast_double2(Gte, 1.0, 2.0),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(Evaluator::fast_double2(FastArith::None, 1.0, 2.0), None);
+        assert_eq!(Evaluator::fast_double2(Inc, 1.0, 2.0), None);
+        assert_eq!(Evaluator::fast_double2(Dec, 1.0, 2.0), None);
     }
 
     #[test]
@@ -4457,5 +4929,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(scalar_res.last().unwrap(), &Value::Int(3));
+    }
+
+    #[test]
+    #[should_panic(expected = "eval_tail_form partition")]
+    fn eval_tail_form_rejects_upstream_expr() {
+        let mut eval = crate::ns::boot();
+        let _ = eval.eval_tail_form(&Expr::Literal(Value::Nil), &Env::new());
     }
 }

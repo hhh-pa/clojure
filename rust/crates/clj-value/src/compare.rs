@@ -60,8 +60,8 @@ pub fn compare(a: &Value, b: &Value) -> Result<Ordering, CompareError> {
     if let Some(ord) = compare_numbers(a, b) {
         return Ok(ord);
     }
-    if let (Some(x), Some(y)) = (vector_items(a), vector_items(b)) {
-        return compare_item_slices(&x, &y);
+    if let Some(res) = compare_vector_like(a, b) {
+        return res;
     }
     match (a, b) {
         (Value::Nil, Value::Nil) => Ok(Ordering::Equal),
@@ -287,6 +287,53 @@ fn vector_items(v: &Value) -> Option<Vec<Value>> {
         }
         _ => None,
     }
+}
+
+fn compare_vector_like(a: &Value, b: &Value) -> Option<Result<Ordering, CompareError>> {
+    if let (Value::Vector(x), Value::Vector(y)) = (a, b) {
+        return Some(compare_vectors(x, y));
+    }
+    if let (Some(x), Some(y)) = (vector_items(a), vector_items(b)) {
+        return Some(compare_item_slices(&x, &y));
+    }
+    None
+}
+
+/// Zero-allocation `APersistentVector.compareTo` for persistent [`Vector`]
+/// pairs: compares lengths first, then flat packed slices or elementwise
+/// without cloning into temporary `Vec<Value>` buffers (#271).
+fn compare_vectors(a: &crate::Vector, b: &crate::Vector) -> Result<Ordering, CompareError> {
+    if a.len() != b.len() {
+        return Ok(a.len().cmp(&b.len()));
+    }
+    if let (Some(xs), Some(ys)) = (a.as_flat_ints(), b.as_flat_ints()) {
+        return Ok(xs.cmp(ys));
+    }
+    if let (Some(xs), Some(ys)) = (a.as_flat_doubles(), b.as_flat_doubles()) {
+        return Ok(compare_f64_slices(xs, ys));
+    }
+    if let (Some(xs), Some(ys)) = (a.as_flat_values(), b.as_flat_values()) {
+        return compare_item_slices(xs, ys);
+    }
+    for i in 0..a.len() {
+        let ord = a
+            .read_at(i, |av| b.read_at(i, |bv| Some(compare(av, bv))))
+            .unwrap_or(Ok(Ordering::Equal))?;
+        if ord != Ordering::Equal {
+            return Ok(ord);
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
+fn compare_f64_slices(a: &[f64], b: &[f64]) -> Ordering {
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        let ord = num_cmp(x, y);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
 }
 
 /// `APersistentVector.compareTo`: the shorter vector first (its
@@ -635,5 +682,31 @@ mod tests {
             message_of(&vec, &list),
             "class clojure.lang.PersistentList cannot be cast to class clojure.lang.IPersistentVector (clojure.lang.PersistentList and clojure.lang.IPersistentVector are in unnamed module of loader 'app')"
         );
+    }
+
+    #[test]
+    fn compare_vectors_fast_and_fallback_paths() {
+        let vi1 = Value::Vector(Vector::from_ints(vec![1, 2]));
+        let vi2 = Value::Vector(Vector::from_ints(vec![1, 3]));
+        let vi_short = Value::Vector(Vector::from_ints(vec![9]));
+        assert_eq!(compare(&vi_short, &vi1), Ok(Ordering::Less));
+        assert_eq!(compare(&vi1, &vi2), Ok(Ordering::Less));
+        assert_eq!(compare(&vi1, &vi1), Ok(Ordering::Equal));
+
+        let vd1 = Value::Vector(Vector::from_doubles(vec![1.0, 2.0]));
+        let vd2 = Value::Vector(Vector::from_doubles(vec![1.0, 3.0]));
+        let vd_nan = Value::Vector(Vector::from_doubles(vec![f64::NAN, 2.0]));
+        assert_eq!(compare(&vd1, &vd2), Ok(Ordering::Less));
+        assert_eq!(compare(&vd1, &vd1), Ok(Ordering::Equal));
+        assert_eq!(compare(&vd_nan, &vd1), Ok(Ordering::Equal));
+
+        let vg1 = Value::Vector(Vector::from_vec(vec![Value::Int(1), Value::Char('a')]));
+        let vg2 = Value::Vector(Vector::from_vec(vec![Value::Int(1), Value::Char('b')]));
+        assert_eq!(compare(&vg1, &vg2), Ok(Ordering::Less));
+        assert_eq!(compare(&vg1, &vg1), Ok(Ordering::Equal));
+
+        // Cross-representation fallback (Ints vs Doubles): both Equal and non-Equal
+        assert_eq!(compare(&vi1, &vd1), Ok(Ordering::Equal));
+        assert_eq!(compare(&vi1, &vd2), Ok(Ordering::Less));
     }
 }

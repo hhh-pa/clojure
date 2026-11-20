@@ -610,6 +610,11 @@ pub(crate) const APPLY1: &[(&str, Apply1)] = &[
     ("int", <IntCast as Op1>::apply),
     ("long", <LongCast as Op1>::apply),
     ("double", <DoubleCast as Op1>::apply),
+    ("unchecked-inc", <UncheckedInc as Op1>::apply),
+    ("unchecked-dec", <UncheckedDec as Op1>::apply),
+    ("unchecked-negate", <UncheckedNegate as Op1>::apply),
+    ("deref", <DerefCell as Op1>::apply),
+    ("char", <CharOf as Op1>::apply),
 ];
 
 pub(crate) const APPLY2: &[(&str, Apply2)] = &[
@@ -642,13 +647,22 @@ pub(crate) const APPLY2: &[(&str, Apply2)] = &[
     ("dissoc", <Dissoc as Op2>::apply),
     ("contains?", <Contains as Op2>::apply),
     ("conj!", <ConjBang as Op2>::apply),
-    ("re-matches", <ReMatches as Op2>::apply),
+    ("aget", <Aget as Op2>::apply),
+    ("unchecked-add", <UncheckedAdd as Op2>::apply),
+    ("unchecked-subtract", <UncheckedSub as Op2>::apply),
+    ("unchecked-multiply", <UncheckedMul as Op2>::apply),
+    ("compare", <CompareNum as Op2>::apply),
 ];
+
+/// Specialized regex matcher kept outside [`APPLY2`] so non-regex AOT binaries
+/// calling `rt_n_op2` strip `regex_automata`.
+pub(crate) const RE_MATCHES_OP: (&str, Apply2) = ("re-matches", <ReMatches as Op2>::apply);
 
 pub(crate) const APPLY3: &[(&str, Apply3)] = &[
     ("assoc!", <AssocBang as Op3>::apply),
     ("nth", <Nth3 as Op3>::apply),
     ("get", <Get3 as Op3>::apply),
+    ("aset", <Aset as Op3>::apply),
 ];
 
 /// The 3+-argument forms over borrowed args for native code (#259):
@@ -679,6 +693,7 @@ const TERNARY: &[Row3] = &[
     ("assoc!", shape3::<AssocBang>),
     ("nth", shape3::<Nth3>),
     ("get", shape3::<Get3>),
+    ("aset", shape3::<Aset>),
 ];
 
 /// The two-argument ops by core name: the value code, and the
@@ -728,6 +743,11 @@ const BINARY: &[Row2] = &[
         Some(shape2::<Contains, AsTest>),
     ),
     ("conj!", shape2::<ConjBang, AsValue>, None),
+    ("aget", shape2::<Aget, AsValue>, None),
+    ("unchecked-add", shape2::<UncheckedAdd, AsValue>, None),
+    ("unchecked-subtract", shape2::<UncheckedSub, AsValue>, None),
+    ("unchecked-multiply", shape2::<UncheckedMul, AsValue>, None),
+    ("compare", shape2::<CompareNum, AsValue>, None),
     (
         "re-matches",
         shape2::<ReMatches, AsValue>,
@@ -795,6 +815,11 @@ const UNARY: &[Row1] = &[
     ("int", shape1::<IntCast, AsValue>, None),
     ("long", shape1::<LongCast, AsValue>, None),
     ("double", shape1::<DoubleCast, AsValue>, None),
+    ("unchecked-inc", shape1::<UncheckedInc, AsValue>, None),
+    ("unchecked-dec", shape1::<UncheckedDec, AsValue>, None),
+    ("unchecked-negate", shape1::<UncheckedNegate, AsValue>, None),
+    ("deref", shape1::<DerefCell, AsValue>, None),
+    ("char", shape1::<CharOf, AsValue>, None),
 ];
 
 /// The analyzed native's `clojure.core` name (its display).
@@ -1153,25 +1178,193 @@ impl Upd for Assoc {
     #[inline(always)]
     fn apply(args: &mut [Value]) -> Option<Value> {
         let [coll, k, v] = args else { return None };
-        match (std::mem::replace(coll, Value::Nil), &*k) {
-            (Value::Vector(x), Value::Int(i)) => match usize::try_from(*i as i32) {
-                Ok(n) if n < x.len() => x.set_nth_owned(n, take(v)).map(Value::Vector),
-                Ok(n) if n == x.len() => Some(Value::Vector(x.push_back(take(v)))),
-                _ => {
-                    *coll = Value::Vector(x);
-                    None
-                }
-            },
-            (Value::Map(m), k_ref)
-                if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) =>
-            {
-                Some(Value::Map(m.insert(take(k), take(v))))
-            }
-            (other, _) => {
-                *coll = other;
+        match try_assoc_leaf(take(coll), k, v) {
+            Ok(out) => Some(out),
+            Err(orig) => {
+                *coll = orig;
                 None
             }
         }
+    }
+}
+
+fn try_assoc_leaf(coll: Value, k: &mut Value, v: &mut Value) -> Result<Value, Value> {
+    match (coll, &*k) {
+        (Value::Vector(x), Value::Int(i)) => match usize::try_from(*i as i32) {
+            Ok(n) if n < x.len() => Ok(Value::Vector(
+                x.set_nth_owned(n, take(v)).expect("n < x.len()"),
+            )),
+            Ok(n) if n == x.len() => Ok(Value::Vector(x.push_back(take(v)))),
+            _ => Err(Value::Vector(x)),
+        },
+        (Value::Map(m), k_ref) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) => {
+            Ok(Value::Map(m.insert(take(k), take(v))))
+        }
+        (other, _) => Err(other),
+    }
+}
+
+fn fast_inc_dec_delta(f: &Value) -> Option<i64> {
+    match crate::ext::as_native(f)?.fast {
+        crate::ext::FastArith::Inc => Some(1),
+        crate::ext::FastArith::Dec => Some(-1),
+        _ => None,
+    }
+}
+
+fn try_update_leaf_int(coll: Value, k: &mut Value, delta: i64) -> Result<Value, Value> {
+    match (coll, &*k) {
+        (Value::Vector(x), Value::Int(i)) => {
+            let Some(n) = usize::try_from(*i).ok().filter(|&n| n < x.len()) else {
+                return Err(Value::Vector(x));
+            };
+            let Some(Value::Int(old)) = x.get(n) else {
+                return Err(Value::Vector(x));
+            };
+            let Some(new) = old.checked_add(delta) else {
+                return Err(Value::Vector(x));
+            };
+            Ok(Value::Vector(
+                x.set_nth_owned(n, Value::Int(new)).expect("n < x.len()"),
+            ))
+        }
+        (Value::Map(m), k_ref) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) => {
+            let Some(Value::Int(old)) = m.get(k_ref) else {
+                return Err(Value::Map(m));
+            };
+            let Some(new) = old.checked_add(delta) else {
+                return Err(Value::Map(m));
+            };
+            Ok(Value::Map(m.insert(take(k), Value::Int(new))))
+        }
+        (other, _) => Err(other),
+    }
+}
+
+fn try_step_in2(
+    outer: Value,
+    k1: &mut Value,
+    step: impl FnOnce(Value) -> Result<Value, Value>,
+) -> Result<Value, Value> {
+    match (outer, &*k1) {
+        (Value::Map(mut m), k1_ref)
+            if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k1_ref) =>
+        {
+            let Some(inner) = m.take_value(k1_ref) else {
+                return Err(Value::Map(m));
+            };
+            match step(inner) {
+                Ok(updated) => Ok(Value::Map(m.insert(take(k1), updated))),
+                Err(orig_inner) => {
+                    m.insert_mut(k1_ref.clone(), orig_inner);
+                    Err(Value::Map(m))
+                }
+            }
+        }
+        (Value::Vector(mut v), Value::Int(i1)) => {
+            let Some(n1) = usize::try_from(*i1).ok().filter(|&n1| n1 < v.len()) else {
+                return Err(Value::Vector(v));
+            };
+            let inner = v.take_nth(n1).expect("n1 < v.len()");
+            match step(inner) {
+                Ok(updated) => Ok(Value::Vector(
+                    v.set_nth_owned(n1, updated).expect("n1 < v.len()"),
+                )),
+                Err(orig_inner) => {
+                    let v = v.set_nth_owned(n1, orig_inner).expect("n1 < v.len()");
+                    Err(Value::Vector(v))
+                }
+            }
+        }
+        (other, _) => Err(other),
+    }
+}
+
+/// Owned fast path for 3-arg `(update coll k inc/dec)`.
+pub(crate) fn apply_update3(args: &mut [Value]) -> Option<Value> {
+    let [coll, k, f] = args else { return None };
+    let delta = fast_inc_dec_delta(f)?;
+    match try_update_leaf_int(take(coll), k, delta) {
+        Ok(out) => Some(out),
+        Err(orig) => {
+            *coll = orig;
+            None
+        }
+    }
+}
+
+/// Owned fast path for 2-key `(assoc-in coll [k1 k2] v)` lowered as
+/// 4 args `[coll, k1, k2, v]`.
+pub(crate) fn apply_assoc_in2(args: &mut [Value]) -> Option<Value> {
+    let [coll, k1, k2, v] = args else { return None };
+    match try_step_in2(take(coll), k1, |inner| try_assoc_leaf(inner, k2, v)) {
+        Ok(out) => Some(out),
+        Err(orig) => {
+            *coll = orig;
+            None
+        }
+    }
+}
+
+/// Owned fast path for 2-key `(update-in coll [k1 k2] inc/dec)` lowered as
+/// 4 args `[coll, k1, k2, f]`.
+pub(crate) fn apply_update_in2(args: &mut [Value]) -> Option<Value> {
+    let [coll, k1, k2, f] = args else { return None };
+    let delta = fast_inc_dec_delta(f)?;
+    match try_step_in2(take(coll), k1, |inner| {
+        try_update_leaf_int(inner, k2, delta)
+    }) {
+        Ok(out) => Some(out),
+        Err(orig) => {
+            *coll = orig;
+            None
+        }
+    }
+}
+
+/// In-place `swap!` fast path for unwatched, unvalidated atoms with
+/// pure core update functions (`assoc`, 2-key `assoc-in`, `+`).
+pub(crate) fn try_swap_in_place(val: &mut Value, f: &Value, extra: &[Value]) -> Option<Value> {
+    let nat = crate::ext::as_native(f)?;
+    match (&*nat.display, extra) {
+        ("clojure.core/assoc", [k, v]) => {
+            let mut kc = k.clone();
+            let mut vc = v.clone();
+            match try_assoc_leaf(take(val), &mut kc, &mut vc) {
+                Ok(out) => {
+                    *val = out.clone();
+                    Some(out)
+                }
+                Err(orig) => {
+                    *val = orig;
+                    None
+                }
+            }
+        }
+        ("clojure.core/assoc-in", [Value::Vector(ks), v]) if ks.len() == 2 => {
+            let mut k1 = ks.get(0).expect("len 2");
+            let mut k2 = ks.get(1).expect("len 2");
+            let mut vc = v.clone();
+            match try_step_in2(take(val), &mut k1, |inner| {
+                try_assoc_leaf(inner, &mut k2, &mut vc)
+            }) {
+                Ok(out) => {
+                    *val = out.clone();
+                    Some(out)
+                }
+                Err(orig) => {
+                    *val = orig;
+                    None
+                }
+            }
+        }
+        ("clojure.core/+", [Value::Int(d)]) => {
+            let Value::Int(old) = *val else { return None };
+            let new = Value::Int(old.checked_add(*d)?);
+            *val = new.clone();
+            Some(new)
+        }
+        _ => None,
     }
 }
 
@@ -1444,7 +1637,7 @@ op2!(Max, |a, b| ints(a, b, |x, y| Some(x.max(y))));
 /// op misses, so the caller deopts to the boxed road). A test
 /// pins the mirrors against the ops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntOp1 {
+pub enum IntOp1 {
     Inc,
     Dec,
     Negate,
@@ -1465,7 +1658,7 @@ impl IntOp1 {
 
 /// A two-argument op over unboxed ints (see [`IntOp1`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntOp2 {
+pub enum IntOp2 {
     Add,
     Sub,
     Mul,
@@ -1527,7 +1720,7 @@ impl IntOp2 {
 
 /// A one-argument predicate over an unboxed int (see [`IntOp1`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntTest1 {
+pub enum IntTest1 {
     Zero,
     Pos,
     Neg,
@@ -1546,7 +1739,7 @@ impl IntTest1 {
 
 /// A two-argument predicate over unboxed ints (see [`IntOp1`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntTest2 {
+pub enum IntTest2 {
     Lt,
     Lte,
     Gt,
@@ -1735,7 +1928,7 @@ impl Op2 for Get {
     #[inline(always)]
     fn apply(a: &Value, b: &Value) -> Option<Value> {
         match a {
-            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
+            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_lookup_key(b) => {
                 Some(m.get(b).cloned().unwrap_or(Value::Nil))
             }
             _ => crate::vm_intrinsics::get_of(a, b, None),
@@ -1800,6 +1993,121 @@ impl Op1 for Dec {
 }
 
 /// `(bit-not x)` on an integer.
+/// `unchecked-add`/`-subtract`/`-multiply` over two longs (#271): the
+/// wrapping op (`(unchecked-add Long/MAX_VALUE 1)` is `Long/MIN_VALUE`);
+/// doubles and the tower are the native's.
+pub(crate) struct UncheckedAdd;
+pub(crate) struct UncheckedSub;
+pub(crate) struct UncheckedMul;
+
+impl Op2 for UncheckedAdd {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        wrapping2(a, b, i64::wrapping_add)
+    }
+}
+
+impl Op2 for UncheckedSub {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        wrapping2(a, b, i64::wrapping_sub)
+    }
+}
+
+impl Op2 for UncheckedMul {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        wrapping2(a, b, i64::wrapping_mul)
+    }
+}
+
+#[inline(always)]
+fn wrapping2(a: &Value, b: &Value, op: fn(i64, i64) -> i64) -> Option<Value> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Some(Value::Int(op(*x, *y))),
+        _ => None,
+    }
+}
+
+/// `unchecked-inc`/`-dec`/`-negate` over a long (#271): wrapping.
+pub(crate) struct UncheckedInc;
+pub(crate) struct UncheckedDec;
+pub(crate) struct UncheckedNegate;
+
+impl Op1 for UncheckedInc {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        wrapping1(a, |x| x.wrapping_add(1))
+    }
+}
+
+impl Op1 for UncheckedDec {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        wrapping1(a, |x| x.wrapping_sub(1))
+    }
+}
+
+impl Op1 for UncheckedNegate {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        wrapping1(a, i64::wrapping_neg)
+    }
+}
+
+#[inline(always)]
+fn wrapping1(a: &Value, op: fn(i64) -> i64) -> Option<Value> {
+    match a {
+        Value::Int(x) => Some(Value::Int(op(*x))),
+        _ => None,
+    }
+}
+
+/// `@atom`/`@volatile` (#271): the cell's value, read under its lock as
+/// the native reads it; every other derefable (refs, delays, futures,
+/// vars, the timeout arity) is the native's.
+pub(crate) struct DerefCell;
+
+impl Op1 for DerefCell {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        match a {
+            Value::Atom(c) => Some(c.lock().value.clone()),
+            Value::Volatile(v) => Some(v.lock().clone()),
+            _ => None,
+        }
+    }
+}
+
+/// `(char n)` for a long code point (#271): `char::from_u32` as the
+/// native narrows it; out of range (and every other shape) is the
+/// native's, error included.
+pub(crate) struct CharOf;
+
+impl Op1 for CharOf {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        let Value::Int(i) = a else {
+            return None;
+        };
+        u32::try_from(*i)
+            .ok()
+            .and_then(char::from_u32)
+            .map(Value::Char)
+    }
+}
+
+/// `compare` over longs and doubles (#271): `-1`/`0`/`1` from
+/// `jvm_compare`'s own numeric order; other operands are the native's.
+pub(crate) struct CompareNum;
+
+impl Op2 for CompareNum {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        crate::core::compare_long_double(a, b).map(|o| Value::Int(o as i64))
+    }
+}
+
 pub(crate) struct BitNot;
 
 impl Op1 for BitNot {
@@ -2091,6 +2399,38 @@ impl Op3 for AssocBang {
     }
 }
 
+/// `(aget a i)` inline (#271): an array read at an in-bounds long
+/// index. Any other shape (a negative or out-of-bounds index, a
+/// coerced index, nil, a non-array) takes the native for its exact
+/// answer or error.
+pub(crate) struct Aget;
+
+impl Op2 for Aget {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value) -> Option<Value> {
+        let (Value::Array(arr), Value::Int(i)) = (a, b) else {
+            return None;
+        };
+        crate::arrays::aget_fast(arr, usize::try_from(*i).ok()?)
+    }
+}
+
+/// `(aset a i v)` inline (#271): a primitive slot taking its own value
+/// type at an in-bounds long index (`aset_prim_fast`); the rest takes
+/// the native.
+pub(crate) struct Aset;
+
+impl Op3 for Aset {
+    #[inline(always)]
+    fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
+        let (Value::Array(arr), Value::Int(i)) = (a, b) else {
+            return None;
+        };
+        let i = usize::try_from(*i).ok()?;
+        crate::arrays::aset_prim_fast(arr, i, c).then(|| c.clone())
+    }
+}
+
 pub(crate) struct Nth3;
 
 impl Op3 for Nth3 {
@@ -2137,7 +2477,7 @@ impl Op3 for Get3 {
     #[inline(always)]
     fn apply(a: &Value, b: &Value, c: &Value) -> Option<Value> {
         match a {
-            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(b) => {
+            Value::Map(m) if !m.is_sorted() && crate::vm_intrinsics::is_lookup_key(b) => {
                 Some(m.get(b).cloned().unwrap_or_else(|| c.clone()))
             }
             _ => crate::vm_intrinsics::get_of(a, b, Some(c)),
@@ -2422,17 +2762,280 @@ mod tests {
 
 #[cfg(test)]
 mod apply_tests {
-    use super::{APPLY1, APPLY2, APPLY3, APPLYN, BINARY, NARY, TERNARY, UNARY};
+    use super::{APPLY1, APPLY2, APPLY3, APPLYN, BINARY, NARY, RE_MATCHES_OP, TERNARY, UNARY};
+    use super::{
+        CharOf, CompareNum, DerefCell, Op1, Op2, UncheckedAdd, UncheckedDec, UncheckedInc,
+        UncheckedMul, UncheckedNegate, UncheckedSub,
+    };
+    use clj_value::Value;
+
+    #[test]
+    fn unchecked_deref_char_and_compare_ops_271() {
+        let (int, s) = (Value::Int, Value::Str(std::sync::Arc::from("s")));
+        assert_eq!(
+            UncheckedAdd::apply(&int(i64::MAX), &int(1)),
+            Some(int(i64::MIN))
+        );
+        assert_eq!(
+            UncheckedSub::apply(&int(i64::MIN), &int(1)),
+            Some(int(i64::MAX))
+        );
+        assert_eq!(UncheckedMul::apply(&int(i64::MAX), &int(2)), Some(int(-2)));
+        assert_eq!(UncheckedAdd::apply(&int(1), &Value::Double(1.0)), None);
+        assert_eq!(UncheckedInc::apply(&int(i64::MAX)), Some(int(i64::MIN)));
+        assert_eq!(UncheckedDec::apply(&int(i64::MIN)), Some(int(i64::MAX)));
+        assert_eq!(UncheckedNegate::apply(&int(i64::MIN)), Some(int(i64::MIN)));
+        assert_eq!(UncheckedInc::apply(&s), None);
+        let atom = Value::Atom(clj_value::Atom::new(int(3)));
+        let vol = Value::Volatile(clj_value::Volatile::new(int(4)));
+        assert_eq!(DerefCell::apply(&atom), Some(int(3)));
+        assert_eq!(DerefCell::apply(&vol), Some(int(4)));
+        assert_eq!(DerefCell::apply(&Value::Nil), None);
+        assert_eq!(CharOf::apply(&int(97)), Some(Value::Char('a')));
+        assert_eq!(CharOf::apply(&int(0xD800)), None);
+        assert_eq!(CharOf::apply(&int(-1)), None);
+        assert_eq!(CharOf::apply(&Value::Char('a')), None);
+        assert_eq!(
+            CompareNum::apply(&int(1), &Value::Double(2.5)),
+            Some(int(-1))
+        );
+        assert_eq!(CompareNum::apply(&int(2), &int(2)), Some(int(0)));
+        assert_eq!(CompareNum::apply(&s, &s), None);
+        // The natives answer the same when called as values.
+        let mut ev = crate::boot();
+        let v = ev
+            .eval_source(
+                "(= [(reduce unchecked-add [9223372036854775807 1])
+                     (reduce unchecked-subtract [-9223372036854775808 1])
+                     (reduce unchecked-multiply [9223372036854775807 2])
+                     (first (map unchecked-inc [9223372036854775807]))
+                     (first (map unchecked-dec [-9223372036854775808]))
+                     (first (map unchecked-negate [-9223372036854775808]))
+                     (first (map deref [(volatile! 5)]))]
+                    [-9223372036854775808 9223372036854775807 -2
+                     -9223372036854775808 9223372036854775807 -9223372036854775808 5])",
+            )
+            .expect("eval");
+        assert_eq!(v.last(), Some(&Value::Bool(true)));
+    }
 
     #[test]
     fn apply_tables_cover_every_specialized_op() {
         let a1: Vec<&str> = APPLY1.iter().map(|r| r.0).collect();
-        let a2: Vec<&str> = APPLY2.iter().map(|r| r.0).collect();
+        let mut a2: Vec<&str> = APPLY2.iter().map(|r| r.0).collect();
+        a2.push(RE_MATCHES_OP.0);
         let a3: Vec<&str> = APPLY3.iter().map(|r| r.0).collect();
         assert_eq!(a1, UNARY.iter().map(|r| r.0).collect::<Vec<_>>());
         assert_eq!(a2, BINARY.iter().map(|r| r.0).collect::<Vec<_>>());
         assert_eq!(a3, TERNARY.iter().map(|r| r.0).collect::<Vec<_>>());
         let an: Vec<&str> = APPLYN.iter().map(|r| r.0).collect();
         assert_eq!(an, NARY.iter().map(|r| r.0).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn owned_update_in2_and_swap_in_place_271() {
+        use super::{apply_assoc_in2, apply_update_in2, apply_update3, try_swap_in_place};
+        use crate::native_abi::{
+            TAKE_ARGS, apply_own, own_op, repack_own_args, single_take_arg_bit, take_arg_mask,
+        };
+        use clj_value::{Keyword, Map, Vector};
+
+        assert_eq!(take_arg_mask(0), TAKE_ARGS | single_take_arg_bit(0));
+        let ev = crate::boot();
+        let core_fn = |name: &str| {
+            let id = crate::ns::core_var(&ev, name).expect("core var");
+            ev.registry
+                .with_state_mut(id, |st| st.root.clone())
+                .flatten()
+                .expect("root")
+        };
+        let inc_fn = core_fn("inc");
+        let dec_fn = core_fn("dec");
+        let add_fn = core_fn("+");
+        let assoc_fn = core_fn("assoc");
+        let assoc_in_fn = core_fn("assoc-in");
+        let ka = Value::Keyword(Keyword::new(None, "a"));
+        let kb = Value::Keyword(Keyword::new(None, "b"));
+
+        // apply_update3 branches
+        assert_eq!(apply_update3(&mut []), None);
+        assert_eq!(
+            apply_update3(&mut [Value::Nil, ka.clone(), add_fn.clone()]),
+            None
+        );
+        assert_eq!(
+            apply_update3(&mut [Value::Nil, ka.clone(), inc_fn.clone()]),
+            None
+        );
+        let v_ok = Value::Vector(Vector::from_vec(vec![
+            Value::Int(10),
+            Value::Nil,
+            Value::Int(i64::MAX),
+        ]));
+        let mut a = [v_ok.clone(), Value::Int(0), inc_fn.clone()];
+        assert_eq!(
+            apply_update3(&mut a),
+            Some(Value::Vector(Vector::from_vec(vec![
+                Value::Int(11),
+                Value::Nil,
+                Value::Int(i64::MAX)
+            ])))
+        );
+        assert_eq!(
+            apply_update3(&mut [v_ok.clone(), Value::Int(5), inc_fn.clone()]),
+            None
+        );
+        assert_eq!(
+            apply_update3(&mut [v_ok.clone(), Value::Int(1), inc_fn.clone()]),
+            None
+        );
+        assert_eq!(
+            apply_update3(&mut [v_ok, Value::Int(2), inc_fn.clone()]),
+            None
+        );
+
+        let m_ok = Value::Map(Map::from_kvs_last_wins(vec![
+            (ka.clone(), Value::Int(5)),
+            (kb.clone(), Value::Int(i64::MIN)),
+        ]));
+        assert_eq!(
+            apply_update3(&mut [m_ok.clone(), ka.clone(), dec_fn.clone()]),
+            Some(Value::Map(Map::from_kvs_last_wins(vec![
+                (ka.clone(), Value::Int(4)),
+                (kb.clone(), Value::Int(i64::MIN)),
+            ])))
+        );
+        assert_eq!(
+            apply_update3(&mut [
+                m_ok.clone(),
+                Value::Keyword(Keyword::new(None, "missing")),
+                inc_fn.clone()
+            ]),
+            None
+        );
+        assert_eq!(apply_update3(&mut [m_ok, kb.clone(), dec_fn.clone()]), None);
+
+        // apply_assoc_in2 & apply_update_in2 branches
+        assert_eq!(apply_assoc_in2(&mut []), None);
+        assert_eq!(apply_update_in2(&mut []), None);
+        assert_eq!(
+            apply_update_in2(&mut [Value::Nil, ka.clone(), kb.clone(), add_fn.clone()]),
+            None
+        );
+        let nested_map = Value::Map(Map::from_kvs_last_wins(vec![
+            (
+                ka.clone(),
+                Value::Map(Map::from_kvs_last_wins(vec![(kb.clone(), Value::Int(1))])),
+            ),
+            (kb.clone(), Value::Int(9)),
+        ]));
+        let upd_map =
+            apply_assoc_in2(&mut [nested_map.clone(), ka.clone(), kb.clone(), Value::Int(2)])
+                .expect("assoc-in2 map");
+        assert_eq!(
+            apply_update_in2(&mut [upd_map, ka.clone(), kb.clone(), inc_fn.clone()]),
+            Some(Value::Map(Map::from_kvs_last_wins(vec![
+                (
+                    ka.clone(),
+                    Value::Map(Map::from_kvs_last_wins(vec![(kb.clone(), Value::Int(3))])),
+                ),
+                (kb.clone(), Value::Int(9)),
+            ])))
+        );
+        // Missing outer key in map, failing inner step in map, non-map/vec outer
+        assert_eq!(
+            apply_assoc_in2(&mut [
+                nested_map.clone(),
+                Value::Keyword(Keyword::new(None, "missing")),
+                kb.clone(),
+                Value::Int(2),
+            ]),
+            None
+        );
+        assert_eq!(
+            apply_assoc_in2(&mut [nested_map.clone(), kb.clone(), ka.clone(), Value::Int(2),]),
+            None
+        );
+        assert_eq!(
+            apply_assoc_in2(&mut [Value::Nil, ka.clone(), kb.clone(), Value::Int(2)]),
+            None
+        );
+        assert_eq!(
+            apply_update_in2(&mut [Value::Nil, ka.clone(), kb.clone(), inc_fn.clone()]),
+            None
+        );
+
+        // Outer vector in try_step_in2
+        let nested_vec = Value::Vector(Vector::from_vec(vec![
+            Value::Vector(Vector::from_vec(vec![Value::Int(7)])),
+            Value::Nil,
+        ]));
+        assert_eq!(
+            apply_assoc_in2(&mut [
+                nested_vec.clone(),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(8),
+            ]),
+            Some(Value::Vector(Vector::from_vec(vec![
+                Value::Vector(Vector::from_vec(vec![Value::Int(7), Value::Int(8)])),
+                Value::Nil,
+            ])))
+        );
+        assert_eq!(
+            apply_assoc_in2(&mut [
+                nested_vec.clone(),
+                Value::Int(9),
+                Value::Int(0),
+                Value::Int(8),
+            ]),
+            None
+        );
+        assert_eq!(
+            apply_assoc_in2(&mut [nested_vec, Value::Int(1), Value::Int(0), Value::Int(8),]),
+            None
+        );
+
+        // repack_own_args & apply_own
+        let op_ain2 = own_op("assoc-in2", 4).expect("assoc-in2 op");
+        let mut sv = smallvec::smallvec![Value::Nil, ka.clone(), kb.clone(), Value::Int(1)];
+        repack_own_args(op_ain2, &mut sv);
+        assert_eq!(sv.len(), 3);
+        repack_own_args(u32::MAX, &mut sv);
+        assert_eq!(sv.len(), 3);
+        let op_upd3 = own_op("update", 3).expect("update op");
+        assert!(apply_own(op_upd3, &mut [Value::Nil, ka.clone(), inc_fn.clone()]).is_none());
+
+        // try_swap_in_place branches
+        let mut v = Value::Int(10);
+        assert_eq!(try_swap_in_place(&mut v, &Value::Nil, &[]), None);
+        assert_eq!(try_swap_in_place(&mut v, &inc_fn, &[]), None);
+        assert_eq!(
+            try_swap_in_place(&mut v, &add_fn, &[Value::Int(5)]),
+            Some(Value::Int(15))
+        );
+        let mut v_max = Value::Int(i64::MAX);
+        assert_eq!(
+            try_swap_in_place(&mut v_max, &add_fn, &[Value::Int(1)]),
+            None
+        );
+        let mut v_nil = Value::Nil;
+        assert_eq!(
+            try_swap_in_place(&mut v_nil, &add_fn, &[Value::Int(1)]),
+            None
+        );
+        assert_eq!(
+            try_swap_in_place(&mut v_nil, &assoc_fn, &[ka.clone(), Value::Int(1)]),
+            None
+        );
+        let mut v_map = Value::Map(Map::from_kvs_last_wins(vec![(ka.clone(), Value::Int(1))]));
+        assert!(try_swap_in_place(&mut v_map, &assoc_fn, &[ka.clone(), Value::Int(2)]).is_some());
+        let path2 = Value::Vector(Vector::from_vec(vec![ka.clone(), kb.clone()]));
+        assert_eq!(
+            try_swap_in_place(&mut v_nil, &assoc_in_fn, &[path2.clone(), Value::Int(1)]),
+            None
+        );
+        let mut v_nmap = nested_map;
+        assert!(try_swap_in_place(&mut v_nmap, &assoc_in_fn, &[path2, Value::Int(42)]).is_some());
     }
 }

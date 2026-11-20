@@ -27,11 +27,11 @@ use std::cell::Cell;
 use std::ffi::CStr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use clj_eval::coll::{nth_str, str_utf16_len};
 use clj_eval::core::nth_index;
-use clj_eval::{Evaluator, NativeError, NativeImpl, as_native, boot};
+use clj_eval::{Evaluator, NativeError, NativeTarget, as_native, boot};
 use clj_value::{Keyword, List, ThrowClass, Value, Vector, print_to_string};
 
 /// `clojure.core` names in [`Prim`](clj_eval::Prim) declaration order: the table
@@ -64,7 +64,7 @@ pub(crate) const PRIM_NAMES: [&str; 19] = [
 /// primitive implementations, indexed by [`Prim`](clj_eval::Prim) discriminant.
 struct Runtime {
     eval: Evaluator,
-    prims: [Arc<NativeImpl>; 19],
+    prims: [NativeTarget; 19],
 }
 
 impl Runtime {
@@ -78,14 +78,14 @@ impl Runtime {
     }
 
     /// Every [`PRIM_NAMES`] native, resolved through `eval`.
-    fn resolve_all(eval: &mut Evaluator) -> [Arc<NativeImpl>; 19] {
+    fn resolve_all(eval: &mut Evaluator) -> [NativeTarget; 19] {
         PRIM_NAMES.map(|name| Self::resolve(eval, name))
     }
 
     /// Resolve one `clojure.core` native through the booted
     /// evaluator (the `expect`s name boot bugs — every core prim
     /// resolves, pinned by the smoke test).
-    fn resolve(eval: &mut Evaluator, name: &str) -> Arc<NativeImpl> {
+    fn resolve(eval: &mut Evaluator, name: &str) -> NativeTarget {
         let probe = format!("clojure.core/{name}");
         let value = eval
             .eval_source(&probe)
@@ -93,18 +93,31 @@ impl Runtime {
             .into_iter()
             .next()
             .expect("a symbol evaluates to one value");
-        Arc::clone(&as_native(&value).expect("core prims are natives").func)
+        as_native(&value)
+            .expect("core prims are natives")
+            .func
+            .clone()
     }
 }
 
-/// The process-global runtime, booted on first helper call — only
-/// by pure-subset binaries: mixed programs run natives inside an
-/// [`ActiveScope`] on the program's own evaluator (issue #258).
-static RUNTIME: LazyLock<Mutex<Runtime>> = LazyLock::new(|| Mutex::new(Runtime::boot()));
+/// The process-global runtime, booted on first legacy `call_prim` helper
+/// call — stored as `Option<Runtime>` inside a zero-initialized `Mutex` so
+/// LLVM's fat-LTO `GlobalMerge` pass never links `clj_eval::boot` through a
+/// `LazyLock` static initializer into `BootMode::Lite` binaries (#271).
+static RUNTIME: Mutex<Option<Runtime>> = Mutex::new(None);
+
+/// Lock and lazily boot the process-global legacy runtime.
+#[cold]
+#[inline(never)]
+fn with_runtime<R>(f: impl FnOnce(&mut Runtime) -> R) -> R {
+    let mut guard = RUNTIME.lock().expect("clj-rt evaluator lock");
+    let rt = guard.get_or_insert_with(Runtime::boot);
+    f(rt)
+}
 
 /// The prim natives resolved from the first active evaluator (the
 /// natives are the same `clojure.core` fns in every evaluator).
-static SHARED_PRIMS: OnceLock<[Arc<NativeImpl>; 19]> = OnceLock::new();
+static SHARED_PRIMS: OnceLock<[NativeTarget; 19]> = OnceLock::new();
 
 thread_local! {
     /// The evaluator the current native call runs on (null outside
@@ -156,12 +169,13 @@ pub(crate) fn call_prim(index: usize, args: Vec<Value>) -> Result<Value, NativeE
         // the native call (it is not used again until the scope
         // ends); this reborrow ends before the shim returns.
         let eval = unsafe { &mut *active };
-        let func = Arc::clone(&SHARED_PRIMS.get_or_init(|| Runtime::resolve_all(eval))[index]);
-        return catch_panic(AssertUnwindSafe(|| func(eval, &args)));
+        let func = SHARED_PRIMS.get_or_init(|| Runtime::resolve_all(eval))[index].clone();
+        return catch_panic(AssertUnwindSafe(|| func.call(eval, &args)));
     }
-    let mut rt = RUNTIME.lock().expect("clj-rt evaluator lock");
-    let func = Arc::clone(&rt.prims[index]);
-    catch_panic(AssertUnwindSafe(|| func(&mut rt.eval, &args)))
+    with_runtime(|rt| {
+        let func = rt.prims[index].clone();
+        catch_panic(AssertUnwindSafe(|| func.call(&mut rt.eval, &args)))
+    })
 }
 
 /// Run a native call, converting a panic (an internal bug — the
@@ -335,11 +349,16 @@ pub(crate) fn nth_worker(owned: Vec<Value>, path: &str, line: u32, col: u32) -> 
 /// The `*command-line-args*` value over borrowed C strings:
 /// `argv[0]` already skipped by the shim; no entries is nil,
 /// else a list of lossy-decoded strings (the JVM shape).
-pub(crate) fn argv_worker(entries: &[&CStr]) -> *mut Value {
+pub(crate) fn argv_worker(entries: &[Option<&CStr>]) -> *mut Value {
     let mut items = Vec::new();
     for entry in entries {
-        let text = entry.to_string_lossy().into_owned();
-        items.push(Value::Str(Arc::from(text.as_str())));
+        match entry {
+            Some(cstr) => {
+                let text = cstr.to_string_lossy().into_owned();
+                items.push(Value::Str(Arc::from(text.as_str())));
+            }
+            None => items.push(Value::Nil),
+        }
     }
     if items.is_empty() {
         give(Value::Nil)
@@ -385,10 +404,10 @@ pub(crate) fn clone_worker(value: &Value) -> *mut Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE, ActiveScope, PRIM_NAMES, RUNTIME, argv_worker, call_prim, catch_panic,
-        clone_worker, count_str_fast, count_worker, error_line, is_int_flag, keyword_worker,
-        nth_str_fast, nth_worker, prim_worker, print_join, print_worker, str_worker, unbox_int,
-        vec_push_worker,
+        ACTIVE, ActiveScope, PRIM_NAMES, argv_worker, call_prim, catch_panic, clone_worker,
+        count_str_fast, count_worker, error_line, is_int_flag, keyword_worker, nth_str_fast,
+        nth_worker, prim_worker, print_join, print_worker, str_worker, unbox_int, vec_push_worker,
+        with_runtime,
     };
     use clj_eval::{NativeError, Prim};
     use clj_value::{ThrowClass, Value, print_to_string};
@@ -463,8 +482,9 @@ mod tests {
 
     #[test]
     fn boot_resolves_every_prim() {
-        let rt = RUNTIME.lock().expect("test lock");
-        assert_eq!(rt.prims.len(), PRIM_NAMES.len());
+        with_runtime(|rt| {
+            assert_eq!(rt.prims.len(), PRIM_NAMES.len());
+        });
     }
 
     #[test]
@@ -667,8 +687,9 @@ mod tests {
         let b = c"b";
         let bad = c"a\xffb";
         assert_eq!(render(argv_worker(&[])), "nil");
-        assert_eq!(render(argv_worker(&[a, b])), "(a b)");
-        assert_eq!(render(argv_worker(&[bad])), "(a�b)");
+        assert_eq!(render(argv_worker(&[Some(a), Some(b)])), "(a b)");
+        assert_eq!(render(argv_worker(&[None, Some(a)])), "(nil a)");
+        assert_eq!(render(argv_worker(&[Some(bad)])), "(a�b)");
     }
 
     #[test]

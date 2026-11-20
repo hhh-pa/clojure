@@ -22,13 +22,23 @@ use crate::Value;
 /// Dedicated exact counters for core + initial user var ids; larger
 /// ids share a bounded tail so dynamic checks remain O(1) and lock-free.
 const EXACT_BIND_SLOTS: usize = 4096;
-const OVERFLOW_BIND_SLOTS: usize = 1024;
-const TOTAL_BIND_SLOTS: usize = EXACT_BIND_SLOTS + OVERFLOW_BIND_SLOTS;
+const OVERFLOW_BIND_SLOTS: usize = 4096;
+/// Slots per lazily allocated chunk, and the chunk count (both powers of
+/// two, so masked indices need no bounds check: the bitcode helpers
+/// inline these reads and must not reference `core`'s panic machinery,
+/// #260).
+const CHUNK_SLOTS: usize = 64;
+const CHUNKS: usize = (EXACT_BIND_SLOTS + OVERFLOW_BIND_SLOTS) / CHUNK_SLOTS;
 
-/// Process-wide atomic refcounts of active thread bindings per `var_id`.
+/// One chunk of binding refcounts.
+type Chunk = [AtomicUsize; CHUNK_SLOTS];
+
+/// Process-wide atomic refcounts of active thread bindings per `var_id`,
+/// in chunks allocated on a chunk's first binding (boot's base `*ns*`
+/// frame costs one 512-byte chunk, not the whole table, #271).
 #[derive(Debug)]
 pub struct BindCounts {
-    slots: Box<[AtomicUsize; TOTAL_BIND_SLOTS]>,
+    chunks: [OnceLock<Box<Chunk>>; CHUNKS],
 }
 
 impl Default for BindCounts {
@@ -38,41 +48,62 @@ impl Default for BindCounts {
 }
 
 impl BindCounts {
-    /// Allocate a zeroed binding-refcount table.
+    /// An empty binding-refcount table (no chunk allocated yet).
     #[must_use]
     pub fn new() -> Self {
         Self {
-            slots: Box::new([const { AtomicUsize::new(0) }; TOTAL_BIND_SLOTS]),
+            chunks: [const { OnceLock::new() }; CHUNKS],
         }
     }
 
+    #[cold]
+    fn alloc_chunk() -> Box<Chunk> {
+        Box::new([const { AtomicUsize::new(0) }; CHUNK_SLOTS])
+    }
+
+    /// `var_id`'s `(chunk, lane)`: exact below [`EXACT_BIND_SLOTS`], a
+    /// shared overflow slot above.
     #[inline]
-    fn slot_index(var_id: u64) -> usize {
+    fn slot(var_id: u64) -> (usize, usize) {
         let id = var_id as usize;
-        if id < EXACT_BIND_SLOTS {
+        let s = if id < EXACT_BIND_SLOTS {
             id
         } else {
             EXACT_BIND_SLOTS + (id & (OVERFLOW_BIND_SLOTS - 1))
-        }
+        };
+        ((s / CHUNK_SLOTS) & (CHUNKS - 1), s & (CHUNK_SLOTS - 1))
     }
 
     /// Whether any thread currently holds a binding entry for `var_id`.
     #[inline]
     #[must_use]
     pub fn is_bound(&self, var_id: u64) -> bool {
-        self.slots[Self::slot_index(var_id)].load(Ordering::Acquire) != 0
+        let (chunk, lane) = Self::slot(var_id);
+        self.chunks[chunk]
+            .get()
+            .is_some_and(|c| c[lane].load(Ordering::Acquire) != 0)
     }
 
     /// Record `n` added binding entries for `var_id`.
     #[inline]
     pub fn add(&self, var_id: u64, n: usize) {
-        self.slots[Self::slot_index(var_id)].fetch_add(n, Ordering::AcqRel);
+        if n == 0 {
+            return;
+        }
+        let (chunk, lane) = Self::slot(var_id);
+        self.chunks[chunk].get_or_init(Self::alloc_chunk)[lane].fetch_add(n, Ordering::AcqRel);
     }
 
     /// Release `n` removed binding entries for `var_id`.
     #[inline]
     pub fn sub(&self, var_id: u64, n: usize) {
-        self.slots[Self::slot_index(var_id)].fetch_sub(n, Ordering::Release);
+        if n == 0 {
+            return;
+        }
+        let (chunk, lane) = Self::slot(var_id);
+        if let Some(c) = self.chunks[chunk].get() {
+            c[lane].fetch_sub(n, Ordering::Release);
+        }
     }
 }
 
@@ -237,5 +268,20 @@ mod tests {
         assert!(bind_counts.is_bound(large_id));
         bind_counts.sub(large_id, 1);
         assert!(!bind_counts.is_bound(large_id));
+    }
+
+    #[test]
+    fn bind_counts_lazy_and_noop_guards() {
+        let bind_counts = BindCounts::new();
+        // Zero-count and uninitialized sub are harmless no-ops that keep
+        // every chunk unallocated.
+        bind_counts.add(3, 0);
+        bind_counts.sub(3, 0);
+        bind_counts.sub(3, 1);
+        assert!(!bind_counts.is_bound(3));
+        bind_counts.add(3, 2);
+        assert!(bind_counts.is_bound(3));
+        bind_counts.sub(3, 2);
+        assert!(!bind_counts.is_bound(3));
     }
 }

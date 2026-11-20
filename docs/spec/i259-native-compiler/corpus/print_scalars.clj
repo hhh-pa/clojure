@@ -1,0 +1,20 @@
+;; print/println/pr/prn of scalars render in one write (#271): every shape
+;; prints as the booted print-method does, and the general road keeps
+;; collections, *print-dup*, rebound *out* and live print methods.
+(println 1 -7 "a b" \x :k :ns/k nil true false 1.5 -0.0 1.0E10 1e-5 ##NaN ##Inf ##-Inf)
+(prn 1 -7 "a \"q\" b\n" \x \newline \space \é :k :ns/k nil true 1.5 -0.0 1.0E10 ##NaN)
+(print "x" 2 \y nil) (print " ") (pr "s" \c :k) (println)
+(println "é unicode ✓" (str (char 955)) 9223372036854775807 -9223372036854775808)
+(println [1 "a" \b] {:k "v"} '(1 2) #{:s})
+(prn [1 "a" \b] {:k "v"})
+(println (with-out-str (println 1 "two" :three) (prn "q" \c)))
+(println (pr-str 1 "a" \b) (print-str 1 "a" \b) (prn-str :k) (println-str 2.5))
+(binding [*print-readably* false] (prn "unquoted" \c))
+(binding [*print-dup* true] (prn 1 "s" :k) (println 2.5))
+(binding [*print-length* 1] (println 1 2 3) (prn [1 2 3]))
+(println (count (with-out-str (dotimes [i 50] (println i "x")))))
+(println (try (binding [*out* nil] (println 1)) (catch Exception e :no-out)))
+(print) (pr) (println)
+(defmethod print-method clojure.lang.Keyword [k w] (.write w (str "KW<" (name k) ">")))
+(println :after "defmethod" 1)
+(prn :also)

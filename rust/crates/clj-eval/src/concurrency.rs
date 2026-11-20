@@ -71,7 +71,7 @@ use clj_value::{
 use crate::core::{cce_err, is_ifn};
 use crate::error::{NativeError, Signal, internal_throwable};
 use crate::eval::Evaluator;
-use crate::ext::{FastArith, NativeFn};
+use crate::ext::{DisplayName, FastArith, NativeFn, NativeTarget};
 use crate::lazy::as_pending;
 use crate::ns::{NativeFnPtr, check_arity, npe, signal_to_native, str_of};
 use crate::vars::check_min_arity;
@@ -321,6 +321,16 @@ fn native_swap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         other => return Err(cce_err(other, "clojure.lang.IAtom")),
     };
     check_swap_fn(&args[1], args.len())?;
+    {
+        let mut state = atom.lock();
+        if state.validator.is_none() && state.watches.is_empty() {
+            if let Some(new) =
+                crate::vm_ops::try_swap_in_place(&mut state.value, &args[1], &args[2..])
+            {
+                return Ok(new);
+            }
+        }
+    }
     swap_loop(eval, &atom, &args[1], &args[2..]).map(|(_, new)| new)
 }
 
@@ -1924,13 +1934,14 @@ fn check_not_in_action(eval: &Evaluator) -> Result<(), NativeError> {
 fn barrier_fn(eval: &mut Evaluator, tx: mpsc::Sender<()>) -> Value {
     Value::Extension(Arc::new(NativeFn {
         id: eval.next_id(),
-        display: Arc::from("clojure.core/await-count-down"),
-        func: Arc::new(move |_, args| {
+        display: DisplayName::shared("clojure.core/await-count-down"),
+        func: NativeTarget::Dyn(Arc::new(move |_, args| {
             let _ = tx.send(());
             Ok(args.first().cloned().unwrap_or(Value::Nil))
-        }),
+        })),
         owned: None,
         fast: FastArith::None,
+        compiled: None,
         meta: None,
     }))
 }
@@ -2492,16 +2503,10 @@ fn hash_debug(payload: &dyn std::fmt::Debug) -> u64 {
     hasher.finish()
 }
 
-/// The monitor-table key for a lockee: minted ids where they
-/// exist, allocation addresses for shared heaps, value bits for
-/// inline kinds (same object always maps alike; distinct objects
-/// sharing a key only serialize — timing, never semantics).
-/// Nil maps to 0, but both callers raise the synchronized-block
-/// NPE first, so it never reaches the table.
-pub(crate) fn monitor_key(v: &Value) -> u64 {
-    const MIX: u64 = 0x9e37_79b9_7f4a_7c15;
-    let (tag, payload): (u64, u64) = match v {
-        Value::Nil => (0, 0),
+/// Scalar monitor key `(tag, payload)` (split from [`monitor_key`]).
+#[inline]
+fn monitor_key_scalar(v: &Value) -> Option<(u64, u64)> {
+    Some(match v {
         Value::Bool(b) => (1, u64::from(*b)),
         Value::Int(i) => (2, *i as u64),
         Value::Double(f) => (3, f.to_bits()),
@@ -2511,6 +2516,16 @@ pub(crate) fn monitor_key(v: &Value) -> u64 {
         Value::Ratio(r) => (7, hash_debug(r)),
         Value::Str(s) => (8, Arc::as_ptr(s) as *const () as usize as u64),
         Value::Char(c) => (9, u64::from(*c)),
+        Value::Uuid(u) => (18, u.hi ^ u.lo),
+        Value::Instant(t) => (19, t.millis as u64),
+        _ => return None,
+    })
+}
+
+/// Named, regex, URI, and structural value monitor key `(tag, payload)`.
+#[inline]
+fn monitor_key_named(v: &Value) -> Option<(u64, u64)> {
+    Some(match v {
         // Symbols key by minted id (JVM identity): distinct-but-equal
         // symbols are distinct monitors, so a distinct exit IMSes
         // instead of releasing (gap #114). Clones preserve the id,
@@ -2527,13 +2542,19 @@ pub(crate) fn monitor_key(v: &Value) -> u64 {
         Value::Map(m) => (15, m.id()),
         Value::Set(s) => (16, s.id()),
         Value::Regex(r) => (17, Arc::as_ptr(r) as *const () as usize as u64),
-        Value::Uuid(u) => (18, u.hi ^ u.lo),
-        Value::Instant(t) => (19, t.millis as u64),
         Value::Uri(u) => (20, u.id()),
         Value::TaggedLiteral { tag, form, .. } => (21, hash_debug(&(tag, form.as_ref()))),
         Value::ReaderConditional { form, splicing, .. } => {
             (22, hash_debug(&(form.as_ref(), splicing)))
         }
+        _ => return None,
+    })
+}
+
+/// Var/cell/executor monitor key `(tag, payload)`.
+#[inline]
+fn monitor_key_cell(v: &Value) -> Option<(u64, u64)> {
+    Some(match v {
         Value::Var(v) => (23, v.id),
         Value::Unbound(u) => (24, u.var_id),
         Value::Throwable(t) => (25, t.id),
@@ -2545,13 +2566,35 @@ pub(crate) fn monitor_key(v: &Value) -> u64 {
         Value::Agent(a) => (31, a.id()),
         Value::Volatile(w) => (32, w.id()),
         Value::Ref(r) => (33, r.id()),
-        Value::Extension(e) => (34, Arc::as_ptr(e) as *const () as usize as u64),
-        Value::HostType(h) => (35, Arc::as_ptr(h) as usize as u64),
-        Value::MultiFn(m) => (36, Arc::as_ptr(m) as usize as u64),
-        Value::Class(c) => (37, Arc::as_ptr(c) as usize as u64),
-        Value::Array(a) => (38, a.id()),
-        Value::PrimitiveVector(p) => (39, hash_debug(&(p.elem(), p.len()))),
         Value::Executor(x) => (40, x.id()),
+        _ => return None,
+    })
+}
+
+/// The monitor-table key for a lockee: minted ids where they
+/// exist, allocation addresses for shared heaps, value bits for
+/// inline kinds (same object always maps alike; distinct objects
+/// sharing a key only serialize — timing, never semantics).
+/// Nil maps to 0, but both callers raise the synchronized-block
+/// NPE first, so it never reaches the table.
+pub(crate) fn monitor_key(v: &Value) -> u64 {
+    const MIX: u64 = 0x9e37_79b9_7f4a_7c15;
+    let (tag, payload): (u64, u64) = if let Some(pair) = monitor_key_scalar(v) {
+        pair
+    } else if let Some(pair) = monitor_key_named(v) {
+        pair
+    } else if let Some(pair) = monitor_key_cell(v) {
+        pair
+    } else {
+        match v {
+            Value::Extension(e) => (34, Arc::as_ptr(e) as *const () as usize as u64),
+            Value::HostType(h) => (35, Arc::as_ptr(h) as usize as u64),
+            Value::MultiFn(m) => (36, Arc::as_ptr(m) as usize as u64),
+            Value::Class(c) => (37, Arc::as_ptr(c) as usize as u64),
+            Value::Array(a) => (38, a.id()),
+            Value::PrimitiveVector(p) => (39, hash_debug(&(p.elem(), p.len()))),
+            _ => (0, 0),
+        }
     };
     tag.wrapping_mul(MIX).wrapping_add(payload)
 }
@@ -2609,15 +2652,15 @@ const TAP_LOOP_NAME: &str = "clojure.core/tap-loop";
 /// (daemon), so tap tests never block suite exit.
 pub struct TapSystem {
     inner: Mutex<TapInner>,
-    tx: mpsc::SyncSender<Value>,
+    tx: std::sync::OnceLock<mpsc::SyncSender<Value>>,
 }
 
 struct TapInner {
     /// The registry set (`=` dedup — fns compare by identity, like
     /// the JVM's set over `.equals`-less fns).
     taps: Vec<Value>,
-    /// The queue's receiver (taken by the dispatcher thread once it
-    /// starts).
+    /// The queue's receiver (allocated on first `add-tap`/`tap>`, then taken
+    /// by the dispatcher thread once it starts).
     rx: Option<mpsc::Receiver<Value>>,
     /// Whether the dispatcher is spawned (flipped before the spawn,
     /// so concurrent starters spawn exactly one thread; reset when
@@ -2626,17 +2669,16 @@ struct TapInner {
 }
 
 impl TapSystem {
-    /// An unstarted system (the dispatcher spawns on the first
-    /// `add-tap`/`tap>`, like the JVM's forced `tap-loop` delay).
+    /// An unstarted system (the queue and dispatcher spawn arrive on the first
+    /// `add-tap`/`tap>`, keeping Lite/short runs free of a 1024-slot allocation).
     pub(crate) fn new() -> Self {
-        let (tx, rx) = mpsc::sync_channel(TAP_QUEUE_CAPACITY);
         Self {
             inner: Mutex::new(TapInner {
                 taps: Vec::new(),
-                rx: Some(rx),
+                rx: None,
                 started: false,
             }),
-            tx,
+            tx: std::sync::OnceLock::new(),
         }
     }
 
@@ -2651,6 +2693,14 @@ impl TapSystem {
             if inner.started {
                 return Ok(());
             }
+            // The first start allocates the queue (runs that never tap
+            // skip the 1024-slot channel); a retry after a failed spawn
+            // keeps the pair (its receiver is still parked in `rx`).
+            self.tx.get_or_init(|| {
+                let (tx, rx) = mpsc::sync_channel(TAP_QUEUE_CAPACITY);
+                inner.rx = Some(rx);
+                tx
+            });
             inner.started = true;
         }
         let child = eval.fork_for_thread(eval.clone_bindings());
@@ -2712,14 +2762,11 @@ impl TapSystem {
     /// a first-class queue item).
     pub(crate) fn offer(self: &Arc<Self>, eval: &Evaluator, x: Value) -> Result<bool, NativeError> {
         self.ensure_started(eval)?;
-        match self.tx.try_send(x) {
-            Ok(()) => Ok(true),
-            // Past capacity the item drops (`false`, never
-            // blocking); disconnection drops it all the same
-            // (unreachable — the receiver lives on the dispatcher
-            // thread, which loops forever).
-            Err(_) => Ok(false),
-        }
+        // `ensure_started` allocated the queue. Past capacity the item
+        // drops (`false`, never blocking); disconnection drops it all
+        // the same (unreachable — the receiver lives on the dispatcher
+        // thread, which loops forever).
+        Ok(self.tx.get().is_some_and(|tx| tx.try_send(x).is_ok()))
     }
 }
 
@@ -3318,5 +3365,59 @@ mod tests {
             Err(std::io::Error::other("boom")),
         );
         assert!(fired.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn monitor_key_covers_every_value_category() {
+        let mut eval = crate::boot();
+        let samples = eval
+            .eval_source(
+                r#"
+                nil
+                (do
+                  (declare unb)
+                  (def v-var 1)
+                  (defmulti mf identity)
+                  (defrecord R [x])
+                  (let [exec (executor)
+                        f (future 1)]
+                    @f
+                    [nil true 1 1.5 1N 1000000000000000000000000000000N 1.5M 1/2
+                     "s" \a 's :k '(1) [1] (first {:a 1}) {:a 1} #{1} #"a"
+                     #uuid "00000000-0000-0000-0000-000000000000"
+                     #inst "2020-01-01T00:00:00Z"
+                     (java.net.URI. "https://example.com")
+                     #'v-var (ex-info "e" {}) (transient [])
+                     (atom 1) (delay 1) f (promise) (agent 1) (volatile! 1) (ref 1)
+                     (lazy-seq nil) (->R 1) mf String (int-array 1) (vector-of :int 1) exec]))
+                "#,
+            )
+            .unwrap();
+        for vec_val in samples {
+            if let Value::Vector(items) = vec_val {
+                for item in items.iter() {
+                    let k = monitor_key(&item);
+                    assert_eq!(k, monitor_key(&item.clone()));
+                }
+            }
+        }
+        // Cover Unbound, TaggedLiteral, ReaderConditional directly too.
+        let unbound = Value::Unbound(clj_value::Unbound {
+            sym: Symbol::new(None, "unb"),
+            var_id: 99,
+        });
+        let tagged = Value::TaggedLiteral {
+            tag: Box::new(Symbol::new(None, "t")),
+            form: Box::new(Value::Int(1)),
+            id: 1,
+        };
+        let cond = Value::ReaderConditional {
+            form: Box::new(Value::Vector(clj_value::Vector::from_vec(vec![]))),
+            splicing: false,
+            id: 2,
+        };
+        assert_ne!(monitor_key(&unbound), 0);
+        assert_ne!(monitor_key(&tagged), 0);
+        assert_ne!(monitor_key(&cond), 0);
     }
 }

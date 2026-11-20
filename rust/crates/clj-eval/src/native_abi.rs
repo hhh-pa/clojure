@@ -21,7 +21,8 @@ use std::sync::atomic::AtomicU64;
 
 use clj_reader::Span;
 use clj_value::{
-    BindCounts, Keyword, Map, Symbol, ThrowClass, Throwable, Value, Var, Vector, new_map,
+    BindCounts, Keyword, List, Map, RangeNum, Set, Symbol, ThrowClass, Throwable, Value, Var,
+    Vector, new_map,
 };
 
 use crate::error::{NativeError, Signal};
@@ -33,7 +34,42 @@ pub type Step = Result<Value, Signal>;
 
 /// Call `f` with `args` exactly like an interpreted call.
 pub fn invoke(eval: &mut Evaluator, f: &Value, args: &[Value]) -> Step {
+    // A native (a compiled closure included) runs straight away: the
+    // general call reaches the same `func` after a VM-closure hook, a
+    // struct check and a second downcast (#271: ~4x a direct call).
+    if let Some(native) = crate::ext::as_native(f) {
+        return native.func.call(eval, args).map_err(|e| eval.throw(e));
+    }
+    if let Some(found) = lookup_call(f, args) {
+        return Ok(found);
+    }
     eval.call(f, args)
+}
+
+/// A map, set, keyword or symbol called on one arg, or two with a
+/// default (#271), through [`lookup_value_call`]. Other arities take the
+/// general call (for their arity errors).
+fn lookup_call(f: &Value, args: &[Value]) -> Option<Value> {
+    match args {
+        [a] => lookup_value_call(f, a, None),
+        [a, not_found] => lookup_value_call(f, a, Some(not_found)),
+        _ => None,
+    }
+}
+
+/// `(f a)` / `(f a not-found)` when `f` is a map, set, keyword or symbol
+/// (#271): the lookup `Evaluator::invoke` ends in (`invoke_map`,
+/// `invoke_set`, `invoke_keyed_name`), without the general call. `None`
+/// for any other callee.
+#[must_use]
+pub fn lookup_value_call(f: &Value, a: &Value, not_found: Option<&Value>) -> Option<Value> {
+    let found = match f {
+        Value::Map(_) => crate::eval::lookup(f, a),
+        Value::Set(s) => crate::eval::member(s, a),
+        Value::Keyword(_) | Value::Symbol(_) => crate::eval::lookup(a, f),
+        _ => return None,
+    };
+    Some(found.or_else(|| not_found.cloned()).unwrap_or(Value::Nil))
 }
 
 /// The runtime var for a fully qualified symbol (interned like the
@@ -50,10 +86,23 @@ pub fn deref(eval: &mut Evaluator, var: &Var) -> Value {
     eval.deref_var_cached(var.id, &var.sym)
 }
 
+/// Whether `def`s keep var metadata (doc, auto keys): a Lite program
+/// that cannot read var metadata keeps only the name's own keys.
+#[must_use]
+pub fn keeps_var_meta(eval: &Evaluator) -> bool {
+    !eval.skip_var_meta
+}
+
 /// `(def sym …)` first half: the target var's id, before the init
 /// runs (recursive `defn`s see their own var).
 pub fn def_begin(eval: &mut Evaluator, sym: &Symbol) -> u64 {
     eval.def_begin(sym)
+}
+
+/// [`def_begin`] for a target var already interned (a compiled plain
+/// def's var slot: no symbol constant, no second intern).
+pub fn def_begin_var(eval: &mut Evaluator, id: u64) -> u64 {
+    eval.def_begin_id(id)
 }
 
 /// `(def sym …)` second half: root, metadata, dynamic flag; returns
@@ -78,6 +127,29 @@ pub fn vec_lit(items: Vec<Value>, meta: Option<Map>) -> Value {
     Value::Vector(Vector::from_vec(items).with_meta(meta))
 }
 
+/// [`vec_lit`] taking the evaluated items over (each slot left nil, #271):
+/// no clone per item, and all-long items go straight to packed storage
+/// (no intermediate boxed vector).
+pub fn vec_lit_owned(items: &mut [Value], meta: Option<Map>) -> Value {
+    let longs: Option<Vec<i64>> = items
+        .iter()
+        .map(|v| match v {
+            Value::Int(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    let vec = match longs {
+        Some(ns) if !ns.is_empty() => Vector::from_ints(ns),
+        _ => Vector::from_vec(
+            items
+                .iter_mut()
+                .map(|v| std::mem::replace(v, Value::Nil))
+                .collect(),
+        ),
+    };
+    Value::Vector(vec.with_meta(meta))
+}
+
 /// A map literal over evaluated `[k0 v0 k1 v1 …]` (keys realized,
 /// last wins, like the interpreter).
 pub fn map_lit(eval: &mut Evaluator, kvs: &[Value], meta: Option<Map>) -> Step {
@@ -92,6 +164,17 @@ pub fn map_pairs(eval: &mut Evaluator, kvs: &[Value]) -> Result<Map, Signal> {
         pairs.push((key, kv.get(1).cloned().unwrap_or(Value::Nil)));
     }
     Ok(Map::from_kvs_last_wins(pairs))
+}
+
+/// A keyword map literal (#271): the `{k nil …}` template constant's
+/// keys over `vals`, sharing its interned shape (a non-map template,
+/// which the compiler never emits, builds nil).
+#[must_use]
+pub fn kw_map(template: &Value, vals: &[Value]) -> Value {
+    match template {
+        Value::Map(t) => Value::Map(Map::with_vals(t, vals.to_vec())),
+        _ => Value::Nil,
+    }
 }
 
 /// A set literal (elements realized, like the interpreter).
@@ -360,6 +443,42 @@ pub fn read_constant(text: &str) -> Result<Value, String> {
     .map_err(|e| e.message())
 }
 
+/// `^{k v …} ns/name` exactly as [`read_constant`] builds it — the
+/// metadata pairs (`kvs`, interleaved) inserted one by one into an empty
+/// map, like the reader's merge — so pooled symbol constants with
+/// metadata (`defn-`'s `{:private true}`) skip the reader (#271).
+#[must_use]
+pub fn meta_symbol(ns: Option<&str>, name: &str, kvs: &[Value]) -> Value {
+    let mut meta = new_map();
+    for pair in kvs.chunks(2) {
+        meta = meta.insert(pair[0].clone(), pair[1].clone());
+    }
+    Value::Symbol(Symbol::new(ns, name)).with_meta(Some(meta))
+}
+
+/// A metadata-free constant collection over its items, built by the
+/// reader's own constructors (#271: pooled constants skip the reader).
+/// `kind`: 0 list, 1 vector, 2 map (`items` interleave keys and
+/// values), anything else a set.
+#[must_use]
+pub fn const_coll(kind: u64, items: &[Value]) -> Value {
+    match kind {
+        0 if items.is_empty() => Value::List(List::new_sync()),
+        0 => Value::List(List::from_vec(items.to_vec())),
+        1 => Value::Vector(Vector::from_vec(items.to_vec())),
+        2 => {
+            let pairs = items
+                .chunks(2)
+                .map(|p| (p[0].clone(), p[1].clone()))
+                .collect();
+            Value::Map(Map::from_kvs_checked(pairs).expect("constant map keys are distinct"))
+        }
+        _ => Value::Set(
+            Set::from_items_checked(items.to_vec()).expect("constant set items are distinct"),
+        ),
+    }
+}
+
 /// Print a constant for [`read_constant`], with metadata.
 #[must_use]
 pub fn print_constant(value: &Value) -> String {
@@ -576,6 +695,21 @@ pub fn destructure_encoded(
     Ok(out)
 }
 
+/// A map-destructure source as the bindings read it (#271): a list
+/// converts to its map (`seq_to_map`), anything else is itself.
+pub fn destructure_source(eval: &mut Evaluator, value: &Value) -> Result<Value, Signal> {
+    eval.seq_to_map(value)
+}
+
+/// A map-destructure binding's lookup in a converted source (#271):
+/// present keys only (a present `nil` stays `nil`), over the shapes the
+/// interpreter's own binding reads (records, maps, map entries,
+/// int-keyed vectors and strings, sets).
+#[must_use]
+pub fn destructure_lookup(coll: &Value, key: &Value) -> Option<Value> {
+    crate::eval::lookup(coll, key)
+}
+
 /// How many locals a pattern binds.
 #[must_use]
 pub fn pattern_local_count(pat: &crate::expr::Pattern) -> usize {
@@ -621,6 +755,45 @@ pub fn bind_counts() -> Arc<BindCounts> {
     crate::env::bind_counts()
 }
 
+/// The argument-count bit a caller of compiled code sets when it hands
+/// its argument array over (`call_owned`): the callee may then take a
+/// param it consumes (moving it out, leaving nil) instead of cloning it,
+/// so e.g. `reduce`'s accumulator reaches `assoc` uniquely owned (#271).
+/// The count itself is the low bits.
+pub const TAKE_ARGS: u64 = 1 << 62;
+
+/// Per-argument ownership bit shift (`TAKE_ARG_SHIFT + (i & 31)`):
+/// a compiled caller sets bit `30 + i` in `n` when `argv[i]` is an owned
+/// temporary or moved last-use local that the callee may move out in place.
+pub const TAKE_ARG_SHIFT: u32 = 30;
+
+/// The single-argument ownership bit in `n` for parameter `i`.
+#[inline]
+#[must_use]
+pub const fn single_take_arg_bit(i: usize) -> u64 {
+    1u64 << (TAKE_ARG_SHIFT + ((i & 31) as u32))
+}
+
+/// The bitmask in `n` allowing parameter `i` to be moved out of `argv[i]`:
+/// either [`TAKE_ARGS`] (all args owned) or [`single_take_arg_bit`].
+#[inline]
+#[must_use]
+pub const fn take_arg_mask(i: usize) -> u64 {
+    TAKE_ARGS | single_take_arg_bit(i)
+}
+
+/// Parse a JVM `Long/parseLong` base-10 string (`None` on malformed or out-of-range).
+#[must_use]
+pub fn parse_long_str(s: &str) -> Option<i64> {
+    crate::core::parse_long_str(s)
+}
+
+/// Parse a JVM `Double/parseDouble` string (`None` on malformed input).
+#[must_use]
+pub fn parse_double_str(s: &str) -> Option<f64> {
+    crate::core::parse_double_str(s)
+}
+
 /// Call `callee` (a cached var root) with `args` by value: a native
 /// runs its entry directly (an owned-args entry gets them moved in —
 /// no per-arg clone/drop, and head-releasing loopers can free as they
@@ -631,10 +804,7 @@ pub fn call_value_owned(
     args: smallvec::SmallVec<[Value; 4]>,
 ) -> Step {
     if let Some(native) = crate::ext::as_native(callee) {
-        return match &native.owned {
-            Some(owned) => owned(eval, args).map_err(|e| eval.throw(e)),
-            None => (native.func)(eval, &args).map_err(|e| eval.throw(e)),
-        };
+        return native.call_owned(eval, args).map_err(|e| eval.throw(e));
     }
     eval.call(callee, &args)
 }
@@ -657,15 +827,49 @@ pub fn leave_call(eval: &mut Evaluator) {
 /// A core native's entries, resolved once (the compiled program
 /// cannot rebind core vars when it uses these).
 pub struct CoreEntry {
-    func: Arc<crate::ext::NativeImpl>,
-    owned: Option<Arc<crate::ext::OwnedNativeImpl>>,
+    func: crate::ext::NativeTarget,
+    owned: Option<crate::ext::OwnedTarget>,
+}
+
+impl CoreEntry {
+    /// Call the native over borrowed args, as [`call_core`] does (#271):
+    /// an owned-args native takes clones by value, a borrowing one gets
+    /// them in a stack array (one or a few args) — one entry resolution
+    /// either way, where an owned native used to be cloned for, refused,
+    /// cloned again and resolved a second time.
+    pub fn call_refs(&self, eval: &mut Evaluator, args: &[&Value]) -> Result<Value, NativeError> {
+        if let Some(owned) = &self.owned {
+            return owned.call(eval, args.iter().map(|a| (*a).clone()).collect());
+        }
+        match *args {
+            [a] => self.func.call(eval, std::slice::from_ref(a)),
+            [a, b] => self.func.call(eval, &[a.clone(), b.clone()]),
+            [a, b, c] => self.func.call(eval, &[a.clone(), b.clone(), c.clone()]),
+            _ => {
+                let owned: smallvec::SmallVec<[Value; 4]> =
+                    args.iter().map(|a| (*a).clone()).collect();
+                self.func.call(eval, &owned)
+            }
+        }
+    }
+}
+
+/// A Lite native's [`CoreEntry`] straight from the registered tables —
+/// compiled code calling it directly needs no var, so its install stays
+/// lazy (`None`: not a Lite native; see `aot_boot::lite_entry`).
+#[must_use]
+pub fn lite_core_entry(
+    decl: (&str, &str, u32),
+    tables: crate::aot_boot::LiteTables,
+) -> Option<CoreEntry> {
+    crate::aot_boot::lite_entry(decl, tables).map(|(func, owned)| CoreEntry { func, owned })
 }
 
 /// Resolve var `var`'s root as a [`CoreEntry`] (`None`: not a native).
 pub fn core_entry(eval: &mut Evaluator, var: &Var) -> Option<CoreEntry> {
     let root = eval.deref_var_cached(var.id, &var.sym);
     crate::ext::as_native(&root).map(|n| CoreEntry {
-        func: Arc::clone(&n.func),
+        func: n.func.clone(),
         owned: n.owned.clone(),
     })
 }
@@ -677,8 +881,8 @@ pub fn call_core(
     args: smallvec::SmallVec<[Value; 4]>,
 ) -> Step {
     match &entry.owned {
-        Some(owned) => owned(eval, args).map_err(|e| eval.throw(e)),
-        None => (entry.func)(eval, &args).map_err(|e| eval.throw(e)),
+        Some(owned) => owned.call(eval, args).map_err(|e| eval.throw(e)),
+        None => entry.func.call(eval, &args).map_err(|e| eval.throw(e)),
     }
 }
 
@@ -686,7 +890,10 @@ pub fn call_core(
 /// id for [`apply_inline`]), if it has one.
 #[must_use]
 pub fn inline_op(name: &str, arity: usize) -> Option<u32> {
-    use crate::vm_ops::{APPLY1, APPLY2, APPLY3, APPLYN};
+    use crate::vm_ops::{APPLY1, APPLY2, APPLY3, APPLYN, RE_MATCHES_OP};
+    if arity == 2 && name == RE_MATCHES_OP.0 {
+        return Some(RE_MATCHES_TAG);
+    }
     let pos = match arity {
         1 => APPLY1.iter().position(|r| r.0 == name),
         2 => APPLY2.iter().position(|r| r.0 == name),
@@ -705,20 +912,28 @@ pub fn inline_op(name: &str, arity: usize) -> Option<u32> {
 
 /// [`inline_op`]'s mark for a 3+-argument fold or comparison chain.
 const NARY_OP: u32 = 1 << 30;
+/// Dedicated inline tag for `(re-matches pat s)` so `APPLY2` stays regex-free.
+const RE_MATCHES_TAG: u32 = 1 << 29;
 
-/// Bit mask covering disjoint op-namespace tag bits so [`NARY_OP`] and
-/// [`OWN_BIT`] can never alias inside shared `u32` dispatch helpers.
-const TAG_MASK: u32 = NARY_OP | OWN_BIT;
+/// Bit mask covering disjoint op-namespace tag bits so [`RE_MATCHES_TAG`],
+/// [`NARY_OP`], and [`OWN_BIT`] can never alias inside shared `u32` dispatch helpers.
+const TAG_MASK: u32 = RE_MATCHES_TAG | NARY_OP | OWN_BIT;
+
+/// Whether `id` is the dedicated regex inline op (`(re-matches ...)`).
+#[must_use]
+pub const fn is_re_op(id: u32) -> bool {
+    id == RE_MATCHES_TAG
+}
 
 /// Apply inline op `id` ([`inline_op`] at `args.len()`) to borrowed
-/// args — the same inline answers the VM gives. `None`: the case is not
-/// covered (or `id` names no op), so the caller runs the native.
+/// args — the same inline answers the VM gives (excluding regex ops so
+/// non-regex AOT binaries strip `regex_automata`).
 #[must_use]
 pub fn apply_inline(id: u32, args: &[&Value]) -> Option<Value> {
     use crate::vm_ops::APPLYN;
     match args {
         [a] => apply1(id, a),
-        [a, b] => apply2(id, a, b),
+        [a, b] => apply2_no_re(id, a, b),
         [a, b, c] => apply3(id, a, b, c),
         _ if id != u32::MAX && (id & TAG_MASK) == NARY_OP => {
             let (_, op, chain) = APPLYN.get((id & !NARY_OP) as usize)?;
@@ -734,10 +949,26 @@ pub fn apply1(id: u32, a: &Value) -> Option<Value> {
     crate::vm_ops::APPLY1.get(id as usize)?.1(a)
 }
 
-/// [`apply_inline`] for two args.
+/// [`apply_inline`] for two args (including `re-matches`).
 #[must_use]
 pub fn apply2(id: u32, a: &Value, b: &Value) -> Option<Value> {
+    if id == RE_MATCHES_TAG {
+        return apply_re_matches(a, b);
+    }
+    apply2_no_re(id, a, b)
+}
+
+/// [`apply_inline`] for two args excluding `re-matches` (keeps `regex_automata`
+/// stripped from non-regex AOT binaries).
+#[must_use]
+pub fn apply2_no_re(id: u32, a: &Value, b: &Value) -> Option<Value> {
     crate::vm_ops::APPLY2.get(id as usize)?.1(a, b)
+}
+
+/// Inline `(re-matches pat s)` fast path for `rt_n_op2_re`.
+#[must_use]
+pub fn apply_re_matches(a: &Value, b: &Value) -> Option<Value> {
+    (crate::vm_ops::RE_MATCHES_OP.1)(a, b)
 }
 
 /// Cached O(1) ASCII check for strings (memoizes long strings after one scan).
@@ -837,18 +1068,19 @@ pub fn delay(f: Value) -> Value {
 /// every call.
 pub fn bound_fn(eval: &mut Evaluator, f: Value) -> Value {
     let conveyed = eval.bindings.clone();
-    let display: Arc<str> = Arc::from("clojure.core/bound-fn");
-    let func = Arc::new(move |ev: &mut Evaluator, args: &[Value]| {
-        let depth = ev.bindings_depth();
-        let frame: Vec<(Var, Value)> = conveyed
-            .pairs()
-            .map(|(v, x)| (v.clone(), x.clone()))
-            .collect();
-        ev.push_frame(frame);
-        let out = ev.call(&f, args);
-        ev.pop_bindings(depth);
-        out.map_err(signal_to_native)
-    });
+    let display = crate::ext::DisplayName::shared("clojure.core/bound-fn");
+    let func =
+        crate::ext::NativeTarget::Dyn(Arc::new(move |ev: &mut Evaluator, args: &[Value]| {
+            let depth = ev.bindings_depth();
+            let frame: Vec<(Var, Value)> = conveyed
+                .pairs()
+                .map(|(v, x)| (v.clone(), x.clone()))
+                .collect();
+            ev.push_frame(frame);
+            let out = ev.call(&f, args);
+            ev.pop_bindings(depth);
+            out.map_err(signal_to_native)
+        }));
     Value::Extension(Arc::new(crate::ext::NativeFn {
         id: eval.next_id(),
         display,
@@ -856,6 +1088,7 @@ pub fn bound_fn(eval: &mut Evaluator, f: Value) -> Value {
         owned: None,
         meta: None,
         fast: crate::ext::FastArith::None,
+        compiled: None,
     }))
 }
 
@@ -930,6 +1163,9 @@ const OWN_OPS: &[(&str, usize, OwnFn)] = &[
         1,
         <crate::vm_ops::Rest as crate::vm_ops::Upd>::apply,
     ),
+    ("update", 3, crate::vm_ops::apply_update3),
+    ("assoc-in2", 4, crate::vm_ops::apply_assoc_in2),
+    ("update-in2", 4, crate::vm_ops::apply_update_in2),
 ];
 
 /// Opcode for [`apply_own`], matching core fns whose in-place `Upd`
@@ -953,9 +1189,587 @@ pub fn apply_own(id: u32, args: &mut [Value]) -> Option<Value> {
         .and_then(|(_, _, f)| f(args))
 }
 
+/// Repack unboxed 2-key path arguments (`[m, k1, k2, vf]`) back into the
+/// 3-argument `[m, [k1 k2], vf]` form when [`apply_own`] falls back to the
+/// general `assoc-in` / `update-in` native.
+pub fn repack_own_args(id: u32, args: &mut smallvec::SmallVec<[Value; 4]>) {
+    if (id & OWN_BIT) != 0
+        && matches!(
+            OWN_OPS.get((id & !OWN_BIT) as usize),
+            Some(&("assoc-in2" | "update-in2", 4, _))
+        )
+        && args.len() == 4
+    {
+        let k2 = args.remove(2);
+        let k1 = std::mem::replace(&mut args[1], Value::Nil);
+        args[1] = Value::Vector(Vector::from_vec(vec![k1, k2]));
+    }
+}
+
+/// A compiled loop's direct iteration plan (#271 Slice 4c/5k): `(1, count,
+/// 0, 0)` for a persistent vector, subvector, or split vector (items by
+/// index, [`vec_item`]), `(2, count, start, step)` for a long range (items
+/// `start`, `start + step`, …). `None`: the loop takes the general call,
+/// which walks the seq exactly as `run` does (lazy forcing order included).
+#[must_use]
+pub fn iter_plan(coll: &Value) -> Option<(u8, i64, i64, i64)> {
+    match coll {
+        Value::Vector(v) => Some((1, i64::try_from(v.len()).ok()?, 0, 0)),
+        Value::Extension(e) => {
+            let any = e.as_any();
+            if let Some(sv) = any.downcast_ref::<clj_value::SubVectorValue>() {
+                return Some((1, i64::try_from(sv.len()).ok()?, 0, 0));
+            }
+            if let Some(sp) = any.downcast_ref::<clj_value::SplitVecValue>() {
+                return Some((1, i64::try_from(sp.len()).ok()?, 0, 0));
+            }
+            let r = any.downcast_ref::<clj_value::RangeValue>()?;
+            match (r.is_long(), r.count(), r.cur(), r.step()) {
+                (true, Some(n), RangeNum::Int(start), RangeNum::Int(step)) => {
+                    Some((2, n, start, step))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Item `i` of an indexed vector/subvector/split-vector (an index below
+/// [`iter_plan`]'s count; anything else is nil).
+#[must_use]
+pub fn vec_item(v: &Value, i: usize) -> Value {
+    match v {
+        Value::Vector(v) => v.get(i).unwrap_or(Value::Nil),
+        Value::Extension(e) => {
+            let any = e.as_any();
+            if let Some(sv) = any.downcast_ref::<clj_value::SubVectorValue>() {
+                return sv.nth(i).unwrap_or(Value::Nil);
+            }
+            if let Some(sp) = any.downcast_ref::<clj_value::SplitVecValue>() {
+                return sp.nth(i).unwrap_or(Value::Nil);
+            }
+            Value::Nil
+        }
+        _ => Value::Nil,
+    }
+}
+
+#[derive(Debug)]
+enum VecBuf {
+    Ints(Vec<i64>),
+    Doubles(Vec<f64>),
+    Generic(Vec<Value>),
+}
+
+impl Default for VecBuf {
+    fn default() -> Self {
+        Self::Ints(Vec::new())
+    }
+}
+
+/// A compiled `mapv` / `vec` / `into []` loop's accumulator (#271): items
+/// gather in a plain buffer, packed while every item is a long or every
+/// item is a double, and become one persistent vector when the loop ends.
+/// Only the loop ever holds it, so pushes take no lock and no copy-on-write check.
+#[derive(Debug, Default)]
+pub struct VecBuilder {
+    buf: VecBuf,
+}
+
+impl VecBuilder {
+    fn push(&mut self, v: Value) {
+        let next = match (&mut self.buf, v) {
+            (VecBuf::Ints(xs), Value::Int(n)) => {
+                xs.push(n);
+                None
+            }
+            (VecBuf::Ints(xs), Value::Double(d)) if xs.is_empty() => Some(VecBuf::Doubles(vec![d])),
+            (VecBuf::Ints(xs), other) => {
+                let mut g: Vec<Value> = xs.drain(..).map(Value::Int).collect();
+                g.push(other);
+                Some(VecBuf::Generic(g))
+            }
+            (VecBuf::Doubles(xs), Value::Double(d)) => {
+                xs.push(d);
+                None
+            }
+            (VecBuf::Doubles(xs), other) => {
+                let mut g: Vec<Value> = xs.drain(..).map(Value::Double).collect();
+                g.push(other);
+                Some(VecBuf::Generic(g))
+            }
+            (VecBuf::Generic(xs), other) => {
+                xs.push(other);
+                None
+            }
+        };
+        if let Some(buf) = next {
+            self.buf = buf;
+        }
+    }
+
+    fn freeze(&mut self) -> Vector {
+        match std::mem::take(&mut self.buf) {
+            VecBuf::Ints(xs) => Vector::from_flat_ints(xs),
+            VecBuf::Doubles(xs) => Vector::from_flat_doubles(xs),
+            VecBuf::Generic(xs) => Vector::from_vec(xs),
+        }
+    }
+}
+
+impl clj_value::ExtensionValue for VecBuilder {
+    fn class_name(&self) -> String {
+        "clojure.lang.PersistentVector$TransientVector".to_owned()
+    }
+
+    fn print(&self) -> String {
+        "#object[clojure.lang.PersistentVector$TransientVector]".to_owned()
+    }
+
+    fn dyn_eq(&self, other: &dyn clj_value::ExtensionValue) -> bool {
+        std::ptr::addr_eq(self, other)
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_usize(std::ptr::from_ref(self).addr());
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+}
+
+/// A fresh [`VecBuilder`] accumulator.
+#[must_use]
+pub fn vec_builder() -> Value {
+    Value::Extension(Arc::new(VecBuilder::default()))
+}
+
+fn builder(acc: &mut Value) -> Option<&mut VecBuilder> {
+    let Value::Extension(e) = acc else {
+        return None;
+    };
+    Arc::get_mut(e)?.as_any_mut()?.downcast_mut::<VecBuilder>()
+}
+
+/// Append `v` to a loop's [`VecBuilder`] accumulator.
+pub fn vec_push(acc: &mut Value, v: Value) {
+    if let Some(b) = builder(acc) {
+        b.push(v);
+    }
+}
+
+/// The loop's result: its [`VecBuilder`] frozen into a persistent vector.
+pub fn vec_done(acc: &mut Value) -> Value {
+    builder(acc).map_or(Value::Nil, |b| Value::Vector(b.freeze()))
+}
+
+/// Unwrap a `reduced` accumulator in place (`true`: it was one, so the
+/// compiled `reduce` loop stops).
+pub fn unreduce(v: &mut Value) -> bool {
+    let Some(inner) = crate::core::as_reduced(v).cloned() else {
+        return false;
+    };
+    *v = inner;
+    true
+}
+
+fn str_window(coll: &Value) -> Option<(usize, usize)> {
+    if let Value::Vector(v) = coll {
+        return Some((0, v.len()));
+    }
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return Some((0, sp.len()));
+    }
+    crate::lazy::as_subvector(coll).map(|sv| (sv.start(), sv.end()))
+}
+
+fn vec_str_at(v: &Vector, i: usize) -> Option<&str> {
+    match v.get_val_ref(i)? {
+        clj_value::ValueRef::Str(s) => Some(s),
+        clj_value::ValueRef::Ref(Value::Str(s)) => Some(s),
+        _ => None,
+    }
+}
+
+fn str_item(coll: &Value, i: usize) -> Option<&str> {
+    if let Value::Vector(v) = coll {
+        return vec_str_at(v, i);
+    }
+    if let Some(sp) = crate::lazy::as_splitvec(coll) {
+        return sp.piece_str(i);
+    }
+    vec_str_at(crate::lazy::as_subvector(coll)?.vec(), i)
+}
+
+/// Parse a string collection (`Vector`, `SplitVecValue`, `SubVectorValue`)
+/// in one pass without materializing token strings (`mode`: 0 `Long/parseLong`,
+/// 1 `Integer/parseInt`, 2 `Double/parseDouble`). Returns `None` on non-string
+/// collections or any malformed token so the caller's general path raises the
+/// exact exception at the failing element.
+#[must_use]
+pub fn try_mapv_parse_num(coll: &Value, mode: u8) -> Option<Value> {
+    let (start, end) = str_window(coll)?;
+    if mode == 2 {
+        let mut out = Vec::with_capacity(end - start);
+        for i in start..end {
+            out.push(parse_double_str(str_item(coll, i)?)?);
+        }
+        return Some(Value::Vector(Vector::from_flat_doubles(out)));
+    }
+    let mut ints = Vec::with_capacity(end - start);
+    for i in start..end {
+        let n = parse_long_str(str_item(coll, i)?)?;
+        if mode == 1 && i32::try_from(n).is_err() {
+            return None;
+        }
+        ints.push(n);
+    }
+    Some(Value::Vector(Vector::from_flat_ints(ints)))
+}
+
+fn num_val_as_i64(vr: clj_value::ValueRef<'_>) -> Option<i64> {
+    match vr {
+        clj_value::ValueRef::Int(n) => Some(n),
+        clj_value::ValueRef::Ref(Value::Int(n)) => Some(*n),
+        _ => None,
+    }
+}
+
+fn dot_ints(mut acc: i64, v1: &Vector, v2: &Vector) -> Option<Value> {
+    if let (Some(s1), Some(s2)) = (v1.as_flat_ints(), v2.as_flat_ints()) {
+        for (&x, &y) in s1.iter().zip(s2.iter()) {
+            acc = acc.checked_add(x.checked_mul(y)?)?;
+        }
+        return Some(Value::Int(acc));
+    }
+    let n = v1.len().min(v2.len());
+    for i in 0..n {
+        let x = num_val_as_i64(v1.get_val_ref(i)?)?;
+        let y = num_val_as_i64(v2.get_val_ref(i)?)?;
+        acc = acc.checked_add(x.checked_mul(y)?)?;
+    }
+    Some(Value::Int(acc))
+}
+
+fn num_val_as_f64(vr: clj_value::ValueRef<'_>) -> Option<f64> {
+    match vr {
+        clj_value::ValueRef::Double(d) => Some(d),
+        clj_value::ValueRef::Ref(Value::Double(d)) => Some(*d),
+        _ => None,
+    }
+}
+
+fn dot_doubles_flat(mut acc: f64, v1: &Vector, v2: &Vector) -> Option<Value> {
+    if let (Some(s1), Some(s2)) = (v1.as_flat_doubles(), v2.as_flat_doubles()) {
+        for (&x, &y) in s1.iter().zip(s2.iter()) {
+            acc += x * y;
+        }
+        return Some(Value::Double(acc));
+    }
+    if let (Some(s1), Some(s2)) = (v1.as_flat_doubles(), v2.as_flat_ints()) {
+        for (&x, &y) in s1.iter().zip(s2.iter()) {
+            acc += x * (y as f64);
+        }
+        return Some(Value::Double(acc));
+    }
+    if let (Some(s1), Some(s2)) = (v1.as_flat_ints(), v2.as_flat_doubles()) {
+        for (&x, &y) in s1.iter().zip(s2.iter()) {
+            acc += (x as f64) * y;
+        }
+        return Some(Value::Double(acc));
+    }
+    None
+}
+
+fn dot_doubles(mut acc: f64, v1: &Vector, v2: &Vector) -> Option<Value> {
+    if let Some(res) = dot_doubles_flat(acc, v1, v2) {
+        return Some(res);
+    }
+    let n = v1.len().min(v2.len());
+    for i in 0..n {
+        let r1 = v1.get_val_ref(i)?;
+        let r2 = v2.get_val_ref(i)?;
+        let prod = match (num_val_as_f64(r1), num_val_as_f64(r2)) {
+            (Some(x), Some(y)) => x * y,
+            (Some(x), None) => x * num_val_as_i64(r2)? as f64,
+            (None, Some(y)) => num_val_as_i64(r1)? as f64 * y,
+            (None, None) => num_val_as_i64(r1)?.checked_mul(num_val_as_i64(r2)?)? as f64,
+        };
+        acc += prod;
+    }
+    Some(Value::Double(acc))
+}
+
+/// Fast path for `(reduce + init (map * c1 c2))` over two vectors when
+/// `init` and all elements are `Int` or `Double`.
+#[must_use]
+pub fn try_dot_product(init: &Value, c1: &Value, c2: &Value) -> Option<Value> {
+    let (Value::Vector(v1), Value::Vector(v2)) = (c1, c2) else {
+        return None;
+    };
+    match init {
+        Value::Int(acc) => dot_ints(*acc, v1, v2),
+        Value::Double(acc) => dot_doubles(*acc, v1, v2),
+        _ => None,
+    }
+}
+
+/// Streaming fast path for `(println|print (clojure.string/join sep coll))`.
+pub fn try_print_join(
+    eval: &mut Evaluator,
+    sep: &Value,
+    coll: &Value,
+    flags: u8,
+    hit: &mut u8,
+) -> Result<(), Signal> {
+    let h = crate::io::try_print_join(eval, sep, coll, flags).map_err(|e| eval.throw(e))?;
+    *hit = u8::from(h);
+    Ok(())
+}
+
+/// Fold `res` into `acc` using `clojure.core/+` for a compiled
+/// `(reduce + [init] (map F ...))` loop.
+pub fn add_acc(eval: &mut Evaluator, acc: &mut Value, res: Value) -> Result<(), Signal> {
+    match (&mut *acc, &res) {
+        (Value::Double(a), Value::Double(b)) => {
+            *a += *b;
+            return Ok(());
+        }
+        (Value::Double(a), Value::Int(b)) => {
+            *a += *b as f64;
+            return Ok(());
+        }
+        (Value::Int(a), Value::Double(b)) => {
+            *acc = Value::Double(*a as f64 + *b);
+            return Ok(());
+        }
+        (Value::Int(a), Value::Int(b)) => {
+            if let Some(sum) = a.checked_add(*b) {
+                *a = sum;
+                return Ok(());
+            }
+        }
+        _ => {}
+    }
+    let lhs = std::mem::replace(acc, Value::Nil);
+    *acc = crate::core::native_add(eval, &[lhs, res]).map_err(|e| eval.throw(e))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_set_and_keyword_calls_look_up_directly_271() {
+        let mut eval = crate::boot();
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        let m = Value::Map(Map::from_kvs_last_wins(vec![(kw("a"), Value::Int(1))]));
+        let s = Value::Set(clj_value::new_set().insert(Value::Int(2)));
+        let sym = Value::Symbol(Symbol::new(None, "a"));
+        let sm = Value::Map(Map::from_kvs_last_wins(vec![(sym.clone(), Value::Int(3))]));
+        let mut call = |f: &Value, args: &[Value]| invoke(&mut eval, f, args).ok();
+        assert_eq!(call(&m, &[kw("a")]), Some(Value::Int(1)));
+        assert_eq!(call(&m, &[kw("b"), Value::Int(9)]), Some(Value::Int(9)));
+        assert_eq!(call(&s, &[Value::Int(2)]), Some(Value::Int(2)));
+        assert_eq!(call(&s, &[Value::Int(5)]), Some(Value::Nil));
+        assert_eq!(
+            call(&kw("a"), std::slice::from_ref(&m)),
+            Some(Value::Int(1))
+        );
+        assert_eq!(call(&sym, &[sm, Value::Nil]), Some(Value::Int(3)));
+        // Other arities keep the general call (and its arity error).
+        assert_eq!(call(&m, &[]), None);
+        assert_eq!(call(&kw("a"), &[m.clone(), Value::Nil, Value::Nil]), None);
+        // The general call answers the same (natives still reach it).
+        assert_eq!(
+            eval.call(&s, &[Value::Int(5), Value::Int(0)]).ok(),
+            Some(Value::Int(0))
+        );
+    }
+
+    #[test]
+    fn kw_map_shares_its_template_keys() {
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        let template = Value::Map(Map::from_kvs_last_wins(vec![(kw("a"), Value::Nil)]));
+        let built = kw_map(&template, &[Value::Int(1)]);
+        assert_eq!(
+            built,
+            Value::Map(Map::from_kvs_last_wins(vec![(kw("a"), Value::Int(1))]))
+        );
+        assert_eq!(kw_map(&Value::Nil, &[Value::Int(1)]), Value::Nil);
+    }
+
+    #[test]
+    fn meta_symbols_match_their_read_back() {
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        for (ns, name, kvs, text) in [
+            (
+                Some("user"),
+                "f",
+                vec![kw("private"), Value::Bool(true)],
+                "^{:private true} user/f",
+            ),
+            (
+                None,
+                "g",
+                vec![
+                    kw("tag"),
+                    Value::Symbol(Symbol::new(None, "String")),
+                    kw("dynamic"),
+                    Value::Bool(true),
+                    kw("doc"),
+                    Value::Str(std::sync::Arc::from("d")),
+                    kw("n"),
+                    Value::Int(3),
+                ],
+                "^{:tag String :dynamic true :doc \"d\" :n 3} g",
+            ),
+        ] {
+            let built = meta_symbol(ns, name, &kvs);
+            let read = read_constant(text).expect("reads");
+            assert_eq!(print_constant(&built), print_constant(&read));
+            assert_eq!(built.meta(), read.meta());
+        }
+    }
+
+    #[test]
+    fn owned_vector_literals_match_the_cloning_ones() {
+        let s = Value::Str(Arc::from("s"));
+        for items in [
+            vec![Value::Int(1), Value::Int(2)],
+            vec![Value::Int(1), s.clone()],
+            vec![s.clone(), Value::Int(2)],
+            vec![Value::Char('a'), Value::Char('b')],
+            Vec::new(),
+        ] {
+            let mut slots = items.clone();
+            let owned = vec_lit_owned(&mut slots, None);
+            assert_eq!(owned, vec_lit(items.clone(), None), "{items:?}");
+            assert!(
+                slots
+                    .iter()
+                    .all(|v| matches!(v, Value::Nil | Value::Int(_)))
+            );
+        }
+    }
+
+    #[test]
+    fn loop_plans_vectors_and_long_ranges() {
+        use clj_value::RangeValue;
+        let v = Value::Vector(Vector::from_vec(vec![Value::Int(7), Value::Int(8)]));
+        assert_eq!(iter_plan(&v), Some((1, 2, 0, 0)));
+        assert_eq!(vec_item(&v, 1), Value::Int(8));
+        assert_eq!(vec_item(&Value::Nil, 0), Value::Nil);
+        let range = |cur, end, step, long, count| {
+            Value::Extension(Arc::new(RangeValue::new(cur, end, step, long, count)))
+        };
+        let long = range(
+            RangeNum::Int(3),
+            Some(RangeNum::Int(9)),
+            RangeNum::Int(2),
+            true,
+            Some(3),
+        );
+        assert_eq!(iter_plan(&long), Some((2, 3, 3, 2)));
+        let dbl = range(
+            RangeNum::Double(0.0),
+            Some(RangeNum::Double(1.0)),
+            RangeNum::Double(0.5),
+            false,
+            None,
+        );
+        assert_eq!(iter_plan(&dbl), None);
+        let mut reduced = crate::core::Reduced::wrap(Value::Int(5));
+        assert_eq!(iter_plan(&reduced), None);
+        assert_eq!(iter_plan(&Value::Nil), None);
+        assert!(unreduce(&mut reduced));
+        assert_eq!(reduced, Value::Int(5));
+        assert!(!unreduce(&mut reduced));
+        let ints = |xs: &[i64]| {
+            Value::Vector(Vector::from_vec(
+                xs.iter().map(|n| Value::Int(*n)).collect(),
+            ))
+        };
+        let mut acc = vec_builder();
+        vec_push(&mut acc, Value::Int(1));
+        vec_push(&mut acc, Value::Int(2));
+        assert_eq!(vec_done(&mut acc), ints(&[1, 2]));
+        let mut mixed = vec_builder();
+        vec_push(&mut mixed, Value::Int(1));
+        vec_push(&mut mixed, Value::Nil);
+        vec_push(&mut mixed, Value::Int(3));
+        let want = Value::Vector(Vector::from_vec(vec![
+            Value::Int(1),
+            Value::Nil,
+            Value::Int(3),
+        ]));
+        assert_eq!(vec_done(&mut mixed), want);
+        let mut not_builder = Value::Int(3);
+        vec_push(&mut not_builder, Value::Int(1));
+        assert_eq!(vec_done(&mut not_builder), Value::Nil);
+        let mut shared = vec_builder();
+        let _other = shared.clone();
+        vec_push(&mut shared, Value::Int(1));
+        assert_eq!(vec_done(&mut shared), Value::Nil);
+        use clj_value::ExtensionValue;
+        let mut b = VecBuilder::default();
+        assert!(b.class_name().ends_with("TransientVector"));
+        assert!(b.print().starts_with("#object["));
+        assert!(b.dyn_eq(&b));
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        b.dyn_hash(&mut h);
+        assert!(b.as_any().is::<VecBuilder>());
+        assert!(b.as_any_mut().is_some());
+    }
+
+    #[test]
+    fn const_colls_match_the_reader() {
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        let sym = |n: &str| Value::Symbol(Symbol::new(None, n));
+        let vec_of = |xs: Vec<Value>| const_coll(1, &xs);
+        for (kind, items, text) in [
+            (0, vec![], "()"),
+            (
+                0,
+                vec![
+                    vec_of(vec![sym("x")]),
+                    vec_of(vec![sym("x"), sym("&"), sym("y")]),
+                ],
+                "([x] [x & y])",
+            ),
+            (
+                1,
+                vec![Value::Str(std::sync::Arc::from("java.lang.Exception"))],
+                "[\"java.lang.Exception\"]",
+            ),
+            (
+                2,
+                vec![
+                    kw("added"),
+                    Value::Str(std::sync::Arc::from("1.0")),
+                    kw("n"),
+                    Value::Int(2),
+                ],
+                "{:added \"1.0\", :n 2}",
+            ),
+            (3, vec![kw("a"), Value::Int(1)], "#{:a 1}"),
+        ] {
+            let built = const_coll(kind, &items);
+            let read = read_constant(text).expect("reads");
+            assert_eq!(built, read);
+            // Read lists carry their read position; built ones carry none.
+            let shown = |v: &Value| print_constant(&v.clone().with_meta(None));
+            assert_eq!(shown(&built), shown(&read));
+            assert!(built.meta().is_none());
+        }
+    }
 
     #[test]
     fn only_throws_carry_a_throwable() {
@@ -1025,5 +1839,241 @@ mod tests {
         assert_eq!(apply_own(mul3_id, &mut mul_args), None);
         let mut assoc_miss = [Value::Int(2), Value::Int(3), Value::Int(4)];
         assert_eq!(apply_own(assoc_id, &mut assoc_miss), None);
+
+        let re_id = inline_op("re-matches", 2).expect("re-matches");
+        assert!(is_re_op(re_id));
+        assert!(!is_re_op(add_id));
+        let re_pattern = crate::re::RE_NATIVES
+            .iter()
+            .find(|&&(k, _)| k == "re-pattern")
+            .expect("re-pattern")
+            .1;
+        let pat = re_pattern(
+            &mut Evaluator::new_bare("user"),
+            &[Value::Str(Arc::from("a+"))],
+        )
+        .expect("pat");
+        let aa = Value::Str(Arc::from("aa"));
+        assert_eq!(apply2_no_re(re_id, &pat, &aa), None);
+        assert_eq!(apply2(re_id, &pat, &aa), Some(aa.clone()));
+        assert_eq!(
+            apply2(add_id, &Value::Int(2), &Value::Int(3)),
+            Some(Value::Int(5))
+        );
+        assert_eq!(apply_re_matches(&pat, &aa), Some(aa));
+    }
+
+    #[test]
+    fn try_mapv_parse_num_covers_vectors_splits_subvecs_and_misses() {
+        let strs = |xs: &[&str]| {
+            Value::Vector(Vector::from_vec(
+                xs.iter().map(|s| Value::Str(Arc::from(*s))).collect(),
+            ))
+        };
+        let ints = |xs: &[i64]| Value::Vector(Vector::from_flat_ints(xs.to_vec()));
+        let dbls = |xs: &[f64]| {
+            Value::Vector(Vector::from_vec(
+                xs.iter().map(|d| Value::Double(*d)).collect(),
+            ))
+        };
+        // Generic Vector of strings (modes 0, 1, 2)
+        let gv = strs(&["-7", "42", "0"]);
+        assert_eq!(try_mapv_parse_num(&gv, 0), Some(ints(&[-7, 42, 0])));
+        assert_eq!(try_mapv_parse_num(&gv, 1), Some(ints(&[-7, 42, 0])));
+        assert_eq!(
+            try_mapv_parse_num(&strs(&["1.5", "-2.25"]), 2),
+            Some(dbls(&[1.5, -2.25]))
+        );
+        // PackedStrings vector (>= 256 items through TransientVector)
+        let mut tv = clj_value::TransientVector::new();
+        for i in 0..260 {
+            tv.conj(Value::Str(Arc::from(i.to_string()))).expect("conj");
+        }
+        let pv = Value::Vector(tv.persistent().expect("vec"));
+        assert!(matches!(&pv, Value::Vector(v) if v.as_packed_strs().is_some()));
+        let parsed = try_mapv_parse_num(&pv, 0).expect("packed long");
+        assert_eq!(parsed, ints(&(0..260).collect::<Vec<_>>()));
+        // SplitVecValue
+        let sp = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from("10 20 30"),
+            Arc::new(vec![(0, 2), (3, 2), (6, 2)]),
+        )));
+        assert_eq!(try_mapv_parse_num(&sp, 0), Some(ints(&[10, 20, 30])));
+        // SubVectorValue
+        let base_vec = Vector::from_vec(vec![
+            Value::Str(Arc::from("x")),
+            Value::Str(Arc::from("3")),
+            Value::Str(Arc::from("4")),
+        ]);
+        let sv = Value::Extension(Arc::new(clj_value::SubVectorValue::new(base_vec, 1, 3)));
+        assert_eq!(try_mapv_parse_num(&sv, 1), Some(ints(&[3, 4])));
+        // Misses: non-collection, non-string item, malformed token, i32 overflow on mode 1
+        assert_eq!(try_mapv_parse_num(&Value::Nil, 0), None);
+        assert_eq!(try_mapv_parse_num(&ints(&[1, 2]), 0), None);
+        assert_eq!(try_mapv_parse_num(&strs(&["1", "nope"]), 0), None);
+        assert_eq!(try_mapv_parse_num(&strs(&["1.0", "bad"]), 2), None);
+        assert_eq!(try_mapv_parse_num(&strs(&["3000000000"]), 1), None);
+        assert_eq!(
+            try_mapv_parse_num(&strs(&["3000000000"]), 0),
+            Some(ints(&[3_000_000_000]))
+        );
+    }
+
+    #[test]
+    fn try_dot_product_and_add_acc_cover_fast_and_fallback_paths() {
+        let flat = |xs: &[i64]| Value::Vector(Vector::from_flat_ints(xs.to_vec()));
+        let generic_ints = Value::Vector(Vector::from_vec(vec![
+            Value::Int(2),
+            Value::Int(5),
+            Value::Nil,
+        ]));
+        let dbls = |xs: &[f64]| {
+            Value::Vector(Vector::from_vec(
+                xs.iter().map(|d| Value::Double(*d)).collect(),
+            ))
+        };
+        let mixed = Value::Vector(Vector::from_vec(vec![Value::Double(1.5), Value::Int(4)]));
+        let non_num = Value::Vector(Vector::from_vec(vec![Value::Nil]));
+        // dot_ints: flat + generic + overflow miss + non-int miss
+        assert_eq!(
+            try_dot_product(&Value::Int(10), &flat(&[2, 3]), &flat(&[4, 5])),
+            Some(Value::Int(33))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Int(1), &generic_ints, &flat(&[3, 4])),
+            Some(Value::Int(27))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Int(0), &flat(&[i64::MAX]), &flat(&[2])),
+            None
+        );
+        assert_eq!(
+            try_dot_product(&Value::Int(0), &generic_ints, &non_num),
+            None
+        );
+        // dot_doubles: flat (Double, Double), (Double, Int), (Int, Double),
+        // generic/mixed fallback across all 4 combos, overflow/non-num miss
+        assert_eq!(
+            try_dot_product(&Value::Double(0.5), &dbls(&[2.0, 3.0]), &dbls(&[4.0, 5.0])),
+            Some(Value::Double(23.5))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &dbls(&[2.0, 3.0]), &flat(&[4, 5])),
+            Some(Value::Double(23.0))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &flat(&[2, 3]), &dbls(&[4.0, 5.0])),
+            Some(Value::Double(23.0))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &mixed, &flat(&[2, 3])),
+            Some(Value::Double(15.0))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &flat(&[2, 3]), &mixed),
+            Some(Value::Double(15.0))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &mixed, &mixed),
+            Some(Value::Double(18.25))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &dbls(&[2.0, 3.0]), &mixed),
+            Some(Value::Double(15.0))
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &flat(&[i64::MAX]), &flat(&[2])),
+            None
+        );
+        assert_eq!(
+            try_dot_product(&Value::Double(0.0), &dbls(&[1.0]), &non_num),
+            None
+        );
+        // Non-vector and non-numeric init misses
+        assert_eq!(
+            try_dot_product(&Value::Int(0), &Value::Nil, &flat(&[1])),
+            None
+        );
+        assert_eq!(try_dot_product(&Value::Nil, &flat(&[1]), &flat(&[1])), None);
+
+        // add_acc: all 4 numeric combos + i64 overflow fallback + non-int fallback
+        let mut eval = crate::boot();
+        let mut a = Value::Double(1.5);
+        add_acc(&mut eval, &mut a, Value::Double(2.5)).expect("d+d");
+        assert_eq!(a, Value::Double(4.0));
+        add_acc(&mut eval, &mut a, Value::Int(3)).expect("d+i");
+        assert_eq!(a, Value::Double(7.0));
+        let mut b = Value::Int(2);
+        add_acc(&mut eval, &mut b, Value::Double(0.5)).expect("i+d");
+        assert_eq!(b, Value::Double(2.5));
+        let mut c = Value::Int(10);
+        add_acc(&mut eval, &mut c, Value::Int(5)).expect("i+i");
+        assert_eq!(c, Value::Int(15));
+        let mut ov = Value::Int(i64::MAX);
+        assert!(add_acc(&mut eval, &mut ov, Value::Int(1)).is_err());
+        let mut big = read_constant("10N").expect("10N");
+        add_acc(&mut eval, &mut big, Value::Int(5)).expect("bigint+i");
+        assert_eq!(big, read_constant("15N").expect("15N"));
+
+        // SplitVec direct walking (`seqs::walk_direct`, `lazy::walk_all_other`, `filterv seq`)
+        let sp = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from(" ab c"),
+            Arc::new(vec![(0, 0), (1, 2), (4, 1)]),
+        )));
+        let walker = eval
+            .eval_source(
+                "(fn [sp] [(vec (take 2 sp)) (some seq sp) (filterv seq sp) \
+                  (vec (take 1 (subvec [\"x\" \"y\"] 0 2))) (some seq (subvec [\"x\" \"y\"] 0 2))])",
+            )
+            .expect("walker")
+            .pop()
+            .expect("fn");
+        let split_walk = eval.call(&walker, &[sp]).expect("split walk");
+        assert_eq!(
+            print_constant(&split_walk),
+            "[[\"\" \"ab\"] (\\a \\b) [\"ab\" \"c\"] [\"x\"] (\\x)]"
+        );
+
+        // native_abi::try_print_join thin wrapper
+        let mut hit = 9u8;
+        try_print_join(&mut eval, &Value::Int(1), &Value::Nil, 3, &mut hit).expect("miss");
+        assert_eq!(hit, 0);
+
+        // iter_plan + vec_item on SubVectorValue, SplitVecValue, and non-indexed Extension
+        let sub_v = Value::Extension(Arc::new(clj_value::SubVectorValue::new(
+            clj_value::Vector::from_ints(vec![10, 20, 30]),
+            1,
+            3,
+        )));
+        assert_eq!(iter_plan(&sub_v), Some((1, 2, 0, 0)));
+        assert_eq!(vec_item(&sub_v, 0), Value::Int(20));
+        assert_eq!(vec_item(&sub_v, 9), Value::Nil);
+        let sp_v = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from("x y"),
+            Arc::new(vec![(0, 1), (2, 1)]),
+        )));
+        assert_eq!(iter_plan(&sp_v), Some((1, 2, 0, 0)));
+        assert_eq!(vec_item(&sp_v, 1), Value::Str(Arc::from("y")));
+        assert_eq!(vec_item(&sp_v, 9), Value::Nil);
+        let rep_ext = Value::Extension(Arc::new(clj_value::RepeatValue::new(
+            Value::Int(1),
+            Some(2),
+        )));
+        assert_eq!(iter_plan(&rep_ext), None);
+        assert_eq!(vec_item(&rep_ext, 0), Value::Nil);
+
+        // VecBuilder: packed Doubles freeze, Doubles->Generic widening, and Debug across variants
+        let mut vb_d = VecBuilder::default();
+        assert!(format!("{vb_d:?}").contains("Ints"));
+        vb_d.push(Value::Double(1.5));
+        vb_d.push(Value::Double(2.5));
+        assert!(format!("{vb_d:?}").contains("Doubles"));
+        assert_eq!(vb_d.freeze().as_flat_doubles(), Some([1.5, 2.5].as_slice()));
+        let mut vb_dg = VecBuilder::default();
+        vb_dg.push(Value::Double(1.5));
+        vb_dg.push(Value::Int(2));
+        vb_dg.push(Value::Bool(true));
+        assert!(format!("{vb_dg:?}").contains("Generic"));
+        assert_eq!(vb_dg.freeze().len(), 3);
     }
 }

@@ -2172,10 +2172,18 @@ type StaticCache<T> = std::collections::HashMap<&'static str, T>;
 /// supertype — and a scan of the 325 rows cost each lookup hundreds
 /// of string compares. The first row of a name wins, as the scan did.
 fn static_row(name: &str) -> Option<&'static StaticRow> {
-    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, &'static StaticRow>> =
+    // Fx-hashed and pre-sized: a program's first class lookup builds
+    // the whole index (SipHash made that ~200K instructions, #271).
+    // Reversed insertion keeps the first row of a repeated name.
+    static INDEX: std::sync::OnceLock<crate::env::FxHashMap<&'static str, &'static StaticRow>> =
         std::sync::OnceLock::new();
     INDEX
-        .get_or_init(|| STATIC_LATTICE.iter().rev().map(|r| (r.name, r)).collect())
+        .get_or_init(|| {
+            let mut index = crate::env::FxHashMap::default();
+            index.reserve(STATIC_LATTICE.len());
+            index.extend(STATIC_LATTICE.iter().rev().map(|r| (r.name, r)));
+            index
+        })
         .get(name)
         .copied()
 }
@@ -2319,6 +2327,19 @@ const DEFAULT_IMPORTS: &[&str] = &[
     "java.lang.Void",
     "clojure.lang.ExceptionInfo",
 ];
+
+/// Whether `simple` is one of [`DEFAULT_IMPORTS`]'s unqualified names (pure
+/// string check so `drop_import` on lowercase var names avoids materializing
+/// [`default_import_map`]).
+pub(crate) fn is_default_import(simple: &str) -> bool {
+    simple
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_uppercase)
+        && DEFAULT_IMPORTS
+            .iter()
+            .any(|fqn| fqn.rsplit('.').next() == Some(simple))
+}
 
 /// The default imports as `(simple-name, class)` pairs for
 /// namespace seeding. Every name resolves: a missing row is a
@@ -3978,7 +3999,7 @@ fn static_identity_hashcode(args: &[Value]) -> Result<Value, NativeError> {
 /// U+202F), plus the controls U+001C–U+001F. Out-of-range ints
 /// and lone surrogates read false; anything else is the
 /// `Character` cast failure.
-fn static_character_is_whitespace(args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn static_character_is_whitespace(args: &[Value]) -> Result<Value, NativeError> {
     match args.len() {
         1 => Ok(Value::Bool(match &args[0] {
             Value::Char(c) => java_is_whitespace(*c),

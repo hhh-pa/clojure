@@ -68,6 +68,12 @@ impl Drop for DirLock {
 fn acquire_lock(lock_dir: &std::path::Path) -> DirLock {
     let stale = std::time::Duration::from_secs(600);
     let wait = std::time::Duration::from_millis(25);
+    // Windows refuses to create a directory whose previous instance is
+    // still pending deletion ("Access is denied", os error 5): a lock
+    // just released by another test process. That is a held lock, not a
+    // failure; a denial lasting this long is a real permission problem.
+    let denied_limit = std::time::Duration::from_secs(120);
+    let mut denied_since = None;
     loop {
         match std::fs::create_dir(lock_dir) {
             Ok(()) => return DirLock(lock_dir.to_path_buf()),
@@ -79,6 +85,15 @@ fn acquire_lock(lock_dir: &std::path::Path) -> DirLock {
                     let _ = std::fs::remove_dir(lock_dir);
                     continue;
                 }
+                std::thread::sleep(wait);
+            }
+            Err(err)
+                if err.kind() == std::io::ErrorKind::PermissionDenied
+                    && denied_since
+                        .get_or_insert_with(std::time::Instant::now)
+                        .elapsed()
+                        < denied_limit =>
+            {
                 std::thread::sleep(wait);
             }
             Err(err) => panic!("create lock {}: {err}", lock_dir.display()),
@@ -421,5 +436,137 @@ fn native_binary_preserves_nested_or_defaults_and_assoc_miss_parity() {
     assert_eq!(
         (stdout.as_str(), stderr.as_str(), code),
         ("[10 20] [[30 40] [30 40]] :err :err\n", "", 0)
+    );
+}
+
+#[test]
+fn native_binary_exercises_lite_ns_stdin_and_full_cli() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let dir = tmp("lite-stdin");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let out = dir.join(format!("prog{}", exe_suffix()));
+    let lite_src = "\
+(ns demo.app (:require [clojure.string :as s]))
+(println (read-line) (s/join \",\" *command-line-args*))
+";
+    let report = clj_aot::build_str(
+        lite_src,
+        "f.clj",
+        &out,
+        &EmitOptions::default(),
+        &LinkOptions {
+            runtime_archive: Some(ensure_archive()),
+            exe_dir: dir.clone(),
+            linker: None,
+        },
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("compile lite stdin");
+    assert!(report.starts_with("aot: native "), "{report}");
+    let mut child = Command::new(&out)
+        .args(["x", "y"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lite");
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(b"hi\n")
+        .expect("write stdin");
+    let ran = child.wait_with_output().expect("wait lite");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+    assert_eq!(
+        (
+            String::from_utf8_lossy(&ran.stdout).into_owned().as_str(),
+            String::from_utf8_lossy(&ran.stderr).into_owned().as_str(),
+            ran.status.code()
+        ),
+        ("hi x,y\n", "", Some(0))
+    );
+
+    let req_src = "\
+(require 'clojure.string '[clojure.string :as rq] '[clojure.string :refer [trim]])
+(println (trim (rq/join \",\" [(Long/parseLong \"7\") (instance? Long 1)])))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("lite-require-string", req_src, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("7,true\n", "", 0)
+    );
+
+    let caps_src = "\
+(println (deref (atom [(re-find #\"a+\" \"baa\") (re-matches #\"a+\" \"aa\") (vec (take 2 (map inc [1 2]))) (Long/parseLong \"7\")])))
+";
+    let (stdout, stderr, code, _report) =
+        build_mode_and_run("lite-caps-seq-re-host", caps_src, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[aa aa [2 3] 7]\n", "", 0)
+    );
+
+    let lite_str_src = "\
+(ns demo.str (:require [clojure.string :as s]))
+(println (s/blank? \" \") (vec *command-line-args*))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("lite-str-cli", lite_str_src, &["a"]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("true [a]\n", "", 0)
+    );
+
+    let full_src = "\
+(ns demo.full (:require [clojure.walk :as w]))
+(println (w/postwalk identity [1 2]) (vec *command-line-args*))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("full-ns-cli", full_src, &["a"]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[1 2] [a]\n", "", 0)
+    );
+
+    let full_err_src = "(println (eval '(/ 1 0)))";
+    let (stdout, stderr, code, _report) = build_mode_and_run("full-err", full_err_src, &[]);
+    assert_eq!(stdout, "");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("ArithmeticException"), "{stderr}");
+
+    let scalar_src = "\
+(defn step [x] (+ x 1))
+(defn run-scalar [s u pairs]
+  (let [t (transient [])]
+    (loop [i 0 acc 0]
+      (if (< i 20)
+        (do
+          (conj! t i)
+          (if (> i 0) (assoc! t (- i 1) (* i 2)) nil)
+          (recur (step i) (+ acc (if (= (nth s (mod i (count s))) \\a) 1 0))))
+        (do
+          (pop! t)
+          [acc
+           (count (persistent! t))
+           (loop [j 0 uacc 0]
+             (if (< j (count u))
+               (recur (+ j 1) (+ uacc (if (= (nth u j) \\é) 10 1)))
+               uacc))
+           (loop [k 0 pacc 0]
+             (if (< k (count pairs))
+               (let [[a b] (nth pairs k)]
+                 (recur (+ k 1) (+ pacc a b)))
+               pacc))
+           (loop [m 0 hi 0 lo 1000]
+             (if (< m 20)
+               (recur (+ m 1) (max hi (rem (* m 37) 101)) (min lo (rem (* m 53) 97)))
+               (+ hi lo)))])))))
+(println (run-scalar \"aba\" \"aé\" [[3 4] [5 6]]))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("scalar-271", scalar_src, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[13 19 11 18 97]\n", "", 0)
     );
 }

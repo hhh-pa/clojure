@@ -29,7 +29,7 @@ use clj_value::{
 
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
-use crate::ext::{FastArith, NativeFn};
+use crate::ext::{DisplayName, FastArith, NativeFn, NativeTarget};
 use crate::lazy::{
     as_pending, as_realized, as_subvector, collect_all, equiv_vals, is_counted_seq, is_seq_value,
     realize_deep,
@@ -610,7 +610,7 @@ fn fold(
     Ok(num_value(acc))
 }
 
-fn native_add(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_add(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Ok(Value::Int(0));
     }
@@ -1083,12 +1083,12 @@ fn dec_one(eval: &mut Evaluator, n: Num) -> Result<Value, NativeError> {
     }
 }
 
-fn native_inc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_inc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/inc", args, &[1])?;
     inc_one(eval, as_num(&args[0])?)
 }
 
-fn native_dec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_dec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/dec", args, &[1])?;
     dec_one(eval, as_num(&args[0])?)
 }
@@ -1277,7 +1277,7 @@ fn tower_sign(n: &Num, want: num_bigint::Sign) -> bool {
     num_sign(n) == want
 }
 
-fn native_zero(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_zero(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/zero?", args, &[1])?;
     Ok(Value::Bool(match as_num(&args[0])? {
         Num::Int(x) => x == 0,
@@ -1312,6 +1312,12 @@ fn native_neg(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 /// non-`Comparable`s (whose own class fails against
 /// `Comparable`). All probed.
 pub(crate) fn jvm_compare(x: &Value, y: &Value) -> Result<std::cmp::Ordering, NativeError> {
+    if let Some(ord) = compare_long_double(x, y) {
+        return Ok(ord);
+    }
+    if let (Value::Vector(a), Value::Vector(b)) = (x, y) {
+        return compare_vectors(a, b);
+    }
     if let Some(ord) = compare_nil(x, y) {
         return Ok(ord);
     }
@@ -1322,6 +1328,29 @@ pub(crate) fn jvm_compare(x: &Value, y: &Value) -> Result<std::cmp::Ordering, Na
         return Ok(ord);
     }
     Err(compare_cast_err(x, y))
+}
+
+/// Longs and doubles, the usual sort keys, without the numeric tower
+/// (#271): two longs went through `Ratio<BigInt>` (allocated and
+/// cross-multiplied) on every compare, and `compare_vectors` per item.
+/// Exactly [`compare_numbers`]: longs order exactly, and a double on
+/// either side compares as `f64` (`NaN` ties). `None` for anything else.
+pub(crate) fn compare_long_double(x: &Value, y: &Value) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    let (a, b) = match (x, y) {
+        (Value::Int(a), Value::Int(b)) => return Some(a.cmp(b)),
+        (Value::Int(a), Value::Double(b)) => (*a as f64, *b),
+        (Value::Double(a), Value::Int(b)) => (*a, *b as f64),
+        (Value::Double(a), Value::Double(b)) => (*a, *b),
+        _ => return None,
+    };
+    Some(if a < b {
+        Ordering::Less
+    } else if a > b {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    })
 }
 
 /// Nils sort first (`nil` is less than everything, equal to itself).
@@ -1394,7 +1423,6 @@ fn compare_same_type(x: &Value, y: &Value) -> Result<Option<std::cmp::Ordering>,
         (Value::Bool(a), Value::Bool(b)) => Ok(Some(a.cmp(b))),
         (Value::Keyword(a), Value::Keyword(b)) => Ok(Some(compare_named(a, b))),
         (Value::Symbol(a), Value::Symbol(b)) => Ok(Some(compare_named(a, b))),
-        (Value::Vector(a), Value::Vector(b)) => Ok(Some(compare_vectors(a, b)?)),
         // S9 scalars order within their kind (the port takes the
         // sign; the JVM returns raw `compareTo` ints).
         (Value::Uuid(_), Value::Uuid(_))
@@ -1459,13 +1487,45 @@ fn compare_vectors(
     if a.len() != b.len() {
         return Ok(a.len().cmp(&b.len()));
     }
-    for (u, v) in a.iter().zip(b.iter()) {
+    if let (Some(xs), Some(ys)) = (a.as_flat_ints(), b.as_flat_ints()) {
+        return Ok(xs.cmp(ys));
+    }
+    if let (Some(xs), Some(ys)) = (a.as_flat_doubles(), b.as_flat_doubles()) {
+        return Ok(compare_f64_slices(xs, ys));
+    }
+    if let (Some(xs), Some(ys)) = (a.as_flat_values(), b.as_flat_values()) {
+        for (u, v) in xs.iter().zip(ys.iter()) {
+            match jvm_compare(u, v)? {
+                Ordering::Equal => {}
+                ord => return Ok(ord),
+            }
+        }
+        return Ok(Ordering::Equal);
+    }
+    for i in 0..a.len() {
+        let (u, v) = (
+            a.get(i).unwrap_or(Value::Nil),
+            b.get(i).unwrap_or(Value::Nil),
+        );
         match jvm_compare(&u, &v)? {
             Ordering::Equal => {}
             ord => return Ok(ord),
         }
     }
     Ok(Ordering::Equal)
+}
+
+fn compare_f64_slices(xs: &[f64], ys: &[f64]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for (&x, &y) in xs.iter().zip(ys.iter()) {
+        if x < y {
+            return Ordering::Less;
+        }
+        if x > y {
+            return Ordering::Greater;
+        }
+    }
+    Ordering::Equal
 }
 
 /// `x.compareTo(y)`: checkcast `y` to `x`'s class (vectors name
@@ -1698,7 +1758,7 @@ pub(crate) fn is_counted(v: &Value) -> bool {
 fn is_list(v: &Value) -> bool {
     matches!(v, Value::List(_))
 }
-fn is_vector(v: &Value) -> bool {
+pub(crate) fn is_vector(v: &Value) -> bool {
     matches!(
         v,
         Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
@@ -2051,14 +2111,15 @@ fn default_reader_fn(
 ) -> Value {
     Value::Extension(Arc::new(NativeFn {
         id: eval.next_id(),
-        display: Arc::from(display),
-        func: Arc::new(move |_, args| {
+        display: DisplayName::shared(display),
+        func: NativeTarget::Dyn(Arc::new(move |_, args| {
             check_arity(display, args, &[1])?;
             reader(&args[0])
-        }),
+        })),
         owned: None,
         meta: None,
         fast: FastArith::None,
+        compiled: None,
     }))
 }
 
@@ -2693,11 +2754,21 @@ pub fn print_opts(
     eval: &Evaluator,
     readably: Option<bool>,
 ) -> Result<clj_value::PrintOpts, NativeError> {
+    let mut opts = eval.print_snap()?.opts;
+    if let Some(r) = readably {
+        opts.readably = r;
+    }
+    Ok(opts)
+}
+
+/// [`print_opts`] read from the vars (the bound `*print-readably*`), for
+/// [`Evaluator::print_snap`] to keep.
+pub(crate) fn read_print_opts(eval: &Evaluator) -> Result<clj_value::PrintOpts, NativeError> {
     Ok(clj_value::PrintOpts {
         length: print_limit(&deref_core(eval, "*print-length*"), false)?,
         level: print_limit(&deref_core(eval, "*print-level*"), true)?,
         namespace_maps: deref_core(eval, "*print-namespace-maps*").is_truthy(),
-        readably: readably.unwrap_or_else(|| deref_core(eval, "*print-readably*").is_truthy()),
+        readably: deref_core(eval, "*print-readably*").is_truthy(),
         meta: deref_core(eval, "*print-meta*").is_truthy(),
         dup: deref_core(eval, "*print-dup*").is_truthy(),
         str_form: false,
@@ -2800,7 +2871,17 @@ fn str_of_realized(eval: &mut Evaluator, v: &Value) -> Result<String, NativeErro
 /// `str`: concatenates the per-arg rendering (no spaces).
 /// `str` concatenated (shared by `str` and the `throw-*!` natives).
 fn str_concat(eval: &mut Evaluator, args: &[Value]) -> Result<String, NativeError> {
-    let mut out = String::new();
+    // Sized up front from the pieces (#271): one allocation where the
+    // growing buffer reallocated per piece.
+    let size: usize = args
+        .iter()
+        .map(|a| match a {
+            Value::Str(s) => s.len(),
+            Value::Nil => 0,
+            _ => 20,
+        })
+        .sum();
+    let mut out = String::with_capacity(size);
     for arg in args {
         str_push(&mut out, eval, arg)?;
     }
@@ -2819,14 +2900,31 @@ pub(crate) fn str_push(
         Value::Str(s) => out.push_str(s),
         Value::Char(c) => out.push(*c),
         // A long's `toString` is its decimal digits (the printer's
-        // rendering, without the print machinery).
-        Value::Int(n) => {
-            use std::fmt::Write;
-            write!(out, "{n}").expect("writing to a String cannot fail");
-        }
+        // rendering, without the print or format machinery).
+        Value::Int(n) => push_long(out, *n),
         _ => out.push_str(&str_of_one(eval, v)?),
     }
     Ok(())
+}
+
+/// Append `n`'s decimal digits (a long's `toString`): a digit loop
+/// instead of `core::fmt` (#271: ~200 instructions per long there).
+pub(crate) fn push_long(out: &mut String, n: i64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut rest = n.unsigned_abs();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        out.push('-');
+    }
+    out.push_str(std::str::from_utf8(&digits[at..]).expect("ASCII digits"));
 }
 
 /// `(apply str a … coll)` without spreading `coll` into an argument
@@ -2874,8 +2972,13 @@ pub(crate) fn native_str(eval: &mut Evaluator, args: &[Value]) -> Result<Value, 
 
 pub(crate) fn native_str_owned(
     eval: &mut Evaluator,
-    args: SmallVec<[Value; 4]>,
+    mut args: SmallVec<[Value; 4]>,
 ) -> Result<Value, NativeError> {
+    // `(str s)` is `s` itself, as the JVM's `String.toString` returns
+    // `this` (#271: no copy, no allocation).
+    if let [Value::Str(_)] = &args[..] {
+        return Ok(args.swap_remove(0));
+    }
     let s = str_concat(eval, &args)?;
     Ok(Value::Str(Arc::from(s.as_str())))
 }
@@ -2909,8 +3012,18 @@ fn native_subs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
         return subs_ascii(s, args);
     }
     let len = s.chars().count() as i64;
-    // The `nth`/`subvec` index path: doubles truncate, nil trips the
-    // `charValue` NPE, anything else fails to `Number`.
+    let (begin, end) = subs_bounds(args, len)?;
+    if begin == 0 && end == len {
+        return Ok(args[0].clone());
+    }
+    let start_b = char_byte_at(s, begin, len);
+    let end_b = char_byte_at(s, end, len);
+    Ok(Value::Str(Arc::from(&s[start_b..end_b])))
+}
+
+/// The `nth`/`subvec` index path for `subs`: doubles truncate, nil
+/// trips the `charValue` NPE, anything else fails to `Number`.
+fn subs_bounds(args: &[Value], len: i64) -> Result<(i64, i64), NativeError> {
     let begin = i64::from(nth_index(&args[1])?);
     let end = if args.len() == 3 {
         i64::from(nth_index(&args[2])?)
@@ -2920,9 +3033,7 @@ fn native_subs(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     if begin < 0 || end < begin || end > len {
         return Err(subs_oob(begin, end, len));
     }
-    let start_b = char_byte_at(s, begin, len);
-    let end_b = char_byte_at(s, end, len);
-    Ok(Value::Str(Arc::from(&s[start_b..end_b])))
+    Ok((begin, end))
 }
 
 /// The byte offset of char `idx` (`len`-capped callers only: `idx`
@@ -2950,14 +3061,9 @@ fn subs_oob(begin: i64, end: i64, len: i64) -> NativeError {
 /// answers as the scalar walk).
 fn subs_ascii(s: &str, args: &[Value]) -> Result<Value, NativeError> {
     let len = s.len() as i64;
-    let begin = i64::from(nth_index(&args[1])?);
-    let end = if args.len() == 3 {
-        i64::from(nth_index(&args[2])?)
-    } else {
-        len
-    };
-    if begin < 0 || end < begin || end > len {
-        return Err(subs_oob(begin, end, len));
+    let (begin, end) = subs_bounds(args, len)?;
+    if begin == 0 && end == len {
+        return Ok(args[0].clone());
     }
     Ok(Value::Str(Arc::from(&s[begin as usize..end as usize])))
 }
@@ -5038,6 +5144,7 @@ const FAST_ARITH_TABLE: &[(NativeFnPtr, FastArith)] = &[
     (native_add, FastArith::Add),
     (native_sub, FastArith::Sub),
     (native_mul, FastArith::Mul),
+    (native_div, FastArith::Div),
     (native_lt, FastArith::Lt),
     (native_lte, FastArith::Lte),
     (native_gt, FastArith::Gt),
@@ -5252,7 +5359,7 @@ mod tests {
         use std::cmp::Ordering;
         let sp = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
             Arc::from("1 2"),
-            Arc::from([(0, 1), (2, 1)]),
+            Arc::new(vec![(0, 1), (2, 1)]),
         )));
         let plain = Value::Vector(clj_value::Vector::from_vec(vec![
             Value::Str(Arc::from("1")),
@@ -5528,11 +5635,50 @@ mod tests {
     }
 
     #[test]
+    fn long_and_double_compares_match_the_tower_271() {
+        let vals = [
+            Value::Int(0),
+            Value::Int(-1),
+            Value::Int(7),
+            Value::Int(i64::MAX),
+            Value::Int(i64::MIN),
+            Value::Double(0.0),
+            Value::Double(-0.0),
+            Value::Double(7.0),
+            Value::Double(6.5),
+            Value::Double(9.223_372_036_854_776E18),
+            Value::Double(f64::NAN),
+            Value::Double(f64::INFINITY),
+            Value::Double(f64::NEG_INFINITY),
+        ];
+        for x in &vals {
+            for y in &vals {
+                let tower = compare_numbers(x, y).expect("numbers").expect("ordered");
+                assert_eq!(compare_long_double(x, y), Some(tower), "{x:?} {y:?}");
+                assert_eq!(jvm_compare(x, y).expect("cmp"), tower, "{x:?} {y:?}");
+            }
+        }
+        assert_eq!(compare_long_double(&Value::Int(1), &Value::Nil), None);
+    }
+
+    #[test]
+    fn push_long_writes_decimal_digits() {
+        // The digit loop agrees with `Display` at every sign and width,
+        // including `i64::MIN` (whose magnitude has no positive long).
+        for n in [0, 7, -7, 10, -10, 1_234_567_890, i64::MAX, i64::MIN] {
+            let mut out = String::from("x");
+            push_long(&mut out, n);
+            assert_eq!(out, format!("x{n}"));
+        }
+    }
+
+    #[test]
     fn fast_arith_for_tags_genuine_fns_only() {
         use crate::ext::FastArith;
         assert_eq!(fast_arith_for(native_add), FastArith::Add);
         assert_eq!(fast_arith_for(native_sub), FastArith::Sub);
         assert_eq!(fast_arith_for(native_mul), FastArith::Mul);
+        assert_eq!(fast_arith_for(native_div), FastArith::Div);
         assert_eq!(fast_arith_for(native_lt), FastArith::Lt);
         assert_eq!(fast_arith_for(native_lte), FastArith::Lte);
         assert_eq!(fast_arith_for(native_gt), FastArith::Gt);
@@ -5548,5 +5694,40 @@ mod tests {
         // The fake itself runs (its body counts as covered code).
         let mut eval = Evaluator::new_bare("user");
         assert!(matches!(fake(&mut eval, &[]), Ok(Value::Nil)));
+    }
+
+    #[test]
+    fn compare_vectors_fast_and_fallback_paths_271() {
+        use std::cmp::Ordering;
+        let vi1 = Value::Vector(clj_value::Vector::from_ints(vec![1, 2]));
+        let vi2 = Value::Vector(clj_value::Vector::from_ints(vec![1, 3]));
+        let vi_short = Value::Vector(clj_value::Vector::from_ints(vec![9]));
+        assert_eq!(jvm_compare(&vi_short, &vi1).unwrap(), Ordering::Less);
+        assert_eq!(jvm_compare(&vi1, &vi2).unwrap(), Ordering::Less);
+        assert_eq!(jvm_compare(&vi1, &vi1).unwrap(), Ordering::Equal);
+
+        let vd1 = Value::Vector(clj_value::Vector::from_doubles(vec![1.0, 2.0]));
+        let vd2 = Value::Vector(clj_value::Vector::from_doubles(vec![1.0, 3.0]));
+        let vd0 = Value::Vector(clj_value::Vector::from_doubles(vec![1.0, 1.0]));
+        let vd_nan = Value::Vector(clj_value::Vector::from_doubles(vec![f64::NAN, 2.0]));
+        assert_eq!(jvm_compare(&vd1, &vd2).unwrap(), Ordering::Less);
+        assert_eq!(jvm_compare(&vd1, &vd0).unwrap(), Ordering::Greater);
+        assert_eq!(jvm_compare(&vd1, &vd1).unwrap(), Ordering::Equal);
+        assert_eq!(jvm_compare(&vd_nan, &vd1).unwrap(), Ordering::Equal);
+
+        let vg1 = Value::Vector(clj_value::Vector::from_vec(vec![
+            Value::Int(1),
+            vi1.clone(),
+        ]));
+        let vg2 = Value::Vector(clj_value::Vector::from_vec(vec![
+            Value::Int(1),
+            vi2.clone(),
+        ]));
+        assert_eq!(jvm_compare(&vg1, &vg2).unwrap(), Ordering::Less);
+        assert_eq!(jvm_compare(&vg1, &vg1).unwrap(), Ordering::Equal);
+
+        // Cross-representation fallback (Ints vs Doubles)
+        assert_eq!(jvm_compare(&vi1, &vd1).unwrap(), Ordering::Equal);
+        assert_eq!(jvm_compare(&vi1, &vd2).unwrap(), Ordering::Less);
     }
 }

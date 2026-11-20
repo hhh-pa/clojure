@@ -952,7 +952,7 @@ fn npe_target() -> NativeError {
 /// reflector), `gen-class` instances forward to their `prefix`
 /// fns, and anything missing is the oracle's field/method error.
 /// Non-host targets get the same shapes with their own class.
-fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.len() < 2 {
         return Err(NativeError::arity("clojure.core/__meth*", args.len()));
     }

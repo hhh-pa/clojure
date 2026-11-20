@@ -279,20 +279,17 @@ impl Array {
     #[must_use]
     pub fn snapshot(&self) -> Vec<Value> {
         match &*self.lock() {
-            ArrayStore::Bools(v) => v.iter().map(|b| Value::Bool(*b)).collect(),
-            ArrayStore::Bytes(v) => v.iter().map(|b| Value::Int(i64::from(*b))).collect(),
-            ArrayStore::Chars(v) => v.iter().map(|c| Value::Char(*c)).collect(),
-            ArrayStore::Shorts(v) => v.iter().map(|s| Value::Int(i64::from(*s))).collect(),
-            ArrayStore::Ints(v) => v.iter().map(|i| Value::Int(i64::from(*i))).collect(),
-            ArrayStore::Longs(v) => v.iter().map(|l| Value::Int(*l)).collect(),
+            ArrayStore::Bools(v) => v.iter().copied().map(Value::Bool).collect(),
+            ArrayStore::Bytes(v) => v.iter().copied().map(i64::from).map(Value::Int).collect(),
+            ArrayStore::Chars(v) => v.iter().copied().map(Value::Char).collect(),
+            ArrayStore::Shorts(v) => v.iter().copied().map(i64::from).map(Value::Int).collect(),
+            ArrayStore::Ints(v) => v.iter().copied().map(i64::from).map(Value::Int).collect(),
+            ArrayStore::Longs(v) => v.iter().copied().map(Value::Int).collect(),
             ArrayStore::Floats(v) | ArrayStore::Doubles(v) => {
-                v.iter().map(|d| Value::Double(*d)).collect()
+                v.iter().copied().map(Value::Double).collect()
             }
             ArrayStore::Objs(v) => v.clone(),
-            ArrayStore::Arrays(v) => v
-                .iter()
-                .map(|o| o.clone().map(Value::Array).unwrap_or(Value::Nil))
-                .collect(),
+            ArrayStore::Arrays(v) => snapshot_arrays(v),
         }
     }
 
@@ -302,4 +299,13 @@ impl Array {
     pub fn shallow_clone(&self) -> Self {
         Self::new(self.0.desc.clone(), self.lock().clone())
     }
+}
+
+/// Box nested array slots into values (`nil` for unset slots; split
+/// from [`Array::snapshot`] for the complexity budget).
+fn snapshot_arrays(slots: &[Option<Array>]) -> Vec<Value> {
+    slots
+        .iter()
+        .map(|o| o.clone().map(Value::Array).unwrap_or(Value::Nil))
+        .collect()
 }

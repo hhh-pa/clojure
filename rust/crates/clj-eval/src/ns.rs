@@ -81,7 +81,7 @@ const JAVA_SHELL_CLJ: &str = include_str!("java_shell.clj");
 /// `require` path (the `spec_alpha.clj` shape), so scripts work
 /// with zero install steps.
 pub(crate) static STDLIB_STRING_CLJ: &str = include_str!("stdlib/clojure/string.clj");
-const STDLIB_SET_CLJ: &str = include_str!("stdlib/clojure/set.clj");
+pub(crate) static STDLIB_SET_CLJ: &str = include_str!("stdlib/clojure/set.clj");
 // W1 (verbatim+pure) — do not merge by hand, integrator resolves.
 const STDLIB_W1_TEMPLATE_CLJ: &str = include_str!("stdlib/clojure/template.clj");
 const STDLIB_W1_WALK_CLJ: &str = include_str!("stdlib/clojure/walk.clj");
@@ -309,12 +309,6 @@ pub(crate) fn check_arity(
     } else {
         Err(NativeError::arity(display, args.len()))
     }
-}
-
-/// A qualified symbol's var id, without the alias step (the target
-/// is already resolved).
-fn id_of(reg: &SharedRegistry, q: &Symbol) -> Option<u64> {
-    reg.lookup_in_ns(q.namespace()?, q)
 }
 
 /// The ISeq coercion error (probe36 `req-string`).
@@ -1110,48 +1104,97 @@ fn native_ns_unalias(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
     Ok(Value::Nil)
 }
 
+/// Simple JVM exception names mapped to [`ThrowClass`].
+const THROW_CLASSES: &[(&str, ThrowClass)] = &[
+    ("Exception", ThrowClass::Exception),
+    ("Error", ThrowClass::Error),
+    ("RuntimeException", ThrowClass::RuntimeException),
+    (
+        "IllegalArgumentException",
+        ThrowClass::IllegalArgumentException,
+    ),
+    ("IllegalStateException", ThrowClass::IllegalStateException),
+    (
+        "IllegalMonitorStateException",
+        ThrowClass::IllegalMonitorStateException,
+    ),
+    (
+        "UnsupportedOperationException",
+        ThrowClass::UnsupportedOperationException,
+    ),
+    ("AssertionError", ThrowClass::AssertionError),
+    ("ArityException", ThrowClass::ArityException),
+    ("NullPointerException", ThrowClass::NullPointerException),
+    ("ClassCastException", ThrowClass::ClassCastException),
+    ("ClassNotFoundException", ThrowClass::ClassNotFoundException),
+    (
+        "IndexOutOfBoundsException",
+        ThrowClass::IndexOutOfBoundsException,
+    ),
+    (
+        "ArrayIndexOutOfBoundsException",
+        ThrowClass::ArrayIndexOutOfBoundsException,
+    ),
+    ("ArrayStoreException", ThrowClass::ArrayStoreException),
+    (
+        "NegativeArraySizeException",
+        ThrowClass::NegativeArraySizeException,
+    ),
+    ("OutOfMemoryError", ThrowClass::OutOfMemoryError),
+    ("ArithmeticException", ThrowClass::ArithmeticException),
+    ("ExceptionInfo", ThrowClass::ExceptionInfo),
+    ("FileNotFoundException", ThrowClass::FileNotFoundException),
+    ("ExecutionException", ThrowClass::ExecutionException),
+    ("CancellationException", ThrowClass::CancellationException),
+    (
+        "RejectedExecutionException",
+        ThrowClass::RejectedExecutionException,
+    ),
+    ("IllegalAccessError", ThrowClass::IllegalAccessError),
+    ("NumberFormatException", ThrowClass::NumberFormatException),
+    (
+        "StringIndexOutOfBoundsException",
+        ThrowClass::StringIndexOutOfBoundsException,
+    ),
+    (
+        "IllegalFormatConversionException",
+        ThrowClass::IllegalFormatConversionException,
+    ),
+    (
+        "UnknownFormatConversionException",
+        ThrowClass::UnknownFormatConversionException,
+    ),
+    (
+        "MissingFormatConversionException",
+        ThrowClass::MissingFormatConversionException,
+    ),
+    (
+        "MissingFormatArgumentException",
+        ThrowClass::MissingFormatArgumentException,
+    ),
+    (
+        "IllegalFormatPrecisionException",
+        ThrowClass::IllegalFormatPrecisionException,
+    ),
+    (
+        "IllegalFormatCodePointException",
+        ThrowClass::IllegalFormatCodePointException,
+    ),
+    ("IOException", ThrowClass::IOException),
+    ("Compiler$CompilerException", ThrowClass::CompilerException),
+    ("LispReader$ReaderException", ThrowClass::ReaderException),
+    ("ReaderException", ThrowClass::ReaderException),
+];
+
 /// A JVM class name (simple or fully qualified) to its
 /// [`ThrowClass`]. Unknown names — including the port-only
 /// `ReaderError` deferrals — fall back to `Exception`.
 pub(crate) fn throw_class_for(name: &str) -> ThrowClass {
-    match name.rsplit('.').next().unwrap_or(name) {
-        "Exception" => ThrowClass::Exception,
-        "Error" => ThrowClass::Error,
-        "RuntimeException" => ThrowClass::RuntimeException,
-        "IllegalArgumentException" => ThrowClass::IllegalArgumentException,
-        "IllegalStateException" => ThrowClass::IllegalStateException,
-        "IllegalMonitorStateException" => ThrowClass::IllegalMonitorStateException,
-        "UnsupportedOperationException" => ThrowClass::UnsupportedOperationException,
-        "AssertionError" => ThrowClass::AssertionError,
-        "ArityException" => ThrowClass::ArityException,
-        "NullPointerException" => ThrowClass::NullPointerException,
-        "ClassCastException" => ThrowClass::ClassCastException,
-        "ClassNotFoundException" => ThrowClass::ClassNotFoundException,
-        "IndexOutOfBoundsException" => ThrowClass::IndexOutOfBoundsException,
-        "ArrayIndexOutOfBoundsException" => ThrowClass::ArrayIndexOutOfBoundsException,
-        "ArrayStoreException" => ThrowClass::ArrayStoreException,
-        "NegativeArraySizeException" => ThrowClass::NegativeArraySizeException,
-        "OutOfMemoryError" => ThrowClass::OutOfMemoryError,
-        "ArithmeticException" => ThrowClass::ArithmeticException,
-        "ExceptionInfo" => ThrowClass::ExceptionInfo,
-        "FileNotFoundException" => ThrowClass::FileNotFoundException,
-        "ExecutionException" => ThrowClass::ExecutionException,
-        "CancellationException" => ThrowClass::CancellationException,
-        "RejectedExecutionException" => ThrowClass::RejectedExecutionException,
-        "IllegalAccessError" => ThrowClass::IllegalAccessError,
-        "NumberFormatException" => ThrowClass::NumberFormatException,
-        "StringIndexOutOfBoundsException" => ThrowClass::StringIndexOutOfBoundsException,
-        "IllegalFormatConversionException" => ThrowClass::IllegalFormatConversionException,
-        "UnknownFormatConversionException" => ThrowClass::UnknownFormatConversionException,
-        "MissingFormatConversionException" => ThrowClass::MissingFormatConversionException,
-        "MissingFormatArgumentException" => ThrowClass::MissingFormatArgumentException,
-        "IllegalFormatPrecisionException" => ThrowClass::IllegalFormatPrecisionException,
-        "IllegalFormatCodePointException" => ThrowClass::IllegalFormatCodePointException,
-        "IOException" => ThrowClass::IOException,
-        "Compiler$CompilerException" => ThrowClass::CompilerException,
-        "LispReader$ReaderException" | "ReaderException" => ThrowClass::ReaderException,
-        _ => ThrowClass::Exception,
-    }
+    let short = name.rsplit('.').next().unwrap_or(name);
+    THROW_CLASSES
+        .iter()
+        .find_map(|&(k, cls)| (k == short).then_some(cls))
+        .unwrap_or(ThrowClass::Exception)
 }
 
 /// A load/eval failure as a native error: a real
@@ -1218,12 +1261,14 @@ pub(crate) fn core_var_handle(id: u64, name: &str) -> Var {
 }
 
 pub(crate) fn core_var(eval: &Evaluator, name: &str) -> Option<u64> {
-    id_of(&eval.registry, &Symbol::new(Some("clojure.core"), name))
+    eval.registry.lookup_str("clojure.core", name)
 }
 
-/// Push a thread binding for `clojure.core/<name>` if that core var exists.
-pub(crate) fn push_core_binding(eval: &mut Evaluator, name: &str, value: Value) {
-    if let Some(id) = core_var(eval, name) {
+/// Push a thread binding for `clojure.core/<name>` if that core var exists
+/// (its id through the evaluator's core-read cache: `print` binds
+/// `*print-readably*` on every call).
+pub(crate) fn push_core_binding(eval: &mut Evaluator, name: &'static str, value: Value) {
+    if let Some(id) = eval.core_var_id(name) {
         eval.push_binding(core_var_handle(id, name), value);
     }
 }
@@ -1259,11 +1304,8 @@ pub(crate) fn set_arglists_multi(eval: &mut Evaluator, name: &str, arities: &[&[
 
 /// The visible value of a `clojure.core` var (total fallback nil —
 /// boot installs every var the loader touches).
-pub(crate) fn deref_core(eval: &Evaluator, name: &str) -> Value {
-    match core_var(eval, name) {
-        Some(id) => eval.deref_var_unforced(id, &Symbol::new(Some("clojure.core"), name)),
-        None => Value::Nil,
-    }
+pub(crate) fn deref_core(eval: &Evaluator, name: &'static str) -> Value {
+    eval.core_read(name)
 }
 
 /// The visible `*loaded-libs*` set: the var holds a `Ref`
@@ -2667,51 +2709,64 @@ pub(crate) type NativeFnPtr = fn(&mut Evaluator, &[Value]) -> Result<Value, Nati
 pub(crate) type OwnedNativeFnPtr =
     fn(&mut Evaluator, smallvec::SmallVec<[Value; 4]>) -> Result<Value, NativeError>;
 
-/// Owned-args entries by looping-native name (sorted for
-/// binary search; core looper names are unique across installed
-/// namespaces, so the lookup is by name — test doubles install
-/// literally with `owned: None`).
-const OWNED_ENTRIES: &[(&str, OwnedNativeFnPtr)] = &[
+/// Owned-args entries for `BootMode::Lite` core/collection natives (sorted for
+/// binary search; kept separate from sequence/transducer entries so non-seq
+/// AOT binaries dead-strip `seqs`/`xform`).
+pub(crate) const OWNED_CORE_ENTRIES: &[(&str, OwnedNativeFnPtr)] = &[
     ("assoc", crate::coll::native_assoc_owned),
     ("assoc-in", crate::coll::native_assoc_in_owned),
-    ("butlast", crate::seqs::native_butlast_owned),
     ("conj", crate::coll::native_conj_owned),
     ("count", crate::coll::native_count_owned),
-    ("doall", crate::seqs::native_doall_owned),
-    ("dorun", crate::seqs::native_dorun_owned),
-    ("drop-last", crate::seqs::native_drop_last_owned),
     ("empty?", crate::coll::native_emptyp_owned),
-    ("every?", crate::seqs::native_every_p_owned),
-    ("filterv", crate::seqs::native_filterv_owned),
-    ("frequencies", crate::seqs::native_frequencies_owned),
-    ("group-by", crate::seqs::native_group_by_owned),
     ("into", crate::coll::native_into_owned),
     ("last", crate::coll::native_last_owned),
-    ("mapv", crate::seqs::native_mapv_owned),
-    ("not-any?", crate::seqs::native_not_any_p_owned),
-    ("not-every?", crate::seqs::native_not_every_p_owned),
     ("nth", crate::coll::native_nth_owned),
     ("persistent!", crate::coll::native_persistent_owned),
-    ("reduce", crate::seqs::native_reduce_owned),
-    ("reverse", crate::seqs::native_reverse_owned),
     ("set", crate::coll::native_set_owned),
-    ("some", crate::seqs::native_some_owned),
-    ("sort", crate::seqs::native_sort_owned),
-    ("sort-by", crate::seqs::native_sort_by_owned),
     ("str", crate::core::native_str_owned),
-    ("take-last", crate::seqs::native_take_last_owned),
-    ("transduce", crate::xform::native_transduce_owned),
     ("transient", crate::coll::native_transient_owned),
     ("update", crate::coll::native_update_owned),
     ("update-in", crate::coll::native_update_in_owned),
     ("vec", crate::coll::native_vec_owned),
 ];
 
+/// Owned-args entries for sequence and transducer natives (sorted for binary search).
+pub(crate) const OWNED_SEQ_ENTRIES: &[(&str, OwnedNativeFnPtr)] = &[
+    ("butlast", crate::seqs::native_butlast_owned),
+    ("doall", crate::seqs::native_doall_owned),
+    ("dorun", crate::seqs::native_dorun_owned),
+    ("drop-last", crate::seqs::native_drop_last_owned),
+    ("every?", crate::seqs::native_every_p_owned),
+    ("filterv", crate::seqs::native_filterv_owned),
+    ("frequencies", crate::seqs::native_frequencies_owned),
+    ("group-by", crate::seqs::native_group_by_owned),
+    ("mapv", crate::seqs::native_mapv_owned),
+    ("not-any?", crate::seqs::native_not_any_p_owned),
+    ("not-every?", crate::seqs::native_not_every_p_owned),
+    ("reduce", crate::seqs::native_reduce_owned),
+    ("reduce-kv", crate::seqs::native_reduce_kv_owned),
+    ("reverse", crate::seqs::native_reverse_owned),
+    ("run!", crate::seqs::native_run_bang_owned),
+    ("some", crate::seqs::native_some_owned),
+    ("sort", crate::seqs::native_sort_owned),
+    ("sort-by", crate::seqs::native_sort_by_owned),
+    ("take-last", crate::seqs::native_take_last_owned),
+    ("transduce", crate::xform::native_transduce_owned),
+];
+
+/// Lookup `name` inside a sorted owned-args table (`None` for borrow-only natives).
+pub(crate) fn owned_entry_in(
+    entries: &[(&str, OwnedNativeFnPtr)],
+    name: &str,
+) -> Option<OwnedNativeFnPtr> {
+    let idx = entries.binary_search_by(|(n, _)| n.cmp(&name)).ok()?;
+    Some(entries[idx].1)
+}
+
 /// The owned-args entry for a looping native by name (`None`
-/// for borrow-only natives).
-pub(crate) fn owned_entry(name: &str) -> Option<std::sync::Arc<crate::ext::OwnedNativeImpl>> {
-    let idx = OWNED_ENTRIES.binary_search_by(|(n, _)| n.cmp(&name)).ok()?;
-    Some(std::sync::Arc::new(OWNED_ENTRIES[idx].1))
+/// for borrow-only natives — test doubles install literally with `owned: None`).
+pub(crate) fn owned_entry(name: &str) -> Option<OwnedNativeFnPtr> {
+    owned_entry_in(OWNED_CORE_ENTRIES, name).or_else(|| owned_entry_in(OWNED_SEQ_ENTRIES, name))
 }
 
 /// The §N natives installed into `clojure.core` by [`boot`].
@@ -2909,9 +2964,44 @@ fn def_var(eval: &mut Evaluator, name: &str, root: Value, dynamic: bool, private
 /// moves, like `RT.inNamespace` under `clojure.main`), and the
 /// embedded `core.clj` composites loaded into `clojure.core` with
 /// their publics referred into `user`.
+fn vm_call_hook(
+    eval: &mut Evaluator,
+    callee: &Value,
+    args: &[Value],
+) -> Option<Result<Value, Signal>> {
+    let (code, arity) = crate::vm::fixed_target(callee, args.len())?;
+    Some(crate::vm::call_borrowed(eval, code, arity, args))
+}
+
+fn vm_apply_moved_hook(
+    eval: &mut Evaluator,
+    callee: &Value,
+    args: &mut smallvec::SmallVec<[Value; 4]>,
+) -> Option<Result<Value, Signal>> {
+    let closure = crate::ext::as_closure(callee)?;
+    let (Some(code), None) = (&closure.vm, &closure.conveyed) else {
+        return None;
+    };
+    Some(crate::vm::apply_moved(eval, closure, code, args))
+}
+
+pub(crate) static FULL_LAZY_HOOKS: crate::eval::LazyHooks = crate::eval::LazyHooks {
+    force: crate::core_lazy::force,
+    force_meta: crate::core_lazy::force_meta,
+    interpreted: crate::core_lazy::interpreted,
+    eval_ns: eval_ns_form,
+    apply_closure: Evaluator::apply_closure,
+    vm_call: vm_call_hook,
+    vm_apply_moved: vm_apply_moved_hook,
+    vm_call1: crate::vm::vm_call1,
+    vm_call2: crate::vm::vm_call2,
+    eval_expr: Evaluator::eval,
+};
+
 #[must_use]
 pub fn boot() -> Evaluator {
     let mut eval = Evaluator::new_bare("user");
+    eval.lazy_hooks = Some(&FULL_LAZY_HOOKS);
     eval.registry.ensure_ns("clojure.core");
     let user_ns = eval.registry.ensure_ns("user");
     eval.registry.set_current("user");
@@ -2947,11 +3037,14 @@ fn boot_in_ns(eval: &mut Evaluator, name: &str) {
     set_core_ns(eval, ns_value(name, id));
 }
 
+const IO_EXTRA_NATIVES: &[(&str, NativeFnPtr)] = &[("read-string", crate::io::native_read_string)];
+
 /// Install the §N natives into `clojure.core`.
 fn boot_install_natives(eval: &mut Evaluator) {
     let natives = NATIVES
         .iter()
         .chain(crate::vars::VAR_NATIVES.iter())
+        .chain(crate::macros::MACRO_LITE_NATIVES.iter())
         .chain(crate::macros::MACRO_NATIVES.iter())
         .chain(crate::lazy::LAZY_NATIVES.iter())
         .chain(crate::core::CORE_NATIVES.iter())
@@ -2960,7 +3053,8 @@ fn boot_install_natives(eval: &mut Evaluator) {
         .chain(crate::coll::COLL_NATIVES.iter())
         .chain(crate::re::RE_NATIVES.iter())
         .chain(crate::rng::RNG_NATIVES.iter())
-        .chain(crate::io::IO_NATIVES.iter())
+        .chain(crate::io::IO_LITE_NATIVES.iter())
+        .chain(IO_EXTRA_NATIVES.iter())
         .chain(crate::jdkio::JDKIO_NATIVES.iter())
         .chain(crate::reader::READER_NATIVES.iter())
         .chain(crate::concurrency::CONC_NATIVES.iter())
@@ -3307,15 +3401,17 @@ mod tests {
 
     #[test]
     fn owned_entries_sorted_and_total() {
-        // The binary search needs sorted unique names; every
-        // entry must resolve and unknown names must miss.
-        let names: Vec<&str> = super::OWNED_ENTRIES.iter().map(|(n, _)| *n).collect();
-        let mut sorted = names.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(names, sorted, "OWNED_ENTRIES out of order");
-        for name in &names {
-            assert!(super::owned_entry(name).is_some(), "missing {name}");
+        // Binary search in both split owned tables needs sorted unique names;
+        // every entry must resolve and unknown names must miss.
+        for table in [super::OWNED_CORE_ENTRIES, super::OWNED_SEQ_ENTRIES] {
+            let names: Vec<&str> = table.iter().map(|(n, _)| *n).collect();
+            let mut sorted = names.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(names, sorted, "owned entries out of order");
+            for name in &names {
+                assert!(super::owned_entry(name).is_some(), "missing {name}");
+            }
         }
         assert!(super::owned_entry("map").is_none());
         assert!(super::owned_entry("").is_none());

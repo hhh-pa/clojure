@@ -7,6 +7,7 @@
 //
 //	h2h-compare --jvm BASE.json [BASE.json ...] --rs CHALLENGER.json [...]
 //	            --label SUITE [--summary-file FILE] [--report-only]
+//	            [--allow-extra-challenger]
 //	            [--merged-jvm FILE] [--merged-rs FILE]
 //	            [--base-name NAME] [--challenger-name NAME]
 //	            [--metrics cpu,mem[,ins]] [--margin F]
@@ -33,23 +34,25 @@ import (
 
 // options are the parsed CLI flags.
 type options struct {
-	jvm            []string
-	rs             []string
-	baseName       string
-	challengerName string
-	label          string
-	summaryFile    string
-	reportOnly     bool
-	mergedJVM      string
-	mergedRS       string
-	metrics        string
-	margin         float64
+	jvm                  []string
+	rs                   []string
+	baseName             string
+	challengerName       string
+	label                string
+	summaryFile          string
+	reportOnly           bool
+	allowExtraChallenger bool
+	mergedJVM            string
+	mergedRS             string
+	metrics              string
+	margin               float64
 }
 
 const usage = `h2h-compare: reference-vs-challenger CPU/RSS gate
 
 Usage: h2h-compare --jvm BASE.json [BASE.json ...] --rs CHALLENGER.json [...]
                    --label SUITE [--summary-file FILE] [--report-only]
+                   [--allow-extra-challenger]
                    [--merged-jvm FILE] [--merged-rs FILE]
                    [--base-name NAME] [--challenger-name NAME]
                    [--metrics CSv] [--margin F]
@@ -122,11 +125,15 @@ func parseArgs(argv []string) (options, error) {
 			} else {
 				o.rs = append(o.rs, paths...)
 			}
-		case "report-only":
+		case "report-only", "allow-extra-challenger":
 			if hasInline {
-				return o, fmt.Errorf("--report-only takes no value")
+				return o, fmt.Errorf("--%s takes no value", name)
 			}
-			o.reportOnly = true
+			if name == "report-only" {
+				o.reportOnly = true
+			} else {
+				o.allowExtraChallenger = true
+			}
 			i++
 		case "help":
 			return o, errHelp

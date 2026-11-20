@@ -112,24 +112,68 @@ pub(crate) fn close_reader_value(
     Some(close_stream_reader(r).map(|()| Value::Nil))
 }
 
+/// Build the standard reader UTF-8 IO error.
+fn utf8_io_err() -> NativeError {
+    NativeError::new(
+        ThrowClass::IOException,
+        "stream did not contain valid UTF-8".to_owned(),
+    )
+}
+
+/// Append `s` onto `out` with `\r\n` and a lone `\r` normalized to `\n`.
+fn push_normalized(out: &mut String, s: &str) {
+    let mut rest = s;
+    while let Some(i) = rest.find('\r') {
+        out.push_str(&rest[..i]);
+        out.push('\n');
+        rest = &rest[i + 1..];
+        rest = rest.strip_prefix('\n').unwrap_or(rest);
+    }
+    out.push_str(rest);
+}
+
+/// Drain the live stdin reader into `out`: one buffer grown as the input
+/// arrives and never zero-filled, validated once. Most inputs are tens
+/// of bytes, and the previous zeroed 8 KiB first chunk cost ~8K
+/// instructions per program (#271). std's `read_to_end` probes small
+/// inputs on the stack, retries interrupted reads, and grows large
+/// buffers by `realloc`.
+fn slurp_buf_reader(src: &mut dyn Read, out: &mut String) -> Result<(), NativeError> {
+    let mut buf = Vec::new();
+    src.read_to_end(&mut buf)
+        .map_err(|e| NativeError::new(ThrowClass::IOException, e.to_string()))?;
+    if out.is_empty() && !buf.contains(&b'\r') {
+        *out = String::from_utf8(buf).map_err(|_| utf8_io_err())?;
+        return Ok(());
+    }
+    let text = std::str::from_utf8(&buf).map_err(|_| utf8_io_err())?;
+    out.reserve_exact(text.len());
+    push_normalized(out, text);
+    Ok(())
+}
+
 /// Drain a stream reader fully (issue #201 S8): parser remainder
-/// plus every further feed, char by char (exact text — no
-/// line-split roundtrip, so trailing newlines survive). Matches
-/// upstream `slurp`, which `with-open`s the reader: the stream
+/// plus any buffered/live feed without intermediate char expansion.
+/// Matches upstream `slurp`, which `with-open`s the reader: the stream
 /// latches closed on success, even stdin.
 pub(crate) fn slurp_reader(r: &StreamReader) -> Result<String, NativeError> {
     check_reader_open(r)?;
     let mut out = String::new();
     {
         let mut state = lock_state(r);
-        loop {
+        out.push_str(&state.parser.drain_to_string());
+        #[cfg(test)]
+        while let Some(line) = state.script_lines.pop_front() {
+            state.parser.extend(&line);
             out.push_str(&state.parser.drain_to_string());
-            if !more_input(&mut state)? {
-                break;
-            }
         }
+        if let Some(src) = state.stdin.as_mut() {
+            slurp_buf_reader(src, &mut out)?;
+        }
+        // Closed like `.close`; the parser was just drained, so it
+        // stays (a fresh one costs ~3K instructions to build, #271).
+        state.closed = true;
     }
-    close_stream_reader(r)?;
     Ok(out)
 }
 
@@ -1260,7 +1304,7 @@ fn native_read_plus_string(eval: &mut Evaluator, args: &[Value]) -> Result<Value
 /// the verbatim `Var.get()` NPE (probe `rl-nil-in`); non-readers
 /// fail the `BufferedReader` cast (probes `rl-str-in`,
 /// `rl-num-in`).
-fn native_read_line(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+pub(crate) fn native_read_line(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/read-line", args, &[0])?;
     let stream_value = deref_core(eval, "*in*");
     if matches!(stream_value, Value::Nil) {
@@ -1418,6 +1462,103 @@ mod tests {
         let reader = as_reader(&value).expect("a reader");
         lock_state(reader).script_lines.push_back("b\n".to_owned());
         assert_eq!(slurp_reader(reader).unwrap(), "ab\n");
+
+        // Direct stdin bulk path: CRLF/CR normalization + multi-chunk UTF-8/CR boundaries.
+        let ext: Arc<dyn ExtensionValue> = Arc::new(StreamReader {
+            id: 9001,
+            state: Arc::new(Mutex::new(StreamState {
+                parser: Reader::new("head:", &ReaderOpts::default()),
+                stdin: Some(BufReader::new(Box::new(Cursor::new(b"a\r\nb\rc".to_vec())))),
+                closed: false,
+                script_lines: VecDeque::new(),
+            })),
+        });
+        let bulk = Value::Extension(Arc::clone(&ext));
+        assert_eq!(
+            slurp_reader(as_reader(&bulk).unwrap()).unwrap(),
+            "head:a\nb\nc"
+        );
+        assert_eq!(close_reader_value(&ext).unwrap().unwrap(), Value::Nil);
+        // Single-chunk fast move and empty EOF.
+        let mut fast = String::new();
+        slurp_buf_reader(&mut Cursor::new(b"ok".as_slice()), &mut fast).unwrap();
+        assert_eq!(fast, "ok");
+        let mut empty = String::new();
+        slurp_buf_reader(&mut Cursor::new(b"".as_slice()), &mut empty).unwrap();
+        assert_eq!(empty, "");
+
+        // Inputs past the old 8 KiB first-chunk edge (one buffer now): a
+        // multi-byte char and a CRLF across that edge, a trailing `\r` at
+        // EOF, `Interrupted`, and IO error / malformed UTF-8 coverage.
+        let mut big = vec![b'x'; 8 * 1024 - 1];
+        big.extend_from_slice("\r\n€".as_bytes()); // `\r` ends chunk 1, `\n€` starts chunk 2
+        let mut big2 = vec![b'y'; 8 * 1024 - 1];
+        big2.extend_from_slice("€\r".as_bytes()); // partial `€` straddles chunk edge + trailing `\r`
+        struct RetryOnce(Vec<u8>, bool);
+        impl Read for RetryOnce {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.1 {
+                    self.1 = true;
+                    return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+                }
+                let n = buf.len().min(self.0.len());
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0.drain(..n);
+                Ok(n)
+            }
+        }
+        let mut multi = String::new();
+        slurp_buf_reader(&mut RetryOnce(big, false), &mut multi).unwrap();
+        assert_eq!(multi.len(), 8 * 1024 - 1 + 1 + 3);
+        let mut multi2 = String::new();
+        slurp_buf_reader(&mut Cursor::new(big2), &mut multi2).unwrap();
+        assert!(multi2.ends_with("€\n"));
+
+        // Truncated UTF-8 at EOF, corrupt UTF-8 at and past the old edge, and a read error.
+        let mut trunc = vec![b'a'; 8 * 1024 - 1];
+        trunc.push(0xE2); // 1st byte of 3-byte char at EOF
+        assert_eq!(
+            slurp_buf_reader(&mut Cursor::new(trunc), &mut String::new())
+                .unwrap_err()
+                .class,
+            ThrowClass::IOException
+        );
+        let mut bad_tail = vec![b'a'; 8 * 1024 - 1];
+        bad_tail.extend_from_slice(&[0xC3, 0x28]); // invalid continuation across 8K boundary
+        assert_eq!(
+            slurp_buf_reader(&mut Cursor::new(bad_tail), &mut String::new())
+                .unwrap_err()
+                .class,
+            ThrowClass::IOException
+        );
+        let mut bad_mid = vec![b'a'; 8 * 1024];
+        bad_mid.push(0xff);
+        assert_eq!(
+            slurp_buf_reader(&mut Cursor::new(bad_mid), &mut String::new())
+                .unwrap_err()
+                .class,
+            ThrowClass::IOException
+        );
+        let mut bad_eof = vec![b'a'; 8 * 1024];
+        bad_eof.push(0xC3); // incomplete UTF-8 ending 2nd chunk
+        assert_eq!(
+            slurp_buf_reader(&mut Cursor::new(bad_eof), &mut String::new())
+                .unwrap_err()
+                .class,
+            ThrowClass::IOException
+        );
+        struct ErrRead;
+        impl Read for ErrRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("boom"))
+            }
+        }
+        assert_eq!(
+            slurp_buf_reader(&mut ErrRead, &mut String::new())
+                .unwrap_err()
+                .class,
+            ThrowClass::IOException
+        );
     }
 
     #[test]

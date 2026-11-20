@@ -392,8 +392,7 @@ pub(crate) const SERVER_NATIVES: &[(&str, NativeFnPtr)] = &[
 pub(crate) fn install_server_natives(eval: &mut Evaluator) {
     eval.registry.ensure_ns(SERVER_NS);
     for (name, f) in SERVER_NATIVES {
-        let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
-        eval.install_native(SERVER_NS, name, func);
+        eval.install_native_ptr(SERVER_NS, name, *f);
     }
 }
 
@@ -944,8 +943,7 @@ pub(crate) const XML_NATIVES: &[(&str, NativeFnPtr)] = &[("__xml-scan*", native_
 pub(crate) fn install_xml_natives(eval: &mut Evaluator) {
     eval.registry.ensure_ns(XML_NS);
     for (name, f) in XML_NATIVES {
-        let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
-        eval.install_native(XML_NS, name, func);
+        eval.install_native_ptr(XML_NS, name, *f);
     }
 }
 

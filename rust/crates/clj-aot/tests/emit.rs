@@ -555,9 +555,9 @@ fn native_emit_ir_lowers_units_constants_and_main_259() {
     let text = std::fs::read_to_string(&ir).expect("ir");
     std::fs::remove_file(&ir).expect("cleanup");
     for needle in [
-        "@rt_n_main(",
-        "@rt_n_declare_var(",
-        "@rt_n_declare_fn(",
+        "@rt_n_main_lite(",
+        "@rt_n_declare_vars(",
+        "@rt_n_declare_fns(",
         "@rt_n_set_const(",
         "@cljconst_init",
     ] {
@@ -683,7 +683,7 @@ fn native_emit_ir_covers_assoc_conj_fx_and_nested_moves_259() {
     .expect("native build");
     let text = std::fs::read_to_string(&ir).expect("ir");
     std::fs::remove_file(&ir).expect("cleanup");
-    assert!(report.starts_with("aot: native "), "{report}");
+    assert!(!report.contains("(native:"), "{report}");
     assert!(text.contains("@rt_n_assoc_conj("), "{text}");
     assert!(
         text.contains("@rt_bc_2_str_starts_with")
@@ -716,7 +716,7 @@ fn native_emit_ir_marks_clojure_string_def_as_rebinding() {
     .expect("native build");
     let text = std::fs::read_to_string(&ir).expect("ir");
     std::fs::remove_file(&ir).expect("cleanup");
-    assert!(report.starts_with("aot: native "), "{report}");
+    assert!(!report.contains("(native:"), "{report}");
     assert!(text.contains("@rt_n_fast_vars"), "{text}");
 }
 
@@ -745,7 +745,7 @@ fn native_emit_ir_covers_owned_move_assoc_update_and_loop_unsupported() {
     )
     .expect("native build");
     std::fs::remove_file(&ir).expect("cleanup");
-    assert!(report.starts_with("aot: native "), "{report}");
+    assert!(!report.contains("(native:"), "{report}");
 
     let bad_loop = "\
 (defmacro bad-val [] (list 'quote +))
@@ -769,5 +769,1012 @@ fn native_emit_ir_covers_owned_move_assoc_update_and_loop_unsupported() {
     assert!(
         bad_report.contains("(native: constant without a readable form:"),
         "{bad_report}"
+    );
+}
+
+#[test]
+fn native_emit_ir_selects_lite_vs_full_boot() {
+    let lite_src = "\
+(ns demo.app
+  (:refer-clojure :exclude [get])
+  (:require [clojure.string :as s] clojure.string))
+(require 'clojure.string '[clojure.string :as rq] '[clojure.string :refer [trim]])
+(declare fwd)
+(def ^:dynamic *d* 1)
+(defn fwd [x] (trim (s/join \",\" [x (Long/parseLong \"7\")])))
+(defn g [] (binding [*d* 2] (set! *d* 3) (vector *d* #'fwd (fwd \"ok\") (rq/blank? \" \") (instance? Long 1))))
+(println (g))
+";
+    let lite_ir = tmp("boot-lite.ll");
+    let lite_report = clj_aot::build_str(
+        lite_src,
+        "f.clj",
+        &tmp("nope-lite"),
+        &EmitOptions {
+            emit_ir: Some(lite_ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("lite native");
+    let lite_text = std::fs::read_to_string(&lite_ir).expect("ir");
+    std::fs::remove_file(&lite_ir).expect("cleanup");
+    assert!(lite_report.starts_with("aot: native "), "{lite_report}");
+    assert!(
+        lite_text.contains("@rt_n_require_string_lite("),
+        "{lite_text}"
+    );
+    assert!(lite_text.contains("@rt_n_ns_lite("), "{lite_text}");
+    assert!(lite_text.contains("@rt_n_main_lite("), "{lite_text}");
+    // The Linux static link's `--wrap` targets ride in every module (#271).
+    assert!(
+        lite_text.contains("@__wrap___register_frame_info(ptr")
+            && lite_text.contains("@__wrap___deregister_frame_info(ptr"),
+        "{lite_text}"
+    );
+
+    let lite_ext_ir = tmp("boot-lite-ext.ll");
+    let lite_ext_report = clj_aot::build_str(
+        "(ns demo.s (:require [clojure.string :as str])) \
+         (require '[clojure.string :as sq]) \
+         (run! println [(sq/trim \" 1 \") ((fnil inc 0) nil) (reduce-kv (fn [a k v] (+ a v)) 0 {:a 1}) (str/join \",\" [1 2])])",
+        "e.clj",
+        &tmp("nope-lite-ext"),
+        &EmitOptions {
+            emit_ir: Some(lite_ext_ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("lite ext native");
+    let lite_ext_text = std::fs::read_to_string(&lite_ext_ir).expect("ir");
+    std::fs::remove_file(&lite_ext_ir).expect("cleanup");
+    assert!(
+        lite_ext_report.starts_with("aot: native "),
+        "{lite_ext_report}"
+    );
+    assert!(
+        lite_ext_text.contains("@rt_n_main_lite("),
+        "{lite_ext_text}"
+    );
+    assert!(
+        lite_ext_text.contains("@rt_n_require_string_lite("),
+        "{lite_ext_text}"
+    );
+
+    for (tag, full_src) in [
+        ("macro", "(defmacro m [x] x) (println (m 1))"),
+        ("ns-use", "(ns demo.u (:use clojure.string)) (println 1)"),
+        (
+            "ns-import",
+            "(ns demo.i (:import [java.util Locale])) (println Locale/US)",
+        ),
+        (
+            "ns-walk",
+            "(ns demo.w (:require [clojure.walk :as w])) (println (w/postwalk identity [1]))",
+        ),
+        ("top-req-other", "(require 'clojure.walk) (println 1)"),
+        ("top-req-dyn", "(let [x 'clojure.string] (require x))"),
+        ("top-req-empty", "(defn f [] (require)) (println 1)"),
+        ("core-eval", "(println (eval '(+ 1 2)))"),
+        ("redef", "(with-redefs [inc dec] (println (inc 1)))"),
+    ] {
+        let ir = tmp(&format!("boot-full-{tag}.ll"));
+        let report = clj_aot::build_str(
+            full_src,
+            "f.clj",
+            &tmp("nope-full"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("full native");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        assert!(report.starts_with("aot: native "), "{tag}: {report}");
+        assert!(text.contains("@rt_n_main("), "{tag}: {text}");
+    }
+}
+
+#[test]
+fn native_emit_splices_clojure_set_under_lite_only() {
+    // #271: a leading `ns` requiring `clojure.set` compiles the vendored
+    // library into the program and keeps the Lite boot; a program that
+    // needs the full boot anyway drops those units (its `require` loads
+    // the interpreted library).
+    let emit = |tag: &str, src: &str| {
+        let ir = tmp(&format!("splice-{tag}.ll"));
+        let report = clj_aot::build_str(
+            src,
+            "s.clj",
+            &tmp("nope-splice"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("splice native");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        (report, text)
+    };
+    let (report, lite) = emit(
+        "lite",
+        "(ns demo.set (:require [clojure.set :as set] [clojure.string :as str]))
+         (defn pick [a b] (set/union a b))
+         (println (pick #{1} #{2}) (str/join [1]))",
+    );
+    assert!(report.starts_with("aot: native 1/1 defns"), "{report}");
+    assert!(lite.contains("@rt_n_main_lite("), "{lite}");
+    assert!(lite.contains("_clojure_set_union"), "{lite}");
+    let (report, full) = emit(
+        "full",
+        "(ns demo.setm (:require [clojure.set :as set]))
+         (defmacro m [x] x)
+         (println (m (set/union #{1} #{2})))",
+    );
+    assert!(report.starts_with("aot: native 0/0 defns"), "{report}");
+    assert!(full.contains("@rt_n_main("), "{full}");
+    assert!(!full.contains("_clojure_set_union"), "{full}");
+    // `clojure.string` splices only what no Lite native covers
+    // (`replace` and its helper); redefining a native-served var still
+    // takes the full boot.
+    let (_, lite) = emit(
+        "string",
+        "(ns demo.str (:require [clojure.string :as str]))
+         (println (str/replace \"a1\" #\"\\d\" \"x\") (str/join [1]))",
+    );
+    assert!(lite.contains("@rt_n_main_lite("), "{lite}");
+    assert!(lite.contains("_clojure_string_replace_by"), "{lite}");
+    assert!(!lite.contains("_clojure_string_join"), "{lite}");
+    let (_, redef) = emit(
+        "string-redef",
+        "(ns demo.strr (:require [clojure.string :as str]))
+         (in-ns 'clojure.string)
+         (defn trim [s] s)
+         (in-ns 'demo.strr)
+         (println (str/trim \" a \"))",
+    );
+    assert!(redef.contains("@rt_n_main("), "{redef}");
+    let (_, core) = emit(
+        "core-def",
+        "(in-ns 'clojure.core) (def x-271 1) (in-ns 'user) (println clojure.core/x-271)",
+    );
+    assert!(core.contains("@rt_n_main("), "{core}");
+}
+
+#[test]
+fn native_emit_ir_lowers_scalar_loops_and_branch_conds_271() {
+    let src = "\
+(defn step [x]
+  (let [y (+ x 1)]
+    (if (> y 0) y 0)))
+
+(defn multi
+  ([x] x)
+  ([x y] (+ x y)))
+
+(defn conds-and-preds [a b]
+  (let [v [1]
+        _ (if true 1 2)
+        _ (if false 1 2)
+        _ (if (or (< a b) (<= a b)) 1 2)
+        _ (if (and (> a b) (>= a b) (== a b)) 1 2)
+        _ (if (if (nil? a) (some? b) (not b)) 1 2)
+        _ (if (step a) 1 2)
+        c (< a b)
+        d (<= a b)
+        e (> a b)
+        f (>= a b)
+        g (== a b)
+        h (nil? a)
+        i (some? a)
+        j (not a)
+        k (int a)
+        l (long b)]
+    (step v)
+    (let [x [1]] (vec x))
+    [c d e f g h i j k l]))
+
+(defn scalar-pure [s pairs outer-n outer-box]
+  (loop [i 0 acc 0 pass s]
+    (if (and (< i (count s)) (<= i 100) (> 200 i) (>= 200 i) (== i i))
+      (let [ch (nth s i)
+            [p0 p1] (nth pairs 0)
+            b (if (= ch \\a) true false)
+            u (if b 1 (if (not (or (zero? i) (pos? i) (neg? i))) 2 3))
+            v (+ (- (* (inc (dec (- (bit-not (int (long outer-n)))))) 1) p0) (quot p1 1))
+            w (do (+ v 1) (step i))
+            inner-v (loop [j 0] (if (< j 2) (recur (+ j 1)) (+ j w)))
+            flag (< i 5)
+            cmp-v (if flag 1 0)]
+        (if (< i 1)
+          (let [z (+ i 1)] (+ z 1))
+          (+ i 2))
+        (loop [k 0]
+          (if (< k 1)
+            (recur (+ k 1))
+            nil))
+        (recur (+ i 1) (+ acc inner-v cmp-v u) pass))
+      (if (= i 999)
+        :done
+        (if (= i 998)
+          pass
+          (if (= i 997)
+            acc
+            (if (= i 996)
+              outer-box
+              (if (= i 995)
+                (let [{:keys [k]} i] k)
+                (if (= i 994)
+                  (println i)
+                  (+ acc 1))))))))))
+
+(defn scalar-mut [n]
+  (let [t (transient [10 20])]
+    (loop [i 0]
+      (if (< i n)
+        (do
+          (if (< i 1)
+            (let [z (+ i 1)] (conj! t z))
+            (conj! t i))
+          (assoc! t 0 i)
+          (pop! t)
+          (recur (+ i 1)))
+        (conj! t 99)))))
+
+(defn scalar-fallbacks [n]
+  (let [t (transient [1])]
+    (letfn [(cell-fn [x] x)
+            (use-cell [m]
+              (loop [i 0]
+                (if (< i m)
+                  (recur (+ i 1))
+                  cell-fn)))]
+      [(use-cell n)
+       (loop [[a b] [1 2]]
+         (if a (recur [nil b]) b))
+       (loop [i 0]
+         (if (< i n)
+           (do (conj! t i) (recur (+' i 1)))
+           i))])))
+
+(println (conds-and-preds 1 2) (scalar-pure \"ab\" [[3 4]] 5 :box) (scalar-mut 2) (scalar-fallbacks 2))
+";
+    let ir = tmp("scalar-271.ll");
+    let report = clj_aot::build_str(
+        src,
+        "s271.clj",
+        &tmp("nope-s271"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("scalar 271 native");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    assert!(!report.contains("(native:"), "{report}");
+    assert!(text.contains("sc_hdr"), "{text}");
+    assert!(text.contains("sc_deopt"), "{text}");
+}
+
+/// Stable vars (#271): a single-`def` var reads from its root cache —
+/// borrowed by calls, cloned elsewhere, checked only where code can run
+/// before the `def` — while dynamic, re-`def`ed, nested, `set!`, and
+/// `#'`-taken vars keep the deref, and a program that can re-root any
+/// var keeps no caches at all. Keyword invokes go through the bitcode
+/// `get` with the keyword borrowed from the constant pool.
+#[test]
+fn native_emit_ir_drops_unread_pure_defs_271() {
+    let emit = |src: &str, name: &str| {
+        let ir = tmp(name);
+        clj_aot::build_str(
+            src,
+            "f.clj",
+            &tmp("nope"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("build");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        text
+    };
+    // Unread pure defs drop (their names never reach the var table); a
+    // def read only by a dropped def drops with it (`min-long`); reads,
+    // effects and impure inits keep theirs.
+    let ir = emit(
+        concat!(
+            "(def digit-values (zipmap \"0123456789\" (range)))\n",
+            "(def short-digits (zipmap \"01\" (range 2)))\n",
+            "(def separators #{\\space \\tab})\n",
+            "(def pairs-v [1 2])\n",
+            "(def table-m {:a 1})\n",
+            "(def size-k 100)\n",
+            "(def min-long (bit-shift-left 1 63))\n",
+            "(def max-long (bit-not min-long))\n",
+            "(def mixed-bits (bit-xor (bit-and 7 3) (unsigned-bit-shift-right 8 1)))\n",
+            "(def used-k 5)\n",
+            "(def noisy (do (println \"init\") 1))\n",
+            "(def nonconst-v [used-k])\n",
+            "(declare declared-k)\n",
+            "(def declared-k 3)\n",
+            "(def ^:dynamic *dyn* 1)\n",
+            "(binding [*dyn* 2] (println used-k *dyn*))\n",
+        ),
+        "dead-defs.ll",
+    );
+    for gone in [
+        "digit-values",
+        "short-digits",
+        "separators",
+        "pairs-v",
+        "table-m",
+        "size-k",
+        "min-long",
+        "max-long",
+        "mixed-bits",
+    ] {
+        assert!(!ir.contains(gone), "{gone} should drop:\n{ir}");
+    }
+    for kept in ["used-k", "noisy", "nonconst-v", "declared-k", "*dyn*"] {
+        assert!(ir.contains(kept), "{kept} should stay:\n{ir}");
+    }
+    // A program that can reach vars by name keeps every def.
+    let finder = emit(
+        "(def unread-k 7)\n(def kept-k 1)\n(println (var-get (var kept-k)))\n",
+        "dead-defs-finder.ll",
+    );
+    assert!(finder.contains("unread-k"), "{finder}");
+}
+
+#[test]
+fn native_emit_ir_caches_stable_var_roots_271() {
+    let emit = |src: &str, name: &str| {
+        let ir = tmp(name);
+        clj_aot::build_str(
+            src,
+            "f.clj",
+            &tmp("nope"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("native build");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        text
+    };
+    let src = "\
+(declare tbl)
+(defn early [x] (if x (nth tbl 0) (count [tbl])))
+(def tbl [10 20 30])
+(def ^:dynamic *dyn* 1)
+(def ^{:dynamic (not false)} formed 2)
+(def twice 1)
+(def twice 2)
+(defn setter [] (def inner 3))
+(def taken 4)
+(def m {:a 1 :b 2})
+(defn late [i] (+ (nth tbl i) (:a m) (:z m 0) (get m :b) (count tbl)))
+(def wrapped [tbl (get '{a 1} 'a)])
+(defn bump [] (set! *dyn* 2))
+(defn odd-arity [] (:k {} 1 2))
+(println (early false) (late 1) *dyn* formed twice (setter) inner @#'taken (:k [1]) wrapped)
+";
+    let text = emit(src, "stable.ll");
+    for needle in [
+        "@clj_root0 = internal global [4 x i64] zeroinitializer",
+        "load atomic i8, ptr @clj_root_set",
+        "store atomic i8 1, ptr @clj_root_set",
+        "@rt_n_consts_base",
+        "kw_slow",
+    ] {
+        assert!(text.contains(needle), "missing {needle}:\n{text}");
+    }
+    // bump, early, late, m, odd-arity, setter, tbl, and wrapped are
+    // stable (roots 0-7); the dynamic, re-`def`ed, nested, `set!`, and
+    // `#'`-taken vars are not.
+    assert!(text.contains("@clj_root7 = "), "{text}");
+    assert!(!text.contains("@clj_root8 = "), "{text}");
+    // Direct calls (#271 Slice 4b): a stable `defn` called from its own
+    // unit or a later one skips the root check; a forward call keeps it.
+    // Params only read as call operands keep reading the caller's array.
+    let text = emit(
+        "\
+(declare later)
+(defn first-of [w i] (nth w i))
+(defn relay [w] (first-of w 0))
+(defn grow [w x] (conj w x))
+(defn kept [w] (let [v w] (count v)))
+(defn ahead [x] (if (pos? x) (later (dec x)) 0))
+(defn later [x] (+ x (ahead x)))
+(println (relay [1 2]) (grow [1] 2) (kept [3]) (later 2))
+",
+        "calls.ll",
+    );
+    for needle in ["@rt_n_enter()", "@rt_n_enter_fn("] {
+        assert!(text.contains(needle), "missing {needle}:\n{text}");
+    }
+    // Inline traversals (#271 Slice 4c): `doseq`, `mapv`, `vec`/`into []`
+    // of `map`, and `reduce` over literal `fn`s plan a direct loop with a
+    // general fallback; other shapes keep the plain call.
+    let text = emit(
+        "\
+(def v [1 2 3])
+(doseq [x v] (print x))
+(println (mapv (fn [x] (* x x)) v) (vec (map (fn [x] (inc x)) (range 3))))
+(println (into [] (map (fn [x] x) v)) (reduce (fn [a x] (+ a x)) 0 v))
+(println (reduce (fn [a x] a) 0 '(1)) (mapv (fn [x & r] x) v) (into [1] (map (fn [x] x) v)))
+(println (mapv (fn self [x] (if (pos? x) (self (dec x)) x)) v) (mapv (fn [[a]] a) [[1]]))
+(println (mapv (fn ([x] x) ([x y] y)) v))
+(println (map (fn [x] x) v) (dorun (map inc v)) (mapv (fn [x] (recur (dec x))) []))
+",
+        "loops.ll",
+    );
+    for needle in [
+        "@rt_n_iter_plan(",
+        "@rt_n_vec_item(",
+        "@rt_n_vec_push(",
+        "@rt_n_unreduce(",
+    ] {
+        assert!(text.contains(needle), "missing {needle}:\n{text}");
+    }
+    // Var metadata (#271): `(meta coll)` alone (clojure.set's `select`)
+    // and constant attr-map writes (`{:added …, :tag …}`) keep none; a
+    // `#'v` with a value reader keeps it.
+    let set_only = emit(
+        "(ns user (:require [clojure.set :as set]))\n(println (set/union #{1} #{2}) (meta (with-meta [1] {:a 1})))\n",
+        "meta-off.ll",
+    );
+    assert!(
+        !set_only.contains("call void @rt_n_cap_var_meta"),
+        "{set_only}"
+    );
+    let reads = emit(
+        "(defn f {:added \"1\"} [^String x] x)\n(println (:added (meta #'f)) (f 1))\n",
+        "meta-on.ll",
+    );
+    assert!(reads.contains("call void @rt_n_cap_var_meta"), "{reads}");
+    // Any var-rooting call anywhere disables the caches.
+    let text = emit(
+        "(def a [1]) (defn f [] (nth a 0)) (alter-var-root #'a conj 2) (println (f))",
+        "stable-off.ll",
+    );
+    assert!(!text.contains("@clj_root0"), "{text}");
+}
+
+#[test]
+fn native_emit_ir_binds_plain_map_patterns_by_lookup_271() {
+    let emit = |src: &str, name: &str| {
+        let ir = tmp(name);
+        clj_aot::build_str(
+            src,
+            "f.clj",
+            &tmp("nope"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("build");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        text
+    };
+    // `:keys`/`:strs`/`:syms`, entries, `:or` and `:as` read their keys
+    // directly: no encoded pattern, no interpreter destructure.
+    let plain = emit(
+        "(defn f [{:keys [a b] :strs [c] {:keys [d]} :inner :or {b 2} :as m}] [a b c d m])\n(println (f {:a 1}))\n",
+        "map-plain.ll",
+    );
+    assert!(plain.contains("rt_n_destr_map"), "{plain}");
+    assert!(plain.contains("rt_n_destr_get"), "{plain}");
+    assert!(!plain.contains("rt_n_destructure"), "{plain}");
+    // Required keys keep the interpreter's destructure.
+    let required = emit(
+        "(defn g [{:keys! [a]}] a)\n(println (g {:a 1}))\n",
+        "map-required.ll",
+    );
+    assert!(required.contains("rt_n_destructure"), "{required}");
+}
+
+#[test]
+fn native_emit_ir_builds_keyword_map_literals_from_a_template_271() {
+    let emit = |src: &str, name: &str| {
+        let ir = tmp(name);
+        clj_aot::build_str(
+            src,
+            "f.clj",
+            &tmp("nope"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("build");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        text
+    };
+    // Distinct constant keyword keys share a shaped template.
+    let kw = emit(
+        "(defn p [x y] {:x x :y y})\n(println (p 1 2))\n",
+        "kw-map.ll",
+    );
+    assert!(kw.contains("rt_n_kw_map"), "{kw}");
+    assert!(!kw.contains("rt_n_map_lit"), "{kw}");
+    // Computed or non-keyword keys, and more than 8 keys, pair up.
+    for (src, name) in [
+        (
+            "(defn q [k] {k 1 :b 2})\n(println (q :a))\n",
+            "kw-map-computed.ll",
+        ),
+        (
+            "(defn s [x] {\"s\" x :k 2})\n(println (s 1))\n",
+            "kw-map-string.ll",
+        ),
+        (
+            "(defn n [x] {:a x :b 2 :c 3 :d 4 :e 5 :f 6 :g 7 :h 8 :i 9})\n(println (n 1))\n",
+            "kw-map-nine.ll",
+        ),
+    ] {
+        let ir = emit(src, name);
+        assert!(ir.contains("rt_n_map_lit"), "{name}: {ir}");
+        assert!(!ir.contains("rt_n_kw_map"), "{name}: {ir}");
+    }
+}
+
+#[test]
+fn native_emit_ir_calls_compiled_closures_directly_271() {
+    let ir = tmp("closure-call.ll");
+    clj_aot::build_str(
+        "(defn app [f x] (f x))\n(println (app (fn [y] (* 2 y)) 21))\n",
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    // A call through a value checks for a compiled closure of its arity
+    // (then calls its code), keeping the general invoke for the rest.
+    assert!(text.contains("@rt_n_enter_closure"), "{text}");
+    assert!(text.contains("@rt_n_invoke"), "{text}");
+}
+
+#[test]
+fn native_emit_ir_keeps_loops_with_boxed_exits_scalar_271() {
+    let ir = tmp("boxed-exit.ll");
+    clj_aot::build_str(
+        "(defn sq [n] (let [acc (transient [])] (loop [i 0] (if (= i n) (persistent! acc) (do (conj! acc (* i i)) (recur (inc i)))))))\n(println (sq 4))\n",
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    // The `(persistent! acc)` exit reads only a local bound before the
+    // loop, so the loop stays scalar (it was boxed for the exit alone).
+    assert!(text.contains("sc_deopt"), "{text}");
+}
+
+#[test]
+fn native_emit_ir_reads_keyword_lookups_without_the_general_call_271() {
+    let ir = tmp("kw-lookup.ll");
+    clj_aot::build_str(
+        "(defn kwf [m] (:k7 m))\n(defn kwd [m] (:k7 m 0))\n(println (kwf {:k7 1}) (kwd {}))\n",
+        "f.clj",
+        &tmp("nope-kw"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    // A shape the bitcode `get` leaves to the runtime (a hash map, a
+    // record, a set) reads through `lookup`, not the keyword's invoke.
+    for name in ["user_kwf(", "user_kwd("] {
+        let body = text
+            .split("\ndefine ")
+            .find(|d| d.contains(name))
+            .expect("fn");
+        assert!(body.contains("@rt_n_destr_get"), "{body}");
+        assert!(!body.contains("@rt_n_invoke"), "{body}");
+    }
+}
+
+#[test]
+fn native_emit_ir_hoists_int_vecs_and_locks_transients_271() {
+    let ir = tmp("hoisted-vecs.ll");
+    clj_aot::build_str(
+        "(defn dp [ws cap] (let [n (count ws) t (transient (vec (repeat (inc cap) 0)))] (loop [i 0] (if (< i n) (let [w (nth ws i)] (assoc! t w (inc (nth t w))) (recur (inc i))) (persistent! t)))))\n\
+         (defn grow [n] (let [t (transient [0])] (loop [i 0] (if (< i n) (do (conj! t i) (assoc! t 0 i) (recur (inc i))) (persistent! t)))))\n\
+         (println (dp [1 2] 3) (grow 3))\n",
+        "f.clj",
+        &tmp("nope-hv"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let dp_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_dp("))
+        .expect("dp fn");
+    // Bitcode-inlined: scalar loop emits hoisted flat-int check + direct
+    // transient store without retaining the rt_bc_ivec/same_transient calls.
+    assert!(dp_body.contains("sc_nth_ichk"), "{dp_body}");
+    assert!(dp_body.contains("sc_assoc_fast"), "{dp_body}");
+    assert!(!dp_body.contains("@rt_bc_scalar_ivec"), "{dp_body}");
+    assert!(
+        !dp_body.contains("@rt_bc_scalar_same_transient"),
+        "{dp_body}"
+    );
+    let grow_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_grow("))
+        .expect("grow fn");
+    assert!(!grow_body.contains("sc_assoc_fast"), "{grow_body}");
+}
+
+#[test]
+fn native_emit_ir_fuses_filter_some_and_in2_moves_271() {
+    let ir = tmp("hof-in2.ll");
+    clj_aot::build_str(
+        "(defn step [st] (-> st (assoc-in [:a :b] 1) (update-in [:a :b] inc) (update :c dec)))\n\
+         (defn hofs [xs] [(filterv (fn [x] (> x 1)) xs) (vec (filter (fn [x] (< x 3)) xs)) (into [] (filter (fn [x] (= x 2)) xs)) (count (filter (fn [x] (> x 0)) xs)) (count (filterv (fn [x] (> x 0)) xs)) (some (fn [x] (if (= x 2) :two nil)) xs) (count (filter odd? xs))])\n\
+         (println (step {:a {:b 0} :c 5}) (hofs [1 2 3]))\n",
+        "f.clj",
+        &tmp("nope-hof-in2"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let hofs_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_hofs("))
+        .expect("hofs fn");
+    assert!(hofs_body.contains("filter_keep"), "{hofs_body}");
+    assert!(hofs_body.contains("some_hit"), "{hofs_body}");
+    assert!(hofs_body.contains("@rt_n_core_own"), "{hofs_body}");
+}
+
+#[test]
+fn native_emit_ir_fuses_dot_parse_num_and_hof2_271() {
+    let ir = tmp("dot-hof2.ll");
+    clj_aot::build_str(
+        "(defn dot [a b] (reduce + 0.0 (map * a b)))\n\
+         (defn idf [x] x)\n\
+         (defn pnums [ss] [(mapv #(Long/parseLong %) ss) (mapv #(Integer/parseInt %) ss) (mapv #(Double/parseDouble %) ss) (mapv #(idf %) ss) (mapv #(Math/abs %) [1 -2])])\n\
+         (defn hof2 [a b] [(mapv (fn [x y] (+ x y)) a b) (every? (fn [x] (> x 0)) a) (reduce + 0.0 (map (fn [x y] (* x y)) a b)) (reduce + (map (fn [x] (* x 2)) a))])\n\
+         (defn mrecur [m] (loop [{:keys [a]} m] (if (< a 1) (recur {:a 1}) a)))\n\
+         (defn nth-str [v i] (nth v i))\n\
+         (println (dot [1.0 2.0] [3.0 4.0]) (pnums [\"1\" \"2\"]) (hof2 [1 2] [3 4]) (mrecur {:a 0}) (nth-str [\"a\"] 0))\n",
+        "f.clj",
+        &tmp("nope-dot-hof2"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let dot_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_dot("))
+        .expect("dot fn");
+    assert!(dot_body.contains("@rt_n_dot"), "{dot_body}");
+    let pnums_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_pnums("))
+        .expect("pnums fn");
+    assert_eq!(
+        pnums_body.match_indices("@rt_n_mapv_parse_num").count(),
+        3,
+        "{pnums_body}"
+    );
+    let hof2_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_hof2("))
+        .expect("hof2 fn");
+    assert!(hof2_body.contains("loop_cur2"), "{hof2_body}");
+    assert!(hof2_body.contains("every_fail"), "{hof2_body}");
+    assert!(hof2_body.contains("sum_set"), "{hof2_body}");
+    assert!(hof2_body.contains("@rt_n_add_acc"), "{hof2_body}");
+    // Regression guard: bitcode linked into user modules (`clj-bc`) must stay
+    // panic-free so Linux links never pull undefined `core::str::slice_error_fail`
+    // or `core::panicking` symbols across differing panic/CPU flags.
+    assert!(
+        !text.contains("slice_error_fail") && !text.contains("9panicking"),
+        "bitcode leaked a Rust panic symbol into emitted IR"
+    );
+}
+
+#[test]
+fn native_emit_ir_lowers_double_scalar_loops_and_gvec_271() {
+    let ir = tmp("scalar-double.ll");
+    clj_aot::build_str(
+        "(def G_SCALE 2.5)\n\
+         (def ^:dynamic *dyn-bias* 0.5)\n\
+         (defn fp-loop [xs mat n]\n\
+           (loop [i 0 acc 0.0]\n\
+             (if (< i n)\n\
+               (let [x (nth xs i)\n\
+                     y (nth (nth mat 0) i)\n\
+                     a (+ (- (* x G_SCALE) G_SCALE) *dyn-bias*)\n\
+                     b (/ (inc (dec (- a))) 2.0)\n\
+                     m (min (max b 0.0) 10.0)\n\
+                     w (+ (Math/sqrt (Math/abs m)) (Math/log (+ m 1.0)) (Math/pow 2.0 3.0))\n\
+                     c (+ (double i) (long w) (int w))]\n\
+                 (if (and (pos? m) (neg? (- m)) (zero? 0.0) (<= 0.0 m) (>= m 0.0) (> m -1.0) (== m m) (= m m))\n\
+                   (recur (inc i) (+ acc y c))\n\
+                   (recur (inc i) acc)))\n\
+               acc)))\n\
+         (defn int-loop [xs mat n]\n\
+           (loop [i 0 acc 0]\n\
+             (if (< i n)\n\
+               (let [x (nth xs i)\n\
+                     y (nth (nth mat 0) i)\n\
+                     a (+ (Math/abs (- x y)) (long x) (int y) (bit-not i))]\n\
+                 (if (and (pos? a) (= x y))\n\
+                   (recur (inc i) (+ acc a))\n\
+                   (recur (inc i) acc)))\n\
+               acc)))\n\
+         (println (fp-loop [1.0 2.0] [[3.0 4.0]] 2) (int-loop [1 2] [[1 2]] 2))\n",
+        "f.clj",
+        &tmp("nope-scalar-double"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let fp_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_fp_loop("))
+        .expect("fp-loop fn");
+    assert!(fp_body.contains("sc_nth_gvec"), "{fp_body}");
+    assert!(fp_body.contains("@rt_n_math_log"), "{fp_body}");
+    assert!(fp_body.contains("@rt_n_math_pow"), "{fp_body}");
+    assert!(fp_body.contains("llvm.sqrt.f64"), "{fp_body}");
+    assert!(fp_body.contains("llvm.fabs.f64"), "{fp_body}");
+    assert!(fp_body.contains("sc_glb_ok"), "{fp_body}");
+    assert!(fp_body.contains("sc_div_ok"), "{fp_body}");
+    assert!(fp_body.contains("sc_d2i_ok"), "{fp_body}");
+
+    let int_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_int_loop("))
+        .expect("int-loop fn");
+    assert!(int_body.contains("llvm.abs.i64"), "{int_body}");
+    assert!(!int_body.contains("sc_nth_gvec"), "{int_body}");
+    assert!(!int_body.contains("sc_o2_d"), "{int_body}");
+    assert!(!int_body.contains("sc_abs_d"), "{int_body}");
+    assert!(
+        !text.contains("slice_error_fail") && !text.contains("9panicking"),
+        "bitcode leaked a Rust panic symbol into emitted IR"
+    );
+}
+
+#[test]
+fn native_emit_ir_streams_print_join_271() {
+    let ir = tmp("native-print-join.ll");
+    let src = "\
+(require '[clojure.string :as str])
+(defn emit-ln [xs] (println (str/join \",\" xs)))
+(defn emit-raw [xs] (print (str/join \",\" xs)))
+(defn emit-str-nl [xs] (print (str (str/join \",\" xs) \"\\n\")))
+(defn non-matching [xs]
+  (println (str/join xs))
+  (println \"a\" \"b\")
+  (println (inc 1))
+  (print (str (str/join \",\" xs) \"x\"))
+  (print (str \"a\" \"\\n\"))
+  (print (str (str/join \",\" xs)))
+  (print (inc 1))
+  (print xs)
+  (prn (str/join \",\" xs)))
+(emit-ln [\"a\" \"b\"])
+(emit-raw [\"a\" \"b\"])
+(emit-str-nl [\"a\" \"b\"])
+(non-matching [\"a\" \"b\"])
+";
+    clj_aot::build_str(
+        src,
+        "f.clj",
+        &tmp("nope-print-join"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    for (fname, flag) in [
+        ("user_emit_ln(", "i8 3"),
+        ("user_emit_raw(", "i8 0"),
+        ("user_emit_str_nl(", "i8 1"),
+    ] {
+        let body = text
+            .split("\ndefine ")
+            .find(|d| d.contains(fname))
+            .unwrap_or_else(|| panic!("missing {fname}"));
+        assert!(
+            body.contains("@rt_n_print_join") && body.contains(flag),
+            "{fname} expected @rt_n_print_join with {flag}:\n{body}"
+        );
+    }
+    let nm_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_non_matching("))
+        .expect("non_matching fn");
+    assert!(
+        !nm_body.contains("@rt_n_print_join"),
+        "non_matching unexpectedly emitted @rt_n_print_join:\n{nm_body}"
+    );
+    assert!(
+        !text.contains("slice_error_fail") && !text.contains("9panicking"),
+        "bitcode leaked a Rust panic symbol into emitted IR"
+    );
+}
+
+#[test]
+fn native_emit_ir_packed_doubles_and_dtvec_271() {
+    let ir = tmp("native-packed-doubles.ll");
+    let src = "\
+(defn scan-max [q base na]
+  (loop [a 1 bv (nth q base)]
+    (if (>= a na)
+      bv
+      (let [v (nth q (+ base a))]
+        (recur (inc a) (if (> v bv) v bv))))))
+
+(defn update-dtvec [q n]
+  (loop [i 0 acc 0.0]
+    (if (< i n)
+      (let [v (+ (nth q i) acc)]
+        (assoc! q i v)
+        (recur (inc i) (+ acc 0.5)))
+      acc)))
+
+(defn grow-dtvec [q n x]
+  (loop [i 0 acc (double x)]
+    (if (< i n)
+      (do
+        (conj! q acc)
+        (assoc! q 0 acc)
+        (recur (inc i) (+ acc 1.0)))
+      acc)))
+
+(defn pure-int-dec [xs n]
+  (loop [j (dec n) acc 0]
+    (if (< j 0)
+      acc
+      (recur (dec j) (+ acc (nth xs j))))))
+
+(defn init-dbl-lit [xs n]
+  (loop [i 0 cur 0.0]
+    (if (< i n)
+      (recur (inc i) (nth xs i))
+      cur)))
+
+(let [tv (transient [1.0 2.0 3.0])]
+  (println (scan-max tv 0 3) (update-dtvec tv 3) (grow-dtvec tv 2 1) (pure-int-dec [1 2 3] 3) (init-dbl-lit [1.0 2.0] 2)))
+";
+    clj_aot::build_str(
+        src,
+        "f.clj",
+        &tmp("nope-packed-doubles"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+
+    let scan_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_scan_max("))
+        .expect("scan_max");
+    assert!(scan_body.contains("sc_nth_dvec"), "{scan_body}");
+    assert!(
+        scan_body.contains("rt_bc_scalar_dvec") || scan_body.contains("sc_dtv_try"),
+        "{scan_body}"
+    );
+
+    let upd_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_update_dtvec("))
+        .expect("update_dtvec");
+    assert!(upd_body.contains("rt_bc_scalar_dtvec_lock"), "{upd_body}");
+    assert!(upd_body.contains("sc_assoc_dchk"), "{upd_body}");
+    assert!(upd_body.contains("sc_assoc_tryd"), "{upd_body}");
+
+    let grow_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_grow_dtvec("))
+        .expect("grow_dtvec");
+    assert!(grow_body.contains("sc_conj_tryd"), "{grow_body}");
+    assert!(grow_body.contains("sc_assoc_tryd"), "{grow_body}");
+
+    let pure_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_pure_int_dec("))
+        .expect("pure_int_dec");
+    assert!(!pure_body.contains("sc_nth_dvec"), "{pure_body}");
+    assert!(!pure_body.contains("sc_dtv_try"), "{pure_body}");
+    assert!(!pure_body.contains("sc_assoc_dfast"), "{pure_body}");
+
+    let init_dbl_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_init_dbl_lit("))
+        .expect("init_dbl_lit");
+    assert!(init_dbl_body.contains("sc_nth_dvec"), "{init_dbl_body}");
+
+    assert!(
+        !text.contains("slice_error_fail") && !text.contains("9panicking"),
+        "bitcode leaked a Rust panic symbol into emitted IR"
     );
 }
