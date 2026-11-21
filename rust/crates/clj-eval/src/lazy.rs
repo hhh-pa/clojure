@@ -5286,7 +5286,7 @@ fn range_num(v: &Value) -> RangeNum {
 
 /// `LongRange.rangeCount` (checked; `None` overflows like the
 /// JVM's `ArithmeticException`, routing to the double path).
-fn range_count(start: i64, end: i64, step: i64) -> Option<i64> {
+pub(crate) fn range_count(start: i64, end: i64, step: i64) -> Option<i64> {
     let total = end
         .checked_sub(start)?
         .checked_add(step)?
@@ -5297,7 +5297,7 @@ fn range_count(start: i64, end: i64, step: i64) -> Option<i64> {
 /// `LongRange.create` (all-`Int` args): empties answer `()`,
 /// zero steps repeat the start, overflows fall back to the double
 /// path with `Int` bounds.
-fn long_range(s: i64, e: i64, st: i64) -> Value {
+pub(crate) fn long_range(s: i64, e: i64, st: i64) -> Value {
     if (st > 0 && e <= s) || (st < 0 && e >= s) || (st == 0 && e == s) {
         return empty_list_value();
     }

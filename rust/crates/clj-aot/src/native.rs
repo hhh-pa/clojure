@@ -3251,7 +3251,146 @@ impl<'ctx> Lowerer<'ctx> {
         (state, state2)
     }
 
+    /// One fused-loop collection's `(plan kind, plan slots, range source)`:
+    /// a [`range_plan_call`] lowers its argument exprs into slots and
+    /// classifies them in place (`rt_n_range_plan`) without building the
+    /// range value (#271 Slice 5l) — the returned source materializes the
+    /// range into `slot` on the general path. Every other collection
+    /// lowers into `slot` and classifies through `rt_n_iter_plan`.
+    fn emit_coll_plan<'a>(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        e: &'a Expr,
+        slot: PointerValue<'ctx>,
+    ) -> Result<
+        (
+            IntValue<'ctx>,
+            PointerValue<'ctx>,
+            Option<RangeSrc<'a, 'ctx>>,
+        ),
+        Unsupported,
+    > {
+        let Some(call) = range_plan_call(e) else {
+            self.lower(f, e, slot)?;
+            let (kind, plan) = self.emit_iter_plan(f, slot);
+            return Ok((kind, plan, None));
+        };
+        let mut args = Vec::with_capacity(call.args.len());
+        for a in &call.args {
+            let s = self.slot(f);
+            self.lower(f, a, s)?;
+            args.push(s);
+        }
+        let plan_ty = self.ctx.struct_type(&[self.i64t.into(); 3], false);
+        let plan = self.entry_alloca(f, plan_ty, "plan");
+        let mut all_int = self.ctx.bool_type().const_int(1, false);
+        for a in &args {
+            let is_int = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    self.tag(*a),
+                    self.i8t.const_int(2, false),
+                    "rng_i",
+                )
+                .expect("cmp");
+            all_int = self
+                .builder
+                .build_and(all_int, is_int, "rng_ints")
+                .expect("and");
+        }
+        let fast = self.ctx.append_basic_block(f.func, "range_fast");
+        let slow = self.ctx.append_basic_block(f.func, "range_slow");
+        let join = self.ctx.append_basic_block(f.func, "range_join");
+        self.builder
+            .build_conditional_branch(all_int, fast, slow)
+            .expect("br");
+        self.builder.position_at_end(fast);
+        let mut bound = [self.i64t.const_zero(); 3];
+        for (b, a) in bound.iter_mut().zip(&args) {
+            *b = self.int_payload(*a);
+        }
+        let argc = self.i8t.const_int(args.len() as u64, false);
+        let fast_kind = self
+            .call(
+                "rt_n_range_plan",
+                Some(self.i8t),
+                &[
+                    argc.into(),
+                    bound[0].into(),
+                    bound[1].into(),
+                    bound[2].into(),
+                    plan.into(),
+                ],
+            )
+            .expect("kind");
+        self.builder.build_unconditional_branch(join).expect("br");
+        self.builder.position_at_end(slow);
+        let slow_kind = self.i8t.const_zero();
+        self.builder.build_unconditional_branch(join).expect("br");
+        self.builder.position_at_end(join);
+        let kind = self.builder.build_phi(self.i8t, "rng_kind").expect("phi");
+        kind.add_incoming(&[(&fast_kind, fast), (&slow_kind, slow)]);
+        let kind = kind.as_basic_value().into_int_value();
+        Ok((kind, plan, Some(RangeSrc { call, args })))
+    }
+
     /// [`try_lower_hof_loop`] once the moves are safe.
+    /// A fused loop's first collection, planned for its shape: the
+    /// parse-num probe reads the collection value, so a probed `mapv`
+    /// keeps the materialized path (`rt_n_iter_plan`); anything else
+    /// goes through [`Self::emit_coll_plan`].
+    fn plan_first_coll<'a>(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        hl: &HofLoop<'a>,
+        base: usize,
+        coll: PointerValue<'ctx>,
+    ) -> Result<
+        (
+            IntValue<'ctx>,
+            PointerValue<'ctx>,
+            Option<RangeSrc<'a, 'ctx>>,
+            Option<u8>,
+        ),
+        Unsupported,
+    > {
+        let probe = (hl.kind == HofKind::Collect && hl.coll2.is_none())
+            .then(|| parse_num_arity(hl.arity, base))
+            .flatten();
+        if probe.is_none() {
+            let (kind, plan, rsrc) = self.emit_coll_plan(f, hl.coll, coll)?;
+            return Ok((kind, plan, rsrc, None));
+        }
+        self.lower(f, hl.coll, coll)?;
+        let (kind, plan) = self.emit_iter_plan(f, coll);
+        Ok((kind, plan, None, probe))
+    }
+
+    /// The general block's range materializations: every range source
+    /// that skipped its value builds it here, once, over the already
+    /// lowered argument slots (moved into the call). Returns the
+    /// argument slots for the caller to free.
+    fn materialize_range_srcs(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        rsrc1: Option<&RangeSrc<'_, 'ctx>>,
+        rsrc2: Option<&RangeSrc<'_, 'ctx>>,
+        coll: PointerValue<'ctx>,
+        coll2: Option<PointerValue<'ctx>>,
+    ) -> Vec<PointerValue<'ctx>> {
+        let mut range_args: Vec<PointerValue<'ctx>> = Vec::new();
+        let pairs = [(rsrc1, Some(coll)), (rsrc2, coll2)];
+        for (rs, dest) in pairs
+            .into_iter()
+            .filter_map(|(rs, dest)| Some((rs?, dest?)))
+        {
+            self.core_call_owned(f, rs.call, &rs.args, dest);
+            range_args.extend_from_slice(&rs.args);
+        }
+        range_args
+    }
+
     fn lower_hof_loop(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -3264,29 +3403,26 @@ impl<'ctx> Lowerer<'ctx> {
             self.lower(f, init, acc)?;
         }
         let coll = self.slot(f);
-        self.lower(f, hl.coll, coll)?;
-        let coll2 = match hl.coll2 {
-            Some(c2) => {
-                let s = self.slot(f);
-                self.lower(f, c2, s)?;
-                Some(s)
-            }
-            None => None,
-        };
+        let (kind1, plan1, rsrc1, probe) = self.plan_first_coll(f, hl, base, coll)?;
+        let mut coll2 = None;
+        let mut plan2 = None;
+        let mut rsrc2 = None;
+        if let Some(c2) = hl.coll2 {
+            let s = self.slot(f);
+            let (k, p, r) = self.emit_coll_plan(f, c2, s)?;
+            coll2 = Some(s);
+            plan2 = Some((k, p));
+            rsrc2 = r;
+        }
         let done = self.ctx.append_basic_block(f.func, "loop_done");
-        if hl.kind == HofKind::Collect
-            && coll2.is_none()
-            && let Some(mode) = parse_num_arity(hl.arity, base)
-        {
+        if let Some(mode) = probe {
             self.emit_parse_num_probe(f, coll, mode, dest, done);
         }
-        let plan1 = self.emit_iter_plan(f, coll);
-        let plan2 = coll2.map(|c2| self.emit_iter_plan(f, c2));
         let direct = self.ctx.append_basic_block(f.func, "loop_direct");
         let general = self.ctx.append_basic_block(f.func, "loop_general");
         let mut is_direct = self
             .builder
-            .build_int_compare(IntPredicate::NE, plan1.0, self.i8t.const_zero(), "direct")
+            .build_int_compare(IntPredicate::NE, kind1, self.i8t.const_zero(), "direct")
             .expect("cmp");
         if let Some((k2, _)) = plan2 {
             let d2 = self
@@ -3303,10 +3439,12 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("br");
         self.builder.position_at_end(direct);
         self.init_hof_acc(f.func, hl.kind, hl.init.is_some(), acc);
-        let (state, state2) = self.load_hof_states(acc, coll, plan1, coll2, plan2);
+        let (state, state2) = self.load_hof_states(acc, coll, (kind1, plan1), coll2, plan2);
         self.emit_hof_direct(f, hl, base, &state, state2.as_ref(), dest)?;
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(general);
+        let range_args =
+            self.materialize_range_srcs(f, rsrc1.as_ref(), rsrc2.as_ref(), coll, coll2);
         self.emit_hof_general(f, hl, base, acc, coll, coll2, dest)?;
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
@@ -3314,6 +3452,7 @@ impl<'ctx> Lowerer<'ctx> {
         if let Some(c2) = coll2 {
             self.free_slots(f, &[c2]);
         }
+        self.free_slots(f, &range_args);
         Ok(())
     }
 
@@ -6376,6 +6515,28 @@ struct LoopState<'ctx> {
     n: IntValue<'ctx>,
     start: IntValue<'ctx>,
     step: IntValue<'ctx>,
+}
+
+/// `(range a0 [a1 [a2]])` as a direct `clojure.core` call a fused loop
+/// classifies by its long bounds without building the range value
+/// (#271 Slice 5l): 1-3 arguments (arity 0 is the infinite range; the
+/// general path materializes the call over the lowered arg slots).
+fn range_plan_call(e: &Expr) -> Option<&clj_eval::expr::DirectCall> {
+    let Expr::DirectNative(c) = e else {
+        return None;
+    };
+    if c.var.sym.namespace() != Some("clojure.core") || c.var.sym.name() != "range" {
+        return None;
+    }
+    matches!(c.args.len(), 1..=3).then_some(c)
+}
+
+/// A fused-loop collection that came from a [`range_plan_call`]: the
+/// lowered argument slots (classification reads them in place; the
+/// general path moves them into the range call).
+struct RangeSrc<'a, 'ctx> {
+    call: &'a clj_eval::expr::DirectCall,
+    args: Vec<PointerValue<'ctx>>,
 }
 
 fn is_direct_moving(
