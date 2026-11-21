@@ -657,6 +657,15 @@ The `sudoku` cluster (the largest `aot-ocaml` INS loser family, 20 cases at 6.3-
 
 Measured on macOS (arm64, min of 5 wall runs, byte-identical output): `sudoku` 1500-puzzle input 2.20s → 0.51s (**0.231x**), 500-puzzle input 269ms → 80ms (**0.298x**); parse-only and solve-only bisect variants put the eliminated cost in the join walk.
 
+### 6.45 Slice 5n: vector literals classify in one pass and skip the meta re-stamp
+
+A 2-second `sample` of `q_learning` (the worst remaining `aot-ocaml` INS loser after Slice 5m, 9.5x) put ~7% of samples in per-step small vector literals (`[rng u]` pair returns): `vec_lit_owned` first collected an `Option<Vec<i64>>`, so every mixed-shape literal allocated (and dropped) a partial longs buffer before the generic path allocated again, and every literal ended in `with_meta(None)` — an `Arc::make_mut` plus a second identity mint over a freshly constructed vector (the first is stamped at construction).
+
+- **One classification pass (`clj-eval::native_abi::vec_lit_owned`):** all-long items still pack without touching the caller's slots; everything else moves the items out as before — no partial buffer for the mixed shapes. `vec_lit` and `vec_lit_owned` stamp metadata only when there is any; identity semantics are unchanged (each literal is a fresh object either way, and `with-meta` proper still re-stamps).
+- **Verification:** the existing `vec_lit_owned` unit tests (slots left `Nil`/`Int`, packed all-long answers, metadata) and the full corpus/parity runs below cover both paths.
+
+Measured on macOS (arm64, min of 3 wall runs, byte-identical output): `q_learning` heavy workload (80k episodes) 7.04s → 6.48s (**0.92x**); the local run-vs-build parity sweep passed `394/394` snippet scripts.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

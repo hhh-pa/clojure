@@ -124,30 +124,44 @@ pub fn def_finish(
 /// A vector literal.
 #[must_use]
 pub fn vec_lit(items: Vec<Value>, meta: Option<Map>) -> Value {
-    Value::Vector(Vector::from_vec(items).with_meta(meta))
+    Value::Vector(match meta {
+        Some(m) => Vector::from_vec(items).with_meta(Some(m)),
+        None => Vector::from_vec(items),
+    })
 }
 
 /// [`vec_lit`] taking the evaluated items over (each slot left nil, #271):
 /// no clone per item, and all-long items go straight to packed storage
 /// (no intermediate boxed vector).
 pub fn vec_lit_owned(items: &mut [Value], meta: Option<Map>) -> Value {
-    let longs: Option<Vec<i64>> = items
-        .iter()
-        .map(|v| match v {
-            Value::Int(n) => Some(*n),
-            _ => None,
-        })
-        .collect();
-    let vec = match longs {
-        Some(ns) if !ns.is_empty() => Vector::from_ints(ns),
-        _ => Vector::from_vec(
+    // All-long literals pack without touching the caller's slots
+    // again (a single classification pass — no partial longs buffer
+    // for the mixed shapes, #271 Slice 5n); everything else moves the
+    // items out. `with_meta(None)` would re-`make_mut` a fresh vector
+    // and mint a second identity for nothing, so it is skipped.
+    let all_longs = !items.is_empty() && items.iter().all(|v| matches!(v, Value::Int(_)));
+    let vec = if all_longs {
+        Vector::from_ints(
+            items
+                .iter()
+                .map(|v| match v {
+                    Value::Int(n) => *n,
+                    _ => unreachable!("guarded by all_longs"),
+                })
+                .collect(),
+        )
+    } else {
+        Vector::from_vec(
             items
                 .iter_mut()
                 .map(|v| std::mem::replace(v, Value::Nil))
                 .collect(),
-        ),
+        )
     };
-    Value::Vector(vec.with_meta(meta))
+    Value::Vector(match meta {
+        Some(m) => vec.with_meta(Some(m)),
+        None => vec,
+    })
 }
 
 /// A map literal over evaluated `[k0 v0 k1 v1 …]` (keys realized,

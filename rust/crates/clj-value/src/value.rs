@@ -4158,7 +4158,7 @@ mod tests {
     fn vector_iter_from_seeks_every_packing() {
         let collect =
             |v: &super::Vector, from: usize| v.iter_from(from).take(3).collect::<Vec<Value>>();
-        let generic = super::Vector::from_vec((0..2_000).map(|i| Value::Int(i)).collect());
+        let generic = super::Vector::from_vec((0..2_000).map(Value::Int).collect());
         let mut ints = super::Vector::from_ints(Vec::new());
         let mut doubles = super::Vector::from_doubles(Vec::new());
         let mut chars = super::Vector::from_chars(Vec::new());
