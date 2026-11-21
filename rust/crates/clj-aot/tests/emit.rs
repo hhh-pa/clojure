@@ -1488,6 +1488,47 @@ fn native_emit_ir_fuses_filter_some_and_in2_moves_271() {
 }
 
 #[test]
+fn native_emit_ir_plans_range_loops_directly_271() {
+    let ir = tmp("range-plans.ll");
+    clj_aot::build_str(
+        "(defn rsum [k] (reduce (fn [a j] (+ a j)) 0 (range k)))\n\
+         (defn rmapv [k] (mapv (fn [j] (* j j)) (range k)))\n\
+         (defn rdbl [a b] (mapv (fn [x y] (+ x y)) (range a) (range b)))\n\
+         (defn rvec [k st] (vec (map (fn [j] (inc j)) (range 0 k st))))\n\
+         (println (rsum 5) (rmapv 3) (rdbl 2 3) (rvec 6 2))\n",
+        "f.clj",
+        &tmp("nope-rng"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let body = |name: &str| {
+        text.split("\ndefine ")
+            .find(|d| d.contains(name))
+            .unwrap_or_else(|| panic!("missing {name} in {text}"))
+            .to_owned()
+    };
+    // The bounds classify in place (`rt_n_range_plan`) and no range
+    // value is built or walked (`rt_n_iter_plan`, the owned `range`
+    // native only on the general path's call).
+    let rsum = body("user_rsum(");
+    assert!(rsum.contains("@rt_n_range_plan"), "{rsum}");
+    assert!(!rsum.contains("@rt_n_iter_plan"), "{rsum}");
+    let rmapv = body("user_rmapv(");
+    assert!(rmapv.contains("@rt_n_range_plan"), "{rmapv}");
+    let rdbl = body("user_rdbl(");
+    assert_eq!(rdbl.matches("@rt_n_range_plan").count(), 2, "{rdbl}");
+    let rvec = body("user_rvec(");
+    assert!(rvec.contains("@rt_n_range_plan"), "{rvec}");
+}
+
+#[test]
 fn native_emit_ir_fuses_dot_parse_num_and_hof2_271() {
     let ir = tmp("dot-hof2.ll");
     clj_aot::build_str(
