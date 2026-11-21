@@ -598,14 +598,7 @@ impl<T: Clone> Packed<T> {
     /// before it (#271 Slice 5m).
     pub(crate) fn iter_from(&self, start: usize) -> PackedIter<'_, T> {
         match self {
-            // A slice iterator's `nth` advances by index (O(1)).
-            Packed::Flat(a) => {
-                let mut it = a.iter();
-                if start > 0 {
-                    it.nth(start - 1);
-                }
-                PackedIter::Flat(it)
-            }
+            Packed::Flat(a) => PackedIter::Flat(a.get(start..).unwrap_or(&[]).iter()),
             Packed::Trie(t) => PackedIter::Trie(t.iter_from(start)),
         }
     }

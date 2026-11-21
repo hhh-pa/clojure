@@ -124,22 +124,40 @@ pub fn def_finish(
 /// A vector literal.
 #[must_use]
 pub fn vec_lit(items: Vec<Value>, meta: Option<Map>) -> Value {
-    Value::Vector(Vector::from_vec(items).with_meta(meta))
+    Value::Vector(match meta {
+        Some(m) => Vector::from_vec(items).with_meta(Some(m)),
+        None => Vector::from_vec(items),
+    })
 }
 
-/// [`vec_lit`] taking the evaluated items over (each slot left nil, #271):
-/// no clone per item, and all-long items go straight to packed storage
-/// (no intermediate boxed vector).
+/// [`vec_lit`] taking the evaluated items over (each non-POD slot left nil,
+/// #271): no clone per item, and all-long / all-double items go straight to
+/// packed storage (no intermediate boxed vector).
 pub fn vec_lit_owned(items: &mut [Value], meta: Option<Map>) -> Value {
-    let longs: Option<Vec<i64>> = items
-        .iter()
-        .map(|v| match v {
-            Value::Int(n) => Some(*n),
-            _ => None,
-        })
-        .collect();
-    let vec = match longs {
-        Some(ns) if !ns.is_empty() => Vector::from_ints(ns),
+    // All-long and all-double literals pack in a single classification pass
+    // without touching the caller's POD slots again (#271 Slice 5n);
+    // everything else moves the items out. `with_meta(None)` would
+    // re-`make_mut` a fresh vector and mint a second identity for nothing,
+    // so it is skipped.
+    let vec = match items.first() {
+        Some(Value::Int(_)) if items.iter().all(|v| matches!(v, Value::Int(_))) => {
+            let mut ns = Vec::with_capacity(items.len());
+            for v in items.iter() {
+                if let Value::Int(n) = *v {
+                    ns.push(n);
+                }
+            }
+            Vector::from_ints(ns)
+        }
+        Some(Value::Double(_)) if items.iter().all(|v| matches!(v, Value::Double(_))) => {
+            let mut ds = Vec::with_capacity(items.len());
+            for v in items.iter() {
+                if let Value::Double(d) = *v {
+                    ds.push(d);
+                }
+            }
+            Vector::from_doubles(ds)
+        }
         _ => Vector::from_vec(
             items
                 .iter_mut()
@@ -147,7 +165,10 @@ pub fn vec_lit_owned(items: &mut [Value], meta: Option<Map>) -> Value {
                 .collect(),
         ),
     };
-    Value::Vector(vec.with_meta(meta))
+    Value::Vector(match meta {
+        Some(m) => vec.with_meta(Some(m)),
+        None => vec,
+    })
 }
 
 /// A map literal over evaluated `[k0 v0 k1 v1 …]` (keys realized,
@@ -1666,9 +1687,15 @@ mod tests {
     #[test]
     fn owned_vector_literals_match_the_cloning_ones() {
         let s = Value::Str(Arc::from("s"));
+        let meta = Map::from_kvs_last_wins(vec![(
+            Value::Keyword(Keyword::new(None, "tag")),
+            Value::Int(1),
+        )]);
         for items in [
             vec![Value::Int(1), Value::Int(2)],
+            vec![Value::Double(1.5), Value::Double(2.5)],
             vec![Value::Int(1), s.clone()],
+            vec![Value::Double(1.5), s.clone()],
             vec![s.clone(), Value::Int(2)],
             vec![Value::Char('a'), Value::Char('b')],
             Vec::new(),
@@ -1679,8 +1706,14 @@ mod tests {
             assert!(
                 slots
                     .iter()
-                    .all(|v| matches!(v, Value::Nil | Value::Int(_)))
+                    .all(|v| matches!(v, Value::Nil | Value::Int(_) | Value::Double(_)))
             );
+            let mut meta_slots = items.clone();
+            let owned_meta = vec_lit_owned(&mut meta_slots, Some(meta.clone()));
+            let cloned_meta = vec_lit(items.clone(), Some(meta.clone()));
+            assert_eq!(owned_meta, cloned_meta);
+            assert_eq!(owned_meta.meta(), Some(&meta));
+            assert_eq!(cloned_meta.meta(), Some(&meta));
         }
     }
 
