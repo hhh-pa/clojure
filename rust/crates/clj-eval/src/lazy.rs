@@ -1588,7 +1588,7 @@ fn idrop_shift_vector(x: &Vector, n: i32, n64: i64) -> Option<Value> {
     if n64 < 0 || n64 >= x.len() as i64 {
         return None;
     }
-    let rest: Vec<Value> = x.iter().skip(n as usize).collect();
+    let rest: Vec<Value> = x.iter_from(n as usize).collect();
     Some(realized_value(rest, true, true, true, SeqKind::Chunked))
 }
 
@@ -1966,7 +1966,7 @@ fn walk_all_other(
         return visit_all(eval, sp.iter(), visit);
     }
     if let Some(sv) = as_subvector(&other) {
-        return visit_all(eval, sv.vec().iter().skip(sv.start()).take(sv.len()), visit);
+        return visit_all(eval, sv.vec().iter_from(sv.start()).take(sv.len()), visit);
     }
     if let Some(r) = as_repeat(&other) {
         return walk_repeat(eval, r, visit);

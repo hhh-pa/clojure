@@ -647,6 +647,16 @@ A 2-second macOS `sample` profile of the `approx_inference` inner loops (the wor
 
 Measured on macOS (arm64, min of 7 wall runs): `approx_inference` on a CI-shaped input (two cases, `s` ≈ 2-3k) 46.6ms → 36.2ms (0.778x); on a heavy input (three cases, `s` = 150k-250k) 6.37s → 4.74s (0.745x); empty-stdin startup unchanged (2.1ms → 2.0ms). Output byte-identical to `run` and to the previous binary on both inputs.
 
+### 6.44 Slice 5m: windows into a large vector seek instead of skipping
+
+The `sudoku` cluster (the largest `aot-ocaml` INS loser family, 20 cases at 6.3-6.6x) printed each solved board with `(str/join " " (subvec board …))`, where `board` is `(vec (subvec all base (+ base 81)))` — a window over the whole parsed input vector. Every join materialized its items through `vec.iter().skip(start)`: `Skip` pulls the default `Iterator::nth`, and the trie-backed `VectorIter`/`PackedIter` inherit the default too, so each window walked **every item from the vector's start** — O(base) per join, quadratic in the input. A bisected run (1500 puzzles) spent 77% of its wall time in that walk (2.2s of 2.9s; the solver itself was 0.55s).
+
+- **Seeking iteration (`clj-value::trie`, `clj_value::value`):** `PVec::iter_from` already positioned its cursor; `Packed::iter_from` now reaches it (a flat run advances its slice iterator by index — `slice::Iter::nth` is O(1) — and a trie positions its cursor, one descent on the first `next`), `Vector::iter_from` exposes it for every packing, and `PackedStrings` seeks its `lo`.
+- **The walks (`clj-value::seq`, `clj-eval::lazy`, `clj-eval::seqs`):** `SubVectorValue::iter` seeks to its `start` (`.take(len)` unchanged), `with_window` and `idrop_shift_vector` (`drop` on a vector) take `iter_from`, and the two subvector walk sites (`seqs::walk_direct`'s each-helper, `lazy::walk_all_other`'s visit) seek as well. Item values, laziness, `realized?`, seq classes, and side-effect order are unchanged — only the skipped items are no longer stepped.
+- **Verification:** `clj-value` unit tests seek flat and trie `Packed`/`Vector` storage of every packing (double-ended from a seek, clamped and past-end starts, empty storage); corpus `docs/spec/i259-native-compiler/corpus/subvector_seeks.clj` pins join/print/seq/reduce/`into`/`drop`/`doseq`/lazy-realization order over deep windows, windows over windows, and the error shapes, against `run`; the local run-vs-build parity sweep passed `394/394` snippet scripts.
+
+Measured on macOS (arm64, min of 5 wall runs, byte-identical output): `sudoku` 1500-puzzle input 2.20s → 0.51s (**0.231x**), 500-puzzle input 269ms → 80ms (**0.298x**); parse-only and solve-only bisect variants put the eliminated cost in the join walk.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

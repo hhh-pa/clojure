@@ -479,9 +479,13 @@ impl PackedStrings {
     }
 
     fn iter(&self) -> PackedStringsIter<'_> {
+        self.iter_from(0)
+    }
+
+    fn iter_from(&self, start: usize) -> PackedStringsIter<'_> {
         PackedStringsIter {
             ps: self,
-            lo: 0,
+            lo: start.min(self.ends.len()),
             hi: self.ends.len(),
         }
     }
@@ -1447,6 +1451,23 @@ impl Vector {
                 VectorInner::Doubles(t) => VectorIterInner::Doubles(t.iter()),
                 VectorInner::Chars(t) => VectorIterInner::Chars(t.iter()),
                 VectorInner::Strs(ps) => VectorIterInner::Strs(ps.iter()),
+            },
+        }
+    }
+
+    /// Owned-value iteration from `start` (clamped) to the back: packed
+    /// storage positions its cursor instead of walking the skipped
+    /// items, so a window deep into a large vector iterates only its
+    /// own items (#271 Slice 5m).
+    #[must_use]
+    pub fn iter_from(&self, start: usize) -> VectorIter<'_> {
+        VectorIter {
+            inner: match &self.0.inner {
+                VectorInner::Generic(t) => VectorIterInner::Generic(t.iter_from(start)),
+                VectorInner::Ints(t) => VectorIterInner::Ints(t.iter_from(start)),
+                VectorInner::Doubles(t) => VectorIterInner::Doubles(t.iter_from(start)),
+                VectorInner::Chars(t) => VectorIterInner::Chars(t.iter_from(start)),
+                VectorInner::Strs(ps) => VectorIterInner::Strs(ps.iter_from(start)),
             },
         }
     }
@@ -4128,6 +4149,52 @@ mod tests {
         assert_eq!(big_ints.iter().nth(1_500), Some(Value::Int(1_500)));
         assert_eq!(big_chars.iter().nth(1_501), Some(Value::Char('b')));
         assert_eq!(big.iter().nth(1_999), Some(Value::Str(Arc::from("1999"))));
+    }
+
+    /// Seeking iteration (#271 Slice 5m): `iter_from` starts at the
+    /// index for every packing (flat and trie), so a window deep into a
+    /// large vector never walks the items before it.
+    #[test]
+    fn vector_iter_from_seeks_every_packing() {
+        let collect =
+            |v: &super::Vector, from: usize| v.iter_from(from).take(3).collect::<Vec<Value>>();
+        let generic = super::Vector::from_vec((0..2_000).map(|i| Value::Int(i)).collect());
+        let mut ints = super::Vector::from_ints(Vec::new());
+        let mut doubles = super::Vector::from_doubles(Vec::new());
+        let mut chars = super::Vector::from_chars(Vec::new());
+        for i in 0..2_000i64 {
+            ints = ints.push_back(Value::Int(i));
+            doubles = doubles.push_back(Value::Double(i as f64 / 2.0));
+            chars = chars.push_back(Value::Char('a'));
+        }
+        let strs = super::Vector::from_vec(
+            (0..2_000)
+                .map(|i| Value::Str(Arc::from(i.to_string())))
+                .collect(),
+        );
+        assert_eq!(
+            collect(&generic, 1_500),
+            (1_500..1_503).map(Value::Int).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            collect(&ints, 1_024),
+            (1_024..1_027).map(Value::Int).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            collect(&doubles, 31),
+            (31..34)
+                .map(|i| Value::Double(i as f64 / 2.0))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(collect(&chars, 40), vec![Value::Char('a'); 3]);
+        assert_eq!(collect(&strs, 1_999), vec![Value::Str(Arc::from("1999"))]);
+        // A seek past the end is empty, for flat and trie storage.
+        assert_eq!(generic.iter_from(2_000).next(), None);
+        assert_eq!(ints.iter_from(9_999).next(), None);
+        assert_eq!(
+            super::Vector::from_vec(Vec::new()).iter_from(3).next(),
+            None
+        );
     }
 
     /// The layout natively compiled code relies on (issue #259).
