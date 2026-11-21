@@ -155,6 +155,25 @@ fn nabi_assoc_conj_fallbacks() {
             .iter()
             .any(|(name, _)| *name == "rt_n_str_ascii")
     );
+    // A fused loop's long-bounds range plan (#271 Slice 5l): hit, empty,
+    // and the repeat/overflow shapes that stay general.
+    let mut plan = [0i64; 3];
+    assert_eq!(cljrt::nabi::rt_n_range_plan(1, 5, 0, 0, &mut plan), 2);
+    assert_eq!(plan, [5, 0, 1]);
+    assert_eq!(cljrt::nabi::rt_n_range_plan(3, 9, 3, -2, &mut plan), 2);
+    assert_eq!(plan, [3, 9, -2]);
+    assert_eq!(cljrt::nabi::rt_n_range_plan(2, 5, 0, 0, &mut plan), 2);
+    assert_eq!(plan[0], 0);
+    assert_eq!(cljrt::nabi::rt_n_range_plan(3, 4, 5, 0, &mut plan), 0);
+    assert_eq!(
+        cljrt::nabi::rt_n_range_plan(2, 0, i64::MAX, 0, &mut plan),
+        0
+    );
+    assert!(
+        cljrt::nabi::native_symbols()
+            .iter()
+            .any(|(name, _)| *name == "rt_n_range_plan")
+    );
     let mut cell_out = Value::Int(99);
     cljrt::nabi::rt_n_cell_set(&Value::Nil, &Value::Int(1));
     cljrt::nabi::rt_n_cell_get(&mut cell_out, &Value::Nil);

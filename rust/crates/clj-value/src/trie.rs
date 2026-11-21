@@ -589,9 +589,24 @@ impl<T: Clone> Packed<T> {
     }
 
     pub(crate) fn iter(&self) -> PackedIter<'_, T> {
+        self.iter_from(0)
+    }
+
+    /// Items from index `start` to the back: a flat run indexes its
+    /// slice, a trie positions its cursor (one descent on the first
+    /// `next`), so a window into a large vector never walks the items
+    /// before it (#271 Slice 5m).
+    pub(crate) fn iter_from(&self, start: usize) -> PackedIter<'_, T> {
         match self {
-            Packed::Flat(a) => PackedIter::Flat(a.iter()),
-            Packed::Trie(t) => PackedIter::Trie(t.iter()),
+            // A slice iterator's `nth` advances by index (O(1)).
+            Packed::Flat(a) => {
+                let mut it = a.iter();
+                if start > 0 {
+                    it.nth(start - 1);
+                }
+                PackedIter::Flat(it)
+            }
+            Packed::Trie(t) => PackedIter::Trie(t.iter_from(start)),
         }
     }
 }
@@ -724,6 +739,39 @@ mod tests {
         assert_eq!(v.chunk_from(32).len(), 32);
         assert_eq!(v.chunk_from(65).len(), 5);
         assert!(v.chunk_from(70).is_empty());
+    }
+
+    /// Seeking iteration (#271 Slice 5m): `iter_from` positions the
+    /// cursor (one descent on the first `next`) instead of walking the
+    /// skipped items, on both the flat and trie shapes of [`Packed`].
+    #[test]
+    fn iter_from_seeks_flat_and_trie() {
+        let want = |lo: i64, hi: i64| (lo..hi).collect::<Vec<i64>>();
+        let flat: Packed<i64> = Packed::from_vec((0..64).collect());
+        for start in [0usize, 1, 31, 32, 33, 63, 64, 100] {
+            let got: Vec<i64> = flat.iter_from(start).copied().collect();
+            assert_eq!(got, want(start as i64, 64), "flat from {start}");
+        }
+        // Past the trie threshold: leaves, branch boundaries, the tail.
+        let trie: Packed<i64> = Packed::from_vec((0..(FLAT_MAX + 100) as i64).collect());
+        let n = FLAT_MAX + 100;
+        for start in [0usize, 1, 32, 33, 1023, 1024, n - 1, n, n + 5] {
+            let got: Vec<i64> = trie.iter_from(start).copied().collect();
+            assert_eq!(
+                got,
+                want(start.min(n) as i64, n as i64),
+                "trie from {start}"
+            );
+        }
+        // Double-ended from a seek: the front seeks, the back stays.
+        let mut it = trie.iter_from(1024);
+        assert_eq!(it.next(), Some(&1024));
+        assert_eq!(it.next_back(), Some(&(n as i64 - 1)));
+        assert_eq!(it.size_hint().0, n - 1026);
+        // An empty packed storage seeks to nothing.
+        let empty: Packed<i64> = Packed::from_vec(Vec::new());
+        assert_eq!(empty.iter_from(0).next(), None);
+        assert_eq!(empty.iter_from(7).next(), None);
     }
 
     /// [`Packed`]: flat up to `FLAT_MAX` items, the trie past it —

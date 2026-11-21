@@ -768,9 +768,11 @@ impl SubVectorValue {
     }
 
     /// Iterate the window items, in order (owned values since
-    /// vector packing).
+    /// vector packing): the cursor seeks to `start`, so a window deep
+    /// into a large vector never walks the items before it (#271
+    /// Slice 5m).
     pub fn iter(&self) -> impl Iterator<Item = Value> + '_ {
-        self.vec.iter().skip(self.start).take(self.len())
+        self.vec.iter_from(self.start).take(self.len())
     }
 
     /// The window item at `index` (`None` past the end).
@@ -804,7 +806,7 @@ impl SubVectorValue {
         let mut backing: Vec<Value> = self.vec.iter().take(self.start).collect();
         let end = self.start + items.len();
         backing.extend(items);
-        backing.extend(self.vec.iter().skip(self.end));
+        backing.extend(self.vec.iter_from(self.end));
         Self {
             vec: Vector::from_vec(backing),
             start: self.start,

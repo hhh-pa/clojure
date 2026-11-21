@@ -172,7 +172,7 @@ fn walk_direct(
         return Some(each(&mut sp.iter()));
     }
     if let Some(sv) = crate::lazy::as_subvector(coll) {
-        return Some(each(&mut sv.vec().iter().skip(sv.start()).take(sv.len())));
+        return Some(each(&mut sv.vec().iter_from(sv.start()).take(sv.len())));
     }
     if let Value::Str(s) = coll {
         return Some(each(&mut s.chars().map(Value::Char)));

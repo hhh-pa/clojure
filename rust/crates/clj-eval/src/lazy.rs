@@ -1588,7 +1588,7 @@ fn idrop_shift_vector(x: &Vector, n: i32, n64: i64) -> Option<Value> {
     if n64 < 0 || n64 >= x.len() as i64 {
         return None;
     }
-    let rest: Vec<Value> = x.iter().skip(n as usize).collect();
+    let rest: Vec<Value> = x.iter_from(n as usize).collect();
     Some(realized_value(rest, true, true, true, SeqKind::Chunked))
 }
 
@@ -1966,7 +1966,7 @@ fn walk_all_other(
         return visit_all(eval, sp.iter(), visit);
     }
     if let Some(sv) = as_subvector(&other) {
-        return visit_all(eval, sv.vec().iter().skip(sv.start()).take(sv.len()), visit);
+        return visit_all(eval, sv.vec().iter_from(sv.start()).take(sv.len()), visit);
     }
     if let Some(r) = as_repeat(&other) {
         return walk_repeat(eval, r, visit);
@@ -5286,7 +5286,7 @@ fn range_num(v: &Value) -> RangeNum {
 
 /// `LongRange.rangeCount` (checked; `None` overflows like the
 /// JVM's `ArithmeticException`, routing to the double path).
-fn range_count(start: i64, end: i64, step: i64) -> Option<i64> {
+pub(crate) fn range_count(start: i64, end: i64, step: i64) -> Option<i64> {
     let total = end
         .checked_sub(start)?
         .checked_add(step)?
@@ -5297,7 +5297,7 @@ fn range_count(start: i64, end: i64, step: i64) -> Option<i64> {
 /// `LongRange.create` (all-`Int` args): empties answer `()`,
 /// zero steps repeat the start, overflows fall back to the double
 /// path with `Int` bounds.
-fn long_range(s: i64, e: i64, st: i64) -> Value {
+pub(crate) fn long_range(s: i64, e: i64, st: i64) -> Value {
     if (st > 0 && e <= s) || (st < 0 && e >= s) || (st == 0 && e == s) {
         return empty_list_value();
     }
