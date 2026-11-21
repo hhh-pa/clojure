@@ -1235,6 +1235,30 @@ pub fn iter_plan(coll: &Value) -> Option<(u8, i64, i64, i64)> {
     }
 }
 
+/// A compiled loop's direct plan for `(range …)` with all-`Int` args
+/// (#271 Slice 5l), mirroring `lazy::long_range`'s classification without
+/// building the range value: `(2, count, start, step)` for a finite long
+/// range — the empty shapes answer `(2, 0, start, step)`, which walks zero
+/// items exactly as the general call walks the empty list — and `None` for
+/// the infinite repeat and count-overflow shapes the direct loop cannot
+/// walk (the general call builds those ranges itself).
+#[must_use]
+pub fn range_plan(argc: usize, a: [i64; 3]) -> Option<(u8, i64, i64, i64)> {
+    let (s, e, st) = match argc {
+        1 => (0, a[0], 1),
+        2 => (a[0], a[1], 1),
+        _ => (a[0], a[1], a[2]),
+    };
+    if (st > 0 && e <= s) || (st < 0 && e >= s) || (st == 0 && e == s) {
+        return Some((2, 0, s, st));
+    }
+    if st == 0 {
+        return None;
+    }
+    let count = crate::lazy::range_count(s, e, st).filter(|&c| c <= i64::from(i32::MAX))?;
+    Some((2, count, s, st))
+}
+
 /// Item `i` of an indexed vector/subvector/split-vector (an index below
 /// [`iter_plan`]'s count; anything else is nil).
 #[must_use]
@@ -1686,6 +1710,29 @@ mod tests {
             None,
         );
         assert_eq!(iter_plan(&dbl), None);
+        // Bounds-only range plans (#271 Slice 5l) agree with the plans
+        // of the range values `lazy::long_range` builds for the same
+        // all-long args, and refuse the shapes it answers with a repeat
+        // or a double-path range.
+        assert_eq!(range_plan(1, [5, 0, 0]), Some((2, 5, 0, 1)));
+        assert_eq!(range_plan(2, [3, 9, 0]), Some((2, 6, 3, 1)));
+        assert_eq!(range_plan(3, [3, 9, 2]), Some((2, 3, 3, 2)));
+        assert_eq!(range_plan(3, [9, 3, -2]), Some((2, 3, 9, -2)));
+        for (s, e, st) in [(0i64, 5, 1), (3, 9, 2), (9, 3, -2), (-4, 4, 3)] {
+            let want = iter_plan(&crate::lazy::long_range(s, e, st)).filter(|&(k, _, _, _)| k == 2);
+            assert_eq!(range_plan(3, [s, e, st]), want, "({s}, {e}, {st})");
+        }
+        // Empty shapes walk zero items, like the empty-list value path.
+        assert_eq!(range_plan(1, [0, 0, 0]), Some((2, 0, 0, 1)));
+        assert_eq!(range_plan(2, [5, 0, 0]), Some((2, 0, 5, 1)));
+        assert_eq!(range_plan(3, [0, 5, -1]), Some((2, 0, 0, -1)));
+        assert_eq!(range_plan(3, [4, 4, 0]), Some((2, 0, 4, 0)));
+        // A zero step repeats forever; a count that overflows `i32` (or
+        // the count arithmetic) takes the double-path range: both stay
+        // general.
+        assert_eq!(range_plan(3, [4, 5, 0]), None);
+        assert_eq!(range_plan(2, [0, i64::MAX, 0]), None);
+        assert_eq!(range_plan(2, [i64::MIN, i64::MAX, 0]), None);
         let mut reduced = crate::core::Reduced::wrap(Value::Int(5));
         assert_eq!(iter_plan(&reduced), None);
         assert_eq!(iter_plan(&Value::Nil), None);

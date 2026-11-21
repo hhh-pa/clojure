@@ -342,6 +342,21 @@ pub extern "C" fn rt_n_iter_plan(coll: &Value, plan: &mut [i64; 3]) -> u8 {
     kind
 }
 
+/// A compiled loop's direct plan for `(range a0 [a1 [a2]])` with all-long
+/// args (#271 Slice 5l), without building the range value: `plan` =
+/// (count, start, step); returns 2 for a finite long range (an empty
+/// shape answers count 0) and 0 when the loop must take the general
+/// call (a zero-step repeat, a count overflow).
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_range_plan(argc: u8, a0: i64, a1: i64, a2: i64, plan: &mut [i64; 3]) -> u8 {
+    let Some((kind, n, start, step)) = native_abi::range_plan(usize::from(argc), [a0, a1, a2])
+    else {
+        return 0;
+    };
+    *plan = [n, start, step];
+    kind
+}
+
 /// `out = v[i]` (a persistent vector and an in-range index).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_vec_item(out: &mut Value, v: &Value, i: u64) {
@@ -1297,6 +1312,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_consts_base,
         rt_n_enter,
         rt_n_iter_plan,
+        rt_n_range_plan,
         rt_n_cap_var_meta,
         rt_n_vec_item,
         rt_n_vec_new,
