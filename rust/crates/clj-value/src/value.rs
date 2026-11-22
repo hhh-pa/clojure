@@ -2563,23 +2563,13 @@ impl Set {
     /// in the insertion-order sidecar (preserving member order).
     #[must_use]
     pub fn without(mut self, v: &Value) -> Self {
-        match &self.0.storage {
-            SetStorage::Small(items) => {
-                let Some(pos) = items.iter().position(|m| m == v) else {
-                    return self;
-                };
-                let data = Arc::make_mut(&mut self.0);
-                if let SetStorage::Small(items) = &mut data.storage {
-                    items.remove(pos);
-                }
-                data.id = next_set_id();
-                self
-            }
-            SetStorage::Large(ls) => {
-                let Some(&slot) = ls.inner.get(v) else {
-                    return self;
-                };
-                if self.0.sort.is_some() {
+        let slot = match &self.0.storage {
+            SetStorage::Small(items) => match items.iter().position(|m| m == v) {
+                Some(pos) => pos,
+                None => return self,
+            },
+            SetStorage::Large(ls) => match ls.inner.get(v) {
+                Some(_) if self.0.sort.is_some() => {
                     // Sorted sidecars keep no slots (positional inserts would
                     // shift them): find the member's sorted position.
                     let pos = self
@@ -2588,14 +2578,19 @@ impl Set {
                         .expect("a member sits in the sidecar");
                     return self.without_sorted_at(pos);
                 }
-                let data = Arc::make_mut(&mut self.0);
-                if let SetStorage::Large(ls) = &mut data.storage {
-                    ls.remove_unsorted_slot(v, slot);
-                }
-                data.id = next_set_id();
-                self
+                Some(&slot) => slot,
+                None => return self,
+            },
+        };
+        let data = Arc::make_mut(&mut self.0);
+        match &mut data.storage {
+            SetStorage::Small(items) => {
+                items.remove(slot);
             }
+            SetStorage::Large(ls) => ls.remove_unsorted_slot(v, slot),
         }
+        data.id = next_set_id();
+        self
     }
 
     /// The element count.
@@ -5920,7 +5915,7 @@ mod tests {
 
     #[test]
     fn small_and_large_set_storage_paths_271() {
-        use super::{Set, SortSpec};
+        use super::{PackedStrings, Set, SortSpec, Vector};
         // Small set: from_items_checked, insert, dup insert, get, contains, without, iter
         let s = Set::from_items_checked(vec![Value::Int(1), Value::Int(2)]).unwrap();
         assert_eq!(s.size(), 2);
@@ -5967,9 +5962,21 @@ mod tests {
         assert_eq!(ss_sm.sorted_member(1), Some(&Value::Int(2)));
         let ss_sm2 = ss_sm.without_sorted_at(1);
         assert_eq!(ss_sm2.sorted_len(), 2);
-        let ss_lg = ss.without(&Value::Int(0)).without(&Value::Int(5));
-        assert_eq!(ss_lg.sorted_len(), 8);
+        let mut ss_lg = ss;
+        for i in 0..7 {
+            ss_lg = ss_lg.without(&Value::Int(i));
+        }
+        ss_lg = ss_lg.without(&Value::Int(8));
+        assert_eq!(ss_lg.sorted_len(), 2);
         let ss_rebuilt = new_set().with_ordered_members((0..10).map(Value::Int).collect());
         assert_eq!(ss_rebuilt.size(), 10);
+
+        // String-packed Vector::iter_from
+        let mut ps = PackedStrings::new();
+        assert!(ps.try_push("a"));
+        assert!(ps.try_push("b"));
+        assert!(ps.try_push("c"));
+        let sv = Vector::from_packed_strs(ps);
+        assert_eq!(sv.iter_from(1).count(), 2);
     }
 }

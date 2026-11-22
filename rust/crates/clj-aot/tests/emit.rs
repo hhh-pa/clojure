@@ -914,6 +914,7 @@ fn native_emit_splices_clojure_set_under_lite_only() {
     assert!(report.starts_with("aot: native 1/1 defns"), "{report}");
     assert!(lite.contains("@rt_n_main_lite("), "{lite}");
     assert!(lite.contains("_clojure_set_union"), "{lite}");
+    assert!(!lite.contains("_clojure_set_join"), "{lite}");
     let (report, full) = emit(
         "full",
         "(ns demo.setm (:require [clojure.set :as set]))

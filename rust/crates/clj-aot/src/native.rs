@@ -680,16 +680,37 @@ impl<'ctx> Lowerer<'ctx> {
     }
 
     /// Finish a function whose result is in `result`: entry inits every
-    /// slot to nil; the exit moves the result out and drops every slot.
+    /// slot to nil; the exit moves the result out and drops only live slots
+    /// (skipping slots already nilled in `free_slots`/`free_arrays`/`result`),
+    /// while `fail` calls `rt_n_drop` directly with `cold` to keep exception
+    /// cleanup out of hot `.text` pages (#271 Slice 5r).
     fn end_fn(&mut self, f: FnCtx<'ctx>, result: PointerValue<'ctx>) -> FunctionValue<'ctx> {
         let ret = f.func.get_nth_param(0).expect("ret").into_pointer_value();
         self.move_v(f.func, ret, result);
-        self.drop_slots(f.func, &f.slots);
+        let mut nilled: HashSet<PointerValue<'ctx>> = f.free_slots.iter().copied().collect();
+        nilled.insert(result);
+        for pairs in f.free_arrays.values() {
+            for (_, elems) in pairs {
+                nilled.extend(elems.iter().copied());
+            }
+        }
+        for &slot in &f.slots {
+            if !nilled.contains(&slot) {
+                self.drop_v(f.func, slot);
+            }
+        }
         self.builder
             .build_return(Some(&self.i32t.const_zero()))
             .expect("ret");
         self.builder.position_at_end(f.fail);
-        self.drop_slots(f.func, &f.slots);
+        let cold_attr = self.ctx.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id("cold"),
+            0,
+        );
+        for &slot in &f.slots {
+            self.call_raw("rt_n_drop", None, &[slot.into()])
+                .add_attribute(inkwell::attributes::AttributeLoc::Function, cold_attr);
+        }
         self.builder
             .build_return(Some(&self.i32t.const_int(1, false)))
             .expect("ret");
@@ -2607,10 +2628,11 @@ impl<'ctx> Lowerer<'ctx> {
     fn inline_compound_ok(&self, e: &Expr, callee_unit: usize, budget: &mut usize) -> bool {
         match e {
             Expr::VecLit(xs, m) | Expr::SetLit(xs, m) => {
-                m.is_none() && self.inline_exprs_ok(xs, callee_unit, budget)
+                !xs.is_empty() && m.is_none() && self.inline_exprs_ok(xs, callee_unit, budget)
             }
             Expr::MapLit(ps, m) => {
-                m.is_none()
+                !ps.is_empty()
+                    && m.is_none()
                     && ps.iter().all(|(k, v)| {
                         self.inline_expr_ok(k, callee_unit, budget)
                             && self.inline_expr_ok(v, callee_unit, budget)
@@ -7243,10 +7265,10 @@ fn range_plan_call(e: &Expr) -> Option<&clj_eval::expr::DirectCall> {
     let Expr::DirectNative(c) = e else {
         return None;
     };
-    if c.var.sym.namespace() != Some("clojure.core") || c.var.sym.name() != "range" {
-        return None;
-    }
-    matches!(c.args.len(), 1..=3).then_some(c)
+    (c.var.sym.namespace() == Some("clojure.core")
+        && c.var.sym.name() == "range"
+        && matches!(c.args.len(), 1..=3))
+    .then_some(c)
 }
 
 /// A fused-loop collection that came from a [`range_plan_call`]: the

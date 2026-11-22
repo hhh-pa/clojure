@@ -698,6 +698,17 @@ Profiling the set-heavy geometry/compiler clusters (`fortune_voronoi`, `delaunay
 
 Measured on macOS (`libinsn.dylib`, vs Slice 5p, byte-identical output on all 18 scripts): `compiler/hindley_milner` 5.86M → 5.26M (**0.899x**, −10.1%), `math/knuth_div` 96.76M → 87.48M (**0.904x**, −9.28M, −32 KB), `geometry/fortune_voronoi` 47.33M → 44.11M (**0.932x**, −3.22M), `combinatorics/steiner_triple` 7.49M → 7.42M (**0.992x**).
 
+### 6.49 Slice 5r: selective `clojure.set` splicing, targeted `rt_bc_*` inline hints, and lean `end_fn` / cold `fail` cleanup
+
+Inspecting the Slice 5l Linux RSS gap showed 219 of 229 MEM losses sitting within `+0..+584 KB` of OCaml (`hindley_milner` +484 KB, `bentley_ottmann` +524 KB, `point_in_polygon` +584 KB, `delaunay` +368 KB), driven by `.text` page bloat from three codegen sources: splicing all 19 definitions of `clojure.set` regardless of reachability (~50 KB dead `join`/`project`/`rename`/`index`/`select` code), marking every `rt_bc_*` bitcode helper `inlinehint` (forcing multi-hundred-instruction `nth`/`get`/`eq`/`first`/`peek` bodies into every call site), and emitting inline POD-branch drop loops in `end_fn` for both already-nilled slots and cold exception-exit blocks.
+
+- **Selective `clojure.set` splicing (`clj-eval/src/aot_front.rs`):** changed `SplicedLib::select` from `Option<fn(&str) -> bool>` to `fn(&str) -> bool` with `clojure.set` using `no_lite_native`, reusing `needed_defs` + `select_units` so only reachable `clojure.set` definitions and their transitive dependencies are compiled.
+- **Targeted `rt_bc_*` `inlinehint` (`clj-aot/src/lib.rs`):** restricted `mark_internal_inline` (`should_inline_hint`) to `rt_bc_scalar_*`, `rt_bc_is_pod`, `rt_bc_deref`, `rt_bc_clone`, `rt_bc_1_count`, and the transient mutators (`rt_bc_1_pop_bang[_fx]`, `rt_bc_2_conj_bang[_fx]`, `rt_bc_3_assoc_bang[_fx]`), letting LLVM's O2 cost model inline tiny scalar ops automatically while outlining large `nth`/`get`/`eq`/`first`/`peek`/`contains` helpers.
+- **Lean `end_fn` and cold `fail` cleanup (`clj-aot/src/native.rs`):** skipped normal-exit `drop_v` for slots already moved or released (`f.free_slots`, `f.free_arrays`, `result`), and emitted direct `cold`-attributed `@rt_n_drop` calls in `f.fail` so exception cleanup stays out of hot `.text` pages.
+- **Verification:** `clj-aot::emit::native_emit_splices_clojure_set_under_lite_only` pins tree-shaking of unused `clojure.set/join`; `clj-eval::aot_front`, `clj-aot::emit`, `fmt`, `clippy`, and `complexity` all pass with 0 violations.
+
+Measured on macOS (`libinsn.dylib`, vs Slice 5q, byte-identical output on all 18 scripts): `hindley_milner.o` `__TEXT` 301 KB → 212 KB (−89 KB, −29.6%; binary TEXT −96 KB, PEAK_FP −32 KB, INS −1.8%); `suffix_array` 620.57M → 593.69M (**0.957x**, −26.88M), `count_strings` 56.86M → 53.28M (**0.937x**, −3.58M), `approx_inference` 159.39M → 155.78M (**0.977x**, −3.60M), `q_learning` 62.84M → 61.10M (**0.972x**, −1.74M), `sudoku` 357.59M → 355.42M (−2.17M), `connected_component` 918.76M → 916.84M (−1.93M, PEAK_FP −16 KB), `fortune_voronoi` −48 KB TEXT, `backprop` −32 KB TEXT, 17/18 benchmarks strictly faster than 5q.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

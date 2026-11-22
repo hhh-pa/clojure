@@ -294,22 +294,39 @@ fn helper_exports_to_internalize<'ctx>(helper: &inkwell::module::Module<'ctx>) -
     names
 }
 
+fn should_inline_hint(name: &str) -> bool {
+    name.starts_with("rt_bc_scalar_")
+        || matches!(
+            name,
+            "rt_bc_is_pod"
+                | "rt_bc_deref"
+                | "rt_bc_clone"
+                | "rt_bc_1_count"
+                | "rt_bc_1_pop_bang"
+                | "rt_bc_1_pop_bang_fx"
+                | "rt_bc_2_conj_bang"
+                | "rt_bc_2_conj_bang_fx"
+                | "rt_bc_3_assoc_bang"
+                | "rt_bc_3_assoc_bang_fx"
+        )
+}
+
 fn mark_internal_inline<'ctx>(
     ctx: &'ctx Context,
     module: &inkwell::module::Module<'ctx>,
     names: &[String],
 ) {
-    let inline_kind = inkwell::attributes::Attribute::get_named_enum_kind_id("inlinehint");
-    let inline_attr = (inline_kind != 0).then(|| ctx.create_enum_attribute(inline_kind, 0));
+    let inline_attr = ctx.create_enum_attribute(
+        inkwell::attributes::Attribute::get_named_enum_kind_id("inlinehint"),
+        0,
+    );
     for name in names {
         let Some(func) = module.get_function(name) else {
             continue;
         };
         func.set_linkage(inkwell::module::Linkage::Internal);
-        if name.starts_with("rt_bc_")
-            && let Some(attr) = inline_attr
-        {
-            func.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+        if should_inline_hint(name) {
+            func.add_attribute(inkwell::attributes::AttributeLoc::Function, inline_attr);
         }
     }
 }
@@ -442,7 +459,7 @@ mod tests {
         let summary = helpers_summary();
         assert!(summary.contains("rustc LLVM "));
 
-        let src = "(def a \"hello\")\n(defn f [v x] (if (= a \"hello\") (conj v x) (count v)))\n(println (f [1] :k))\n";
+        let src = "(def a \"hello\")\n(defn f [v x] (if (= a \"hello\") (if (nil? x) (recur v :k) (conj v x)) (count v)))\n(println (f [1] :k))\n";
         let ctx = Context::create();
         let (out_mod, _) =
             native_module_with_helpers(&ctx, src, "t.clj", None).expect("out-of-line");

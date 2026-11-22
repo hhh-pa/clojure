@@ -79,10 +79,14 @@ struct SplicedLib {
     ns: &'static str,
     file: &'static str,
     text: &'static str,
-    /// `Some(has_native)`: only the definitions the program reaches that
-    /// no Lite native (`has_native`) covers, with the definitions they
-    /// reach in turn; `None`: the whole library.
-    select: Option<fn(&str) -> bool>,
+    /// Predicate naming the vars already covered by a Lite native: only the
+    /// definitions the program reaches that this predicate returns `false`
+    /// for (plus their transitive dependencies) are spliced (#271 Slice 5r).
+    select: fn(&str) -> bool,
+}
+
+fn no_lite_native(_: &str) -> bool {
+    false
 }
 
 /// The [`SplicedLib`]s, in splice order.
@@ -91,13 +95,13 @@ const SPLICED_LIBS: &[SplicedLib] = &[
         ns: "clojure.set",
         file: "clojure/set.clj",
         text: crate::ns::STDLIB_SET_CLJ,
-        select: None,
+        select: no_lite_native,
     },
     SplicedLib {
         ns: "clojure.string",
         file: "clojure/string.clj",
         text: crate::ns::STDLIB_STRING_CLJ,
-        select: Some(crate::aot_boot::is_lite_string_var),
+        select: crate::aot_boot::is_lite_string_var,
     },
 ];
 
@@ -195,21 +199,15 @@ fn lib_units(
     if !leading_ns_requires(front, lib.ns) {
         return Ok(None);
     }
-    let needed = match lib.select {
-        Some(native) => match needed_defs(&front.units, lib.ns, native) {
-            Some(needed) if !needed.is_empty() => Some((native, needed)),
-            _ => return Ok(None),
-        },
-        None => None,
+    let Some(needed) = needed_defs(&front.units, lib.ns, lib.select).filter(|n| !n.is_empty())
+    else {
+        return Ok(None);
     };
     let prev = eval.swap_source(Arc::from(lib.file));
     let read = read_units(eval, lib.text);
     eval.swap_source(prev);
     let units = read?.units;
-    Ok(match needed {
-        Some((native, needed)) => select_units(units, lib.ns, native, needed),
-        None => Some(units),
-    })
+    Ok(select_units(units, lib.ns, lib.select, needed))
 }
 
 /// The `lib` vars `units` name that no Lite native (`native`) covers —

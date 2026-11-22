@@ -3097,23 +3097,23 @@ mod tests {
         let compile_fn = |ev: &mut crate::Evaluator, src: &str| {
             let front = front_end(ev, src, "p.clj").expect("front");
             let callees = HashMap::new();
-            for u in &front.units {
-                if let Expr::Def {
+            let body = front.units.iter().find_map(|u| match &u.expr {
+                Expr::Def {
                     init: Some(init), ..
-                } = &u.expr
-                {
-                    if let Expr::Fn(fun) = init.as_ref() {
-                        if let Expr::Loop { body, .. } = &fun.arities[0].body[0] {
-                            return compile_aot_loop(body, &[2, 3], 4, &callees);
-                        }
-                    }
-                }
-            }
-            None
+                } => match init.as_ref() {
+                    Expr::Fn(fun) => match &fun.arities[0].body[0] {
+                        Expr::Loop { body, .. } => Some(body.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            });
+            compile_aot_loop(&body.expect("loop"), &[2, 3], 4, &callees)
         };
         let pre = compile_fn(
             &mut ev,
-            "(defn f [t n] (loop [i 0 a 0] (if (< i n) (do (assoc! t i (+' a i)) (recur (inc i) a)) a))) 1",
+            "1 (def x 1) (defn g [a] a) (defn f [t n] (loop [i 0 a 0] (if (< i n) (do (assoc! t i (+' a i)) (recur (inc i) a)) a)))",
         )
         .expect("pre");
         assert!(pre.primed);

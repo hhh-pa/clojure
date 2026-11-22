@@ -130,6 +130,20 @@ pub fn vec_lit(items: Vec<Value>, meta: Option<Map>) -> Value {
     })
 }
 
+fn as_int_val(v: &Value) -> Option<i64> {
+    match *v {
+        Value::Int(n) => Some(n),
+        _ => None,
+    }
+}
+
+fn as_double_val(v: &Value) -> Option<f64> {
+    match *v {
+        Value::Double(d) => Some(d),
+        _ => None,
+    }
+}
+
 /// [`vec_lit`] taking the evaluated items over (each non-POD slot left nil,
 /// #271): no clone per item, and all-long / all-double items go straight to
 /// packed storage (no intermediate boxed vector).
@@ -140,23 +154,11 @@ pub fn vec_lit_owned(items: &mut [Value], meta: Option<Map>) -> Value {
     // re-`make_mut` a fresh vector and mint a second identity for nothing,
     // so it is skipped.
     let vec = match items.first() {
-        Some(Value::Int(_)) if items.iter().all(|v| matches!(v, Value::Int(_))) => {
-            let mut ns = Vec::with_capacity(items.len());
-            for v in items.iter() {
-                if let Value::Int(n) = *v {
-                    ns.push(n);
-                }
-            }
-            Vector::from_ints(ns)
+        Some(Value::Int(_)) if items.iter().all(|v| as_int_val(v).is_some()) => {
+            Vector::from_ints(items.iter().filter_map(as_int_val).collect())
         }
-        Some(Value::Double(_)) if items.iter().all(|v| matches!(v, Value::Double(_))) => {
-            let mut ds = Vec::with_capacity(items.len());
-            for v in items.iter() {
-                if let Value::Double(d) = *v {
-                    ds.push(d);
-                }
-            }
-            Vector::from_doubles(ds)
+        Some(Value::Double(_)) if items.iter().all(|v| as_double_val(v).is_some()) => {
+            Vector::from_doubles(items.iter().filter_map(as_double_val).collect())
         }
         _ => Vector::from_vec(
             items
