@@ -775,14 +775,17 @@ impl<'ctx> Lowerer<'ctx> {
             .builder
             .build_signed_int_to_float(self.int_payload(slot), f64t, "itof")
             .expect("itof");
-        let as_dbl = self
-            .builder
-            .build_load(f64t, self.byte_at(slot, 8), "d")
-            .expect("load")
-            .into_float_value();
+        let as_dbl = self.double_payload(slot);
         self.builder
             .build_select(is_int, as_int, as_dbl, "num")
             .expect("sel")
+            .into_float_value()
+    }
+
+    fn double_payload(&self, slot: PointerValue<'ctx>) -> inkwell::values::FloatValue<'ctx> {
+        self.builder
+            .build_load(self.ctx.f64_type(), self.byte_at(slot, 8), "d")
+            .expect("load")
             .into_float_value()
     }
 
@@ -796,6 +799,14 @@ impl<'ctx> Lowerer<'ctx> {
         self.write_tag(dest, 3);
         self.builder
             .build_store(self.byte_at(dest, 8), v)
+            .expect("store");
+    }
+
+    fn write_char(&self, func: FunctionValue<'ctx>, dest: PointerValue<'ctx>, cp: IntValue<'ctx>) {
+        self.drop_v(func, dest);
+        self.write_tag(dest, TAG_CHAR);
+        self.builder
+            .build_store(self.byte_at(dest, 4), cp)
             .expect("store");
     }
 
@@ -2648,6 +2659,9 @@ impl<'ctx> Lowerer<'ctx> {
         match op {
             StaticOp::Parse(shim) => self.lower_static_parse(shim, refs[0], dest, slow, done),
             StaticOp::RemUnsigned => self.lower_static_urem(f, refs[0], refs[1], dest, slow, done),
+            StaticOp::CharDigit => {
+                self.lower_static_char_digit(f, refs[0], refs[1], dest, slow, done);
+            }
             StaticOp::MathAbs => self.lower_static_math_abs(f, refs[0], dest, slow, done),
             StaticOp::MathSqrt => self.lower_static_math_sqrt(f, refs[0], dest, slow, done),
             StaticOp::MathUnary(shim) => {
@@ -2717,6 +2731,104 @@ impl<'ctx> Lowerer<'ctx> {
             .build_int_unsigned_rem(x, y, "urem")
             .expect("urem");
         self.write_int(f.func, dest, r);
+        self.builder.build_unconditional_branch(done).expect("br");
+    }
+
+    fn lower_static_char_digit(
+        &self,
+        f: &FnCtx<'ctx>,
+        ch: PointerValue<'ctx>,
+        rad: PointerValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let bb = &self.builder;
+        let is_ch = bb
+            .build_int_compare(
+                IntPredicate::EQ,
+                self.tag(ch),
+                self.i8t.const_int(TAG_CHAR, false),
+                "is_ch",
+            )
+            .expect("cmp");
+        let is_rad = bb
+            .build_int_compare(
+                IntPredicate::EQ,
+                self.tag(rad),
+                self.i8t.const_int(TAG_INT, false),
+                "is_rad",
+            )
+            .expect("cmp");
+        let both = bb.build_and(is_ch, is_rad, "ch_rad").expect("and");
+        let chk_bb = self.ctx.append_basic_block(f.func, "cdig_chk");
+        bb.build_conditional_branch(both, chk_bb, slow).expect("br");
+        self.builder.position_at_end(chk_bb);
+        let bb = &self.builder;
+        let r = self.int_payload(rad);
+        let r_off = bb
+            .build_int_sub(r, self.i64t.const_int(2, false), "roff")
+            .expect("sub");
+        let r_ok = bb
+            .build_int_compare(
+                IntPredicate::ULE,
+                r_off,
+                self.i64t.const_int(34, false),
+                "rok",
+            )
+            .expect("cmp");
+        let go_bb = self.ctx.append_basic_block(f.func, "cdig_go");
+        bb.build_conditional_branch(r_ok, go_bb, slow).expect("br");
+        self.builder.position_at_end(go_bb);
+        let bb = &self.builder;
+        let cu = bb
+            .build_int_z_extend(self.char_payload(ch), self.i64t, "cu")
+            .expect("zext");
+        let d_dig = bb
+            .build_int_sub(cu, self.i64t.const_int(u64::from(b'0'), false), "dd")
+            .expect("sub");
+        let is_dig = bb
+            .build_int_compare(
+                IntPredicate::ULE,
+                d_dig,
+                self.i64t.const_int(9, false),
+                "id",
+            )
+            .expect("cmp");
+        let clo = bb
+            .build_or(cu, self.i64t.const_int(32, false), "clo")
+            .expect("or");
+        let a_off = bb
+            .build_int_sub(clo, self.i64t.const_int(u64::from(b'a'), false), "ao")
+            .expect("sub");
+        let is_alpha = bb
+            .build_int_compare(
+                IntPredicate::ULE,
+                a_off,
+                self.i64t.const_int(25, false),
+                "ia",
+            )
+            .expect("cmp");
+        let d_alpha = bb
+            .build_int_add(a_off, self.i64t.const_int(10, false), "da")
+            .expect("add");
+        let neg1 = self.i64t.const_int((-1i64) as u64, true);
+        let alpha_or = bb
+            .build_select(is_alpha, d_alpha, neg1, "ao1")
+            .expect("sel")
+            .into_int_value();
+        let raw = bb
+            .build_select(is_dig, d_dig, alpha_or, "raw")
+            .expect("sel")
+            .into_int_value();
+        let in_rad = bb
+            .build_int_compare(IntPredicate::ULT, raw, r, "inrad")
+            .expect("cmp");
+        let out = bb
+            .build_select(in_rad, raw, neg1, "dig")
+            .expect("sel")
+            .into_int_value();
+        self.write_int(f.func, dest, out);
         self.builder.build_unconditional_branch(done).expect("br");
     }
 
@@ -4599,6 +4711,23 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> IntValue<'ctx> {
         match name {
             "quot" | "rem" | "mod" => self.int_div(f, name, x, y, slow),
+            "urem" => {
+                let nz = self
+                    .builder
+                    .build_int_compare(IntPredicate::NE, y, self.i64t.const_zero(), "nz")
+                    .expect("cmp");
+                let go = self.ctx.append_basic_block(f.func, "urem_ok");
+                self.builder
+                    .build_conditional_branch(nz, go, slow)
+                    .expect("br");
+                self.builder.position_at_end(go);
+                self.builder
+                    .build_int_unsigned_rem(x, y, "urem")
+                    .expect("urem")
+            }
+            "unchecked-add" => self.builder.build_int_add(x, y, "uadd").expect("add"),
+            "unchecked-subtract" => self.builder.build_int_sub(x, y, "usub").expect("sub"),
+            "unchecked-multiply" => self.builder.build_int_mul(x, y, "umul").expect("mul"),
             "max" | "min" => {
                 let pred = if name == "max" {
                     IntPredicate::SGE
@@ -4877,22 +5006,34 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let n = a.len();
         match (name, n) {
+            ("double", 1) => {
+                self.when_numeric(f, a, slow);
+                let d = self.num_as_f64(a[0]);
+                self.write_double(f.func, dest, d);
+            }
             ("int" | "long", 1) => {
-                // A char's code point (always in range); anything else
-                // takes `slow`.
-                self.when_tag(f, a, TAG_CHAR, slow);
-                let c = self.char_payload(a[0]);
-                let n = self
-                    .builder
-                    .build_int_z_extend(c, self.i64t, "cp")
-                    .expect("zext");
-                self.write_int(f.func, dest, n);
+                self.lower_int_long_cast(f, name == "long", a[0], dest, slow, done);
+                return true;
+            }
+            ("char", 1) => {
+                self.lower_char_cast(f, a[0], dest, slow, done);
+                return true;
+            }
+            ("bit-not" | "unchecked-inc" | "unchecked-dec" | "unchecked-negate", 1) => {
+                self.when_ints(f, a, slow);
+                let x = self.int_payload(a[0]);
+                let r = self.int_unop(name, x);
+                self.write_int(f.func, dest, r);
             }
             ("max" | "min", 2..=8) => {
                 self.lower_minmax(f, name == "max", a, dest, slow, done);
                 return true;
             }
-            ("quot" | "rem" | "mod", 2)
+            (
+                "quot" | "rem" | "mod" | "unchecked-add" | "unchecked-subtract"
+                | "unchecked-multiply",
+                2,
+            )
             | (
                 "bit-and"
                 | "bit-or"
@@ -4911,6 +5052,164 @@ impl<'ctx> Lowerer<'ctx> {
         }
         self.builder.build_unconditional_branch(done).expect("br");
         true
+    }
+
+    fn int_unop(&self, name: &str, x: IntValue<'ctx>) -> IntValue<'ctx> {
+        let one = self.i64t.const_int(1, false);
+        match name {
+            "bit-not" => self.builder.build_not(x, "bnot").expect("not"),
+            "unchecked-inc" => self.builder.build_int_add(x, one, "uinc").expect("add"),
+            "unchecked-dec" => self.builder.build_int_sub(x, one, "udec").expect("sub"),
+            _ => self
+                .builder
+                .build_int_sub(self.i64t.const_zero(), x, "uneg")
+                .expect("sub"),
+        }
+    }
+
+    fn lower_int_long_cast(
+        &self,
+        f: &FnCtx<'ctx>,
+        long: bool,
+        arg: PointerValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let tag = self.tag(arg);
+        let int_bb = self.ctx.append_basic_block(f.func, "cast_i");
+        let dbl_bb = self.ctx.append_basic_block(f.func, "cast_d");
+        let chr_bb = self.ctx.append_basic_block(f.func, "cast_c");
+        self.builder
+            .build_switch(
+                tag,
+                slow,
+                &[
+                    (self.i8t.const_int(TAG_INT, false), int_bb),
+                    (self.i8t.const_int(3, false), dbl_bb),
+                    (self.i8t.const_int(TAG_CHAR, false), chr_bb),
+                ],
+            )
+            .expect("switch");
+        self.builder.position_at_end(int_bb);
+        let iv = self.int_payload(arg);
+        if !long {
+            let t32 = self
+                .builder
+                .build_int_truncate(iv, self.i32t, "t32")
+                .expect("trunc");
+            let s64 = self
+                .builder
+                .build_int_s_extend(t32, self.i64t, "s64")
+                .expect("sext");
+            let fits = self
+                .builder
+                .build_int_compare(IntPredicate::EQ, s64, iv, "fits")
+                .expect("cmp");
+            let ok_bb = self.ctx.append_basic_block(f.func, "cast_i_ok");
+            self.builder
+                .build_conditional_branch(fits, ok_bb, slow)
+                .expect("br");
+            self.builder.position_at_end(ok_bb);
+        }
+        self.write_int(f.func, dest, iv);
+        self.builder.build_unconditional_branch(done).expect("br");
+
+        self.builder.position_at_end(dbl_bb);
+        let d = self.double_payload(arg);
+        let f64t = self.ctx.f64_type();
+        let (lo, hi, hi_pred) = if long {
+            (
+                f64t.const_float(-9223372036854775808.0),
+                f64t.const_float(9223372036854775808.0),
+                inkwell::FloatPredicate::OLT,
+            )
+        } else {
+            (
+                f64t.const_float(f64::from(i32::MIN)),
+                f64t.const_float(f64::from(i32::MAX)),
+                inkwell::FloatPredicate::OLE,
+            )
+        };
+        let ge = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::OGE, d, lo, "dlo")
+            .expect("fcmp");
+        let lt = self
+            .builder
+            .build_float_compare(hi_pred, d, hi, "dhi")
+            .expect("fcmp");
+        let ok = self.builder.build_and(ge, lt, "dok").expect("and");
+        let d_ok = self.ctx.append_basic_block(f.func, "cast_d_ok");
+        self.builder
+            .build_conditional_branch(ok, d_ok, slow)
+            .expect("br");
+        self.builder.position_at_end(d_ok);
+        let cv = self
+            .builder
+            .build_float_to_signed_int(d, self.i64t, "f2i")
+            .expect("fptosi");
+        self.write_int(f.func, dest, cv);
+        self.builder.build_unconditional_branch(done).expect("br");
+
+        self.builder.position_at_end(chr_bb);
+        let c = self.char_payload(arg);
+        let cp = self
+            .builder
+            .build_int_z_extend(c, self.i64t, "cp")
+            .expect("zext");
+        self.write_int(f.func, dest, cp);
+        self.builder.build_unconditional_branch(done).expect("br");
+    }
+
+    fn lower_char_cast(
+        &self,
+        f: &FnCtx<'ctx>,
+        arg: PointerValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        slow: BasicBlock<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let tag = self.tag(arg);
+        let int_bb = self.ctx.append_basic_block(f.func, "ch_i");
+        let chr_bb = self.ctx.append_basic_block(f.func, "ch_c");
+        self.builder
+            .build_switch(
+                tag,
+                slow,
+                &[
+                    (self.i8t.const_int(TAG_INT, false), int_bb),
+                    (self.i8t.const_int(TAG_CHAR, false), chr_bb),
+                ],
+            )
+            .expect("switch");
+        self.builder.position_at_end(int_bb);
+        let iv = self.int_payload(arg);
+        let ok = self
+            .builder
+            .build_int_compare(
+                IntPredicate::ULT,
+                iv,
+                self.i64t.const_int(0xD800, false),
+                "bmp",
+            )
+            .expect("cmp");
+        let ok_bb = self.ctx.append_basic_block(f.func, "ch_ok");
+        self.builder
+            .build_conditional_branch(ok, ok_bb, slow)
+            .expect("br");
+        self.builder.position_at_end(ok_bb);
+        let cp = self
+            .builder
+            .build_int_truncate(iv, self.i32t, "cp32")
+            .expect("trunc");
+        self.write_char(f.func, dest, cp);
+        self.builder.build_unconditional_branch(done).expect("br");
+
+        self.builder.position_at_end(chr_bb);
+        let c = self.char_payload(arg);
+        self.write_char(f.func, dest, c);
+        self.builder.build_unconditional_branch(done).expect("br");
     }
 
     fn lower_minmax(
@@ -6146,6 +6445,7 @@ impl<'ctx> Lowerer<'ctx> {
 enum StaticOp {
     Parse(&'static str),
     RemUnsigned,
+    CharDigit,
     MathAbs,
     MathSqrt,
     MathUnary(&'static str),
@@ -6193,6 +6493,7 @@ fn static_op_spec(fqn: &str, member: &str, n_args: usize) -> Option<StaticOp> {
             2,
             StaticOp::RemUnsigned,
         ),
+        ("java.lang.Character", "digit", 2, StaticOp::CharDigit),
         ("java.lang.Math", "abs", 1, StaticOp::MathAbs),
         ("java.lang.Math", "sqrt", 1, StaticOp::MathSqrt),
         (

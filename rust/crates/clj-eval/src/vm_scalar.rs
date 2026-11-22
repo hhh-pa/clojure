@@ -857,9 +857,9 @@ fn op1_sv(op: IntOp1, a: Sv) -> Option<Sv> {
         K::Double => {
             let d = f64::from_bits(a.v as u64);
             Some(Sv::double(match op {
-                IntOp1::Inc => d + 1.0,
-                IntOp1::Dec => d - 1.0,
-                IntOp1::Negate => -d,
+                IntOp1::Inc | IntOp1::UInc => d + 1.0,
+                IntOp1::Dec | IntOp1::UDec => d - 1.0,
+                IntOp1::Negate | IntOp1::UNegate => -d,
                 IntOp1::BitNot => return None,
             }))
         }
@@ -879,9 +879,9 @@ fn op2_sv(op: IntOp2, a: Sv, b: Sv) -> Option<Sv> {
 #[inline(always)]
 fn float_op2_sv(op: IntOp2, a: Sv, b: Sv, x: f64, y: f64) -> Option<Sv> {
     match op {
-        IntOp2::Add => Some(Sv::double(x + y)),
-        IntOp2::Sub => Some(Sv::double(x - y)),
-        IntOp2::Mul => Some(Sv::double(x * y)),
+        IntOp2::Add | IntOp2::UAdd => Some(Sv::double(x + y)),
+        IntOp2::Sub | IntOp2::USub => Some(Sv::double(x - y)),
+        IntOp2::Mul | IntOp2::UMul => Some(Sv::double(x * y)),
         IntOp2::Max => Some(if x.is_nan() || x > y { a } else { b }),
         IntOp2::Min => Some(if x.is_nan() || x < y { a } else { b }),
         _ => None,
@@ -1816,6 +1816,10 @@ struct Builder<'h> {
     /// Whether any arithmetic operation in the loop body uses a
     /// promoting primed operator (`+'`, `-'`, `*'`, `inc'`, `dec'`).
     primed: bool,
+    /// Whether an effect has executed earlier along the current iteration path.
+    seen_effect: bool,
+    /// Whether any primed operator can execute after an effect in the same iteration.
+    primed_after_effect: bool,
 }
 
 /// The analyzed scalar AST of a `loop` body (shared by the VM's
@@ -1826,6 +1830,7 @@ pub struct ScalarAst {
     pub scalar: Vec<bool>,
     pub boxed: Vec<bool>,
     pub primed: bool,
+    pub primed_after_effect: bool,
     sites: Vec<Site>,
     roots: Vec<RootSite>,
     max_depth: usize,
@@ -1853,6 +1858,8 @@ fn build_ast(
         inlined: 0,
         inner: None,
         primed: false,
+        seen_effect: false,
+        primed_after_effect: false,
     };
     let node = b.body(body);
     let clash = b.scalar.iter().zip(&b.boxed).any(|(s, x)| *s && *x);
@@ -1865,6 +1872,7 @@ fn build_ast(
         scalar: b.scalar,
         boxed: b.boxed,
         primed: b.primed,
+        primed_after_effect: b.primed_after_effect,
         sites: b.sites,
         roots: b.roots,
         max_depth: b.max_depth,
@@ -2132,8 +2140,8 @@ impl Builder<'_> {
             Expr::Invoke { head, args, .. } => self.invoke_expr(head, args),
             Expr::If { test, then, els } => {
                 let c = self.cond(test);
-                let a = self.expr(then);
-                IExpr::Ctl(Box::new(Ctl::If(c, a, self.expr(els))))
+                let (a, b) = self.branch_effects(|s| s.expr(then), |s| s.expr(els));
+                IExpr::Ctl(Box::new(Ctl::If(c, a, b)))
             }
             Expr::Let { bindings, body } => self.let_expr(bindings, body),
             Expr::Loop { bindings, body } => self.inner_loop(bindings, body),
@@ -2246,13 +2254,37 @@ impl Builder<'_> {
             .map_or(IExpr::Deopt, |inner| IExpr::Ctl(Box::new(Ctl::Loop(inner))))
     }
 
+    fn branch_effects<A, B>(
+        &mut self,
+        then_f: impl FnOnce(&mut Self) -> A,
+        else_f: impl FnOnce(&mut Self) -> B,
+    ) -> (A, B) {
+        let before = self.seen_effect;
+        let a = then_f(self);
+        let after_then = self.seen_effect;
+        self.seen_effect = before;
+        let b = else_f(self);
+        self.seen_effect |= after_then;
+        (a, b)
+    }
+
     /// A nested loop (symbol bindings only).
     fn loop_inner(&mut self, bindings: &[(Pattern, Expr)], body: &[Expr]) -> Option<Inner> {
         let mark = self.lex.len();
         let out = self.bindings(bindings).map(|binds| {
             let (slots, inits): (Vec<usize>, Vec<IExpr>) = binds.into_iter().unzip();
             let saved = self.inner.replace(slots.clone());
+            let before_eff = self.seen_effect;
+            let before_primed = self.primed;
+            self.primed = false;
             let body = self.body(body);
+            let inner_eff = self.seen_effect && !before_eff;
+            if inner_eff && self.primed {
+                // Any effect inside an inner loop repeats before a primed op
+                // on the next inner iteration, so outer deopt would replay it.
+                self.primed_after_effect = true;
+            }
+            self.primed |= before_primed;
             self.inner = saved;
             Inner {
                 slots: slots.into(),
@@ -2277,10 +2309,15 @@ impl Builder<'_> {
             return None;
         }
         let ([fqn, mem], rest) = args.split_first_chunk::<2>()?;
-        if expr_str(fqn)? != "java.lang.Math" {
+        let cls = expr_str(fqn)?;
+        let name = expr_str(mem)?;
+        if let ("java.lang.Long", "remainderUnsigned", [x, y]) = (cls, name, rest) {
+            let a = self.expr(x);
+            return Some(calc(Calc::Op2(IntOp2::RemUnsigned, a, self.expr(y))));
+        }
+        if cls != "java.lang.Math" {
             return None;
         }
-        let name = expr_str(mem)?;
         match rest {
             [x] => math1_op(name).map(|op| calc(Calc::Fp(FpCalc::Math1(op, self.expr(x))))),
             [x, y] => math2_op(name).map(|op| {
@@ -2372,6 +2409,12 @@ impl Builder<'_> {
     /// A direct core call in value position.
     fn call(&mut self, call: &DirectCall) -> IExpr {
         let e = self.call_expr(call);
+        let is_primed = matches!(
+            crate::vm_ops::core_name(call),
+            Some("+'") | Some("-'") | Some("*'") | Some("inc'") | Some("dec'")
+        );
+        self.primed |= is_primed;
+        self.primed_after_effect |= is_primed && self.seen_effect;
         if !matches!(e, IExpr::Deopt) {
             let site = self.host.site(call);
             self.sites.push(site);
@@ -2381,10 +2424,6 @@ impl Builder<'_> {
 
     fn call_expr(&mut self, call: &DirectCall) -> IExpr {
         let args = &call.args;
-        self.primed |= matches!(
-            crate::vm_ops::core_name(call),
-            Some("+'") | Some("-'") | Some("*'") | Some("inc'") | Some("dec'")
-        );
         if let Some(op) = crate::vm_ops::int_value_op(call) {
             return match op {
                 IntCtor::One(op) => calc(Calc::Op1(op, self.expr(&args[0]))),
@@ -2527,8 +2566,9 @@ impl Builder<'_> {
         match e {
             Expr::If { test, then, els } => {
                 let c = self.cond(test);
-                let a = Box::new(self.node(then));
-                Node::If(c, a, Box::new(self.node(els)))
+                let (a, b) =
+                    self.branch_effects(|s| Box::new(s.node(then)), |s| Box::new(s.node(els)));
+                Node::If(c, a, b)
             }
             Expr::Let { bindings, body } => {
                 let mark = self.lex.len();
@@ -2560,11 +2600,7 @@ impl Builder<'_> {
         let st = match e {
             Expr::Literal(_) | Expr::Local(_) => return Vec::new(),
             Expr::Do(forms) => return self.stmt_seq(forms),
-            Expr::If { test, then, els } => {
-                let c = self.cond(test);
-                let a = self.stmts_of(then).into();
-                Stmt::If(c, a, self.stmts_of(els).into())
-            }
+            Expr::If { test, then, els } => self.if_stmt(test, then, els),
             Expr::Let { bindings, body } => {
                 let mark = self.lex.len();
                 let out = match self.let_bindings(bindings) {
@@ -2588,6 +2624,12 @@ impl Builder<'_> {
         vec![st]
     }
 
+    fn if_stmt(&mut self, test: &Expr, then: &Expr, els: &Expr) -> Stmt {
+        let c = self.cond(test);
+        let (a, b) = self.branch_effects(|s| s.stmts_of(then), |s| s.stmts_of(els));
+        Stmt::If(c, a.into(), b.into())
+    }
+
     /// `(assoc! t k v)`, `(conj! t v)` or `(pop! t)` over a boxed
     /// local: its target and the effect.
     fn effect_call(&mut self, call: &DirectCall) -> Option<(Loc, Effect)> {
@@ -2608,6 +2650,7 @@ impl Builder<'_> {
         };
         let site = self.host.site(call);
         self.sites.push(site);
+        self.seen_effect = true;
         Some((t, effect))
     }
 
@@ -3046,5 +3089,91 @@ mod tests {
         assert!(op1_sv(IntOp1::Inc, Sv::bool(true)).is_none());
         assert!(op2_sv(IntOp2::Quot, Sv::double(5.0), Sv::double(2.0)).is_none());
         assert!(math1_sv(MathOp1::Abs, Sv::bool(true)).is_none());
+    }
+
+    #[test]
+    fn vm_scalar_primed_order_unchecked_and_urem_271() {
+        let mut ev = boot();
+        let compile_fn = |ev: &mut crate::Evaluator, src: &str| {
+            let front = front_end(ev, src, "p.clj").expect("front");
+            let callees = HashMap::new();
+            for u in &front.units {
+                if let Expr::Def {
+                    init: Some(init), ..
+                } = &u.expr
+                {
+                    if let Expr::Fn(fun) = init.as_ref() {
+                        if let Expr::Loop { body, .. } = &fun.arities[0].body[0] {
+                            return compile_aot_loop(body, &[2, 3], 4, &callees);
+                        }
+                    }
+                }
+            }
+            None
+        };
+        let pre = compile_fn(
+            &mut ev,
+            "(defn f [t n] (loop [i 0 a 0] (if (< i n) (do (assoc! t i (+' a i)) (recur (inc i) a)) a))) 1",
+        )
+        .expect("pre");
+        assert!(pre.primed);
+        assert!(!pre.primed_after_effect);
+
+        let post = compile_fn(
+            &mut ev,
+            "(defn f [t n] (loop [i 0 a 0] (if (< i n) (do (assoc! t i a) (recur (inc i) (+' a 1))) a))) 1",
+        )
+        .expect("post");
+        assert!(post.primed);
+        assert!(post.primed_after_effect);
+
+        let nested = compile_fn(
+            &mut ev,
+            "(defn f [t n] (loop [i 0 a 0] (if (< i n) (let [b (loop [k 0 s a] (if (< k 2) (do (assoc! t 0 s) (recur (inc k) (+' s 1))) s))] (recur (inc i) b)) a))) 1",
+        )
+        .expect("nested");
+        assert!(nested.primed);
+        assert!(nested.primed_after_effect);
+
+        let arg_eff = compile_fn(
+            &mut ev,
+            "(defn f [t n] (loop [i 0 a 0] (if (< i n) (recur (inc i) (+' (do (assoc! t 0 a) a) 1)) a))) 1",
+        )
+        .expect("arg_eff");
+        assert!(arg_eff.primed);
+        assert!(arg_eff.primed_after_effect);
+
+        // Unchecked ops on Sv (int & double) and Long/remainderUnsigned in VM scalar loop.
+        assert_eq!(op1_sv(IntOp1::UInc, Sv::double(1.5)), Some(Sv::double(2.5)));
+        assert_eq!(op1_sv(IntOp1::UDec, Sv::double(1.5)), Some(Sv::double(0.5)));
+        assert_eq!(
+            op1_sv(IntOp1::UNegate, Sv::double(1.5)),
+            Some(Sv::double(-1.5))
+        );
+        assert_eq!(
+            op2_sv(IntOp2::UAdd, Sv::double(1.5), Sv::int(2)),
+            Some(Sv::double(3.5))
+        );
+        assert_eq!(
+            op2_sv(IntOp2::USub, Sv::double(5.5), Sv::double(2.0)),
+            Some(Sv::double(3.5))
+        );
+        assert_eq!(
+            op2_sv(IntOp2::UMul, Sv::double(2.5), Sv::int(2)),
+            Some(Sv::double(5.0))
+        );
+        let out = ev
+            .eval_source(
+                "(defn urem-loop [n]
+                   (loop [i 0 s 12345 acc 0]
+                     (if (< i n)
+                       (let [ns (unchecked-add (unchecked-multiply s 6364136223846793005) 1442695040888963407)
+                             r (Long/remainderUnsigned ns 7)]
+                         (recur (unchecked-inc i) ns (unchecked-subtract (unchecked-add acc r) (unchecked-dec (unchecked-negate 1)))))
+                       acc)))
+                 (int? (urem-loop 5000))",
+            )
+            .expect("eval");
+        assert_eq!(out.last(), Some(&clj_value::Value::Bool(true)));
     }
 }

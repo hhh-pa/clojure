@@ -5142,15 +5142,20 @@ fn native_bit_test(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 /// direct-call inline tags — see [`FastArith`]).
 const FAST_ARITH_TABLE: &[(NativeFnPtr, FastArith)] = &[
     (native_add, FastArith::Add),
+    (native_add_prime, FastArith::Add),
     (native_sub, FastArith::Sub),
+    (native_sub_prime, FastArith::Sub),
     (native_mul, FastArith::Mul),
+    (native_mul_prime, FastArith::Mul),
     (native_div, FastArith::Div),
     (native_lt, FastArith::Lt),
     (native_lte, FastArith::Lte),
     (native_gt, FastArith::Gt),
     (native_gte, FastArith::Gte),
     (native_inc, FastArith::Inc),
+    (native_inc_prime, FastArith::Inc),
     (native_dec, FastArith::Dec),
+    (native_dec_prime, FastArith::Dec),
 ];
 
 /// The inline integer op for an installing fn pointer (`None`
@@ -5676,15 +5681,20 @@ mod tests {
     fn fast_arith_for_tags_genuine_fns_only() {
         use crate::ext::FastArith;
         assert_eq!(fast_arith_for(native_add), FastArith::Add);
+        assert_eq!(fast_arith_for(native_add_prime), FastArith::Add);
         assert_eq!(fast_arith_for(native_sub), FastArith::Sub);
+        assert_eq!(fast_arith_for(native_sub_prime), FastArith::Sub);
         assert_eq!(fast_arith_for(native_mul), FastArith::Mul);
+        assert_eq!(fast_arith_for(native_mul_prime), FastArith::Mul);
         assert_eq!(fast_arith_for(native_div), FastArith::Div);
         assert_eq!(fast_arith_for(native_lt), FastArith::Lt);
         assert_eq!(fast_arith_for(native_lte), FastArith::Lte);
         assert_eq!(fast_arith_for(native_gt), FastArith::Gt);
         assert_eq!(fast_arith_for(native_gte), FastArith::Gte);
         assert_eq!(fast_arith_for(native_inc), FastArith::Inc);
+        assert_eq!(fast_arith_for(native_inc_prime), FastArith::Inc);
         assert_eq!(fast_arith_for(native_dec), FastArith::Dec);
+        assert_eq!(fast_arith_for(native_dec_prime), FastArith::Dec);
         // Neighbors and lookalike fakes never tag.
         assert_eq!(fast_arith_for(native_zero), FastArith::None);
         fn fake(_eval: &mut Evaluator, _args: &[Value]) -> Result<Value, NativeError> {

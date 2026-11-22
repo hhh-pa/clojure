@@ -1819,3 +1819,72 @@ fn native_emit_ir_packed_doubles_and_dtvec_271() {
         "bitcode leaked a Rust panic symbol into emitted IR"
     );
 }
+
+#[test]
+fn native_emit_ir_inlines_casts_unchecked_char_digit_and_pre_eff_primed_271() {
+    let ir = tmp("native-5o.ll");
+    let src = "\
+(defn pre-eff-dp [n]
+  (let [row (transient (vec (repeat (inc n) 0)))]
+    (assoc! row 0 1)
+    (loop [j 1]
+      (when (<= j n)
+        (assoc! row j (+' (nth row (dec j)) (nth row (dec j))))
+        (recur (inc j))))
+    (nth (persistent! row) n)))
+(defn casts-and-ops [x y c r]
+  [(double x) (long x) (int x) (char x)
+   (bit-not x) (unchecked-inc x) (unchecked-dec x) (unchecked-negate x)
+   (unchecked-add x y) (unchecked-subtract x y) (unchecked-multiply x y)
+   (Character/digit c r)])
+(defn ufp-scalar [n]
+  (loop [i 0 x 1.5 s 1]
+    (if (< i n)
+      (recur (inc i)
+             (unchecked-negate (unchecked-dec (unchecked-inc (unchecked-multiply (unchecked-subtract (unchecked-add x 1.0) 0.5) 1.0))))
+             (Long/remainderUnsigned (unchecked-add (unchecked-multiply s 3) 1) 7))
+      [x s])))
+(println (pre-eff-dp 5) (casts-and-ops 65 3 \\9 10) (ufp-scalar 4))
+";
+    clj_aot::build_str(
+        src,
+        "f.clj",
+        &tmp("nope-5o"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+
+    let dp_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_pre_eff_dp("))
+        .expect("pre_eff_dp");
+    assert!(dp_body.contains("sc_deopt"), "{dp_body}");
+    assert!(dp_body.contains("sc_assoc_fast"), "{dp_body}");
+
+    let ops_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_casts_and_ops("))
+        .expect("casts_and_ops");
+    for needle in ["sitofp", "cast_d_ok", "ch_ok", "cdig_go"] {
+        assert!(ops_body.contains(needle), "missing {needle}:\n{ops_body}");
+    }
+
+    let ufp_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_ufp_scalar("))
+        .expect("ufp_scalar");
+    assert!(ufp_body.contains("sc_hdr"), "{ufp_body}");
+    assert!(ufp_body.contains("urem "), "{ufp_body}");
+
+    assert!(
+        !text.contains("slice_error_fail") && !text.contains("9panicking"),
+        "bitcode leaked a Rust panic symbol into emitted IR"
+    );
+}

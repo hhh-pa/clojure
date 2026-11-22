@@ -1642,6 +1642,9 @@ pub enum IntOp1 {
     Dec,
     Negate,
     BitNot,
+    UInc,
+    UDec,
+    UNegate,
 }
 
 impl IntOp1 {
@@ -1652,6 +1655,9 @@ impl IntOp1 {
             IntOp1::Dec => x.checked_sub(1),
             IntOp1::Negate => x.checked_neg(),
             IntOp1::BitNot => Some(!x),
+            IntOp1::UInc => Some(x.wrapping_add(1)),
+            IntOp1::UDec => Some(x.wrapping_sub(1)),
+            IntOp1::UNegate => Some(x.wrapping_neg()),
         }
     }
 }
@@ -1662,8 +1668,12 @@ pub enum IntOp2 {
     Add,
     Sub,
     Mul,
+    UAdd,
+    USub,
+    UMul,
     Quot,
     Rem,
+    RemUnsigned,
     Mod,
     BitAnd,
     BitOr,
@@ -1680,7 +1690,8 @@ impl IntOp2 {
     pub(crate) fn apply(self, x: i64, y: i64) -> Option<i64> {
         match self {
             IntOp2::Add | IntOp2::Sub | IntOp2::Mul => self.apply_checked(x, y),
-            IntOp2::Quot | IntOp2::Rem | IntOp2::Mod => self.apply_div(x, y),
+            IntOp2::UAdd | IntOp2::USub | IntOp2::UMul => self.apply_wrapping(x, y),
+            IntOp2::Quot | IntOp2::Rem | IntOp2::RemUnsigned | IntOp2::Mod => self.apply_div(x, y),
             _ => self.apply_bits(x, y),
         }
     }
@@ -1695,10 +1706,20 @@ impl IntOp2 {
     }
 
     #[inline(always)]
+    fn apply_wrapping(self, x: i64, y: i64) -> Option<i64> {
+        Some(match self {
+            IntOp2::UAdd => x.wrapping_add(y),
+            IntOp2::USub => x.wrapping_sub(y),
+            _ => x.wrapping_mul(y),
+        })
+    }
+
+    #[inline(always)]
     fn apply_div(self, x: i64, y: i64) -> Option<i64> {
         match self {
             IntOp2::Quot => (y != 0).then(|| x.wrapping_div(y)),
             IntOp2::Rem => (y != 0).then(|| x.wrapping_rem(y)),
+            IntOp2::RemUnsigned => (y != 0).then(|| ((x as u64) % (y as u64)) as i64),
             _ => crate::vm_intrinsics::java_mod(x, y),
         }
     }
@@ -1787,6 +1808,9 @@ const INT_UNARY: &[(&str, IntOp1)] = &[
     ("-", IntOp1::Negate),
     ("-'", IntOp1::Negate),
     ("bit-not", IntOp1::BitNot),
+    ("unchecked-inc", IntOp1::UInc),
+    ("unchecked-dec", IntOp1::UDec),
+    ("unchecked-negate", IntOp1::UNegate),
 ];
 
 /// The unboxed two-argument value ops by core name ([`BINARY`]).
@@ -1797,6 +1821,9 @@ const INT_BINARY: &[(&str, IntOp2)] = &[
     ("-'", IntOp2::Sub),
     ("*", IntOp2::Mul),
     ("*'", IntOp2::Mul),
+    ("unchecked-add", IntOp2::UAdd),
+    ("unchecked-subtract", IntOp2::USub),
+    ("unchecked-multiply", IntOp2::UMul),
     ("quot", IntOp2::Quot),
     ("rem", IntOp2::Rem),
     ("mod", IntOp2::Mod),
@@ -2786,6 +2813,23 @@ mod apply_tests {
         assert_eq!(UncheckedDec::apply(&int(i64::MIN)), Some(int(i64::MAX)));
         assert_eq!(UncheckedNegate::apply(&int(i64::MIN)), Some(int(i64::MIN)));
         assert_eq!(UncheckedInc::apply(&s), None);
+        use super::{IntCtor, IntOp1, IntOp2, int_value_named};
+        assert_eq!(IntOp1::UInc.apply(i64::MAX), Some(i64::MIN));
+        assert_eq!(IntOp1::UDec.apply(i64::MIN), Some(i64::MAX));
+        assert_eq!(IntOp1::UNegate.apply(i64::MIN), Some(i64::MIN));
+        assert_eq!(IntOp2::UAdd.apply(i64::MAX, 1), Some(i64::MIN));
+        assert_eq!(IntOp2::USub.apply(i64::MIN, 1), Some(i64::MAX));
+        assert_eq!(IntOp2::UMul.apply(i64::MAX, 2), Some(-2));
+        assert_eq!(IntOp2::RemUnsigned.apply(-1, 10), Some(5));
+        assert_eq!(IntOp2::RemUnsigned.apply(10, 0), None);
+        assert!(matches!(
+            int_value_named("unchecked-inc", 1),
+            Some(IntCtor::One(IntOp1::UInc))
+        ));
+        assert!(matches!(
+            int_value_named("unchecked-add", 2),
+            Some(IntCtor::Two(IntOp2::UAdd))
+        ));
         let atom = Value::Atom(clj_value::Atom::new(int(3)));
         let vol = Value::Volatile(clj_value::Volatile::new(int(4)));
         assert_eq!(DerefCell::apply(&atom), Some(int(3)));

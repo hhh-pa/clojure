@@ -666,6 +666,17 @@ A 2-second `sample` of `q_learning` (the worst remaining `aot-ocaml` INS loser a
 
 Measured on macOS (arm64, min of 3 wall runs, byte-identical output): `q_learning` heavy workload (80k episodes) 7.04s → 6.48s (**0.92x**); the local run-vs-build parity sweep passed `394/394` snippet scripts.
 
+### 6.46 Slice 5o: primed `FastArith`, pre-effect primed scalar loops, inline `double`/`int`/`long`/`char`/`bit-not`/`unchecked-*`/`Character/digit`, and scalar `Long/remainderUnsigned`
+
+Profiling the remaining top `aot-ocaml` INS losers (`unbounded_knapsack` 2.93x, `coin_change` 2.46x, `knuth_div` 8.03x, `q_learning` 9.47x, `approx_inference` 5.88x, `suffix_array`) showed four high-frequency gaps in inline codegen and scalar-loop eligibility: promoting ops (`+'`, `-'`, `*'`, `inc'`, `dec'`) were absent from `FAST_ARITH_TABLE` and disqualified every stateful scalar loop even when no mutation preceded the primed op; `double`, `int`, `long`, `char`, `bit-not`, and `unchecked-*` fell back to runtime calls outside scalar loops; `unchecked-*` and `Long/remainderUnsigned` were absent from `vm_scalar`; and `java.lang.Character/digit` went through `rt_n_static_call`.
+
+- **Primed `FastArith` & pre-effect primed scalar loops (`clj-eval/src/{core,vm_scalar}.rs`, `clj-aot/src/scalar.rs`):** registered `native_{add,sub,mul,inc,dec}_prime` in `FAST_ARITH_TABLE`; added flow-sensitive `seen_effect` / `primed_after_effect` tracking in `vm_scalar::Builder` (including branch-scoped `branch_effects`, argument-evaluation ordering before the primed check, and nested-loop `inner_eff && self.primed` rejection so outer deopt can never replay an earlier mutation); relaxed `can_lower_scalar` from `ast.primed` to `ast.primed_after_effect`, unlocking hoisted `itvec` SSA loops for DP loops like `(assoc! row j (+' (nth row j) (nth row (- j c))))` while still deopting cleanly on `i64` overflow.
+- **Unchecked ops & `Long/remainderUnsigned` in scalar loops (`clj-eval/src/{vm_ops,vm_scalar}.rs`, `clj-aot/src/scalar.rs`):** added `IntOp1::{UInc, UDec, UNegate}` and `IntOp2::{UAdd, USub, UMul, RemUnsigned}` across the VM scalar tier and AOT SSA lowering (both integer wrapping and `allow_fp` floating-point paths).
+- **Inline scalar casts, `bit-not`, `unchecked-*`, and `Character/digit` (`clj-aot/src/native.rs`):** lowered `(double x)` (Int/Double), `(long x)` and `(int x)` (Int/Double/Char with exact pre-truncation range checks and `NaN` fallback), `(char x)` (Char and BMP Int `< 0xD800`), `bit-not`, `unchecked-{inc,dec,negate,add,subtract,multiply}`, and `java.lang.Character/digit` (branchless ASCII `0-9`/`A-Z`/`a-z` check matching `char::to_digit`) directly to LLVM IR with general fallback.
+- **Verification:** `docs/spec/i259-native-compiler/corpus/inline_casts_unchecked_primed.clj`, `clj-eval::{core,vm_ops,vm_scalar}`, and `clj-aot::emit` unit tests pin every fast path, overflow/deopt boundary, and error case against `run`.
+
+Measured on macOS (`libinsn.dylib`, vs Slice 5n, byte-identical output on all 18 scripts): `dp/unbounded_knapsack` 246.20M → 32.15M (**0.131x**, −214.1M), `dp/coin_change` 5.89M → 3.06M (**0.519x**, −2.83M, −16 KB), `math/knuth_div` 164.21M → 97.54M (**0.594x**, −66.68M, −32 KB), `suffix_array` 762.98M → 710.98M (**0.932x**, −52.00M), `search/q_learning` 175.63M → 169.77M (**0.967x**, −5.86M, −16 KB), `search/approx_inference` 212.33M → 208.04M (**0.980x**, −4.29M, −16 KB).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

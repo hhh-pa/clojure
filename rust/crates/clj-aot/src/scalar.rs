@@ -475,7 +475,7 @@ impl<'ctx> Lowerer<'ctx> {
         if !scan.all_locs.iter().all(|loc| self.is_direct_loc(f, *loc)) {
             return false;
         }
-        if scan.has_effects && (ast.primed || scan.has_deopt) {
+        if scan.has_effects && (ast.primed_after_effect || scan.has_deopt) {
             return false;
         }
         true
@@ -2082,8 +2082,12 @@ impl<'ctx> Lowerer<'ctx> {
         let d = self.bits_to_f64(av);
         let one = self.ctx.f64_type().const_float(1.0);
         let dr = match op {
-            IntOp1::Inc => self.builder.build_float_add(d, one, "dinc").expect("fadd"),
-            IntOp1::Dec => self.builder.build_float_sub(d, one, "ddec").expect("fsub"),
+            IntOp1::Inc | IntOp1::UInc => {
+                self.builder.build_float_add(d, one, "dinc").expect("fadd")
+            }
+            IntOp1::Dec | IntOp1::UDec => {
+                self.builder.build_float_sub(d, one, "ddec").expect("fsub")
+            }
             _ => self.builder.build_float_neg(d, "dneg").expect("fneg"),
         };
         self.builder
@@ -2111,7 +2115,14 @@ impl<'ctx> Lowerer<'ctx> {
         if !s.allow_fp
             || !matches!(
                 op,
-                IntOp2::Add | IntOp2::Sub | IntOp2::Mul | IntOp2::Max | IntOp2::Min
+                IntOp2::Add
+                    | IntOp2::Sub
+                    | IntOp2::Mul
+                    | IntOp2::UAdd
+                    | IntOp2::USub
+                    | IntOp2::UMul
+                    | IntOp2::Max
+                    | IntOp2::Min
             )
         {
             self.require_ints(f, ak, bk, s.deopt_bb);
@@ -2167,15 +2178,15 @@ impl<'ctx> Lowerer<'ctx> {
         let fb = self.scalar_as_f64(bk, bv);
         let d3 = self.i8t.const_int(3, false);
         match op {
-            IntOp2::Add => (
+            IntOp2::Add | IntOp2::UAdd => (
                 d3,
                 self.f64_bits(self.builder.build_float_add(fa, fb, "fadd").expect("fadd")),
             ),
-            IntOp2::Sub => (
+            IntOp2::Sub | IntOp2::USub => (
                 d3,
                 self.f64_bits(self.builder.build_float_sub(fa, fb, "fsub").expect("fsub")),
             ),
-            IntOp2::Mul => (
+            IntOp2::Mul | IntOp2::UMul => (
                 d3,
                 self.f64_bits(self.builder.build_float_mul(fa, fb, "fmul").expect("fmul")),
             ),
@@ -2390,6 +2401,9 @@ impl<'ctx> Lowerer<'ctx> {
                 self.checked_i64_op(f, "llvm.ssub.with.overflow", zero, x, s.deopt_bb)
             }
             IntOp1::BitNot => self.builder.build_not(x, "bnot").expect("not"),
+            IntOp1::UInc => self.builder.build_int_add(x, one, "uinc").expect("add"),
+            IntOp1::UDec => self.builder.build_int_sub(x, one, "udec").expect("sub"),
+            IntOp1::UNegate => self.builder.build_int_sub(zero, x, "uneg").expect("sub"),
         }
     }
 
@@ -3071,9 +3085,13 @@ fn checked_op2_intrinsic(op: IntOp2) -> Option<&'static str> {
 }
 
 fn op2_binop_name(op: IntOp2) -> &'static str {
-    const NAMES: [(&IntOp2, &str); 11] = [
+    const NAMES: [(&IntOp2, &str); 15] = [
+        (&IntOp2::UAdd, "unchecked-add"),
+        (&IntOp2::USub, "unchecked-subtract"),
+        (&IntOp2::UMul, "unchecked-multiply"),
         (&IntOp2::Quot, "quot"),
         (&IntOp2::Rem, "rem"),
+        (&IntOp2::RemUnsigned, "urem"),
         (&IntOp2::Mod, "mod"),
         (&IntOp2::Max, "max"),
         (&IntOp2::Min, "min"),
