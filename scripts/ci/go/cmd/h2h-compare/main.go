@@ -7,7 +7,7 @@
 //
 //	h2h-compare --jvm BASE.json [BASE.json ...] --rs CHALLENGER.json [...]
 //	            --label SUITE [--summary-file FILE] [--report-only]
-//	            [--allow-extra-challenger]
+//	            [--allow-extra-challenger] [--require-all-wins]
 //	            [--merged-jvm FILE] [--merged-rs FILE]
 //	            [--base-name NAME] [--challenger-name NAME]
 //	            [--metrics cpu,mem[,ins]] [--margin F]
@@ -42,6 +42,7 @@ type options struct {
 	summaryFile          string
 	reportOnly           bool
 	allowExtraChallenger bool
+	requireAllWins       bool
 	mergedJVM            string
 	mergedRS             string
 	metrics              string
@@ -52,7 +53,7 @@ const usage = `h2h-compare: reference-vs-challenger CPU/RSS gate
 
 Usage: h2h-compare --jvm BASE.json [BASE.json ...] --rs CHALLENGER.json [...]
                    --label SUITE [--summary-file FILE] [--report-only]
-                   [--allow-extra-challenger]
+                   [--allow-extra-challenger] [--require-all-wins]
                    [--merged-jvm FILE] [--merged-rs FILE]
                    [--base-name NAME] [--challenger-name NAME]
                    [--metrics CSv] [--margin F]
@@ -125,13 +126,16 @@ func parseArgs(argv []string) (options, error) {
 			} else {
 				o.rs = append(o.rs, paths...)
 			}
-		case "report-only", "allow-extra-challenger":
+		case "report-only", "allow-extra-challenger", "require-all-wins":
 			if hasInline {
 				return o, fmt.Errorf("--%s takes no value", name)
 			}
-			if name == "report-only" {
+			switch name {
+			case "report-only":
 				o.reportOnly = true
-			} else {
+			case "require-all-wins":
+				o.requireAllWins = true
+			case "allow-extra-challenger":
 				o.allowExtraChallenger = true
 			}
 			i++

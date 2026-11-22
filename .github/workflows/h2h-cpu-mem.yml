@@ -928,7 +928,7 @@ jobs:
             --base-name OCAML --challenger-name AOT \
             --jvm h2h-recipes-ocaml-shard-*/h2h-recipes-ocaml-shard-*.json \
             --rs h2h-recipes-aot-from-shard-*/h2h-recipes-aot-from-shard-*.json \
-            --allow-extra-challenger \
+            --allow-extra-challenger --require-all-wins \
             --merged-jvm h2h-recipes-ocaml-merged.json \
             --merged-rs h2h-recipes-aot-from-merged.json \
             --metrics mem,ins --margin 0.15 \

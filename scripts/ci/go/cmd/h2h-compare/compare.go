@@ -826,6 +826,9 @@ func compareLegs(o options, jm, rm map[caseKey]entry, jFail, rFail, jMiss, rMiss
 
 	var problems []string
 	for _, m := range selected {
+		if o.requireAllWins && stat[m].tie > 0 {
+			problems = append(problems, fmt.Sprintf("%d %s ties", stat[m].tie, metrics[m].tag))
+		}
 		if stat[m].loss > 0 {
 			problems = append(problems, fmt.Sprintf("%d %s losses", stat[m].loss, metrics[m].tag))
 		}

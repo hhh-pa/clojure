@@ -282,12 +282,19 @@ func TestAllowExtraChallenger(t *testing.T) {
 		t.Fatalf("strict mode mismatch output:\ncode=%d\n%s", code, stdout)
 	}
 
+	// Equal medians must fail an all-wins comparison.
+	stdout, code = cmdtest.Run(t, bin, ".", "--label", "aot-ocaml", "--jvm", base, "--rs", base,
+		"--metrics", "mem,ins", "--require-all-wins")
+	if code != 1 || !strings.Contains(stdout, "1 MEM ties") || !strings.Contains(stdout, "1 INS ties") {
+		t.Fatalf("expected strict ties to fail, code=%d:\n%s", code, stdout)
+	}
+
 	// --allow-extra-challenger passes when all base cases match and common cases win/tie.
 	stdout, code = cmdtest.Run(t, bin, ".",
 		"--label", "aot-ocaml",
 		"--base-name", "OCAML", "--challenger-name", "AOT",
 		"--jvm", base, "--rs", chal,
-		"--allow-extra-challenger",
+		"--allow-extra-challenger", "--require-all-wins",
 		"--metrics", "mem,ins", "--margin", "0.15",
 		"--summary-file", summary)
 	if code != 0 || !strings.Contains(stdout, "GATE aot-ocaml: PASS") {
