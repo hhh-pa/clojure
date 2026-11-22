@@ -848,8 +848,32 @@ pub(crate) fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeErr
 /// Owned `to` (#227): the accumulator moves through [`conj_one`],
 /// so each step after the first mutates uniquely-owned storage in
 /// place instead of path-copying per step.
+fn try_into_vector(to: Vector, from: &Value) -> Result<Vector, Vector> {
+    match from {
+        Value::Vector(src) => {
+            if to.is_empty() && to.meta().is_none() {
+                return Ok(src.clone().with_meta(None));
+            }
+            to.try_extend_flat_window(src, 0, src.len())
+        }
+        Value::Extension(_) => {
+            let Some(sv) = crate::lazy::as_subvector(from) else {
+                return Err(to);
+            };
+            to.try_extend_flat_window(sv.vec(), sv.start(), sv.end())
+        }
+        _ => Err(to),
+    }
+}
+
 fn into_inner(eval: &mut Evaluator, to: Value, from: Value) -> Result<Value, NativeError> {
-    let mut acc = to;
+    let mut acc = match to {
+        Value::Vector(v) => match try_into_vector(v, &from) {
+            Ok(out) => return Ok(Value::Vector(out)),
+            Err(orig) => Value::Vector(orig),
+        },
+        other => other,
+    };
     crate::seqs::walk_seq(eval, from, |eval, head| {
         let cur = std::mem::replace(&mut acc, Value::Nil);
         acc = conj_one(eval, cur, head.clone())?;

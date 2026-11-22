@@ -1870,6 +1870,9 @@ impl<'ctx> Lowerer<'ctx> {
             if self.try_lower_conj_bang_fx(f, call)? {
                 return Ok(());
             }
+            if self.try_lower_swap_fx(f, call)? {
+                return Ok(());
+            }
         }
         let t = self.slot(f);
         if let Some((call, sym)) = self.bc_fx_call(expr) {
@@ -3725,6 +3728,7 @@ impl<'ctx> Lowerer<'ctx> {
         if self.try_lower_dot_product(f, call, dest)?
             || self.try_lower_print_join(f, call, dest)?
             || self.try_lower_mapv_global_parse(f, call, dest)?
+            || self.try_lower_atom_nth(f, call, dest)?
         {
             return Ok(true);
         }
@@ -3815,6 +3819,113 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(true)
     }
 
+    fn try_lower_atom_nth(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "nth" {
+            return Ok(false);
+        }
+        let [coll, idx] = call.args.as_slice() else {
+            return Ok(false);
+        };
+        if let Expr::DirectNative(inner_nth) = coll
+            && inner_nth.var.sym.namespace() == Some("clojure.core")
+            && inner_nth.var.sym.name() == "nth"
+            && let [Expr::DirectNative(deref_c), u] = inner_nth.args.as_slice()
+            && deref_c.var.sym.namespace() == Some("clojure.core")
+            && deref_c.var.sym.name() == "deref"
+            && let [atom_e] = deref_c.args.as_slice()
+        {
+            let a_s = self.slot(f);
+            self.lower(f, atom_e, a_s)?;
+            let u_s = self.slot(f);
+            self.lower(f, u, u_s)?;
+            let v_s = self.slot(f);
+            self.lower(f, idx, v_s)?;
+            let k = (self.var_of(&deref_c.var) << 32) | self.var_of(&call.var);
+            let st = self
+                .call(
+                    "rt_n_op3",
+                    Some(self.i32t),
+                    &[
+                        dest.into(),
+                        self.i32t
+                            .const_int(u64::from(native_abi::OP_ATOM_NTH2), false)
+                            .into(),
+                        self.u64c(k),
+                        a_s.into(),
+                        u_s.into(),
+                        v_s.into(),
+                    ],
+                )
+                .expect("st");
+            self.check(f, st);
+            self.free_slots(f, &[a_s, u_s, v_s]);
+            return Ok(true);
+        }
+        if let Expr::DirectNative(deref_c) = coll
+            && deref_c.var.sym.namespace() == Some("clojure.core")
+            && deref_c.var.sym.name() == "deref"
+            && let [atom_e] = deref_c.args.as_slice()
+        {
+            let a_s = self.slot(f);
+            self.lower(f, atom_e, a_s)?;
+            let i_s = self.slot(f);
+            self.lower(f, idx, i_s)?;
+            let k = (self.var_of(&deref_c.var) << 32) | self.var_of(&call.var);
+            let st = self
+                .call(
+                    "rt_n_op2",
+                    Some(self.i32t),
+                    &[
+                        dest.into(),
+                        self.i32t
+                            .const_int(u64::from(native_abi::OP_ATOM_NTH), false)
+                            .into(),
+                        self.u64c(k),
+                        a_s.into(),
+                        i_s.into(),
+                    ],
+                )
+                .expect("st");
+            self.check(f, st);
+            self.free_slots(f, &[a_s, i_s]);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn try_lower_swap_fx(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+    ) -> Result<bool, Unsupported> {
+        if !self.inline_arith
+            || call.var.sym.namespace() != Some("clojure.core")
+            || call.var.sym.name() != "swap!"
+        {
+            return Ok(false);
+        }
+        let (op_name, arg_ptrs): (&str, Vec<&Expr>) = match call.args.as_slice() {
+            [atom, fe, Expr::VecLit(ks, None), v]
+                if ks.len() == 2 && is_core_global(fe, "assoc-in") =>
+            {
+                ("swap-assoc-in2-fx!", vec![atom, fe, &ks[0], &ks[1], v])
+            }
+            args if matches!(args.len(), 3 | 4) => ("swap-fx!", args.iter().collect()),
+            _ => return Ok(false),
+        };
+        let k = self.var_of(&call.var);
+        let dest = self.slot(f);
+        let res = self.lower_own_call(f, k, Some(op_name), &arg_ptrs, dest);
+        self.free_slots(f, &[dest]);
+        res?;
+        Ok(true)
+    }
+
     fn try_lower_dot_product(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -3824,12 +3935,8 @@ impl<'ctx> Lowerer<'ctx> {
         let Some((plus, init, m, star, c1, c2)) = dot_product_call(call) else {
             return Ok(false);
         };
-        let plus_s = self.slot(f);
-        self.lower(f, plus, plus_s)?;
         let init_s = self.slot(f);
         self.lower(f, init, init_s)?;
-        let star_s = self.slot(f);
-        self.lower(f, star, star_s)?;
         let c1_s = self.slot(f);
         self.lower(f, c1, c1_s)?;
         let c2_s = self.slot(f);
@@ -3851,12 +3958,17 @@ impl<'ctx> Lowerer<'ctx> {
             .build_conditional_branch(hit, done, slow)
             .expect("br");
         self.builder.position_at_end(slow);
+        let plus_s = self.slot(f);
+        self.lower(f, plus, plus_s)?;
+        let star_s = self.slot(f);
+        self.lower(f, star, star_s)?;
         let seq = self.slot(f);
         self.core_call_owned(f, m, &[star_s, c1_s, c2_s], seq);
         self.core_call_owned(f, call, &[plus_s, init_s, seq], dest);
+        self.free_slots(f, &[plus_s, star_s, seq]);
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
-        self.free_slots(f, &[plus_s, init_s, star_s, c1_s, c2_s, seq]);
+        self.free_slots(f, &[init_s, c1_s, c2_s]);
         Ok(true)
     }
 
@@ -4216,8 +4328,9 @@ impl<'ctx> Lowerer<'ctx> {
             .build_conditional_branch(is_direct, direct, general)
             .expect("br");
         self.builder.position_at_end(direct);
-        self.init_hof_acc(f.func, hl.kind, hl.init.is_some(), acc);
         let (state, state2) = self.load_hof_states(acc, coll, (kind1, plan1), coll2, plan2);
+        self.try_lower_scalar_hof(f, hl, base, acc, &state, state2.as_ref(), dest, done)?;
+        self.init_hof_acc(f.func, hl.kind, hl.init.is_some(), acc, state.n);
         self.emit_hof_direct(f, hl, base, &state, state2.as_ref(), dest)?;
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(general);
@@ -4240,10 +4353,26 @@ impl<'ctx> Lowerer<'ctx> {
         kind: HofKind,
         has_init: bool,
         acc: PointerValue<'ctx>,
+        cap: IntValue<'ctx>,
     ) {
         match kind {
-            HofKind::Collect | HofKind::FilterCollect => {
-                self.call("rt_n_vec_new", None, &[acc.into()]);
+            HofKind::Collect => {
+                self.call(
+                    "rt_n_vec_new",
+                    None,
+                    &[acc.into(), cap.into(), self.i8t.const_zero().into()],
+                );
+            }
+            HofKind::FilterCollect => {
+                self.call(
+                    "rt_n_vec_new",
+                    None,
+                    &[
+                        acc.into(),
+                        self.i64t.const_zero().into(),
+                        self.i8t.const_zero().into(),
+                    ],
+                );
             }
             HofKind::CountFilter => {
                 self.write_int(func, acc, self.i64t.const_zero());
@@ -4853,11 +4982,27 @@ impl<'ctx> Lowerer<'ctx> {
                 (Some("update-in"), [m, Expr::VecLit(ks, None), vf]) if ks.len() == 2 => {
                     (Some("update-in2"), vec![m, &ks[0], &ks[1], vf])
                 }
+                (Some("swap!"), [atom, fe, Expr::VecLit(ks, None), v])
+                    if ks.len() == 2 && is_core_global(fe, "assoc-in") =>
+                {
+                    (Some("swap-assoc-in2!"), vec![atom, fe, &ks[0], &ks[1], v])
+                }
                 _ => (core_name, call.args.iter().collect()),
             };
+        self.lower_own_call(f, k, op_name, &arg_ptrs, dest)
+    }
+
+    fn lower_own_call(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        k: u64,
+        op_name: Option<&str>,
+        arg_ptrs: &[&Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<(), Unsupported> {
         let n = arg_ptrs.len();
         let (arr, elems) = self.slot_array(f, n);
-        for (a, e) in arg_ptrs.into_iter().zip(&elems) {
+        for (&a, e) in arg_ptrs.iter().zip(&elems) {
             let moved = match a {
                 Expr::Local(i) if is_move(f, a) => self.slot_of(f, *i),
                 _ => None,
@@ -7506,7 +7651,7 @@ fn self_recurs(body: &[Expr]) -> bool {
 /// `map`), a vector build (`mapv`, `vec` / `into []` of a `map`), or a
 /// `reduce`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum HofKind {
+pub(super) enum HofKind {
     Each,
     Collect,
     FilterCollect,
@@ -7521,26 +7666,26 @@ enum HofKind {
 /// inline (#271 Slice 4c/5g/5h), with the calls the general path makes: the
 /// inner one (`map`, `mapv`, `filter`, `filterv`, `some`, `every?`, or `reduce`)
 /// and, for `dorun` / `vec` / `into []` / `count` / `reduce +`, the outer one.
-struct HofLoop<'a> {
-    kind: HofKind,
+pub(super) struct HofLoop<'a> {
+    pub(super) kind: HofKind,
     fun: &'a FunExpr,
-    arity: &'a Arity,
-    init: Option<&'a Expr>,
+    pub(super) arity: &'a Arity,
+    pub(super) init: Option<&'a Expr>,
     coll: &'a Expr,
-    coll2: Option<&'a Expr>,
+    pub(super) coll2: Option<&'a Expr>,
     inner: &'a clj_eval::expr::DirectCall,
     outer: Option<(&'a clj_eval::expr::DirectCall, Option<&'a Expr>)>,
 }
 
 /// A compiled loop's runtime state: the accumulator and collection
 /// slots, the [`rt_n_iter_plan`] kind, and the plan's count, start, step.
-struct LoopState<'ctx> {
+pub(super) struct LoopState<'ctx> {
     acc: PointerValue<'ctx>,
-    coll: PointerValue<'ctx>,
-    kind: IntValue<'ctx>,
-    n: IntValue<'ctx>,
-    start: IntValue<'ctx>,
-    step: IntValue<'ctx>,
+    pub(super) coll: PointerValue<'ctx>,
+    pub(super) kind: IntValue<'ctx>,
+    pub(super) n: IntValue<'ctx>,
+    pub(super) start: IntValue<'ctx>,
+    pub(super) step: IntValue<'ctx>,
 }
 
 /// `(range a0 [a1 [a2]])` as a direct `clojure.core` call a fused loop
@@ -7574,6 +7719,11 @@ fn is_direct_moving(
     core_name
         .and_then(|cname| native_abi::own_op(cname, n))
         .is_some()
+        || matches!(
+            (core_name, call.args.as_slice()),
+            (Some("swap!"), [_, fe, Expr::VecLit(ks, None), _])
+                if ks.len() == 2 && is_core_global(fe, "assoc-in")
+        )
         || (is_owned_move_op(call.var.sym.namespace(), call.var.sym.name(), n)
             && call.args.iter().any(|a| is_move(f, a) || is_temporary(a)))
 }

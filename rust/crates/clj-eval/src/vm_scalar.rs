@@ -1787,12 +1787,14 @@ const MAX_INLINE: usize = 4;
 /// is walked whole while the loop compiles).
 const MAX_INLINED: usize = 16;
 
-/// A body-bound local: its slot, or (an inlined callee's param
-/// passed one of the loop body's outer locals) that local's index.
+/// A body-bound local: its slot, an outer local passed to an inlined
+/// callee, or a deferred 2D row ref `(let [row (nth coll i)] ...)` that
+/// lowers `(nth row j)` directly to `Calc::Nth2`.
 #[derive(Clone, Copy)]
 enum Lex {
     Slot(usize),
     Outer(usize),
+    NthRef(Loc, usize),
 }
 
 /// The program builder over one `loop`'s body.
@@ -1925,6 +1927,61 @@ impl<F: Fn(&Var) -> bool> Host for AotHost<'_, F> {
         };
         Some(Loc::Up(idx))
     }
+}
+
+/// The analyzed scalar AST of a pure 1- or 2-arg HOF body (`mapv`,
+/// `reduce`, `sum`, `every?`, `count-filter`), shared with `clj-aot`'s
+/// unboxed scalar HOF lowerer.
+pub struct ScalarFnAst {
+    pub expr: IExpr,
+    pub nslots: usize,
+    pub primed: bool,
+    pub global_colls: Vec<Var>,
+}
+
+/// Build the scalar AST for an AOT-compiled HOF body (`None` when the
+/// body unconditionally deopts or mutates a collection).
+#[must_use]
+pub fn compile_aot_expr(
+    body: &[Expr],
+    n_params: usize,
+    body_base: usize,
+    callees: &std::collections::HashMap<(String, String), Arc<[Arity]>>,
+    can_read_global_coll: impl Fn(&Var) -> bool,
+) -> Option<ScalarFnAst> {
+    let mut host = AotHost {
+        callees,
+        can_read_global_coll,
+        global_colls: Vec::new(),
+    };
+    let mut b = Builder {
+        host: &mut host,
+        body_base,
+        lex: (0..n_params).map(Lex::Slot).collect(),
+        nslots: n_params,
+        targets: Vec::new(),
+        scalar: Vec::new(),
+        boxed: Vec::new(),
+        sites: Vec::new(),
+        roots: Vec::new(),
+        stack: Vec::new(),
+        max_depth: 0,
+        inlined: 0,
+        inner: None,
+        primed: false,
+        seen_effect: false,
+        primed_after_effect: false,
+    };
+    let expr = b.seq_expr(body);
+    if b.seen_effect || misses(&expr) {
+        return None;
+    }
+    Some(ScalarFnAst {
+        expr,
+        nslots: b.nslots,
+        primed: b.primed,
+        global_colls: host.global_colls,
+    })
 }
 
 /// Build the scalar AST for an AOT-compiled `loop` body (`None` when
@@ -2121,7 +2178,7 @@ impl Builder<'_> {
                 }
                 Err(loc) => IExpr::Loc(loc),
             },
-            None => IExpr::Deopt,
+            Some(Lex::NthRef(..)) | None => IExpr::Deopt,
         }
     }
 
@@ -2211,35 +2268,84 @@ impl Builder<'_> {
     /// `let` bindings (symbols only) into fresh slots, visible to
     /// the later inits and `then` (the caller truncates `lex`).
     fn bindings(&mut self, bindings: &[(Pattern, Expr)]) -> Option<Vec<(usize, IExpr)>> {
-        self.bind_all(bindings, false)
+        self.bind_all(bindings, None)
     }
 
-    /// `let` bindings: symbols, and vectors of symbols destructuring
-    /// an `nth` (see [`Self::vec_binding`]). (A `loop`'s destructured
-    /// binding re-destructures on every `recur`: [`Self::bindings`].)
-    fn let_bindings(&mut self, bindings: &[(Pattern, Expr)]) -> Option<Vec<(usize, IExpr)>> {
-        self.bind_all(bindings, true)
+    /// `let` bindings: symbols, deferred 2D row refs (`(let [row (nth coll i)] ...)`),
+    /// and vectors of symbols destructuring an `nth` (see [`Self::vec_binding`]).
+    /// (A `loop`'s destructured binding re-destructures on every `recur`: [`Self::bindings`].)
+    fn let_bindings(
+        &mut self,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+    ) -> Option<Vec<(usize, IExpr)>> {
+        self.bind_all(bindings, Some(body))
     }
 
     fn bind_all(
         &mut self,
         bindings: &[(Pattern, Expr)],
-        destructure: bool,
+        let_body: Option<&[Expr]>,
     ) -> Option<Vec<(usize, IExpr)>> {
         let mut out = Vec::with_capacity(bindings.len());
-        for (pat, init) in bindings {
+        for (bi, (pat, init)) in bindings.iter().enumerate() {
             match pat {
                 Pattern::Symbol(_) => {
+                    if let Some(body) = let_body {
+                        if self.try_nth_ref_binding(init, &bindings[bi + 1..], body, &mut out) {
+                            continue;
+                        }
+                    }
                     let e = self.expr(init);
                     let s = self.slot();
                     self.lex.push(Lex::Slot(s));
                     out.push((s, e));
                 }
-                Pattern::Vec(vp) if destructure => self.vec_binding(vp, init, &mut out)?,
+                Pattern::Vec(vp) if let_body.is_some() => self.vec_binding(vp, init, &mut out)?,
                 _ => return None,
             }
         }
         Some(out)
+    }
+
+    /// Defer `(let [row (nth coll i)] ...)` to `Lex::NthRef(loc, t)` when `row`
+    /// is only read via `(nth row j)` and at least one such read is guaranteed
+    /// to execute unconditionally (so OOB / non-vector `coll` still deopts).
+    fn try_nth_ref_binding(
+        &mut self,
+        init: &Expr,
+        rest: &[(Pattern, Expr)],
+        body: &[Expr],
+        out: &mut Vec<(usize, IExpr)>,
+    ) -> bool {
+        let Expr::DirectNative(call) = init else {
+            return false;
+        };
+        let (Some("nth"), [coll, i]) = (crate::vm_ops::core_name(call), call.args.as_slice())
+        else {
+            return false;
+        };
+        let target = self.next_index();
+        let mut state = (true, false);
+        for (_, r_init) in rest {
+            scan_nth_ref(r_init, target, true, &mut state);
+        }
+        for form in body {
+            scan_nth_ref(form, target, true, &mut state);
+        }
+        if !state.0 || !state.1 {
+            return false;
+        }
+        let Some(loc) = self.read_coll(coll) else {
+            return false;
+        };
+        let idx = self.expr(i);
+        let t = self.slot();
+        out.push((t, idx));
+        let site = self.host.site(call);
+        self.sites.push(site);
+        self.lex.push(Lex::NthRef(loc, t));
+        true
     }
 
     /// `[a b …]` (symbols only) bound to `(nth coll i)` over a boxed
@@ -2286,7 +2392,7 @@ impl Builder<'_> {
 
     fn let_expr(&mut self, bindings: &[(Pattern, Expr)], body: &[Expr]) -> IExpr {
         let mark = self.lex.len();
-        let out = match self.let_bindings(bindings) {
+        let out = match self.let_bindings(bindings, body) {
             Some(binds) => IExpr::Ctl(Box::new(Ctl::Let(binds.into(), self.seq_expr(body)))),
             None => IExpr::Deopt,
         };
@@ -2522,6 +2628,11 @@ impl Builder<'_> {
         if let Some(loc) = self.read_coll(coll) {
             return calc(Calc::Nth(loc, self.expr(idx)));
         }
+        if let Expr::Local(i) = coll {
+            if let Some(Lex::NthRef(loc, row_slot)) = self.lookup(*i) {
+                return calc(Calc::Nth2(loc, IExpr::Slot(row_slot), self.expr(idx)));
+            }
+        }
         if let Expr::DirectNative(inner) = coll {
             if let (Some("nth"), [outer, i]) =
                 (crate::vm_ops::core_name(inner), inner.args.as_slice())
@@ -2623,7 +2734,7 @@ impl Builder<'_> {
             }
             Expr::Let { bindings, body } => {
                 let mark = self.lex.len();
-                let out = match self.let_bindings(bindings) {
+                let out = match self.let_bindings(bindings, body) {
                     Some(binds) => Node::Let(binds.into(), Box::new(self.body(body))),
                     None => Node::Deopt,
                 };
@@ -2654,7 +2765,7 @@ impl Builder<'_> {
             Expr::If { test, then, els } => return self.if_stmts(test, then, els),
             Expr::Let { bindings, body } => {
                 let mark = self.lex.len();
-                let out = match self.let_bindings(bindings) {
+                let out = match self.let_bindings(bindings, body) {
                     Some(binds) => Stmt::Let(binds.into(), self.stmt_seq(body).into()),
                     None => Stmt::Expr(IExpr::Deopt),
                 };
@@ -2832,6 +2943,43 @@ fn const_branch<'a>(test: &Expr, then: &'a Expr, els: &'a Expr) -> Option<&'a Ex
     match test {
         Expr::Literal(v) => Some(if v.is_truthy() { then } else { els }),
         _ => None,
+    }
+}
+
+/// Inspect every occurrence of `Expr::Local(target)` inside `e`:
+/// `state.0` stays `true` while every reference is directly the collection arg
+/// of a 2-arg `clojure.core/nth`; `state.1` becomes `true` once such a read is
+/// reached along an unconditional path.
+fn scan_nth_ref(e: &Expr, target: usize, in_uncond: bool, state: &mut (bool, bool)) {
+    if !state.0 {
+        return;
+    }
+    if let Expr::DirectNative(call) = e {
+        if crate::vm_ops::core_name(call) == Some("nth") {
+            if let [Expr::Local(i), idx_e] = call.args.as_slice() {
+                if *i == target {
+                    state.1 |= in_uncond;
+                    scan_nth_ref(idx_e, target, in_uncond, state);
+                    return;
+                }
+            }
+        }
+    }
+    match e {
+        Expr::Local(i) if *i == target => state.0 = false,
+        Expr::If { test, then, els } => {
+            scan_nth_ref(test, target, in_uncond, state);
+            scan_nth_ref(then, target, false, state);
+            scan_nth_ref(els, target, false, state);
+        }
+        Expr::Fn(_) | Expr::CaseStar { .. } | Expr::Try { .. } => {
+            crate::aot_front::for_each_child(e, &mut |c| scan_nth_ref(c, target, false, state));
+        }
+        _ => {
+            crate::aot_front::for_each_child(e, &mut |c| {
+                scan_nth_ref(c, target, in_uncond, state);
+            });
+        }
     }
 }
 

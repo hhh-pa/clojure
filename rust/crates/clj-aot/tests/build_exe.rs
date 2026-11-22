@@ -570,3 +570,15 @@ fn native_binary_exercises_lite_ns_stdin_and_full_cli() {
         ("[13 19 11 18 97]\n", "", 0)
     );
 }
+
+#[test]
+fn native_binary_maps_packed_vectors_and_restarts_on_type_change() {
+    let source = "(println (mapv (fn [x] (+ x 1)) [4 5 6])
+                           (mapv (fn [x y] (+ x y)) [0.5 1.5 2.5] (range 2))
+                           (mapv (fn [x] (if (zero? x) x (> x 1))) (range 3)))";
+    let (stdout, stderr, code, _) = build_mode_and_run("packed-mapv", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[5 6 7] [0.5 2.5] [0 false true]\n", "", 0)
+    );
+}

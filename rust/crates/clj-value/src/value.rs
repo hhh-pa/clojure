@@ -1014,6 +1014,14 @@ impl Map {
     #[must_use]
     pub fn get_small_scalar(&self, k: &Value) -> Option<Option<&Value>> {
         let small = self.0.small.as_deref()?;
+        if let Value::Keyword(kw) = k {
+            let pos = small
+                .shape
+                .keys
+                .iter()
+                .position(|ek| matches!(ek, Value::Keyword(e) if e.ptr_eq(kw)));
+            return Some(pos.and_then(|idx| small.vals.get(idx)));
+        }
         if let Value::Char(c) = k {
             return small
                 .shape
@@ -1627,6 +1635,68 @@ impl Vector {
         }
     }
 
+    /// Whether the vector's packed representation guarantees no item is `nil`.
+    #[inline]
+    #[must_use]
+    pub fn cannot_contain_nil(&self) -> bool {
+        matches!(
+            self.0.inner,
+            VectorInner::Ints(_)
+                | VectorInner::Doubles(_)
+                | VectorInner::Chars(_)
+                | VectorInner::Strs(_)
+        )
+    }
+
+    /// Bulk-append `other[start..end]` when both sides share a flat packed
+    /// representation (`Err(self)` otherwise so the caller falls back).
+    pub fn try_extend_flat_window(
+        mut self,
+        other: &Vector,
+        start: usize,
+        end: usize,
+    ) -> Result<Self, Self> {
+        if start == end {
+            return Ok(self);
+        }
+        match (&self.0.inner, &other.0.inner) {
+            (VectorInner::Ints(_), VectorInner::Ints(s)) => {
+                let Some(sl) = s.as_flat().and_then(|x| x.get(start..end)) else {
+                    return Err(self);
+                };
+                let data = Arc::make_mut(&mut self.0);
+                if let VectorInner::Ints(d) = &mut data.inner {
+                    d.extend_slice(sl);
+                }
+                data.id = next_vector_id();
+                Ok(self)
+            }
+            (VectorInner::Doubles(_), VectorInner::Doubles(s)) => {
+                let Some(sl) = s.as_flat().and_then(|x| x.get(start..end)) else {
+                    return Err(self);
+                };
+                let data = Arc::make_mut(&mut self.0);
+                if let VectorInner::Doubles(d) = &mut data.inner {
+                    d.extend_slice(sl);
+                }
+                data.id = next_vector_id();
+                Ok(self)
+            }
+            (VectorInner::Generic(_), VectorInner::Generic(s)) => {
+                let Some(sl) = s.as_flat().and_then(|x| x.get(start..end)) else {
+                    return Err(self);
+                };
+                let data = Arc::make_mut(&mut self.0);
+                if let VectorInner::Generic(d) = &mut data.inner {
+                    d.extend_slice(sl);
+                }
+                data.id = next_vector_id();
+                Ok(self)
+            }
+            _ => Err(self),
+        }
+    }
+
     /// The element count.
     #[inline]
     #[must_use]
@@ -1904,6 +1974,7 @@ impl Map {
     /// The handle fields, mutably: shared data clones first (the
     /// entries `Arc`s stay shared, so aliasing/identity rules are
     /// exactly the old struct copy's).
+    #[inline]
     fn data_mut(&mut self) -> &mut MapData {
         Arc::make_mut(&mut self.0)
     }
@@ -2060,8 +2131,8 @@ impl Map {
     /// as before, so live aliases keep their versions and
     /// identities.
     pub fn insert_mut(&mut self, k: Value, v: Value) {
-        if let Some(small) = self.data_mut().small.take() {
-            return self.insert_shaped_mut(small, k, v);
+        if self.0.small.is_some() {
+            return self.insert_shaped_mut(k, v);
         }
         // Owned `self`: mutate the trie in place (same rationale as
         // `Vector::push_back` — rpds still path-copies nodes shared
@@ -2095,29 +2166,29 @@ impl Map {
     /// assocs allocate only the values vec (the shape `Arc` is
     /// shared); new keys intern the extended key-set (hits
     /// allocate nothing past values).
-    fn insert_shaped_mut(&mut self, mut small: Arc<SmallMap>, k: Value, v: Value) {
+    fn insert_shaped_mut(&mut self, k: Value, v: Value) {
+        let data = self.data_mut();
+        let small = data.small.as_mut().expect("shaped checked above");
         if let Some(idx) = small.shape.find_key(&k) {
             // `get_mut` succeeds only with no live alias (not even
             // the consumed input survives), so the write is
             // invisible and the entries `Arc` (see [`Map::id`])
             // stays put.
-            if let Some(entries) = Arc::get_mut(&mut small) {
+            if let Some(entries) = Arc::get_mut(small) {
                 entries.vals[idx] = v;
-                self.data_mut().small = Some(small);
                 return;
             }
             let mut vals = small.vals.clone();
             vals[idx] = v;
-            self.data_mut().small = Some(Arc::new(SmallMap {
+            *small = Arc::new(SmallMap {
                 shape: Arc::clone(&small.shape),
                 vals,
-            }));
+            });
             return;
         }
         let size = small.vals.len();
-        let promote =
-            !self.0.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
-        self.data_mut().hashy |= promote;
+        let promote = !data.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
+        data.hashy |= promote;
         if size < INLINE_MAP_MAX {
             // Exact-size: the new version is frozen, so no growth
             // slack (see [`SmallMap`]).
@@ -2127,13 +2198,65 @@ impl Map {
             let mut vals = Vec::with_capacity(size + 1);
             vals.extend(small.vals.iter().cloned());
             vals.push(v);
-            self.data_mut().small = Some(Arc::new(SmallMap {
+            *small = Arc::new(SmallMap {
                 shape: intern_shape(&keys),
                 vals: vals.into_boxed_slice(),
-            }));
+            });
             return;
         }
+        let small = data.small.take().expect("shaped checked above");
         self.promote_with_mut(&small, k, v);
+    }
+
+    /// Update an existing key's value in place (one lookup, one `Arc::make_mut`,
+    /// and one `Arc::get_mut` on shaped maps), returning `true` when updated
+    /// and `false` when the key is missing or `f` returns `Err(orig)`.
+    pub fn update_existing_mut(
+        &mut self,
+        k: &Value,
+        f: impl FnOnce(Value) -> Result<Value, Value>,
+    ) -> bool {
+        if let Some(small) = &self.0.small {
+            let Some(idx) = small.shape.find_key(k) else {
+                return false;
+            };
+            let small = self
+                .data_mut()
+                .small
+                .as_mut()
+                .expect("shaped checked above");
+            if let Some(entries) = Arc::get_mut(small) {
+                let old = std::mem::replace(&mut entries.vals[idx], Value::Nil);
+                match f(old) {
+                    Ok(new) => {
+                        entries.vals[idx] = new;
+                        return true;
+                    }
+                    Err(orig) => {
+                        entries.vals[idx] = orig;
+                        return false;
+                    }
+                }
+            }
+            let Ok(new) = f(small.vals[idx].clone()) else {
+                return false;
+            };
+            let mut vals = small.vals.clone();
+            vals[idx] = new;
+            *small = Arc::new(SmallMap {
+                shape: Arc::clone(&small.shape),
+                vals,
+            });
+            return true;
+        }
+        let Some(old) = self.trie().get(k).cloned() else {
+            return false;
+        };
+        let Ok(new) = f(old) else {
+            return false;
+        };
+        self.trie_mut().insert_mut(k.clone(), new);
+        true
     }
 
     /// Convert a shaped map to the hash trie, then insert the

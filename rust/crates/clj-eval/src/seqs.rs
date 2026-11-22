@@ -1919,15 +1919,83 @@ fn native_every_p(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeE
     native_every_p_owned(eval, args.iter().cloned().collect())
 }
 
+fn every_kw_ok(eval: &mut Evaluator, kw: &Value, head: &Value) -> Result<bool, NativeError> {
+    if let Value::Map(m) = head {
+        if !m.is_sorted() {
+            return Ok(m.get(kw).is_some_and(Value::is_truthy));
+        }
+    }
+    if let Some(v) = crate::vm_intrinsics::get_of(head, kw, None) {
+        return Ok(v.is_truthy());
+    }
+    Ok(call_checked(eval, kw, std::slice::from_ref(head))?.is_truthy())
+}
+
+fn try_every_fast(
+    eval: &mut Evaluator,
+    pred: &Value,
+    coll: Value,
+) -> Result<Result<Value, NativeError>, Value> {
+    match pred {
+        Value::Map(m) if !m.is_sorted() => {
+            let mut all = true;
+            let res = walk_seq(eval, coll, |eval, head| {
+                let ok = if crate::vm_intrinsics::is_lookup_key(head) {
+                    m.get(head).is_some_and(Value::is_truthy)
+                } else {
+                    call_checked(eval, pred, std::slice::from_ref(head))?.is_truthy()
+                };
+                if !ok {
+                    all = false;
+                    return Ok(Walk::Stop);
+                }
+                Ok(Walk::Continue)
+            });
+            Ok(res.map(|()| Value::Bool(all)))
+        }
+        Value::Set(s) if !s.is_sorted() => {
+            let mut all = true;
+            let res = walk_seq(eval, coll, |eval, head| {
+                let ok = if crate::vm_intrinsics::is_lookup_key(head) {
+                    s.get(head).is_some_and(Value::is_truthy)
+                } else {
+                    call_checked(eval, pred, std::slice::from_ref(head))?.is_truthy()
+                };
+                if !ok {
+                    all = false;
+                    return Ok(Walk::Stop);
+                }
+                Ok(Walk::Continue)
+            });
+            Ok(res.map(|()| Value::Bool(all)))
+        }
+        Value::Keyword(_) => {
+            let mut all = true;
+            let res = walk_seq(eval, coll, |eval, head| {
+                if !every_kw_ok(eval, pred, head)? {
+                    all = false;
+                    return Ok(Walk::Stop);
+                }
+                Ok(Walk::Continue)
+            });
+            Ok(res.map(|()| Value::Bool(all)))
+        }
+        _ => Err(coll),
+    }
+}
+
 pub(crate) fn native_every_p_owned(
     eval: &mut Evaluator,
     mut args: SmallVec<[Value; 4]>,
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/every?", &args, &[2])?;
     let pred = args[0].clone();
+    let coll = match try_every_fast(eval, &pred, take_walk_coll(&mut args, 1)) {
+        Ok(res) => return res,
+        Err(coll) => coll,
+    };
     let prep = crate::vm::Prepared::of(&pred, 1);
     let mut all = true;
-    let coll = take_walk_coll(&mut args, 1);
     walk_seq(eval, coll, |eval, head| {
         if !call_pred1(eval, &pred, prep.as_ref(), head)?.is_truthy() {
             all = false;
@@ -1965,20 +2033,106 @@ fn some_kw_step(found: &mut Value, kw: &Value, head: &Value) -> Walk {
     Walk::Continue
 }
 
+fn coll_cannot_contain_nil(coll: &Value) -> bool {
+    match coll {
+        Value::Vector(v) => v.cannot_contain_nil(),
+        Value::Str(_) => true,
+        Value::Extension(_) => {
+            crate::lazy::as_splitvec(coll).is_some()
+                || crate::lazy::as_subvector(coll).is_some_and(|sv| sv.vec().cannot_contain_nil())
+        }
+        _ => false,
+    }
+}
+
+fn some_lookup_step(
+    eval: &mut Evaluator,
+    pred: &Value,
+    found: &mut Value,
+    head: &Value,
+    direct: Option<&Value>,
+) -> Result<Walk, NativeError> {
+    if crate::vm_intrinsics::is_lookup_key(head) {
+        if let Some(v) = direct {
+            if v.is_truthy() {
+                *found = v.clone();
+                return Ok(Walk::Stop);
+            }
+        }
+        return Ok(Walk::Continue);
+    }
+    let r = call_checked(eval, pred, std::slice::from_ref(head))?;
+    if r.is_truthy() {
+        *found = r;
+        return Ok(Walk::Stop);
+    }
+    Ok(Walk::Continue)
+}
+
+fn try_some_fast(
+    eval: &mut Evaluator,
+    pred: &Value,
+    coll: Value,
+) -> Result<Result<Value, NativeError>, Value> {
+    if let Value::Keyword(_) = pred {
+        let mut found = Value::Nil;
+        let res = walk_seq(eval, coll, |_eval, head| {
+            Ok(some_kw_step(&mut found, pred, head))
+        });
+        return Ok(res.map(|()| found));
+    }
+    if let Value::Set(s) = pred {
+        if !s.is_sorted() {
+            let mut found = Value::Nil;
+            let res = walk_seq(eval, coll, |eval, head| {
+                let hit = crate::vm_intrinsics::is_lookup_key(head)
+                    .then(|| s.get(head))
+                    .flatten();
+                some_lookup_step(eval, pred, &mut found, head, hit)
+            });
+            return Ok(res.map(|()| found));
+        }
+    }
+    if let Value::Map(m) = pred {
+        if !m.is_sorted() {
+            let mut found = Value::Nil;
+            let res = walk_seq(eval, coll, |eval, head| {
+                let hit = crate::vm_intrinsics::is_lookup_key(head)
+                    .then(|| m.get(head))
+                    .flatten();
+                some_lookup_step(eval, pred, &mut found, head, hit)
+            });
+            return Ok(res.map(|()| found));
+        }
+    }
+    if crate::ext::as_native(pred).is_some_and(|n| n.display.as_ref() == "clojure.core/nil?") {
+        if coll_cannot_contain_nil(&coll) {
+            return Ok(Ok(Value::Nil));
+        }
+        let mut found = Value::Nil;
+        let res = walk_seq(eval, coll, |_eval, head| {
+            if matches!(head, Value::Nil) {
+                found = Value::Bool(true);
+                return Ok(Walk::Stop);
+            }
+            Ok(Walk::Continue)
+        });
+        return Ok(res.map(|()| found));
+    }
+    Err(coll)
+}
+
 pub(crate) fn native_some_owned(
     eval: &mut Evaluator,
     mut args: SmallVec<[Value; 4]>,
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/some", &args, &[2])?;
     let pred = args[0].clone();
+    let coll = match try_some_fast(eval, &pred, take_walk_coll(&mut args, 1)) {
+        Ok(res) => return res,
+        Err(coll) => coll,
+    };
     let mut found = Value::Nil;
-    let coll = take_walk_coll(&mut args, 1);
-    if let Value::Keyword(_) = &pred {
-        walk_seq(eval, coll, |_eval, head| {
-            Ok(some_kw_step(&mut found, &pred, head))
-        })?;
-        return Ok(found);
-    }
     let prep = crate::vm::Prepared::of(&pred, 1);
     walk_seq(eval, coll, |eval, head| {
         let r = call_pred1(eval, &pred, prep.as_ref(), head)?;

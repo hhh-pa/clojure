@@ -263,6 +263,24 @@ impl TransientVector {
         }
     }
 
+    /// A transient vector initialized with packed `Int` items.
+    #[must_use]
+    pub fn from_ints(xs: Vec<i64>) -> Self {
+        Self {
+            items: TransientItems::Ints(xs),
+            valid: true,
+        }
+    }
+
+    /// A transient vector initialized with packed `Double` items.
+    #[must_use]
+    pub fn from_doubles(xs: Vec<f64>) -> Self {
+        Self {
+            items: TransientItems::Doubles(xs),
+            valid: true,
+        }
+    }
+
     /// A transient over `v`'s items.
     #[must_use]
     pub fn from_vector(v: &Vector) -> Self {
@@ -579,6 +597,29 @@ impl TransientVector {
             if let Some(slot) = x.get_mut(idx) {
                 *slot = d;
                 return true;
+            }
+        }
+        false
+    }
+
+    /// Overwrite an existing POD slot in a generic transient buffer with a
+    /// `Bool` (`false` when out of bounds, non-generic, invalidated, or the
+    /// overwritten slot holds a heap value; zero allocation, zero drop glue,
+    /// panic-free for `clj-bc` bitcode).
+    #[inline(always)]
+    pub fn assoc_bool_in_bounds(&mut self, idx: usize, b: bool) -> bool {
+        if !self.valid {
+            return false;
+        }
+        if let TransientItems::Generic(x) = &mut self.items {
+            if let Some(slot) = x.get_mut(idx) {
+                if matches!(
+                    slot,
+                    Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Double(_) | Value::Char(_)
+                ) {
+                    std::mem::forget(std::mem::replace(slot, Value::Bool(b)));
+                    return true;
+                }
             }
         }
         false

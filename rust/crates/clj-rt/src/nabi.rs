@@ -363,10 +363,12 @@ pub extern "C" fn rt_n_vec_item(out: &mut Value, v: &Value, i: u64) {
     *out = native_abi::vec_item(v, i as usize);
 }
 
-/// `out =` a fresh accumulator for a compiled `mapv` / `vec` loop.
+/// `out =` a fresh accumulator for a compiled `mapv` / `vec` loop (`mode == 0`:
+/// `VecBuilder` pre-reserving `len`; `mode == 1/2`: zero-filled packed `Int`/
+/// `Double` transient vector for unboxed scalar `mapv`).
 #[unsafe(no_mangle)]
-pub extern "C" fn rt_n_vec_new(out: &mut Value) {
-    *out = native_abi::vec_builder();
+pub extern "C" fn rt_n_vec_new(out: &mut Value, len: i64, mode: u8) {
+    *out = native_abi::vec_builder(len, mode);
 }
 
 /// `out =` accumulator `acc` frozen into a persistent vector.
@@ -572,6 +574,18 @@ pub extern "C" fn rt_n_op1(out: &mut Value, op: u32, k: u64, a: &Value) -> i32 {
 /// dependency for non-regex programs).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_op2(out: &mut Value, op: u32, k: u64, a: &Value, b: &Value) -> i32 {
+    if op == native_abi::OP_ATOM_NTH {
+        if let Some(v) = native_abi::try_atom_nth(a, b) {
+            *out = v;
+            return 0;
+        }
+        let mut derefed = Value::Nil;
+        let st = core_fallback(&mut derefed, k >> 32, &[a]);
+        if st != 0 {
+            return st;
+        }
+        return core_fallback(out, k & 0xFFFF_FFFF, &[&derefed, b]);
+    }
     match native_abi::apply2_no_re(op, a, b) {
         Some(v) => {
             *out = v;
@@ -604,6 +618,23 @@ pub extern "C" fn rt_n_op3(
     b: &Value,
     c: &Value,
 ) -> i32 {
+    if op == native_abi::OP_ATOM_NTH2 {
+        if let Some(v) = native_abi::try_atom_nth2(a, b, c) {
+            *out = v;
+            return 0;
+        }
+        let mut derefed = Value::Nil;
+        let st = core_fallback(&mut derefed, k >> 32, &[a]);
+        if st != 0 {
+            return st;
+        }
+        let mut row = Value::Nil;
+        let st = core_fallback(&mut row, k & 0xFFFF_FFFF, &[&derefed, b]);
+        if st != 0 {
+            return st;
+        }
+        return core_fallback(out, k & 0xFFFF_FFFF, &[&row, c]);
+    }
     match native_abi::apply3(op, a, b, c) {
         Some(v) => {
             *out = v;

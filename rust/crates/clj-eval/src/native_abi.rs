@@ -937,10 +937,63 @@ pub fn inline_op(name: &str, arity: usize) -> Option<u32> {
 const NARY_OP: u32 = 1 << 30;
 /// Dedicated inline tag for `(re-matches pat s)` so `APPLY2` stays regex-free.
 const RE_MATCHES_TAG: u32 = 1 << 29;
+/// Dedicated inline tag for `(nth @atom i)` (zero outer-vector clone).
+pub const OP_ATOM_NTH: u32 = 1 << 28;
+/// Dedicated inline tag for `(nth (nth @atom u) v)` (zero matrix/row clone).
+pub const OP_ATOM_NTH2: u32 = (1 << 28) | 1;
 
 /// Bit mask covering disjoint op-namespace tag bits so [`RE_MATCHES_TAG`],
-/// [`NARY_OP`], and [`OWN_BIT`] can never alias inside shared `u32` dispatch helpers.
-const TAG_MASK: u32 = RE_MATCHES_TAG | NARY_OP | OWN_BIT;
+/// [`NARY_OP`], [`OP_ATOM_NTH`], and [`OWN_BIT`] can never alias inside shared
+/// `u32` dispatch helpers.
+const TAG_MASK: u32 = RE_MATCHES_TAG | NARY_OP | OWN_BIT | (1 << 28);
+
+/// Fast `(nth @atom i)` without cloning the atom's outer vector (`None` falls
+/// back to `(nth (deref atom) i)`).
+#[must_use]
+pub fn try_atom_nth(atom_v: &Value, idx_v: &Value) -> Option<Value> {
+    let (Value::Atom(atom), Value::Int(i)) = (atom_v, idx_v) else {
+        return None;
+    };
+    let idx = i32::try_from(*i)
+        .ok()
+        .and_then(|n| usize::try_from(n).ok())?;
+    let state = atom.lock();
+    match &state.value {
+        Value::Vector(v) => v.get(idx),
+        Value::Extension(e) => {
+            let (v, start, end) = e.as_subvector_parts()?;
+            (idx < end - start).then(|| v.get(start + idx)).flatten()
+        }
+        _ => None,
+    }
+}
+
+/// Fast `(nth (nth @atom u) v)` without cloning the atom's outer matrix or
+/// inner row vector (`None` falls back to `(nth (nth (deref atom) u) v)`).
+#[must_use]
+pub fn try_atom_nth2(atom_v: &Value, u_v: &Value, v_v: &Value) -> Option<Value> {
+    let (Value::Atom(atom), Value::Int(ui), Value::Int(vi)) = (atom_v, u_v, v_v) else {
+        return None;
+    };
+    let u = i32::try_from(*ui)
+        .ok()
+        .and_then(|n| usize::try_from(n).ok())?;
+    let v = i32::try_from(*vi)
+        .ok()
+        .and_then(|n| usize::try_from(n).ok())?;
+    let state = atom.lock();
+    let Value::Vector(outer) = &state.value else {
+        return None;
+    };
+    match outer.get_ref(u)? {
+        Value::Vector(row) => row.get(v),
+        Value::Extension(e) => {
+            let (row, start, end) = e.as_subvector_parts()?;
+            (v < end - start).then(|| row.get(start + v)).flatten()
+        }
+        _ => None,
+    }
+}
 
 /// Whether `id` is the dedicated regex inline op (`(re-matches ...)`).
 #[must_use]
@@ -1189,6 +1242,18 @@ const OWN_OPS: &[(&str, usize, OwnFn)] = &[
     ("update", 3, crate::vm_ops::apply_update3),
     ("assoc-in2", 4, crate::vm_ops::apply_assoc_in2),
     ("update-in2", 4, crate::vm_ops::apply_update_in2),
+    ("swap-fx!", 3, crate::vm_ops::apply_swap_fx),
+    ("swap-fx!", 4, crate::vm_ops::apply_swap_fx),
+    (
+        "swap-assoc-in2!",
+        5,
+        crate::vm_ops::apply_swap_assoc_in2_val,
+    ),
+    (
+        "swap-assoc-in2-fx!",
+        5,
+        crate::vm_ops::apply_swap_assoc_in2_fx,
+    ),
 ];
 
 /// Opcode for [`apply_own`], matching core fns whose in-place `Upd`
@@ -1212,20 +1277,25 @@ pub fn apply_own(id: u32, args: &mut [Value]) -> Option<Value> {
         .and_then(|(_, _, f)| f(args))
 }
 
-/// Repack unboxed 2-key path arguments (`[m, k1, k2, vf]`) back into the
-/// 3-argument `[m, [k1 k2], vf]` form when [`apply_own`] falls back to the
-/// general `assoc-in` / `update-in` native.
+/// Repack unboxed 2-key path arguments back into their nested vector form
+/// when [`apply_own`] falls back to the general `assoc-in`, `update-in`,
+/// or `swap!` native.
 pub fn repack_own_args(id: u32, args: &mut smallvec::SmallVec<[Value; 4]>) {
-    if (id & OWN_BIT) != 0
-        && matches!(
-            OWN_OPS.get((id & !OWN_BIT) as usize),
-            Some(&("assoc-in2" | "update-in2", 4, _))
-        )
-        && args.len() == 4
-    {
-        let k2 = args.remove(2);
-        let k1 = std::mem::replace(&mut args[1], Value::Nil);
-        args[1] = Value::Vector(Vector::from_vec(vec![k1, k2]));
+    if (id & OWN_BIT) == 0 {
+        return;
+    }
+    match OWN_OPS.get((id & !OWN_BIT) as usize) {
+        Some(&("assoc-in2" | "update-in2", 4, _)) if args.len() == 4 => {
+            let k2 = args.remove(2);
+            let k1 = std::mem::replace(&mut args[1], Value::Nil);
+            args[1] = Value::Vector(Vector::from_vec(vec![k1, k2]));
+        }
+        Some(&("swap-assoc-in2!" | "swap-assoc-in2-fx!", 5, _)) if args.len() == 5 => {
+            let k2 = args.remove(3);
+            let k1 = std::mem::replace(&mut args[2], Value::Nil);
+            args[2] = Value::Vector(Vector::from_vec(vec![k1, k2]));
+        }
+        _ => {}
     }
 }
 
@@ -1304,6 +1374,7 @@ pub fn vec_item(v: &Value, i: usize) -> Value {
 
 #[derive(Debug)]
 enum VecBuf {
+    Empty(usize),
     Ints(Vec<i64>),
     Doubles(Vec<f64>),
     Generic(Vec<Value>),
@@ -1311,9 +1382,13 @@ enum VecBuf {
 
 impl Default for VecBuf {
     fn default() -> Self {
-        Self::Ints(Vec::new())
+        Self::Empty(0)
     }
 }
+
+/// Upper bound on pre-reserved [`VecBuilder`] capacity so an unchecked range
+/// length cannot pre-allocate unbounded memory before the loop runs.
+const VEC_BUILDER_CAP_MAX: usize = 1 << 20;
 
 /// A compiled `mapv` / `vec` / `into []` loop's accumulator (#271): items
 /// gather in a plain buffer, packed while every item is a long or every
@@ -1325,13 +1400,33 @@ pub struct VecBuilder {
 }
 
 impl VecBuilder {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            buf: VecBuf::Empty(cap.min(VEC_BUILDER_CAP_MAX)),
+        }
+    }
+
     fn push(&mut self, v: Value) {
         let next = match (&mut self.buf, v) {
+            (VecBuf::Empty(cap), Value::Int(n)) => {
+                let mut xs = Vec::with_capacity((*cap).max(1));
+                xs.push(n);
+                Some(VecBuf::Ints(xs))
+            }
+            (VecBuf::Empty(cap), Value::Double(d)) => {
+                let mut xs = Vec::with_capacity((*cap).max(1));
+                xs.push(d);
+                Some(VecBuf::Doubles(xs))
+            }
+            (VecBuf::Empty(cap), other) => {
+                let mut xs = Vec::with_capacity((*cap).max(1));
+                xs.push(other);
+                Some(VecBuf::Generic(xs))
+            }
             (VecBuf::Ints(xs), Value::Int(n)) => {
                 xs.push(n);
                 None
             }
-            (VecBuf::Ints(xs), Value::Double(d)) if xs.is_empty() => Some(VecBuf::Doubles(vec![d])),
             (VecBuf::Ints(xs), other) => {
                 let mut g: Vec<Value> = xs.drain(..).map(Value::Int).collect();
                 g.push(other);
@@ -1358,6 +1453,7 @@ impl VecBuilder {
 
     fn freeze(&mut self) -> Vector {
         match std::mem::take(&mut self.buf) {
+            VecBuf::Empty(_) => Vector::new_sync(),
             VecBuf::Ints(xs) => Vector::from_flat_ints(xs),
             VecBuf::Doubles(xs) => Vector::from_flat_doubles(xs),
             VecBuf::Generic(xs) => Vector::from_vec(xs),
@@ -1391,10 +1487,21 @@ impl clj_value::ExtensionValue for VecBuilder {
     }
 }
 
-/// A fresh [`VecBuilder`] accumulator.
+/// A fresh [`VecBuilder`] accumulator (`mode == 0`, pre-reserving `len` slots),
+/// or a zero-filled packed `TransientVector` (`mode == 1`: `i64`, `mode == 2`: `f64`)
+/// for unboxed scalar `mapv` loops.
 #[must_use]
-pub fn vec_builder() -> Value {
-    Value::Extension(Arc::new(VecBuilder::default()))
+pub fn vec_builder(len: i64, mode: u8) -> Value {
+    let n = usize::try_from(len).unwrap_or(0);
+    match mode {
+        1 => Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Vector(
+            clj_value::TransientVector::from_ints(vec![0i64; n]),
+        ))),
+        2 => Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Vector(
+            clj_value::TransientVector::from_doubles(vec![0.0f64; n]),
+        ))),
+        _ => Value::Extension(Arc::new(VecBuilder::with_capacity(n))),
+    }
 }
 
 fn builder(acc: &mut Value) -> Option<&mut VecBuilder> {
@@ -1411,8 +1518,17 @@ pub fn vec_push(acc: &mut Value, v: Value) {
     }
 }
 
-/// The loop's result: its [`VecBuilder`] frozen into a persistent vector.
+/// The loop's result: its [`VecBuilder`] or scalar `TransientVector` frozen
+/// into a persistent vector.
 pub fn vec_done(acc: &mut Value) -> Value {
+    if let Value::Transient(t) = acc {
+        let mut guard = t.lock();
+        if let clj_value::TransientKind::Vector(tv) = &mut *guard {
+            if let Ok(v) = tv.persistent() {
+                return Value::Vector(v);
+            }
+        }
+    }
     builder(acc).map_or(Value::Nil, |b| Value::Vector(b.freeze()))
 }
 
@@ -1847,11 +1963,11 @@ mod tests {
                 xs.iter().map(|n| Value::Int(*n)).collect(),
             ))
         };
-        let mut acc = vec_builder();
+        let mut acc = vec_builder(0, 0);
         vec_push(&mut acc, Value::Int(1));
         vec_push(&mut acc, Value::Int(2));
         assert_eq!(vec_done(&mut acc), ints(&[1, 2]));
-        let mut mixed = vec_builder();
+        let mut mixed = vec_builder(0, 0);
         vec_push(&mut mixed, Value::Int(1));
         vec_push(&mut mixed, Value::Nil);
         vec_push(&mut mixed, Value::Int(3));
@@ -1864,7 +1980,7 @@ mod tests {
         let mut not_builder = Value::Int(3);
         vec_push(&mut not_builder, Value::Int(1));
         assert_eq!(vec_done(&mut not_builder), Value::Nil);
-        let mut shared = vec_builder();
+        let mut shared = vec_builder(0, 0);
         let _other = shared.clone();
         vec_push(&mut shared, Value::Int(1));
         assert_eq!(vec_done(&mut shared), Value::Nil);
@@ -2214,7 +2330,7 @@ mod tests {
 
         // VecBuilder: packed Doubles freeze, Doubles->Generic widening, and Debug across variants
         let mut vb_d = VecBuilder::default();
-        assert!(format!("{vb_d:?}").contains("Ints"));
+        assert!(format!("{vb_d:?}").contains("Empty"));
         vb_d.push(Value::Double(1.5));
         vb_d.push(Value::Double(2.5));
         assert!(format!("{vb_d:?}").contains("Doubles"));

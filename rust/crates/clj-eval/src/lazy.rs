@@ -4657,6 +4657,127 @@ fn collect_repeat(r: &clj_value::RepeatValue) -> Option<Vector> {
     })
 }
 
+enum ConcatPart<'a> {
+    Empty,
+    Ints(&'a [i64]),
+    Doubles(&'a [f64]),
+    RepeatInt(i64, usize),
+    RepeatDouble(f64, usize),
+}
+
+fn concat_part(v: &Value) -> Option<ConcatPart<'_>> {
+    match v {
+        Value::Nil => Some(ConcatPart::Empty),
+        Value::Vector(vec) => {
+            if vec.is_empty() {
+                return Some(ConcatPart::Empty);
+            }
+            if let Some(xs) = vec.as_flat_ints() {
+                return Some(ConcatPart::Ints(xs));
+            }
+            vec.as_flat_doubles().map(ConcatPart::Doubles)
+        }
+        Value::Extension(e) => {
+            if let Some((vec, start, end)) = e.as_subvector_parts() {
+                if start == end {
+                    return Some(ConcatPart::Empty);
+                }
+                if let Some(xs) = vec.as_flat_ints().and_then(|s| s.get(start..end)) {
+                    return Some(ConcatPart::Ints(xs));
+                }
+                return vec
+                    .as_flat_doubles()
+                    .and_then(|s| s.get(start..end))
+                    .map(ConcatPart::Doubles);
+            }
+            let r = e.as_any().downcast_ref::<clj_value::RepeatValue>()?;
+            let n = usize::try_from(r.n()?.max(0)).ok()?;
+            if n == 0 {
+                return Some(ConcatPart::Empty);
+            }
+            match r.x() {
+                Value::Int(x) => Some(ConcatPart::RepeatInt(*x, n)),
+                Value::Double(d) => Some(ConcatPart::RepeatDouble(*d, n)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn collect_concat_parts(parts: &[ConcatPart<'_>]) -> Option<Vector> {
+    let mut is_int = false;
+    let mut is_dbl = false;
+    let mut total = 0usize;
+    for p in parts {
+        match p {
+            ConcatPart::Empty => {}
+            ConcatPart::Ints(s) => {
+                is_int = true;
+                total = total.checked_add(s.len())?;
+            }
+            ConcatPart::RepeatInt(_, n) => {
+                is_int = true;
+                total = total.checked_add(*n)?;
+            }
+            ConcatPart::Doubles(s) => {
+                is_dbl = true;
+                total = total.checked_add(s.len())?;
+            }
+            ConcatPart::RepeatDouble(_, n) => {
+                is_dbl = true;
+                total = total.checked_add(*n)?;
+            }
+        }
+    }
+    if is_int && is_dbl {
+        return None;
+    }
+    if is_dbl {
+        let mut out = Vec::with_capacity(total);
+        for p in parts {
+            match p {
+                ConcatPart::Doubles(s) => out.extend_from_slice(s),
+                ConcatPart::RepeatDouble(d, n) => out.resize(out.len() + *n, *d),
+                _ => {}
+            }
+        }
+        return Some(Vector::from_flat_doubles(out));
+    }
+    let mut out = Vec::with_capacity(total);
+    for p in parts {
+        match p {
+            ConcatPart::Ints(s) => out.extend_from_slice(s),
+            ConcatPart::RepeatInt(x, n) => out.resize(out.len() + *n, *x),
+            _ => {}
+        }
+    }
+    Some(Vector::from_flat_ints(out))
+}
+
+fn collect_concat(p: &PendingSeq) -> Option<Vector> {
+    let guard = p.state.lock().unwrap_or_else(|e| e.into_inner());
+    let SeqState::Pending(thunk) = &*guard else {
+        return None;
+    };
+    let Thunk::Concat {
+        cur,
+        rest,
+        idx,
+        outer: None,
+    } = thunk.as_ref()
+    else {
+        return None;
+    };
+    let tail = rest.get(*idx..)?;
+    let mut parts = Vec::with_capacity(1 + tail.len());
+    parts.push(concat_part(cur)?);
+    for v in tail {
+        parts.push(concat_part(v)?);
+    }
+    collect_concat_parts(&parts)
+}
+
 fn collect_direct(v: &Value) -> Option<Vector> {
     if let Value::Str(s) = v {
         return Some(Vector::from_flat_chars(s.chars().collect()));
@@ -4669,6 +4790,9 @@ fn collect_direct(v: &Value) -> Option<Vector> {
         return None;
     };
     let any = e.as_any();
+    if let Some(p) = any.downcast_ref::<PendingSeq>() {
+        return collect_concat(p);
+    }
     if let Some(r) = any.downcast_ref::<clj_value::RepeatValue>() {
         return collect_repeat(r);
     }

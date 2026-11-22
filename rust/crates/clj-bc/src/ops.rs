@@ -921,6 +921,7 @@ pub(crate) fn assoc_bang_fast<O: OutSlot>(
             match val {
                 Value::Int(n) => tv.assoc_int_in_bounds(idx, *n),
                 Value::Double(d) => tv.assoc_double_in_bounds(idx, *d),
+                Value::Bool(b) => tv.assoc_bool_in_bounds(idx, *b),
                 _ => false,
             }
         } else {

@@ -1293,14 +1293,17 @@ fn try_update_leaf_int(coll: Value, k: &mut Value, delta: i64) -> Result<Value, 
                 x.set_nth_owned(n, Value::Int(new)).expect("n < x.len()"),
             ))
         }
-        (Value::Map(m), k_ref) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) => {
-            let Some(Value::Int(old)) = m.get(k_ref) else {
-                return Err(Value::Map(m));
-            };
-            let Some(new) = old.checked_add(delta) else {
-                return Err(Value::Map(m));
-            };
-            Ok(Value::Map(m.insert(take(k), Value::Int(new))))
+        (Value::Map(mut m), k_ref)
+            if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) =>
+        {
+            if m.update_existing_mut(k_ref, |v| match v {
+                Value::Int(old) => old.checked_add(delta).map(Value::Int).ok_or(v),
+                other => Err(other),
+            }) {
+                Ok(Value::Map(m))
+            } else {
+                Err(Value::Map(m))
+            }
         }
         (other, _) => Err(other),
     }
@@ -1315,15 +1318,10 @@ fn try_step_in2(
         (Value::Map(mut m), k1_ref)
             if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k1_ref) =>
         {
-            let Some(inner) = m.take_value(k1_ref) else {
-                return Err(Value::Map(m));
-            };
-            match step(inner) {
-                Ok(updated) => Ok(Value::Map(m.insert(take(k1), updated))),
-                Err(orig_inner) => {
-                    m.insert_mut(k1_ref.clone(), orig_inner);
-                    Err(Value::Map(m))
-                }
+            if m.update_existing_mut(k1_ref, step) {
+                Ok(Value::Map(m))
+            } else {
+                Err(Value::Map(m))
             }
         }
         (Value::Vector(mut v), Value::Int(i1)) => {
@@ -1387,50 +1385,97 @@ pub(crate) fn apply_update_in2(args: &mut [Value]) -> Option<Value> {
     }
 }
 
+fn finish_swap(val: &mut Value, res: Result<Value, Value>, keep_ret: bool) -> Option<Value> {
+    match res {
+        Ok(out) => {
+            if keep_ret {
+                *val = out.clone();
+                Some(out)
+            } else {
+                *val = out;
+                Some(Value::Nil)
+            }
+        }
+        Err(orig) => {
+            *val = orig;
+            None
+        }
+    }
+}
+
 /// In-place `swap!` fast path for unwatched, unvalidated atoms with
 /// pure core update functions (`assoc`, 2-key `assoc-in`, `+`).
-pub(crate) fn try_swap_in_place(val: &mut Value, f: &Value, extra: &[Value]) -> Option<Value> {
+pub(crate) fn try_swap_in_place(
+    val: &mut Value,
+    f: &Value,
+    extra: &[Value],
+    keep_ret: bool,
+) -> Option<Value> {
     let nat = crate::ext::as_native(f)?;
     match (&*nat.display, extra) {
         ("clojure.core/assoc", [k, v]) => {
             let mut kc = k.clone();
             let mut vc = v.clone();
-            match try_assoc_leaf(take(val), &mut kc, &mut vc) {
-                Ok(out) => {
-                    *val = out.clone();
-                    Some(out)
-                }
-                Err(orig) => {
-                    *val = orig;
-                    None
-                }
-            }
+            let res = try_assoc_leaf(take(val), &mut kc, &mut vc);
+            finish_swap(val, res, keep_ret)
         }
         ("clojure.core/assoc-in", [Value::Vector(ks), v]) if ks.len() == 2 => {
             let mut k1 = ks.get(0).expect("len 2");
             let mut k2 = ks.get(1).expect("len 2");
             let mut vc = v.clone();
-            match try_step_in2(take(val), &mut k1, |inner| {
+            let res = try_step_in2(take(val), &mut k1, |inner| {
                 try_assoc_leaf(inner, &mut k2, &mut vc)
-            }) {
-                Ok(out) => {
-                    *val = out.clone();
-                    Some(out)
-                }
-                Err(orig) => {
-                    *val = orig;
-                    None
-                }
-            }
+            });
+            finish_swap(val, res, keep_ret)
         }
         ("clojure.core/+", [Value::Int(d)]) => {
             let Value::Int(old) = *val else { return None };
             let new = Value::Int(old.checked_add(*d)?);
             *val = new.clone();
-            Some(new)
+            Some(if keep_ret { new } else { Value::Nil })
         }
         _ => None,
     }
+}
+
+/// Owned effect-position fast path for `(swap! atom f extra...)` (skips
+/// cloning the atom's new value when the caller discards the return value).
+pub(crate) fn apply_swap_fx(args: &mut [Value]) -> Option<Value> {
+    let [Value::Atom(atom), f, extra @ ..] = args else {
+        return None;
+    };
+    let mut state = atom.lock();
+    if state.validator.is_some() || !state.watches.is_empty() {
+        return None;
+    }
+    try_swap_in_place(&mut state.value, f, extra, false)
+}
+
+/// Owned fast path for 2-key `(swap! atom assoc-in [k1 k2] v)` lowered as
+/// 5 args `[atom, assoc-in, k1, k2, v]` without allocating `[k1 k2]`.
+pub(crate) fn apply_swap_assoc_in2(args: &mut [Value], keep_ret: bool) -> Option<Value> {
+    let [Value::Atom(atom), f, k1, k2, v] = args else {
+        return None;
+    };
+    if crate::ext::as_native(f)?.display.as_ref() != "clojure.core/assoc-in" {
+        return None;
+    }
+    let mut state = atom.lock();
+    if state.validator.is_some() || !state.watches.is_empty() {
+        return None;
+    }
+    let res = try_step_in2(take(&mut state.value), k1, |inner| {
+        try_assoc_leaf(inner, k2, v)
+    });
+    finish_swap(&mut state.value, res, keep_ret)
+}
+
+pub(crate) fn apply_swap_assoc_in2_val(args: &mut [Value]) -> Option<Value> {
+    apply_swap_assoc_in2(args, true)
+}
+
+pub(crate) fn apply_swap_assoc_in2_fx(args: &mut [Value]) -> Option<Value> {
+    apply_swap_assoc_in2(args, false)
 }
 
 /// A local or literal operand of the fused transient update (see
@@ -3118,35 +3163,44 @@ mod apply_tests {
 
         // try_swap_in_place branches
         let mut v = Value::Int(10);
-        assert_eq!(try_swap_in_place(&mut v, &Value::Nil, &[]), None);
-        assert_eq!(try_swap_in_place(&mut v, &inc_fn, &[]), None);
+        assert_eq!(try_swap_in_place(&mut v, &Value::Nil, &[], true), None);
+        assert_eq!(try_swap_in_place(&mut v, &inc_fn, &[], true), None);
         assert_eq!(
-            try_swap_in_place(&mut v, &add_fn, &[Value::Int(5)]),
+            try_swap_in_place(&mut v, &add_fn, &[Value::Int(5)], true),
             Some(Value::Int(15))
         );
         let mut v_max = Value::Int(i64::MAX);
         assert_eq!(
-            try_swap_in_place(&mut v_max, &add_fn, &[Value::Int(1)]),
+            try_swap_in_place(&mut v_max, &add_fn, &[Value::Int(1)], true),
             None
         );
         let mut v_nil = Value::Nil;
         assert_eq!(
-            try_swap_in_place(&mut v_nil, &add_fn, &[Value::Int(1)]),
+            try_swap_in_place(&mut v_nil, &add_fn, &[Value::Int(1)], true),
             None
         );
         assert_eq!(
-            try_swap_in_place(&mut v_nil, &assoc_fn, &[ka.clone(), Value::Int(1)]),
+            try_swap_in_place(&mut v_nil, &assoc_fn, &[ka.clone(), Value::Int(1)], true),
             None
         );
         let mut v_map = Value::Map(Map::from_kvs_last_wins(vec![(ka.clone(), Value::Int(1))]));
-        assert!(try_swap_in_place(&mut v_map, &assoc_fn, &[ka.clone(), Value::Int(2)]).is_some());
+        assert!(
+            try_swap_in_place(&mut v_map, &assoc_fn, &[ka.clone(), Value::Int(2)], true).is_some()
+        );
         let path2 = Value::Vector(Vector::from_vec(vec![ka.clone(), kb.clone()]));
         assert_eq!(
-            try_swap_in_place(&mut v_nil, &assoc_in_fn, &[path2.clone(), Value::Int(1)]),
+            try_swap_in_place(
+                &mut v_nil,
+                &assoc_in_fn,
+                &[path2.clone(), Value::Int(1)],
+                true
+            ),
             None
         );
         let mut v_nmap = nested_map;
-        assert!(try_swap_in_place(&mut v_nmap, &assoc_in_fn, &[path2, Value::Int(42)]).is_some());
+        assert!(
+            try_swap_in_place(&mut v_nmap, &assoc_in_fn, &[path2, Value::Int(42)], true).is_some()
+        );
 
         // try_assoc_subvec branches: non-subvec ext, negative/OOB idx, compacting,
         // unique in-place, and shared non-compacting.

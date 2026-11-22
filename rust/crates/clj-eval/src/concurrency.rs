@@ -325,7 +325,7 @@ fn native_swap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         let mut state = atom.lock();
         if state.validator.is_none() && state.watches.is_empty() {
             if let Some(new) =
-                crate::vm_ops::try_swap_in_place(&mut state.value, &args[1], &args[2..])
+                crate::vm_ops::try_swap_in_place(&mut state.value, &args[1], &args[2..], true)
             {
                 return Ok(new);
             }

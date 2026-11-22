@@ -117,6 +117,7 @@ pub mod aot_scalar {
     pub use crate::vm_ops::{IntOp1, IntOp2, IntTest1, IntTest2};
     pub use crate::vm_scalar::{
         Calc, Cast, Cmp, Cond, Ctl, Effect, ExitVal, FpCalc, IExpr, Inner, K, Leaf, MATH_BINARY,
-        MATH_UNARY, MathOp1, MathOp2, Node, ScalarAst, Stmt, Sv, compile_aot_loop,
+        MATH_UNARY, MathOp1, MathOp2, Node, ScalarAst, ScalarFnAst, Stmt, Sv, compile_aot_expr,
+        compile_aot_loop,
     };
 }

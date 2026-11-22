@@ -20,7 +20,7 @@
 use clj_eval::aot_scalar::{
     Calc, Cast, Cmp, Cond, Ctl, Effect, ExitVal, FpCalc, IExpr, Inner, IntOp1, IntOp2, IntTest1,
     IntTest2, K, Leaf, Loc, MATH_BINARY, MATH_UNARY, MathOp1, MathOp2, Node, ScalarAst, Stmt,
-    compile_aot_loop,
+    compile_aot_expr, compile_aot_loop,
 };
 use clj_eval::expr::{Expr, Pattern};
 use clj_value::{Value, Var};
@@ -29,7 +29,7 @@ use inkwell::types::BasicType;
 use inkwell::values::{FloatValue, FunctionValue, IntValue, PointerValue};
 use inkwell::{FloatPredicate, IntPredicate};
 
-use super::{FnCtx, LocalRef, Lowerer, RecurTarget, Unsupported};
+use super::{FnCtx, HofKind, HofLoop, LocalRef, LoopState, Lowerer, RecurTarget, Unsupported};
 
 const _: () = assert!(std::mem::size_of::<Value>() == 32);
 
@@ -3080,6 +3080,787 @@ impl<'ctx> Lowerer<'ctx> {
         let both = self.builder.build_or(k1, k2, "req_or").expect("or");
         self.require_int(f, both, fail);
     }
+
+    /// Lower a pure-scalar [`HofLoop`] (`mapv`, `reduce`, `sum`, `every?`,
+    /// `count-filter`) to an unboxed SSA loop before the boxed direct loop.
+    /// On success, branches to `done`; on any type/overflow deopt or unsupported
+    /// input vector layout, falls through to a fresh `shof_boxed` block where
+    /// the caller emits `init_hof_acc` + `emit_hof_direct`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_lower_scalar_hof(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        hl: &HofLoop<'_>,
+        base: usize,
+        acc: PointerValue<'ctx>,
+        st1: &LoopState<'ctx>,
+        st2: Option<&LoopState<'ctx>>,
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) -> Result<(), Unsupported> {
+        if !self.inline_arith
+            || !self.use_bitcode
+            || !matches!(
+                hl.kind,
+                HofKind::Collect
+                    | HofKind::Reduce
+                    | HofKind::Sum
+                    | HofKind::Every
+                    | HofKind::CountFilter
+            )
+        {
+            return Ok(());
+        }
+        let n_params = if hl.kind == HofKind::Reduce || hl.coll2.is_some() {
+            2
+        } else {
+            1
+        };
+        let Some(ast) = compile_aot_expr(&hl.arity.body, n_params, base, &self.callees, |v| {
+            self.is_stable_global_coll(v)
+        }) else {
+            return Ok(());
+        };
+        let mut scan = AstScan::default();
+        scan.scan_expr(&ast.expr);
+        if scan.has_effects
+            || !scan
+                .all_locs
+                .iter()
+                .all(|loc| self.is_direct_loc(f, &ast.global_colls, *loc))
+        {
+            return Ok(());
+        }
+        let boxed_bb = self.ctx.append_basic_block(f.func, "shof_boxed");
+        let deopt_bb = self.ctx.append_basic_block(f.func, "shof_deopt");
+        let empty_bb = self.ctx.append_basic_block(f.func, "shof_empty");
+        let non_empty_bb = self.ctx.append_basic_block(f.func, "shof_go");
+        let is_empty = self
+            .builder
+            .build_int_compare(IntPredicate::SLE, st1.n, self.i64t.const_zero(), "shof_z")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(is_empty, empty_bb, non_empty_bb)
+            .expect("br");
+        self.builder.position_at_end(empty_bb);
+        self.emit_shof_empty(f.func, hl.kind, hl.init.is_some(), acc, dest, done);
+
+        self.builder.position_at_end(non_empty_bb);
+        let session =
+            self.init_hof_session(f, ast.nslots, &ast.global_colls, &scan, boxed_bb, deopt_bb);
+        let src1 = self.probe_hof_src(f, st1, st1.n, boxed_bb);
+        let src2 = st2.map(|s2| self.probe_hof_src(f, s2, st1.n, boxed_bb));
+        match hl.kind {
+            HofKind::Collect => self.emit_shof_collect(
+                f,
+                &session,
+                &ast.expr,
+                acc,
+                st1.n,
+                &src1,
+                src2.as_ref(),
+                dest,
+                done,
+                deopt_bb,
+                boxed_bb,
+            )?,
+            HofKind::Reduce => self.emit_shof_reduce(
+                f, &session, &ast.expr, acc, st1.n, &src1, dest, done, deopt_bb, boxed_bb,
+            )?,
+            HofKind::Sum => self.emit_shof_sum(
+                f,
+                &session,
+                &ast.expr,
+                hl.init.is_some(),
+                acc,
+                st1.n,
+                &src1,
+                src2.as_ref(),
+                dest,
+                done,
+                deopt_bb,
+                boxed_bb,
+            )?,
+            HofKind::Every => self.emit_shof_every(
+                f, &session, &ast.expr, st1.n, &src1, dest, done, deopt_bb, boxed_bb,
+            )?,
+            HofKind::CountFilter => self.emit_shof_count_filter(
+                f, &session, &ast.expr, st1.n, &src1, dest, done, deopt_bb, boxed_bb,
+            )?,
+            _ => unreachable!("filtered above"),
+        }
+        self.builder.position_at_end(boxed_bb);
+        Ok(())
+    }
+
+    fn emit_shof_empty(
+        &self,
+        func: FunctionValue<'ctx>,
+        kind: HofKind,
+        has_init: bool,
+        acc: PointerValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        match kind {
+            HofKind::Collect => {
+                self.call(
+                    "rt_n_vec_new",
+                    None,
+                    &[
+                        acc.into(),
+                        self.i64t.const_zero().into(),
+                        self.i8t.const_zero().into(),
+                    ],
+                );
+                self.call("rt_n_vec_done", None, &[dest.into(), acc.into()]);
+                self.drop_and_nil_slots(func, &[acc]);
+            }
+            HofKind::Reduce => self.move_v(func, dest, acc),
+            HofKind::Sum if has_init => self.move_v(func, dest, acc),
+            HofKind::Sum | HofKind::CountFilter => {
+                self.write_int(func, dest, self.i64t.const_zero());
+            }
+            HofKind::Every => {
+                self.write_bool(func, dest, self.ctx.bool_type().const_int(1, false));
+            }
+            _ => unreachable!("filtered above"),
+        }
+        self.builder.build_unconditional_branch(done).expect("br");
+    }
+
+    fn init_hof_session(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        nslots: usize,
+        global_colls: &[Var],
+        scan: &AstScan,
+        boxed_bb: BasicBlock<'ctx>,
+        deopt_bb: BasicBlock<'ctx>,
+    ) -> ScalarSession<'ctx> {
+        let mut k_slots = Vec::with_capacity(nslots);
+        let mut v_slots = Vec::with_capacity(nslots);
+        for _ in 0..nslots {
+            k_slots.push(self.entry_alloca(f, self.i8t, "hsck"));
+            v_slots.push(self.entry_alloca(f, self.i64t, "hscv"));
+        }
+        let scratch_k = self.entry_alloca(f, self.i8t, "hscrk");
+        let scratch_v = self.entry_alloca(f, self.i64t, "hscrv");
+        let mut load_vals = Vec::with_capacity(scan.loads.len());
+        for &loc in &scan.loads {
+            let slot = self.loc_slot(f, global_colls, loc);
+            let (ok, k, v) = self.unbox_scalar(slot, true);
+            let next = self.ctx.append_basic_block(f.func, "hsc_loc_ok");
+            self.builder
+                .build_conditional_branch(ok, next, boxed_bb)
+                .expect("br");
+            self.builder.position_at_end(next);
+            load_vals.push((k, v));
+        }
+        let mut global_ids = Vec::with_capacity(scan.globals.len());
+        let mut global_vals = Vec::with_capacity(scan.globals.len());
+        for var in &scan.globals {
+            let tmp = self.slot(f);
+            let kv = self.var_of(var);
+            match self.stable_of(var) {
+                Some(sr) => self.clone_stable(f, sr, kv, tmp),
+                None => self.emit_deref(f.func, tmp, kv),
+            }
+            let (ok, k, v) = self.unbox_scalar(tmp, true);
+            self.free_slots(f, &[tmp]);
+            let next = self.ctx.append_basic_block(f.func, "hsc_glb_ok");
+            self.builder
+                .build_conditional_branch(ok, next, boxed_bb)
+                .expect("br");
+            self.builder.position_at_end(next);
+            global_ids.push(var.id);
+            global_vals.push((k, v));
+        }
+        let colls = scan
+            .colls
+            .iter()
+            .map(|&loc| self.probe_coll(f, global_colls, loc, scan, true))
+            .collect();
+        ScalarSession {
+            allow_fp: true,
+            k_slots,
+            v_slots,
+            load_locs: scan.loads.clone(),
+            load_vals,
+            global_ids,
+            global_vals,
+            coll_locs: scan.colls.clone(),
+            colls,
+            scratch_k,
+            scratch_v,
+            deopt_bb,
+        }
+    }
+
+    fn probe_hof_src(
+        &self,
+        f: &FnCtx<'ctx>,
+        st: &LoopState<'ctx>,
+        n: IntValue<'ctx>,
+        boxed_bb: BasicBlock<'ctx>,
+    ) -> HofSrc<'ctx> {
+        let cur_ptr = self.entry_alloca(f, self.i64t, "hcur");
+        let base = self.entry_alloca(f, self.ptr, "hbase");
+        let ivn = self.entry_alloca(f, self.i64t, "hivn");
+        let dvn = self.entry_alloca(f, self.i64t, "hdvn");
+        let z64 = self.i64t.const_zero();
+        self.builder.build_store(cur_ptr, st.start).expect("store");
+        self.builder.build_store(ivn, z64).expect("store");
+        self.builder.build_store(dvn, z64).expect("store");
+        let is_rng = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                st.kind,
+                self.i8t.const_int(2, false),
+                "h_rng",
+            )
+            .expect("cmp");
+        let vec_bb = self.ctx.append_basic_block(f.func, "hsrc_vec");
+        let dv_bb = self.ctx.append_basic_block(f.func, "hsrc_dv");
+        let ok_bb = self.ctx.append_basic_block(f.func, "hsrc_ok");
+        let range_bb = self.builder.get_insert_block().expect("range probe");
+        self.builder
+            .build_conditional_branch(is_rng, ok_bb, vec_bb)
+            .expect("br");
+        self.builder.position_at_end(vec_bb);
+        self.call(
+            "rt_bc_scalar_ivec",
+            Some(self.i8t),
+            &[st.coll.into(), base.into(), ivn.into()],
+        );
+        let iv_ok = self
+            .builder
+            .build_int_compare(IntPredicate::SGE, self.load_i64(ivn), n, "hiv_ok")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(iv_ok, ok_bb, dv_bb)
+            .expect("br");
+        self.builder.position_at_end(dv_bb);
+        self.call(
+            "rt_bc_scalar_dvec",
+            Some(self.i8t),
+            &[st.coll.into(), base.into(), dvn.into()],
+        );
+        let dv_ok = self
+            .builder
+            .build_int_compare(IntPredicate::SGE, self.load_i64(dvn), n, "hdv_ok")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(dv_ok, ok_bb, boxed_bb)
+            .expect("br");
+        self.builder.position_at_end(ok_bb);
+        let element_kind = self.builder.build_phi(self.i8t, "hkind").expect("phi");
+        let int_kind = self.i8t.const_zero();
+        let double_kind = self.i8t.const_int(3, false);
+        element_kind.add_incoming(&[
+            (&int_kind, range_bb),
+            (&int_kind, vec_bb),
+            (&double_kind, dv_bb),
+        ]);
+        HofSrc {
+            kind: st.kind,
+            step: st.step,
+            cur_ptr,
+            base,
+            element_kind: element_kind.as_basic_value().into_int_value(),
+        }
+    }
+
+    fn load_hof_src_item(
+        &self,
+        f: &FnCtx<'ctx>,
+        src: &HofSrc<'ctx>,
+        i: IntValue<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let is_rng = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                src.kind,
+                self.i8t.const_int(2, false),
+                "is_r",
+            )
+            .expect("cmp");
+        let rng_bb = self.ctx.append_basic_block(f.func, "hld_rng");
+        let vec_bb = self.ctx.append_basic_block(f.func, "hld_vec");
+        let done_bb = self.ctx.append_basic_block(f.func, "hld_done");
+        self.builder
+            .build_conditional_branch(is_rng, rng_bb, vec_bb)
+            .expect("br");
+        self.builder.position_at_end(rng_bb);
+        let cur = self.load_i64(src.cur_ptr);
+        let next = self
+            .builder
+            .build_int_add(cur, src.step, "hcur_n")
+            .expect("add");
+        self.builder.build_store(src.cur_ptr, next).expect("store");
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(vec_bb);
+        let bits = self.load_i64(self.ivec_elem_ptr(src.base, i));
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .expect("br");
+        self.builder.position_at_end(done_bb);
+        let v_phi = self.builder.build_phi(self.i64t, "hv").expect("phi");
+        v_phi.add_incoming(&[(&cur, rng_bb), (&bits, vec_bb)]);
+        (src.element_kind, v_phi.as_basic_value().into_int_value())
+    }
+
+    fn store_hof_params(
+        &self,
+        f: &FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        src1: &HofSrc<'ctx>,
+        src2: Option<&HofSrc<'ctx>>,
+        i: IntValue<'ctx>,
+    ) {
+        let (k1, v1) = self.load_hof_src_item(f, src1, i);
+        self.builder.build_store(s.k_slots[0], k1).expect("store");
+        self.builder.build_store(s.v_slots[0], v1).expect("store");
+        if let Some(s2) = src2 {
+            let (k2, v2) = self.load_hof_src_item(f, s2, i);
+            self.builder.build_store(s.k_slots[1], k2).expect("store");
+            self.builder.build_store(s.v_slots[1], v2).expect("store");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_shof_collect(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        expr: &IExpr,
+        acc: PointerValue<'ctx>,
+        n: IntValue<'ctx>,
+        src1: &HofSrc<'ctx>,
+        src2: Option<&HofSrc<'ctx>>,
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+        deopt_bb: BasicBlock<'ctx>,
+        boxed_bb: BasicBlock<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let out_ptr = self.entry_alloca(f, self.ptr, "ho_p");
+        let out_len = self.entry_alloca(f, self.i64t, "ho_n");
+        let out_kind = self.entry_alloca(f, self.i8t, "ho_k");
+        let i_ptr = self.entry_alloca(f, self.i64t, "ho_i");
+        let unlocked = self.i8t.const_int(255, false);
+        self.builder.build_store(out_kind, unlocked).expect("store");
+
+        self.store_hof_params(f, s, src1, src2, self.i64t.const_zero());
+        let (k0, v0) = self.lower_sc_expr(f, s, expr)?;
+        let is_i = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, k0, self.i8t.const_zero(), "ho_is_i")
+            .expect("cmp");
+        let is_d = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                k0,
+                self.i8t.const_int(3, false),
+                "ho_is_d",
+            )
+            .expect("cmp");
+        let alloc_i = self.ctx.append_basic_block(f.func, "ho_ai");
+        let chk_d = self.ctx.append_basic_block(f.func, "ho_chkd");
+        let alloc_d = self.ctx.append_basic_block(f.func, "ho_ad");
+        let locked = self.ctx.append_basic_block(f.func, "ho_lk");
+        self.builder
+            .build_conditional_branch(is_i, alloc_i, chk_d)
+            .expect("br");
+        self.builder.position_at_end(chk_d);
+        self.builder
+            .build_conditional_branch(is_d, alloc_d, deopt_bb)
+            .expect("br");
+        self.builder.position_at_end(alloc_i);
+        self.call(
+            "rt_n_vec_new",
+            None,
+            &[acc.into(), n.into(), self.i8t.const_int(1, false).into()],
+        );
+        self.call(
+            "rt_bc_scalar_tvec_lock",
+            Some(self.i8t),
+            &[acc.into(), out_ptr.into(), out_len.into()],
+        );
+        self.builder.build_unconditional_branch(locked).expect("br");
+        self.builder.position_at_end(alloc_d);
+        self.call(
+            "rt_n_vec_new",
+            None,
+            &[acc.into(), n.into(), self.i8t.const_int(2, false).into()],
+        );
+        self.call(
+            "rt_bc_scalar_dtvec_lock",
+            Some(self.i8t),
+            &[acc.into(), out_ptr.into(), out_len.into()],
+        );
+        self.builder.build_unconditional_branch(locked).expect("br");
+
+        self.builder.position_at_end(locked);
+        self.builder.build_store(out_kind, k0).expect("store");
+        let base_p = self
+            .builder
+            .build_load(self.ptr, out_ptr, "ho_bp")
+            .expect("load")
+            .into_pointer_value();
+        self.builder.build_store(base_p, v0).expect("store");
+        self.builder
+            .build_store(i_ptr, self.i64t.const_int(1, false))
+            .expect("store");
+
+        let hdr = self.ctx.append_basic_block(f.func, "ho_hdr");
+        let body_bb = self.ctx.append_basic_block(f.func, "ho_body");
+        let store_bb = self.ctx.append_basic_block(f.func, "ho_st");
+        let fin = self.ctx.append_basic_block(f.func, "ho_fin");
+        self.builder.build_unconditional_branch(hdr).expect("br");
+        self.builder.position_at_end(hdr);
+        let i = self.load_i64(i_ptr);
+        let more = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, i, n, "ho_more")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(more, body_bb, fin)
+            .expect("br");
+        self.builder.position_at_end(body_bb);
+        self.store_hof_params(f, s, src1, src2, i);
+        let (rk, rv) = self.lower_sc_expr(f, s, expr)?;
+        let same_k = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, rk, self.load_i8(out_kind), "ho_sk")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(same_k, store_bb, deopt_bb)
+            .expect("br");
+        self.builder.position_at_end(store_bb);
+        let ep = self.ivec_elem_ptr(out_ptr, i);
+        self.builder.build_store(ep, rv).expect("store");
+        let i_next = self
+            .builder
+            .build_int_add(i, self.i64t.const_int(1, false), "ho_in")
+            .expect("add");
+        self.builder.build_store(i_ptr, i_next).expect("store");
+        self.builder.build_unconditional_branch(hdr).expect("br");
+
+        self.builder.position_at_end(fin);
+        self.call("rt_bc_scalar_tvec_unlock", None, &[acc.into()]);
+        self.call("rt_n_vec_done", None, &[dest.into(), acc.into()]);
+        self.drop_and_nil_slots(f.func, &[acc]);
+        self.builder.build_unconditional_branch(done).expect("br");
+
+        self.builder.position_at_end(deopt_bb);
+        let was_lk = self
+            .builder
+            .build_int_compare(IntPredicate::NE, self.load_i8(out_kind), unlocked, "ho_wlk")
+            .expect("cmp");
+        let ulk = self.ctx.append_basic_block(f.func, "ho_ulk");
+        self.builder
+            .build_conditional_branch(was_lk, ulk, boxed_bb)
+            .expect("br");
+        self.builder.position_at_end(ulk);
+        self.call("rt_bc_scalar_tvec_unlock", None, &[acc.into()]);
+        self.drop_and_nil_slots(f.func, &[acc]);
+        self.builder
+            .build_unconditional_branch(boxed_bb)
+            .expect("br");
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_shof_reduce(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        expr: &IExpr,
+        acc: PointerValue<'ctx>,
+        n: IntValue<'ctx>,
+        src1: &HofSrc<'ctx>,
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+        deopt_bb: BasicBlock<'ctx>,
+        boxed_bb: BasicBlock<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let (ok, k0, v0) = self.unbox_scalar(acc, true);
+        let hdr = self.ctx.append_basic_block(f.func, "hr_hdr");
+        let go = self.ctx.append_basic_block(f.func, "hr_go");
+        let body_bb = self.ctx.append_basic_block(f.func, "hr_body");
+        let fin = self.ctx.append_basic_block(f.func, "hr_fin");
+        self.builder
+            .build_conditional_branch(ok, go, boxed_bb)
+            .expect("br");
+        self.builder.position_at_end(go);
+        self.builder.build_store(s.k_slots[0], k0).expect("store");
+        self.builder.build_store(s.v_slots[0], v0).expect("store");
+        let i_ptr = self.entry_alloca(f, self.i64t, "hr_i");
+        self.builder
+            .build_store(i_ptr, self.i64t.const_zero())
+            .expect("store");
+        self.builder.build_unconditional_branch(hdr).expect("br");
+        self.builder.position_at_end(hdr);
+        let i = self.load_i64(i_ptr);
+        let more = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, i, n, "hr_more")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(more, body_bb, fin)
+            .expect("br");
+        self.builder.position_at_end(body_bb);
+        let (xk, xv) = self.load_hof_src_item(f, src1, i);
+        self.builder.build_store(s.k_slots[1], xk).expect("store");
+        self.builder.build_store(s.v_slots[1], xv).expect("store");
+        let (rk, rv) = self.lower_sc_expr(f, s, expr)?;
+        self.builder.build_store(s.k_slots[0], rk).expect("store");
+        self.builder.build_store(s.v_slots[0], rv).expect("store");
+        let i_next = self
+            .builder
+            .build_int_add(i, self.i64t.const_int(1, false), "hr_in")
+            .expect("add");
+        self.builder.build_store(i_ptr, i_next).expect("store");
+        self.builder.build_unconditional_branch(hdr).expect("br");
+        self.builder.position_at_end(fin);
+        self.box_scalar(
+            f.func,
+            dest,
+            self.load_i8(s.k_slots[0]),
+            self.load_i64(s.v_slots[0]),
+        );
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(deopt_bb);
+        self.builder
+            .build_unconditional_branch(boxed_bb)
+            .expect("br");
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_shof_sum(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        expr: &IExpr,
+        has_init: bool,
+        acc: PointerValue<'ctx>,
+        n: IntValue<'ctx>,
+        src1: &HofSrc<'ctx>,
+        src2: Option<&HofSrc<'ctx>>,
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+        deopt_bb: BasicBlock<'ctx>,
+        boxed_bb: BasicBlock<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let sum_k = self.entry_alloca(f, self.i8t, "hs_k");
+        let sum_v = self.entry_alloca(f, self.i64t, "hs_v");
+        let i_ptr = self.entry_alloca(f, self.i64t, "hs_i");
+        if has_init {
+            let (ok, k0, v0) = self.unbox_scalar(acc, true);
+            let num_ok = self
+                .builder
+                .build_and(ok, self.is_k_num(k0), "hs_nok")
+                .expect("and");
+            let go = self.ctx.append_basic_block(f.func, "hs_go");
+            self.builder
+                .build_conditional_branch(num_ok, go, boxed_bb)
+                .expect("br");
+            self.builder.position_at_end(go);
+            self.builder.build_store(sum_k, k0).expect("store");
+            self.builder.build_store(sum_v, v0).expect("store");
+            self.builder
+                .build_store(i_ptr, self.i64t.const_zero())
+                .expect("store");
+        } else {
+            self.store_hof_params(f, s, src1, src2, self.i64t.const_zero());
+            let (k0, v0) = self.lower_sc_expr(f, s, expr)?;
+            self.require_num(f, k0, deopt_bb);
+            self.builder.build_store(sum_k, k0).expect("store");
+            self.builder.build_store(sum_v, v0).expect("store");
+            self.builder
+                .build_store(i_ptr, self.i64t.const_int(1, false))
+                .expect("store");
+        }
+        let hdr = self.ctx.append_basic_block(f.func, "hs_hdr");
+        let body_bb = self.ctx.append_basic_block(f.func, "hs_body");
+        let fin = self.ctx.append_basic_block(f.func, "hs_fin");
+        self.builder.build_unconditional_branch(hdr).expect("br");
+        self.builder.position_at_end(hdr);
+        let i = self.load_i64(i_ptr);
+        let more = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, i, n, "hs_more")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(more, body_bb, fin)
+            .expect("br");
+        self.builder.position_at_end(body_bb);
+        self.store_hof_params(f, s, src1, src2, i);
+        let (rk, rv) = self.lower_sc_expr(f, s, expr)?;
+        let (nk, nv) = self.lower_sc_op2_any(
+            f,
+            s,
+            IntOp2::Add,
+            self.load_i8(sum_k),
+            self.load_i64(sum_v),
+            rk,
+            rv,
+        );
+        self.builder.build_store(sum_k, nk).expect("store");
+        self.builder.build_store(sum_v, nv).expect("store");
+        let i_next = self
+            .builder
+            .build_int_add(i, self.i64t.const_int(1, false), "hs_in")
+            .expect("add");
+        self.builder.build_store(i_ptr, i_next).expect("store");
+        self.builder.build_unconditional_branch(hdr).expect("br");
+        self.builder.position_at_end(fin);
+        self.box_scalar(f.func, dest, self.load_i8(sum_k), self.load_i64(sum_v));
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(deopt_bb);
+        self.builder
+            .build_unconditional_branch(boxed_bb)
+            .expect("br");
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_shof_every(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        expr: &IExpr,
+        n: IntValue<'ctx>,
+        src1: &HofSrc<'ctx>,
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+        deopt_bb: BasicBlock<'ctx>,
+        boxed_bb: BasicBlock<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let i_ptr = self.entry_alloca(f, self.i64t, "he_i");
+        self.builder
+            .build_store(i_ptr, self.i64t.const_zero())
+            .expect("store");
+        let hdr = self.ctx.append_basic_block(f.func, "he_hdr");
+        let body_bb = self.ctx.append_basic_block(f.func, "he_body");
+        let step_bb = self.ctx.append_basic_block(f.func, "he_step");
+        let stop_bb = self.ctx.append_basic_block(f.func, "he_stop");
+        let fin = self.ctx.append_basic_block(f.func, "he_fin");
+        self.builder.build_unconditional_branch(hdr).expect("br");
+        self.builder.position_at_end(hdr);
+        let i = self.load_i64(i_ptr);
+        let more = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, i, n, "he_more")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(more, body_bb, fin)
+            .expect("br");
+        self.builder.position_at_end(body_bb);
+        self.store_hof_params(f, s, src1, None, i);
+        let (rk, rv) = self.lower_sc_expr(f, s, expr)?;
+        let truthy = self.scalar_truthy(rk, rv);
+        self.builder
+            .build_conditional_branch(truthy, step_bb, stop_bb)
+            .expect("br");
+        self.builder.position_at_end(step_bb);
+        let i_next = self
+            .builder
+            .build_int_add(i, self.i64t.const_int(1, false), "he_in")
+            .expect("add");
+        self.builder.build_store(i_ptr, i_next).expect("store");
+        self.builder.build_unconditional_branch(hdr).expect("br");
+        self.builder.position_at_end(stop_bb);
+        self.write_bool(f.func, dest, self.ctx.bool_type().const_zero());
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(fin);
+        self.write_bool(f.func, dest, self.ctx.bool_type().const_int(1, false));
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(deopt_bb);
+        self.builder
+            .build_unconditional_branch(boxed_bb)
+            .expect("br");
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_shof_count_filter(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        s: &ScalarSession<'ctx>,
+        expr: &IExpr,
+        n: IntValue<'ctx>,
+        src1: &HofSrc<'ctx>,
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+        deopt_bb: BasicBlock<'ctx>,
+        boxed_bb: BasicBlock<'ctx>,
+    ) -> Result<(), Unsupported> {
+        let i_ptr = self.entry_alloca(f, self.i64t, "hcf_i");
+        let cnt_ptr = self.entry_alloca(f, self.i64t, "hcf_c");
+        self.builder
+            .build_store(i_ptr, self.i64t.const_zero())
+            .expect("store");
+        self.builder
+            .build_store(cnt_ptr, self.i64t.const_zero())
+            .expect("store");
+        let hdr = self.ctx.append_basic_block(f.func, "hcf_hdr");
+        let body_bb = self.ctx.append_basic_block(f.func, "hcf_body");
+        let fin = self.ctx.append_basic_block(f.func, "hcf_fin");
+        self.builder.build_unconditional_branch(hdr).expect("br");
+        self.builder.position_at_end(hdr);
+        let i = self.load_i64(i_ptr);
+        let more = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, i, n, "hcf_more")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(more, body_bb, fin)
+            .expect("br");
+        self.builder.position_at_end(body_bb);
+        self.store_hof_params(f, s, src1, None, i);
+        let (rk, rv) = self.lower_sc_expr(f, s, expr)?;
+        let truthy = self.scalar_truthy(rk, rv);
+        let inc = self
+            .builder
+            .build_int_z_extend(truthy, self.i64t, "hcf_inc")
+            .expect("zext");
+        let cnt_next = self
+            .builder
+            .build_int_add(self.load_i64(cnt_ptr), inc, "hcf_cn")
+            .expect("add");
+        self.builder.build_store(cnt_ptr, cnt_next).expect("store");
+        let i_next = self
+            .builder
+            .build_int_add(i, self.i64t.const_int(1, false), "hcf_in")
+            .expect("add");
+        self.builder.build_store(i_ptr, i_next).expect("store");
+        self.builder.build_unconditional_branch(hdr).expect("br");
+        self.builder.position_at_end(fin);
+        self.write_int(f.func, dest, self.load_i64(cnt_ptr));
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(deopt_bb);
+        self.builder
+            .build_unconditional_branch(boxed_bb)
+            .expect("br");
+        Ok(())
+    }
+}
+
+/// Probed input collection source for a scalar HOF loop (either a long range
+/// or a flat packed `Int`/`Double` vector).
+struct HofSrc<'ctx> {
+    kind: IntValue<'ctx>,
+    step: IntValue<'ctx>,
+    cur_ptr: PointerValue<'ctx>,
+    base: PointerValue<'ctx>,
+    element_kind: IntValue<'ctx>,
 }
 
 fn init_needs_fp(e: &Expr, read_only_nth: bool) -> bool {
