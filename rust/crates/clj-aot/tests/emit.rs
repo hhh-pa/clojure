@@ -1888,3 +1888,88 @@ fn native_emit_ir_inlines_casts_unchecked_char_digit_and_pre_eff_primed_271() {
         "bitcode leaked a Rust panic symbol into emitted IR"
     );
 }
+
+#[test]
+fn native_emit_ir_inlines_helpers_and_elides_destructuring_271() {
+    let ir = tmp("native-5p.ll");
+    let src = "\
+(defn leaf [x] (+ x 1))
+(defn pair [x] (let [y (leaf x)] [y (* y 2)]))
+(defn d2 [x] (let [[a b] (pair x)] [(+ a 1) b]))
+(defn d3 [x] (let [[a b] (d2 x)] [a (+ b 1)]))
+(defn d4 [x] (let [[a b] (d3 x)] (+ a b)))
+(defn vec-p [[a b] c] (+ a b c))
+(defn map-p [{:keys [x]}] x)
+(defn map-or [{:keys [x] :or {x 1}}] x)
+(defn set-map [x] {:s #{x} :v [x]})
+(defn variadic [& xs] (vec xs))
+(defn rec-ar [n a] (if (zero? n) a (recur (dec n) (+ a n))))
+(defn big-fn [x]
+  (+ (+ (+ (+ x 1) (+ x 2)) (+ (+ x 3) (+ x 4)))
+     (+ (+ (+ x 5) (+ x 6)) (+ (+ x 7) (+ x 8)))
+     (+ (+ (+ x 9) (+ x 10)) (+ (+ x 11) (+ x 12)))))
+(defn with-fn [xs] (mapv (fn [x] (inc x)) xs))
+(defn loop-destr [xs]
+  (let [[i s] (loop [i 0 acc \"\"]
+                (if (= i (count xs)) [i acc] (recur (inc i) (str acc (nth xs i)))))]
+    [i s]))
+(defn scalar-destr [n]
+  (let [[i s] (loop [i 0 s 0] (if (< i n) (recur (inc i) (+ s i)) [i s]))]
+    (+ i s)))
+(defn many-calls [x]
+  (+ (leaf x) (leaf x) (leaf x) (leaf x) (leaf x)
+     (leaf x) (leaf x) (leaf x) (leaf x) (leaf x)
+     (leaf x) (leaf x) (leaf x) (leaf x) (leaf x)
+     (leaf x) (leaf x) (leaf x) (leaf x) (leaf x)
+     (leaf x) (leaf x) (leaf x) (leaf x) (leaf x)
+     (leaf x)))
+(defn hot-caller [flag x v]
+  (let [[a b] (pair x)
+        [c d] (if flag [a b] v)
+        [e f] (if flag [1 2] (do))
+        [g h] (do (leaf x) [3 4])
+        [i j] (let [z 5] [z 6])
+        [k l] (if flag (pair x) (with-fn [1 2]))
+        [m n] (if flag (pair x) ((fn [z] [z z]) x))]
+    (+ a b c d (or e 0) (or f 0) g h i j k l m n
+       (d4 x) (vec-p [1 2] 3) (map-p {:x 1}) (map-or {}) (count (set-map x))
+       (count (variadic 1 2)) (rec-ar 3 0) (big-fn x)
+       (first (loop-destr [\"a\"])) (scalar-destr 4) (many-calls x))))
+(println (hot-caller true 5 [1 2]))
+";
+    clj_aot::build_str(
+        src,
+        "f.clj",
+        &tmp("nope-5p"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+
+    // `d2` inlines `pair` -> `leaf` and elides `[y (* y 2)]` completely.
+    let d2_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_d2("))
+        .expect("d2");
+    assert!(!d2_body.contains("@rt_n_enter("), "{d2_body}");
+    // Only the returned outer vector allocates; the inner `pair` vector is gone.
+    assert_eq!(d2_body.matches("@rt_n_vec_lit").count(), 1, "{d2_body}");
+
+    // `many-calls` caps inlining at INLINE_MAX_PER_FN and falls back cleanly.
+    let many_body = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_many_calls("))
+        .expect("many_calls");
+    assert!(many_body.contains("@rt_n_enter("), "{many_body}");
+
+    assert!(
+        !text.contains("slice_error_fail") && !text.contains("9panicking"),
+        "bitcode leaked a Rust panic symbol into emitted IR"
+    );
+}

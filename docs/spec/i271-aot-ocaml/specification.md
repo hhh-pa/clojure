@@ -677,6 +677,16 @@ Profiling the remaining top `aot-ocaml` INS losers (`unbounded_knapsack` 2.93x, 
 
 Measured on macOS (`libinsn.dylib`, vs Slice 5n, byte-identical output on all 18 scripts): `dp/unbounded_knapsack` 246.20M → 32.15M (**0.131x**, −214.1M), `dp/coin_change` 5.89M → 3.06M (**0.519x**, −2.83M, −16 KB), `math/knuth_div` 164.21M → 97.54M (**0.594x**, −66.68M, −32 KB), `suffix_array` 762.98M → 710.98M (**0.932x**, −52.00M), `search/q_learning` 175.63M → 169.77M (**0.967x**, −5.86M, −16 KB), `search/approx_inference` 212.33M → 208.04M (**0.980x**, −4.29M, −16 KB).
 
+### 6.47 Slice 5p: zero-alloc vector-literal destructuring elision and small leaf stable-`defn` inlining
+
+Across the 117 remaining `aot-ocaml` INS-losing scripts, 114 destructured short tuple vectors (`[r2 u] (lcg-double r)`, `[r2 a] (egreedy …)`, `[r3 nst rw] (trans-step …)`, `[a r] (loop …)`, `[c2 cnt] (loop …)`) and called small non-recursive helper `defn`s (`lcg-next`, `orient`, `best-action`, `max-q`, `sigmoid`) inside tight loops — paying per-iteration `rt_n_enter`/`rt_n_leave`, heap vector allocation, `nth` indexing, and drop overhead solely to pass 2–4 scalars across a `let` or leaf call boundary.
+
+- **Small leaf stable-`defn` inlining (`clj-aot/src/native.rs`):** `inline_callee` / `inline_callee_into` inline fixed-arity, non-`recur`, strictly-DAG (`sr.unit < callee_unit`) stable `defn`s bounded by `INLINE_MAX_DEPTH = 3`, `INLINE_MAX_PER_FN = 24`, and `INLINE_GEN_MAX_NODES = 32` (`INLINE_DESTR_MAX_NODES = 80` at destructuring sites). Caller args evaluate left-to-right before swapping `env`/`recur`/`moves`/`captured`; non-moved caller locals bind directly in place as borrowed `LocalRef::Slot`s (zero `Arc` refcount churn) while computed/moved args participate in callee-local `collect_body_moves`.
+- **Zero-alloc vector-literal destructuring elision (`clj-aot/src/native.rs`):** in `lower_let_bindings`, plain `Pattern::Vec` bindings (`rest.is_none() && as_sym.is_none()`) whose init has a destructurable vector-literal exit (`has_destr_vec`) lower via `lower_vec_destructure` directly into the `n` target slots through `VecLit`, `If` (including partial-literal `If` via `lower_and_unpack`), `Let`, `Do`, non-scalar `Loop` (keeping `try_lower_scalar_loop` priority intact), and inlineable `Invoke` (`InlineDest::Destructure`), eliminating both the intermediate vector allocation and the `nth` extractions.
+- **Verification:** `docs/spec/i259-native-compiler/corpus/inline_destructure.clj` and `clj-aot::emit::native_emit_ir_inlines_helpers_and_elides_destructuring_271` pin multi-level inlining, destructuring elision, depth/count caps, scalar-loop priority, non-inlineable recursive/forward/closure/variadic/big callees, and exception/side-effect evaluation order against `run`.
+
+Measured on macOS (`libinsn.dylib`, vs Slice 5o, byte-identical output on all 18 scripts): `search/q_learning` 169.77M → 62.95M (**0.371x**, −106.8M; **0.335x** vs 5k), `search/approx_inference` 208.04M → 159.41M (**0.766x**, −48.6M; **0.551x** vs 5k), `geometry/fortune_voronoi` 55.91M → 47.33M (**0.847x**, −8.58M, −16 KB), `suffix_array` 710.98M → 620.36M (**0.873x**, −90.6M; **0.813x** vs 5k), with minimal `.text` delta (+0 to +16 KB on 15/18 scripts).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

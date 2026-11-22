@@ -190,6 +190,20 @@ struct FnCtx<'ctx> {
     /// Such a local is never borrowed or aliased at an earlier
     /// occurrence (the move would invalidate the reference).
     moves: Vec<(usize, usize)>,
+    /// Current inline nesting depth in this function (caps nested inlining).
+    inline_depth: usize,
+    /// Total inlined calls in this function (caps code-size growth).
+    inlined_count: usize,
+}
+
+const INLINE_MAX_DEPTH: usize = 3;
+const INLINE_MAX_PER_FN: usize = 24;
+const INLINE_GEN_MAX_NODES: usize = 32;
+const INLINE_DESTR_MAX_NODES: usize = 80;
+
+enum InlineDest<'a, 'ctx> {
+    Single(PointerValue<'ctx>),
+    Destructure(&'a [PointerValue<'ctx>]),
 }
 
 /// The program-level lowering session.
@@ -660,6 +674,8 @@ impl<'ctx> Lowerer<'ctx> {
             recur: Vec::new(),
             captured,
             moves: Vec::new(),
+            inline_depth: 0,
+            inlined_count: 0,
         }
     }
 
@@ -2275,11 +2291,7 @@ impl<'ctx> Lowerer<'ctx> {
         let depth = f.env.len();
         let let_depth = f.let_slots.len();
         let mut bound = Vec::new();
-        for (pat, init) in bindings {
-            let t = self.slot(f);
-            self.lower(f, init, t)?;
-            self.bind_owned_slot(f, pat, t, &mut bound)?;
-        }
+        self.lower_let_bindings(f, bindings, &mut bound)?;
         f.let_slots.extend_from_slice(&bound);
         self.lower_body(f, body, dest)?;
         f.let_slots.truncate(let_depth);
@@ -2287,6 +2299,408 @@ impl<'ctx> Lowerer<'ctx> {
         // Release let-bound values at scope end (RSS parity).
         self.free_slots(f, &bound);
         Ok(())
+    }
+
+    fn lower_let_bindings(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        bindings: &[(Pattern, Expr)],
+        bound: &mut Vec<PointerValue<'ctx>>,
+    ) -> Result<(), Unsupported> {
+        for (pat, init) in bindings {
+            if let Pattern::Vec(vp) = pat
+                && vp.rest.is_none()
+                && vp.as_sym.is_none()
+                && !vp.fixed.is_empty()
+                && self.has_destr_vec(f, init, vp.fixed.len(), 0)
+            {
+                let dests: Vec<PointerValue<'ctx>> =
+                    (0..vp.fixed.len()).map(|_| self.slot(f)).collect();
+                self.lower_vec_destructure(f, init, &dests)?;
+                for (sub, d) in vp.fixed.iter().zip(dests) {
+                    self.bind_owned_slot(f, sub, d, bound)?;
+                }
+            } else {
+                let t = self.slot(f);
+                self.lower(f, init, t)?;
+                self.bind_owned_slot(f, pat, t, bound)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn has_destr_vec(&self, f: &FnCtx<'ctx>, e: &Expr, n: usize, depth: usize) -> bool {
+        match e {
+            Expr::VecLit(elems, None) => elems.len() == n,
+            Expr::If { then, els, .. } => {
+                self.has_destr_vec(f, then, n, depth) || self.has_destr_vec(f, els, n, depth)
+            }
+            Expr::Let { body, .. } | Expr::Do(body) => body
+                .last()
+                .is_some_and(|last| self.has_destr_vec(f, last, n, depth)),
+            Expr::Loop { body, .. } => body
+                .last()
+                .is_some_and(|last| self.has_destr_vec(f, last, n, depth)),
+            Expr::Invoke { head, args, .. } if f.inline_depth + depth < INLINE_MAX_DEPTH => self
+                .inline_callee(f, head, args.len(), INLINE_DESTR_MAX_NODES)
+                .is_some_and(|arity| {
+                    arity
+                        .body
+                        .last()
+                        .is_some_and(|last| self.has_destr_vec(f, last, n, depth + 1))
+                }),
+            _ => false,
+        }
+    }
+
+    fn lower_and_unpack(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        e: &Expr,
+        dests: &[PointerValue<'ctx>],
+    ) -> Result<(), Unsupported> {
+        let t = self.slot(f);
+        self.lower(f, e, t)?;
+        for (i, &d) in dests.iter().enumerate() {
+            self.emit_nth_nil(f, d, t, i);
+        }
+        self.free_slots(f, &[t]);
+        Ok(())
+    }
+
+    fn lower_body_destructure(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        body: &[Expr],
+        dests: &[PointerValue<'ctx>],
+    ) -> Result<(), Unsupported> {
+        let (last, rest) = body.split_last().expect("non-empty body");
+        for e in rest {
+            let t = self.slot(f);
+            self.lower(f, e, t)?;
+            self.free_slots(f, &[t]);
+        }
+        self.lower_vec_destructure(f, last, dests)
+    }
+
+    fn lower_vec_destructure(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        e: &Expr,
+        dests: &[PointerValue<'ctx>],
+    ) -> Result<(), Unsupported> {
+        match e {
+            Expr::VecLit(elems, None) if elems.len() == dests.len() => {
+                for (elem, &d) in elems.iter().zip(dests) {
+                    self.lower(f, elem, d)?;
+                }
+                Ok(())
+            }
+            Expr::If { test, then, els } => self.lower_if_destructure(f, test, then, els, dests),
+            Expr::Let { bindings, body } if !body.is_empty() => {
+                self.lower_let_destructure(f, bindings, body, dests)
+            }
+            Expr::Do(forms) if !forms.is_empty() => self.lower_body_destructure(f, forms, dests),
+            Expr::Loop { bindings, body } if !body.is_empty() => {
+                self.lower_loop_destructure(f, bindings, body, dests)
+            }
+            Expr::Recur(args) => self.lower_recur(f, args),
+            Expr::Invoke { head, args, .. } => {
+                self.lower_invoke_destructure(f, e, head, args, dests)
+            }
+            _ => self.lower_and_unpack(f, e, dests),
+        }
+    }
+
+    fn lower_invoke_destructure(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        e: &Expr,
+        head: &Expr,
+        args: &[Expr],
+        dests: &[PointerValue<'ctx>],
+    ) -> Result<(), Unsupported> {
+        if let Some(arity) = self.inline_callee(f, head, args.len(), INLINE_DESTR_MAX_NODES)
+            && arity
+                .body
+                .last()
+                .is_some_and(|last| self.has_destr_vec(f, last, dests.len(), 1))
+        {
+            return self.inline_callee_into(f, &arity, args, InlineDest::Destructure(dests));
+        }
+        self.lower_and_unpack(f, e, dests)
+    }
+
+    fn lower_if_destructure(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        test: &Expr,
+        then: &Expr,
+        els: &Expr,
+        dests: &[PointerValue<'ctx>],
+    ) -> Result<(), Unsupported> {
+        let then_b = self.ctx.append_basic_block(f.func, "then");
+        let else_b = self.ctx.append_basic_block(f.func, "else");
+        let merge = self.ctx.append_basic_block(f.func, "merge");
+        self.lower_cond(f, test, then_b, else_b)?;
+        self.builder.position_at_end(then_b);
+        self.lower_vec_destructure(f, then, dests)?;
+        self.builder.build_unconditional_branch(merge).expect("br");
+        self.builder.position_at_end(else_b);
+        self.lower_vec_destructure(f, els, dests)?;
+        self.builder.build_unconditional_branch(merge).expect("br");
+        self.builder.position_at_end(merge);
+        Ok(())
+    }
+
+    fn lower_let_destructure(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+        dests: &[PointerValue<'ctx>],
+    ) -> Result<(), Unsupported> {
+        let depth = f.env.len();
+        let let_depth = f.let_slots.len();
+        let mut bound = Vec::new();
+        self.lower_let_bindings(f, bindings, &mut bound)?;
+        f.let_slots.extend_from_slice(&bound);
+        self.lower_body_destructure(f, body, dests)?;
+        f.let_slots.truncate(let_depth);
+        f.env.truncate(depth);
+        self.free_slots(f, &bound);
+        Ok(())
+    }
+
+    fn lower_loop_destructure(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+        dests: &[PointerValue<'ctx>],
+    ) -> Result<(), Unsupported> {
+        let t = self.slot(f);
+        if self.try_lower_scalar_loop(f, bindings, body, t)? {
+            for (i, &d) in dests.iter().enumerate() {
+                self.emit_nth_nil(f, d, t, i);
+            }
+            self.free_slots(f, &[t]);
+            return Ok(());
+        }
+        self.free_slots(f, &[t]);
+        let depth = f.env.len();
+        let mut bound = Vec::new();
+        let mut targets = Vec::new();
+        for (pat, init) in bindings {
+            let s = self.slot(f);
+            self.lower(f, init, s)?;
+            let before = bound.len();
+            self.bind_owned_slot(f, pat, s, &mut bound)?;
+            targets.push((pat.clone(), bound[before..].to_vec()));
+        }
+        let header = self.ctx.append_basic_block(f.func, "loop");
+        self.builder.build_unconditional_branch(header).expect("br");
+        self.builder.position_at_end(header);
+        f.recur.push(RecurTarget {
+            header,
+            let_depth: f.let_slots.len(),
+            patterns: targets,
+        });
+        let result = self.lower_body_destructure(f, body, dests);
+        f.recur.pop();
+        f.env.truncate(depth);
+        result?;
+        self.free_slots(f, &bound);
+        Ok(())
+    }
+
+    /// Look up a small, non-recursive stable `defn` arity eligible to inline
+    /// into the current function (#271 Slice 5p).
+    fn inline_callee(
+        &self,
+        f: &FnCtx<'ctx>,
+        head: &Expr,
+        argc: usize,
+        max_nodes: usize,
+    ) -> Option<Arity> {
+        if !self.inline_arith
+            || f.inline_depth >= INLINE_MAX_DEPTH
+            || f.inlined_count >= INLINE_MAX_PER_FN
+        {
+            return None;
+        }
+        let Expr::Global(var) = head else { return None };
+        let sr = self.stable_of(var)?;
+        if self.unit < sr.unit {
+            return None;
+        }
+        let key = (
+            var.sym.namespace().unwrap_or("user").to_owned(),
+            var.sym.name().to_owned(),
+        );
+        let arities = self.callees.get(&key)?;
+        let arity = arities
+            .iter()
+            .find(|a| a.rest.is_none() && a.fixed.len() == argc)?;
+        if self_recurs(&arity.body) || !self.inline_pats_ok(&arity.fixed) {
+            return None;
+        }
+        let mut budget = max_nodes;
+        if !self.inline_exprs_ok(&arity.body, sr.unit, &mut budget) {
+            return None;
+        }
+        Some(arity.clone())
+    }
+
+    fn inline_pats_ok(&self, pats: &[Pattern]) -> bool {
+        pats.iter().all(|p| match p {
+            Pattern::Symbol(_) => true,
+            Pattern::Vec(vp) => self.inline_pats_ok(&vp.fixed),
+            Pattern::Map(mp) => mp.or.is_empty(),
+        })
+    }
+
+    fn inline_exprs_ok(&self, exprs: &[Expr], callee_unit: usize, budget: &mut usize) -> bool {
+        exprs
+            .iter()
+            .all(|e| self.inline_expr_ok(e, callee_unit, budget))
+    }
+
+    fn inline_binds_ok(
+        &self,
+        bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+        callee_unit: usize,
+        budget: &mut usize,
+    ) -> bool {
+        bindings.iter().all(|(pat, init)| {
+            self.inline_pats_ok(std::slice::from_ref(pat))
+                && self.inline_expr_ok(init, callee_unit, budget)
+        }) && self.inline_exprs_ok(body, callee_unit, budget)
+    }
+
+    fn inline_expr_ok(&self, e: &Expr, callee_unit: usize, budget: &mut usize) -> bool {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        match e {
+            Expr::Literal(_) | Expr::Local(_) | Expr::Quote(_) => true,
+            Expr::Global(var) => {
+                let key = (
+                    var.sym.namespace().unwrap_or("user").to_owned(),
+                    var.sym.name().to_owned(),
+                );
+                !self.direct.contains_key(&key)
+                    || self.stable_of(var).is_some_and(|sr| sr.unit < callee_unit)
+            }
+            Expr::Do(xs) | Expr::Recur(xs) => self.inline_exprs_ok(xs, callee_unit, budget),
+            Expr::DirectNative(call) => self.inline_exprs_ok(&call.args, callee_unit, budget),
+            Expr::Invoke { head, args, .. } => {
+                self.inline_expr_ok(head, callee_unit, budget)
+                    && self.inline_exprs_ok(args, callee_unit, budget)
+            }
+            _ => self.inline_compound_ok(e, callee_unit, budget),
+        }
+    }
+
+    fn inline_compound_ok(&self, e: &Expr, callee_unit: usize, budget: &mut usize) -> bool {
+        match e {
+            Expr::VecLit(xs, m) | Expr::SetLit(xs, m) => {
+                m.is_none() && self.inline_exprs_ok(xs, callee_unit, budget)
+            }
+            Expr::MapLit(ps, m) => {
+                m.is_none()
+                    && ps.iter().all(|(k, v)| {
+                        self.inline_expr_ok(k, callee_unit, budget)
+                            && self.inline_expr_ok(v, callee_unit, budget)
+                    })
+            }
+            Expr::If { test, then, els } => {
+                self.inline_expr_ok(test, callee_unit, budget)
+                    && self.inline_expr_ok(then, callee_unit, budget)
+                    && self.inline_expr_ok(els, callee_unit, budget)
+            }
+            Expr::Let { bindings, body } => {
+                self.inline_binds_ok(bindings, body, callee_unit, budget)
+            }
+            Expr::Loop { bindings, body } => {
+                self.inline_binds_ok(bindings, body, callee_unit, budget)
+            }
+            _ => false,
+        }
+    }
+
+    fn inline_callee_into(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        arity: &Arity,
+        args: &[Expr],
+        target: InlineDest<'_, 'ctx>,
+    ) -> Result<(), Unsupported> {
+        let mut eval_args: Vec<(bool, PointerValue<'ctx>)> = Vec::with_capacity(args.len());
+        for (i, (pat, a)) in arity.fixed.iter().zip(args).enumerate() {
+            let borrowed = match (pat, a) {
+                (Pattern::Symbol(_), Expr::Local(idx)) if !is_move(f, a) => {
+                    self.borrowable_before(f, *idx, &args[i + 1..])
+                }
+                _ => None,
+            };
+            if let Some(p) = borrowed {
+                eval_args.push((false, p));
+            } else {
+                let s = self.slot(f);
+                self.lower(f, a, s)?;
+                eval_args.push((true, s));
+            }
+        }
+        let saved_env = std::mem::take(&mut f.env);
+        let saved_recur = std::mem::take(&mut f.recur);
+        let saved_moves = std::mem::take(&mut f.moves);
+        let saved_captured = f.captured;
+        let let_depth = f.let_slots.len();
+        f.captured = self.ptr.const_null();
+        f.inline_depth += 1;
+        f.inlined_count += 1;
+
+        let mut owned_slots = Vec::new();
+        let res = self.inline_callee_body(f, arity, eval_args, target, &mut owned_slots);
+
+        f.inline_depth -= 1;
+        f.let_slots.truncate(let_depth);
+        f.env = saved_env;
+        f.recur = saved_recur;
+        f.moves = saved_moves;
+        f.captured = saved_captured;
+        res?;
+        self.free_slots(f, &owned_slots);
+        Ok(())
+    }
+
+    fn inline_callee_body(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        arity: &Arity,
+        eval_args: Vec<(bool, PointerValue<'ctx>)>,
+        target: InlineDest<'_, 'ctx>,
+        owned_slots: &mut Vec<PointerValue<'ctx>>,
+    ) -> Result<(), Unsupported> {
+        let mut owned_indices = Vec::new();
+        for (pat, (owned, slot)) in arity.fixed.iter().zip(eval_args) {
+            if owned {
+                let start = f.env.len();
+                self.bind_owned_slot(f, pat, slot, owned_slots)?;
+                owned_indices.extend(start..f.env.len());
+            } else {
+                f.env.push(Some(LocalRef::Slot(slot)));
+            }
+        }
+        f.let_slots.extend_from_slice(owned_slots);
+        f.moves = collect_body_moves(&arity.body, 0, &f.env, &owned_indices);
+        match target {
+            InlineDest::Single(dest) => self.lower_body(f, &arity.body, dest),
+            InlineDest::Destructure(dests) => self.lower_body_destructure(f, &arity.body, dests),
+        }
     }
 
     /// A body compiled as a zero-arg fn named `display`, wrapped by
@@ -2973,6 +3387,9 @@ impl<'ctx> Lowerer<'ctx> {
         args: &[Expr],
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
+        if let Some(arity) = self.inline_callee(f, head, args.len(), INLINE_GEN_MAX_NODES) {
+            return self.inline_callee_into(f, &arity, args, InlineDest::Single(dest));
+        }
         let (var, k, code) = self.direct_target(head, args.len()).expect("checked");
         let vk = self.var_of(&var);
         // Plain locals ride in the argument array as bitwise aliases (the
@@ -8491,6 +8908,8 @@ mod tests {
             recur: Vec::new(),
             captured: dest,
             moves: Vec::new(),
+            inline_depth: 0,
+            inlined_count: 0,
         };
         let _ = lowerer.lower_tail_form(&mut f, &Expr::Literal(Value::Nil), dest);
     }
