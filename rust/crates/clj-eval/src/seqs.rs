@@ -21,7 +21,10 @@ use smallvec::SmallVec;
 use crate::core::{as_reduced, cce_err, check_ifn, jvm_compare, repeat_count, take_count};
 use crate::error::{NativeError, jvm_class_of};
 use crate::eval::Evaluator;
-use crate::ext::{DisplayName, FastArith, NativeFn, NativeImpl, NativeTarget};
+use crate::ext::{
+    DisplayName, FastArith, NativeFn, NativeImpl, NativeTarget, OwnedArgs, OwnedNativeImpl,
+    OwnedTarget,
+};
 use crate::lazy::{
     StepUnit, as_subvector, collect_all, collect_packed, concat_thunk, cycle_thunk, dedupe_thunk,
     distinct_thunk, drop_value, drop_while_thunk, empty_list_value, filter_thunk, interleave_thunk,
@@ -58,6 +61,27 @@ pub(crate) fn call_checked_owned(
 ) -> Result<Value, NativeError> {
     check_ifn(eval, f).map_err(signal_to_native)?;
     eval.call_owned(f, args).map_err(signal_to_native)
+}
+
+/// A fresh [`NativeFn`] value capturing its environment with an owned-args entry.
+fn native_fn_owned(
+    eval: &mut Evaluator,
+    display: &str,
+    func: impl Fn(&mut Evaluator, OwnedArgs) -> Result<Value, NativeError> + Send + Sync + 'static,
+) -> Value {
+    let owned: Arc<OwnedNativeImpl> = Arc::new(func);
+    let borrow_ref = Arc::clone(&owned);
+    Value::Extension(Arc::new(NativeFn {
+        id: eval.next_id(),
+        display: DisplayName::shared(display),
+        func: NativeTarget::Dyn(Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
+            borrow_ref(eval, args.iter().cloned().collect())
+        }) as Arc<NativeImpl>),
+        owned: Some(OwnedTarget::Dyn(owned)),
+        meta: None,
+        fast: FastArith::None,
+        compiled: None,
+    }))
 }
 
 /// A fresh [`NativeFn`] value capturing its environment.
@@ -1853,25 +1877,23 @@ fn native_identity(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 fn native_fnil(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/fnil", args, &[2, 3, 4])?;
     let f = args[0].clone();
-    let defaults = args[1..].to_vec();
+    let defaults: SmallVec<[Value; 3]> = args[1..].iter().cloned().collect();
     let min = if defaults.len() >= 2 { 2 } else { 1 };
-    Ok(native_fn(eval, "clojure.core/fnil", move |eval, args| {
-        if args.len() < min {
-            return Err(NativeError::arity("clojure.core/fnil", args.len()));
-        }
-        let filled: Vec<Value> = args
-            .iter()
-            .enumerate()
-            .map(|(i, a)| {
-                if matches!(a, Value::Nil) {
-                    defaults.get(i).cloned().unwrap_or(Value::Nil)
-                } else {
-                    a.clone()
+    Ok(native_fn_owned(
+        eval,
+        "clojure.core/fnil",
+        move |eval, mut args| {
+            if args.len() < min {
+                return Err(NativeError::arity("clojure.core/fnil", args.len()));
+            }
+            for (slot, def) in args.iter_mut().zip(&defaults) {
+                if matches!(slot, Value::Nil) {
+                    *slot = def.clone();
                 }
-            })
-            .collect();
-        call_checked(eval, &f, &filled)
-    }))
+            }
+            call_checked_owned(eval, &f, args)
+        },
+    ))
 }
 
 fn call_pred1(

@@ -1165,7 +1165,8 @@ mod tests {
 
         assert!(is_lite_string_var("split"));
         assert!(is_lite_string_var("join"));
-        assert!(!is_lite_string_var("replace"));
+        assert!(is_lite_string_var("replace"));
+        assert!(!is_lite_string_var("replace-first"));
         assert!(!is_lite_string_var("no-such-string-fn"));
 
         assert!(is_lite_stdin_var("clojure.core", "*in*"));

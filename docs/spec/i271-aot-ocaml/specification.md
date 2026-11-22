@@ -687,6 +687,17 @@ Across the 117 remaining `aot-ocaml` INS-losing scripts, 114 destructured short 
 
 Measured on macOS (`libinsn.dylib`, vs Slice 5o, byte-identical output on all 18 scripts): `search/q_learning` 169.77M → 62.95M (**0.371x**, −106.8M; **0.335x** vs 5k), `search/approx_inference` 208.04M → 159.41M (**0.766x**, −48.6M; **0.551x** vs 5k), `geometry/fortune_voronoi` 55.91M → 47.33M (**0.847x**, −8.58M, −16 KB), `suffix_array` 710.98M → 620.36M (**0.873x**, −90.6M; **0.813x** vs 5k), with minimal `.text` delta (+0 to +16 KB on 15/18 scripts).
 
+### 6.48 Slice 5q: `SmallSet`, owned `fnil`, fast Lite `clojure.string/replace`, and in-place CRLF `slurp`
+
+Profiling the set-heavy geometry/compiler clusters (`fortune_voronoi`, `delaunay`, `bentley_ottmann`, `steiner_triple`, `hindley_milner`, `ssa_dominance`, `dfa_minimization`) and `knuth_div` exposed three runtime bottlenecks: every `Set` (even 0–8 elements) allocated both an `rpds::HashTrieMapSync` and an `rpds::VectorSync` sidecar and triggered full `compact()` rebuilds on small `disj`s; `fnil` used borrow-only `native_fn` with a fresh `Vec<Value>`, breaking `native_update_owned`'s `take_lookup` unique ownership; and `clojure.string/replace` was spliced as Clojure code running `re-matcher` + full regex engine on every `(str/replace s #"^0+" "")` call in `knuth_div`.
+
+- **Inline `SmallSet` (`clj-value/src/value.rs`):** split `SetData` storage into `SetStorage::Small(Vec<Value>)` (up to `SMALL_SET_MAX = 8`, both unsorted and sorted) and `SetStorage::Large(Box<LargeSet>)`, eliminating `rpds` trie/sidecar allocations, double-cloning, and `compact()` churn on small sets while preserving exact insertion/comparator order, equality, hashing, and identity semantics.
+- **Owned `fnil` (`clj-eval/src/{ext,seqs}.rs`):** added `OwnedTarget::Dyn(Arc<OwnedNativeImpl>)` and `native_fn_owned` so `fnil` fills `nil` defaults in place inside `SmallVec<[Value; 4]>` and dispatches via `call_checked_owned`, keeping uniquely-held sets and vectors from `update`'s `take_lookup` unique all the way through `conj`.
+- **Fast Lite `clojure.string/replace` & in-place CRLF `slurp` (`clj-eval/src/{re,stdlib_natives,aot_boot,reader}.rs`):** added `re::replace_all_fast` (zero-copy/direct `trim_start_matches`/`trim_end_matches` for simple anchored `^c+`/`c+$` patterns without `$`/`\` escapes, cached `Regex::replace_all` otherwise) and registered `native_replace` in `STRING_NATIVES` (with fast `Str`/`Regex`/`Str`, `Str`/`Char`/`Char`, `Str`/`Str`/`Str`, and callable `lite_replace_by` paths plus exact `upstream`/`lite_replace` fallback); normalized `\r\n`/`\r` in place inside `slurp_buf_reader` without allocating a second full-file string.
+- **Verification:** `docs/spec/i259-native-compiler/corpus/small_set_fnil_replace.clj`, `clj-value::value::small_and_large_set_storage_paths_271`, `clj-eval::stdlib_natives::native_and_lite_replace_cover_fast_paths_and_fallbacks_271`, and `aot_boot`/`aot_front`/`emit` tests pin every path against `run`.
+
+Measured on macOS (`libinsn.dylib`, vs Slice 5p, byte-identical output on all 18 scripts): `compiler/hindley_milner` 5.86M → 5.26M (**0.899x**, −10.1%), `math/knuth_div` 96.76M → 87.48M (**0.904x**, −9.28M, −32 KB), `geometry/fortune_voronoi` 47.33M → 44.11M (**0.932x**, −3.22M), `combinatorics/steiner_triple` 7.49M → 7.42M (**0.992x**).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

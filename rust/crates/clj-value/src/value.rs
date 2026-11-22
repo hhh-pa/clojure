@@ -1047,15 +1047,16 @@ pub enum SortSpec {
 /// every `Value` (#221 R1). `sort` is the FT6 sorted-set
 /// order (same contract as [`Map`]'s): `members` stays in
 /// comparator order and compare-0 duplicates collapse.
-/// A set's fields, behind the handle's `Arc` so a `Set` (inline
-/// in every `Value`) stays one word (#254: `Value` shrinks to 32
-/// bytes). Writers go through `Arc::make_mut`, exactly like the
-/// old struct copy.
-#[derive(Clone)]
-struct SetData {
+/// Maximum member count kept inline in [`SetStorage::Small`] (mirrors
+/// [`SMALL_MAP_MAX`]): avoids `rpds` trie + sidecar allocations and
+/// `compact()` churn on small sets (#271 Slice 5q).
+const SMALL_SET_MAX: usize = 8;
+
+/// Hash-indexed persistent storage for sets past [`SMALL_SET_MAX`].
+#[derive(Clone, Debug)]
+struct LargeSet {
     /// Live members, each mapped to its slot in `members`.
     inner: RpdsIndex,
-    meta: Option<Arc<Map>>,
     /// Insertion order (comparator order when sorted). `disj` leaves a
     /// hole in its member's slot (O(log n), no shifting); the sidecar
     /// compacts once holes outnumber members (amortized O(1)).
@@ -1064,6 +1065,34 @@ struct SetData {
     /// (every slot before it is a hole: `first`/`disj` pops stay O(1)).
     holes: usize,
     head: usize,
+}
+
+#[derive(Clone, Debug)]
+enum SetStorage {
+    Small(Vec<Value>),
+    Large(Box<LargeSet>),
+}
+
+impl SetStorage {
+    fn large_from_vec(members: Vec<Value>) -> Self {
+        let (inner, slots) = slots_of(members);
+        Self::Large(Box::new(LargeSet {
+            inner,
+            members: Arc::new(slots),
+            holes: 0,
+            head: 0,
+        }))
+    }
+}
+
+/// A set's fields, behind the handle's `Arc` so a `Set` (inline
+/// in every `Value`) stays one word (#254: `Value` shrinks to 32
+/// bytes). Writers go through `Arc::make_mut`, exactly like the
+/// old struct copy.
+#[derive(Clone)]
+struct SetData {
+    storage: SetStorage,
+    meta: Option<Arc<Map>>,
     /// Boxed (like [`Map`]'s): sorted sets are rare.
     sort: Option<Box<SortSpec>>,
     id: u64,
@@ -1075,12 +1104,28 @@ pub struct Set(Arc<SetData>);
 impl std::fmt::Debug for Set {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Set")
-            .field("inner", &self.0.inner)
+            .field("inner", &self.0.storage)
             .field("meta", &self.0.meta)
-            .field("members", &self.0.members)
             .field("sort", &self.0.sort)
             .field("id", &self.0.id)
             .finish()
+    }
+}
+
+enum SetIter<'a> {
+    Small(std::slice::Iter<'a, Value>),
+    Large(std::iter::Flatten<crate::trie::Iter<'a, Option<Value>>>),
+}
+
+impl<'a> Iterator for SetIter<'a> {
+    type Item = &'a Value;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            SetIter::Small(it) => it.next(),
+            SetIter::Large(it) => it.next(),
+        }
     }
 }
 
@@ -2452,93 +2497,131 @@ impl Set {
         if let Some(dup) = find_set_dup(&items) {
             return Err(dup.clone());
         }
-        let mut set = new_set();
-        for v in items {
-            set = set.insert(v);
-        }
-        Ok(set)
+        let storage = if items.len() <= SMALL_SET_MAX {
+            SetStorage::Small(items)
+        } else {
+            SetStorage::large_from_vec(items)
+        };
+        Ok(Self(Arc::new(SetData {
+            storage,
+            meta: None,
+            sort: None,
+            id: next_set_id(),
+        })))
     }
 
     /// Add a value. A new member appends to the insertion order;
     /// a present member is a no-op (keeps the original object).
     #[must_use]
     pub fn insert(mut self, v: Value) -> Self {
-        if self.0.inner.contains_key(&v) {
+        if self.contains(&v) {
             return self;
         }
         let data = Arc::make_mut(&mut self.0);
-        let slot = data.members.len();
-        Arc::make_mut(&mut data.members).push_back_mut(Some(v.clone()));
-        data.inner.insert_mut(v, slot);
+        match &mut data.storage {
+            SetStorage::Small(items) if items.len() < SMALL_SET_MAX => {
+                items.push(v);
+            }
+            SetStorage::Small(items) => {
+                let mut all = std::mem::take(items);
+                all.push(v);
+                data.storage = SetStorage::large_from_vec(all);
+            }
+            SetStorage::Large(ls) => {
+                let slot = ls.members.len();
+                Arc::make_mut(&mut ls.members).push_back_mut(Some(v.clone()));
+                ls.inner.insert_mut(v, slot);
+            }
+        }
         data.id = next_set_id();
         self
     }
 
     /// Whether a value is present.
+    #[inline]
     #[must_use]
     pub fn contains(&self, v: &Value) -> bool {
-        if self.0.members.len() <= 4 {
-            return self.0.members.iter().any(|m| m.as_ref() == Some(v));
+        match &self.0.storage {
+            SetStorage::Small(items) => items.iter().any(|m| m == v),
+            SetStorage::Large(ls) => ls.inner.contains_key(v),
         }
-        self.0.inner.contains_key(v)
     }
 
     /// The stored member equal to `v`, if present (`get` on a set
     /// returns the member, not the key).
+    #[inline]
     #[must_use]
     pub fn get(&self, v: &Value) -> Option<&Value> {
-        self.0.inner.get_key_value(v).map(|(member, _)| member)
+        match &self.0.storage {
+            SetStorage::Small(items) => items.iter().find(|m| *m == v),
+            SetStorage::Large(ls) => ls.inner.get_key_value(v).map(|(member, _)| member),
+        }
     }
 
     /// Remove a value (`disj` one item). A missing value is a no-op;
-    /// otherwise its slot in the insertion-order sidecar becomes a
-    /// hole (the other members keep their order).
+    /// otherwise small sets shift in place and large sets leave a hole
+    /// in the insertion-order sidecar (preserving member order).
     #[must_use]
     pub fn without(mut self, v: &Value) -> Self {
-        let Some(&slot) = self.0.inner.get(v) else {
-            return self;
-        };
-        if self.0.sort.is_some() {
-            // Sorted sidecars keep no slots (positional inserts would
-            // shift them): find the member's sorted position.
-            let pos = self
-                .iter()
-                .position(|m| m == v)
-                .expect("a member sits in the sidecar");
-            return self.without_sorted_at(pos);
+        match &self.0.storage {
+            SetStorage::Small(items) => {
+                let Some(pos) = items.iter().position(|m| m == v) else {
+                    return self;
+                };
+                let data = Arc::make_mut(&mut self.0);
+                if let SetStorage::Small(items) = &mut data.storage {
+                    items.remove(pos);
+                }
+                data.id = next_set_id();
+                self
+            }
+            SetStorage::Large(ls) => {
+                let Some(&slot) = ls.inner.get(v) else {
+                    return self;
+                };
+                if self.0.sort.is_some() {
+                    // Sorted sidecars keep no slots (positional inserts would
+                    // shift them): find the member's sorted position.
+                    let pos = self
+                        .iter()
+                        .position(|m| m == v)
+                        .expect("a member sits in the sidecar");
+                    return self.without_sorted_at(pos);
+                }
+                let data = Arc::make_mut(&mut self.0);
+                if let SetStorage::Large(ls) = &mut data.storage {
+                    ls.remove_unsorted_slot(v, slot);
+                }
+                data.id = next_set_id();
+                self
+            }
         }
-        let data = Arc::make_mut(&mut self.0);
-        data.inner.remove_mut(v);
-        let members = Arc::make_mut(&mut data.members);
-        members.set_mut(slot, None);
-        data.holes += 1;
-        while members.get(data.head).is_some_and(Option::is_none) {
-            data.head += 1;
-        }
-        if data.holes * 2 > members.len() {
-            data.compact();
-        }
-        data.id = next_set_id();
-        self
     }
 
     /// The element count.
     #[inline]
     #[must_use]
     pub fn size(&self) -> usize {
-        self.0.inner.size()
+        match &self.0.storage {
+            SetStorage::Small(items) => items.len(),
+            SetStorage::Large(ls) => ls.inner.size(),
+        }
     }
 
     /// Whether the set is empty.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.inner.size() == 0
+        self.size() == 0
     }
 
     /// Iterate members in insertion order (the JVM small-set seq
     /// order; see the `members` sidecar).
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
-        self.0.members.iter_from(self.0.head).flatten()
+        match &self.0.storage {
+            SetStorage::Small(items) => SetIter::Small(items.iter()),
+            SetStorage::Large(ls) => SetIter::Large(ls.members.iter_from(ls.head).flatten()),
+        }
     }
 
     /// Whether this is a sorted set (FT6 `sorted-set` family).
@@ -2573,61 +2656,64 @@ impl Set {
     /// sidecar past `head`, where a sorted sidecar has no holes).
     #[must_use]
     pub fn sorted_len(&self) -> usize {
-        self.0.members.len() - self.0.head
+        match &self.0.storage {
+            SetStorage::Small(items) => items.len(),
+            SetStorage::Large(ls) => ls.members.len() - ls.head,
+        }
     }
 
     /// A sorted set's member at sorted position `i` (0 = first).
     #[must_use]
     pub fn sorted_member(&self, i: usize) -> Option<&Value> {
-        self.0.members.get(self.0.head + i).and_then(Option::as_ref)
+        match &self.0.storage {
+            SetStorage::Small(items) => items.get(i),
+            SetStorage::Large(ls) => ls.members.get(ls.head + i).and_then(Option::as_ref),
+        }
     }
 
     /// Insert `v` at sorted position `pos` (the caller's binary search
-    /// found no compare-0 member): the index takes `v` in O(log n) and
-    /// only the sidecar is rebuilt (no trie rebuild).
+    /// found no compare-0 member): small sets insert directly into the
+    /// flat slice; large sets update the index in O(log n) and rebuild
+    /// only the sidecar.
     #[must_use]
     pub fn insert_sorted_at(mut self, pos: usize, v: Value) -> Self {
         let data = Arc::make_mut(&mut self.0);
-        let start = data.head;
-        let mut members = Vec::with_capacity(data.members.len() - start + 1);
-        members.extend(data.members.iter_from(start).take(pos).cloned());
-        members.push(Some(v.clone()));
-        members.extend(data.members.iter_from(start + pos).cloned());
-        data.members = Arc::new(SetSlots::from_vec(members));
-        data.inner.insert_mut(v, 0);
-        data.holes = 0;
-        data.head = 0;
+        match &mut data.storage {
+            SetStorage::Small(items) if items.len() < SMALL_SET_MAX => {
+                items.insert(pos, v);
+            }
+            SetStorage::Small(items) => {
+                let mut all = std::mem::take(items);
+                all.insert(pos, v);
+                data.storage = SetStorage::large_from_vec(all);
+            }
+            SetStorage::Large(ls) => {
+                let start = ls.head;
+                let mut members = Vec::with_capacity(ls.members.len() - start + 1);
+                members.extend(ls.members.iter_from(start).take(pos).cloned());
+                members.push(Some(v.clone()));
+                members.extend(ls.members.iter_from(start + pos).cloned());
+                ls.members = Arc::new(SetSlots::from_vec(members));
+                ls.inner.insert_mut(v, 0);
+                ls.holes = 0;
+                ls.head = 0;
+            }
+        }
         data.id = next_set_id();
         self
     }
 
-    /// Remove the member at sorted position `pos` (0 = first): the
-    /// first member pops in O(1) (a hole before `head`); any other
-    /// rebuilds the sidecar (no trie rebuild).
+    /// Remove the member at sorted position `pos` (0 = first): small sets
+    /// remove directly; large sets pop position 0 in O(1) and rebuild only
+    /// the sidecar for interior removals.
     #[must_use]
     pub fn without_sorted_at(mut self, pos: usize) -> Self {
         let data = Arc::make_mut(&mut self.0);
-        let slot = data.head + pos;
-        let member = data
-            .members
-            .get(slot)
-            .cloned()
-            .flatten()
-            .expect("sorted position in range");
-        data.inner.remove_mut(&member);
-        if pos == 0 {
-            Arc::make_mut(&mut data.members).set_mut(slot, None);
-            data.holes += 1;
-            data.head += 1;
-            if data.holes * 2 > data.members.len() {
-                data.compact();
+        match &mut data.storage {
+            SetStorage::Small(items) => {
+                items.remove(pos);
             }
-        } else {
-            let kept = data.members.iter_from(data.head).enumerate();
-            let kept = kept.filter(|&(i, _)| i != pos).map(|(_, m)| m.clone());
-            data.members = Arc::new(kept.collect());
-            data.holes = 0;
-            data.head = 0;
+            SetStorage::Large(ls) => ls.remove_sorted_at(pos),
         }
         data.id = next_set_id();
         self
@@ -2637,13 +2723,14 @@ impl Set {
     /// and the sort order.
     #[must_use]
     pub fn with_ordered_members(self, members: Vec<Value>) -> Self {
-        let (inner, members) = slots_of(members);
+        let storage = if members.len() <= SMALL_SET_MAX {
+            SetStorage::Small(members)
+        } else {
+            SetStorage::large_from_vec(members)
+        };
         Self(Arc::new(SetData {
-            inner,
+            storage,
             meta: self.0.meta.clone(),
-            members: Arc::new(members),
-            holes: 0,
-            head: 0,
             sort: self.0.sort.clone(),
             id: next_set_id(),
         }))
@@ -2796,11 +2883,8 @@ pub fn new_map() -> Map {
 #[must_use]
 pub fn new_set() -> Set {
     Set(Arc::new(SetData {
-        inner: RpdsIndex::new_with_hasher_and_ptr_kind(FxBuildHasher::default()),
+        storage: SetStorage::Small(Vec::new()),
         meta: None,
-        members: Arc::new(SetSlots::new_sync()),
-        holes: 0,
-        head: 0,
         sort: None,
         id: next_set_id(),
     }))
@@ -2817,16 +2901,54 @@ fn slots_of(members: Vec<Value>) -> (RpdsIndex, SetSlots) {
     (inner, slots)
 }
 
-impl SetData {
+impl LargeSet {
+    fn remove_unsorted_slot(&mut self, v: &Value, slot: usize) {
+        self.inner.remove_mut(v);
+        let members = Arc::make_mut(&mut self.members);
+        members.set_mut(slot, None);
+        self.holes += 1;
+        while members.get(self.head).is_some_and(Option::is_none) {
+            self.head += 1;
+        }
+        if self.holes * 2 > members.len() {
+            self.compact(false);
+        }
+    }
+
+    fn remove_sorted_at(&mut self, pos: usize) {
+        let slot = self.head + pos;
+        let member = self
+            .members
+            .get(slot)
+            .cloned()
+            .flatten()
+            .expect("sorted position in range");
+        self.inner.remove_mut(&member);
+        if pos == 0 {
+            Arc::make_mut(&mut self.members).set_mut(slot, None);
+            self.holes += 1;
+            self.head += 1;
+            if self.holes * 2 > self.members.len() {
+                self.compact(true);
+            }
+        } else {
+            let kept = self.members.iter_from(self.head).enumerate();
+            let kept = kept.filter(|&(i, _)| i != pos).map(|(_, m)| m.clone());
+            self.members = Arc::new(kept.collect());
+            self.holes = 0;
+            self.head = 0;
+        }
+    }
+
     /// Drop the order sidecar's holes (the members keep their order).
-    fn compact(&mut self) {
+    fn compact(&mut self, sorted: bool) {
         let live: Vec<Value> = self
             .members
             .iter_from(self.head)
             .flatten()
             .cloned()
             .collect();
-        if self.sort.is_some() {
+        if sorted {
             // Sorted sets keep no slots: only the sidecar rebuilds.
             self.members = Arc::new(live.into_iter().map(Some).collect());
         } else {
@@ -5794,5 +5916,60 @@ mod tests {
                 Value::Str(Arc::from("b")),
             ])))
         );
+    }
+
+    #[test]
+    fn small_and_large_set_storage_paths_271() {
+        use super::{Set, SortSpec};
+        // Small set: from_items_checked, insert, dup insert, get, contains, without, iter
+        let s = Set::from_items_checked(vec![Value::Int(1), Value::Int(2)]).unwrap();
+        assert_eq!(s.size(), 2);
+        assert!(!s.is_empty());
+        assert!(s.contains(&Value::Int(1)));
+        assert_eq!(s.get(&Value::Int(2)), Some(&Value::Int(2)));
+        assert_eq!(s.get(&Value::Int(9)), None);
+        let s_dup = s.clone().insert(Value::Int(2));
+        assert_eq!(s_dup.id(), s.id());
+        let s_miss = s.clone().without(&Value::Int(99));
+        assert_eq!(s_miss.id(), s.id());
+        let s_rem = s.clone().without(&Value::Int(1));
+        assert_eq!(s_rem.size(), 1);
+        assert!(Set::from_items_checked(vec![Value::Int(1), Value::Int(1)]).is_err());
+
+        // Promotion > SMALL_SET_MAX via insert and via from_items_checked
+        let mut big = new_set();
+        for i in 0..10 {
+            big = big.insert(Value::Int(i));
+        }
+        assert_eq!(big.size(), 10);
+        assert_eq!(big.get(&Value::Int(9)), Some(&Value::Int(9)));
+        assert_eq!(big.iter().count(), 10);
+        assert_eq!(big.clone().without(&Value::Int(99)).id(), big.id());
+        let mut shrunk = big.clone();
+        for i in 0..7 {
+            shrunk = shrunk.without(&Value::Int(i));
+        }
+        assert_eq!(shrunk.size(), 3);
+        let big2 = Set::from_items_checked((0..10).map(Value::Int).collect()).unwrap();
+        assert_eq!(big, big2);
+
+        // Small & promoted sorted sets
+        let mut ss = new_set().with_sort(Some(SortSpec::Natural));
+        for i in 0..10 {
+            ss = ss.insert_sorted_at(i, Value::Int(i as i64));
+        }
+        assert_eq!(ss.sorted_len(), 10);
+        assert_eq!(ss.sorted_member(0), Some(&Value::Int(0)));
+        let ss_sm = new_set()
+            .with_sort(Some(SortSpec::Natural))
+            .with_ordered_members(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        assert_eq!(ss_sm.sorted_len(), 3);
+        assert_eq!(ss_sm.sorted_member(1), Some(&Value::Int(2)));
+        let ss_sm2 = ss_sm.without_sorted_at(1);
+        assert_eq!(ss_sm2.sorted_len(), 2);
+        let ss_lg = ss.without(&Value::Int(0)).without(&Value::Int(5));
+        assert_eq!(ss_lg.sorted_len(), 8);
+        let ss_rebuilt = new_set().with_ordered_members((0..10).map(Value::Int).collect());
+        assert_eq!(ss_rebuilt.size(), 10);
     }
 }

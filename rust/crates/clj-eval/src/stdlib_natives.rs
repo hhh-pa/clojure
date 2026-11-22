@@ -38,6 +38,7 @@ pub(crate) const STRING_NATIVES: &[(&str, Native)] = &[
     ("starts-with?", native_starts_with),
     ("ends-with?", native_ends_with),
     ("includes?", native_includes),
+    ("replace", native_replace),
 ];
 
 /// Call the interpreted upstream definition of `clojure.string/name`
@@ -419,6 +420,99 @@ fn lite_to_string_member(
     meth(eval, member, &s, std::slice::from_ref(&args[1]))
 }
 
+/// `(replace s match replacement)`: native fast paths for `Str` with
+/// `Regex`/`Str`, `Char`/`Char`, and `Str`/`Str`; other shapes run the
+/// upstream `string.clj` definition (or Lite transcription).
+fn native_replace(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    match args {
+        [Value::Str(s), Value::Regex(pat), Value::Str(rep)] => replace_regex_str(args, s, pat, rep),
+        [Value::Str(s), Value::Regex(pat), rep]
+            if crate::classemu::char_sequence_text(rep).is_none() =>
+        {
+            lite_replace_by(eval, &args[0], s, pat, rep)
+        }
+        [Value::Str(s), Value::Char(mc), Value::Char(rc)] => {
+            if !s.contains(*mc) {
+                return Ok(args[0].clone());
+            }
+            let mut buf = [0u8; 4];
+            let rep = rc.encode_utf8(&mut buf);
+            Ok(Value::Str(Arc::from(s.replace(*mc, rep).as_str())))
+        }
+        [Value::Str(s), Value::Str(ms), Value::Str(rs)] => {
+            if !s.contains(ms.as_ref()) {
+                return Ok(args[0].clone());
+            }
+            Ok(Value::Str(Arc::from(
+                s.replace(ms.as_ref(), rs.as_ref()).as_str(),
+            )))
+        }
+        _ => upstream(eval, "replace", args, |eval| lite_replace(eval, args)),
+    }
+}
+
+fn replace_regex_str(args: &[Value], s: &str, pat: &str, rep: &str) -> Result<Value, NativeError> {
+    match crate::re::replace_all_fast(pat, s, rep)? {
+        Cow::Borrowed(b) if b.len() == s.len() => Ok(args[0].clone()),
+        Cow::Borrowed(b) => Ok(Value::Str(Arc::from(b))),
+        Cow::Owned(out) => Ok(Value::Str(Arc::from(out.as_str()))),
+    }
+}
+
+fn lite_replace(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.string/replace", args, &[3])?;
+    let s = meth(eval, "toString", &args[0], &[])?;
+    let m = &args[1];
+    let r = &args[2];
+    if matches!(m, Value::Char(_)) || crate::classemu::char_sequence_text(m).is_some() {
+        return meth(eval, "replace", &s, &args[1..]);
+    }
+    if let Value::Regex(pat) = m {
+        let s_text = crate::ns::str_of(&s);
+        if crate::classemu::char_sequence_text(r).is_some() {
+            let rs = meth(eval, "toString", r, &[])?;
+            let rt = crate::ns::str_of(&rs);
+            return replace_regex_str(std::slice::from_ref(&s), &s_text, pat, &rt);
+        }
+        return lite_replace_by(eval, &s, &s_text, pat, r);
+    }
+    Err(NativeError::new(
+        ThrowClass::IllegalArgumentException,
+        format!("Invalid match arg: {}", crate::ns::str_of(m)),
+    ))
+}
+
+fn lite_replace_by(
+    eval: &mut Evaluator,
+    orig: &Value,
+    s: &str,
+    pat: &str,
+    f: &Value,
+) -> Result<Value, NativeError> {
+    let re = crate::re::compile_source(pat)?;
+    let mut out = String::new();
+    let mut last = 0usize;
+    let mut matched = false;
+    for caps in re.captures_iter(s) {
+        let m = caps.get(0).expect("full match");
+        if !matched {
+            out.reserve(s.len());
+            matched = true;
+        }
+        out.push_str(&s[last..m.start()]);
+        let grp = crate::re::groups_value(&caps);
+        let repl = eval.call(f, &[grp]).map_err(signal_to_native)?;
+        let text = meth(eval, "toString", &repl, &[])?;
+        out.push_str(&crate::ns::str_of(&text));
+        last = m.end();
+    }
+    if !matched {
+        return Ok(orig.clone());
+    }
+    out.push_str(&s[last..]);
+    Ok(Value::Str(Arc::from(out.as_str())))
+}
+
 /// Lite `join`: `(apply str coll)`, or `(str sep)` between each item's
 /// `str` (the seq walk raises `seq`'s own errors; `str` runs no user
 /// code under Lite, so stringifying the separator first is unobservable).
@@ -570,5 +664,78 @@ mod tests {
             let (lite, fast) = (lite_blank(&mut eval, &arg), native_blank(&mut eval, &arg));
             assert_eq!(lite.ok(), fast.ok(), "blank? {s:?}");
         }
+    }
+
+    #[test]
+    fn native_and_lite_replace_cover_fast_paths_and_fallbacks_271() {
+        use super::{lite_replace, native_replace};
+        let mut eval = crate::aot_boot::boot_lite(
+            &[("clojure.string", "replace"), ("clojure.core", "str")],
+            false,
+        );
+        let s = |t: &str| Value::Str(Arc::from(t));
+        let re = |p: &str| Value::Regex(Arc::from(p));
+        // Anchored ^c+ and c+$ fast paths (hit, miss, empty & non-empty rep) + general regex
+        for (input, pat, rep, expect) in [
+            ("000123", "^0+", "", "123"),
+            ("123", "^0+", "", "123"),
+            ("000123", "^0+", "X", "X123"),
+            ("123000", "0+$", "", "123"),
+            ("123", "0+$", "", "123"),
+            ("123000", "0+$", "Y", "123Y"),
+            ("000123", "^0+", "$0", "000123"),
+            ("a1b2", r"\d", "N", "aNbN"),
+            ("abc", r"\d", "N", "abc"),
+            ("...", "^.+", "z", "z"),
+        ] {
+            let args = [s(input), re(pat), s(rep)];
+            assert_eq!(native_replace(&mut eval, &args).unwrap(), s(expect));
+            assert_eq!(lite_replace(&mut eval, &args).unwrap(), s(expect));
+        }
+        // Char/Char and Str/Str hit & miss
+        for (args, expect) in [
+            ([s("banana"), Value::Char('a'), Value::Char('o')], "bonono"),
+            ([s("xyz"), Value::Char('a'), Value::Char('o')], "xyz"),
+            ([s("foo-foo"), s("foo"), s("bar")], "bar-bar"),
+            ([s("xyz"), s("foo"), s("bar")], "xyz"),
+        ] {
+            assert_eq!(native_replace(&mut eval, &args).unwrap(), s(expect));
+            assert_eq!(lite_replace(&mut eval, &args).unwrap(), s(expect));
+        }
+        // Callable replacement via both native_replace and lite_replace
+        let mut full = crate::boot();
+        let f = full
+            .eval_source("(fn [m] (str \"<\" m \">\"))")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            native_replace(&mut full, &[s("a1b2"), re(r"\d"), f.clone()]).unwrap(),
+            s("a<1>b<2>")
+        );
+        assert_eq!(
+            native_replace(&mut full, &[s("abc"), re(r"\d"), f.clone()]).unwrap(),
+            s("abc")
+        );
+        assert_eq!(
+            lite_replace(&mut full, &[s("a1"), re(r"\d"), f]).unwrap(),
+            s("a<1>")
+        );
+        // Errors: wrong arity, invalid match arg, nil receiver
+        assert!(native_replace(&mut eval, &[s("a")]).is_err());
+        assert!(native_replace(&mut eval, &[s("a"), Value::Int(1), s("b")]).is_err());
+        assert!(native_replace(&mut eval, &[Value::Nil, s("a"), s("b")]).is_err());
+        // Owned & borrowed fnil paths (update + direct apply)
+        let res = full
+            .eval_source(
+                "(= [(update {} :a (fnil conj #{}) 1)
+                     (apply (fnil + 10 20) [nil 5])
+                     (try ((fnil + 10 20) 1) (catch Exception _ :arity))]
+                    [{:a #{1}} 15 :arity])",
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(res, Value::Bool(true));
     }
 }

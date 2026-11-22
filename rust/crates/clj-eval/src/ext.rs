@@ -312,6 +312,7 @@ impl NativeTarget {
 pub enum OwnedTarget {
     Ptr(crate::ns::OwnedNativeFnPtr),
     Compiled { desc: usize, captured: Arc<[Value]> },
+    Dyn(Arc<OwnedNativeImpl>),
 }
 
 impl OwnedTarget {
@@ -323,6 +324,7 @@ impl OwnedTarget {
             Self::Compiled { desc, captured } => {
                 (compiled_dispatch().call_owned)(eval, *desc, captured, args)
             }
+            Self::Dyn(f) => f(eval, args),
         }
     }
 }

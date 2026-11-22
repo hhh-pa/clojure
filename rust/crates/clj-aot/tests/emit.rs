@@ -924,15 +924,15 @@ fn native_emit_splices_clojure_set_under_lite_only() {
     assert!(full.contains("@rt_n_main("), "{full}");
     assert!(!full.contains("_clojure_set_union"), "{full}");
     // `clojure.string` splices only what no Lite native covers
-    // (`replace` and its helper); redefining a native-served var still
+    // (`replace-first` and its helpers); redefining a native-served var still
     // takes the full boot.
     let (_, lite) = emit(
         "string",
         "(ns demo.str (:require [clojure.string :as str]))
-         (println (str/replace \"a1\" #\"\\d\" \"x\") (str/join [1]))",
+         (println (str/replace-first \"a1\" #\"\\d\" \"x\") (str/join [1]))",
     );
     assert!(lite.contains("@rt_n_main_lite("), "{lite}");
-    assert!(lite.contains("_clojure_string_replace_by"), "{lite}");
+    assert!(lite.contains("_clojure_string_replace_first_by"), "{lite}");
     assert!(!lite.contains("_clojure_string_join"), "{lite}");
     let (_, redef) = emit(
         "string-redef",

@@ -641,19 +641,28 @@ mod tests {
                 .collect();
             (front.libs.clone(), names)
         };
-        // `replace` (no Lite native) and its private helper splice, after the
-        // namespace's clause-free `ns` form; natives and unused defs do not.
+        // `replace-first` (no Lite native) and its private helpers splice, after
+        // the namespace's clause-free `ns` form; natives and unused defs do not.
         let (libs, names) = defs(
             "(ns t (:require [clojure.string :as str])) \
-             (println (str/replace \"a1\" #\"\\d\" \"x\") (str/join [1]))",
+             (println (str/replace-first \"a1\" #\"\\d\" \"x\") (str/join [1]))",
         );
         assert_eq!(libs, ["clojure.string"]);
-        assert_eq!(names, ["ns clojure.string 0", "replace-by", "replace"]);
+        assert_eq!(
+            names,
+            [
+                "ns clojure.string 0",
+                "replace-first-by",
+                "replace-first-char",
+                "replace-first-str",
+                "replace-first"
+            ]
+        );
         // Nothing to splice: only natives, a runtime var lookup, a var the
         // library does not define.
         for src in [
-            "(ns t (:require [clojure.string :as str])) (println (str/join [1]))",
-            "(ns t (:require [clojure.string :as str])) (println (resolve 'str/join) (str/replace \"a\" \"a\" \"b\"))",
+            "(ns t (:require [clojure.string :as str])) (println (str/join [1]) (str/replace \"a\" \"a\" \"b\"))",
+            "(ns t (:require [clojure.string :as str])) (println (resolve 'str/join) (str/replace-first \"a\" \"a\" \"b\"))",
             "(ns t (:require [clojure.string :as str])) (in-ns 'clojure.string) (def extra 1) (in-ns 't) (println str/extra)",
         ] {
             assert_eq!(defs(src), (Vec::new(), Vec::new()), "{src}");

@@ -159,7 +159,7 @@ fn match_text(v: &Value) -> Result<&str, NativeError> {
 /// One `re-groups`: the whole match when the pattern holds no
 /// groups, else the `[full g1 ...]` vector (nil for unmatched
 /// groups, like `Matcher.group` returning null).
-fn groups_value(caps: &regex::Captures<'_>) -> Value {
+pub(crate) fn groups_value(caps: &regex::Captures<'_>) -> Value {
     if caps.len() == 1 {
         let text = caps.get(0).map_or("", |m| m.as_str());
         return Value::Str(Arc::from(text));
@@ -172,6 +172,71 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
         }
     }
     Value::Vector(Vector::from_vec(items))
+}
+
+fn is_plain_regex_char(c: char) -> bool {
+    !matches!(
+        c,
+        '.' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\' | '^' | '$'
+    )
+}
+
+fn single_plain_char(s: &str) -> Option<char> {
+    let mut it = s.chars();
+    let c = it.next()?;
+    (it.next().is_none() && is_plain_regex_char(c)).then_some(c)
+}
+
+fn anchored_trim_replace<'a>(
+    text: &'a str,
+    rest: &'a str,
+    replacement: &str,
+    prefix: bool,
+) -> std::borrow::Cow<'a, str> {
+    if rest.len() == text.len() {
+        std::borrow::Cow::Borrowed(text)
+    } else if replacement.is_empty() {
+        std::borrow::Cow::Borrowed(rest)
+    } else if prefix {
+        std::borrow::Cow::Owned(format!("{replacement}{rest}"))
+    } else {
+        std::borrow::Cow::Owned(format!("{rest}{replacement}"))
+    }
+}
+
+/// Fast path for `clojure.string/replace` / `Matcher.replaceAll` over
+/// simple anchored single-character repeats (`^c+`, `c+$`) when the
+/// replacement has no `$` or `\` escapes; all other patterns use the
+/// cached compiled [`Regex`].
+pub(crate) fn replace_all_fast<'a>(
+    source: &str,
+    text: &'a str,
+    replacement: &str,
+) -> Result<std::borrow::Cow<'a, str>, NativeError> {
+    if !replacement.contains('$') && !replacement.contains('\\') {
+        if let Some(c) = source
+            .strip_prefix('^')
+            .and_then(|s| s.strip_suffix('+'))
+            .and_then(single_plain_char)
+        {
+            return Ok(anchored_trim_replace(
+                text,
+                text.trim_start_matches(c),
+                replacement,
+                true,
+            ));
+        }
+        if let Some(c) = source.strip_suffix("+$").and_then(single_plain_char) {
+            return Ok(anchored_trim_replace(
+                text,
+                text.trim_end_matches(c),
+                replacement,
+                false,
+            ));
+        }
+    }
+    let re = compile_source(source)?;
+    Ok(re.replace_all(text, replacement))
 }
 
 /// Split `text` around matches of the `source` pattern (the

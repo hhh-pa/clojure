@@ -132,17 +132,44 @@ fn push_normalized(out: &mut String, s: &str) {
     out.push_str(rest);
 }
 
+/// Normalize `\r\n` and bare `\r` to `\n` in place on raw UTF-8 bytes
+/// (0x0D and 0x0A never appear as UTF-8 continuation bytes, so UTF-8
+/// validity is preserved identically).
+fn normalize_cr_in_place(buf: &mut Vec<u8>) {
+    let mut r = 0usize;
+    let mut w = 0usize;
+    while r < buf.len() {
+        if buf[r] == b'\r' {
+            buf[w] = b'\n';
+            w += 1;
+            r += 1;
+            if r < buf.len() && buf[r] == b'\n' {
+                r += 1;
+            }
+        } else {
+            buf[w] = buf[r];
+            w += 1;
+            r += 1;
+        }
+    }
+    buf.truncate(w);
+}
+
 /// Drain the live stdin reader into `out`: one buffer grown as the input
 /// arrives and never zero-filled, validated once. Most inputs are tens
 /// of bytes, and the previous zeroed 8 KiB first chunk cost ~8K
 /// instructions per program (#271). std's `read_to_end` probes small
 /// inputs on the stack, retries interrupted reads, and grows large
-/// buffers by `realloc`.
+/// buffers by `realloc`; CRLF inputs normalize in place without a second
+/// full-file copy.
 fn slurp_buf_reader(src: &mut dyn Read, out: &mut String) -> Result<(), NativeError> {
     let mut buf = Vec::new();
     src.read_to_end(&mut buf)
         .map_err(|e| NativeError::new(ThrowClass::IOException, e.to_string()))?;
-    if out.is_empty() && !buf.contains(&b'\r') {
+    if out.is_empty() {
+        if buf.contains(&b'\r') {
+            normalize_cr_in_place(&mut buf);
+        }
         *out = String::from_utf8(buf).map_err(|_| utf8_io_err())?;
         return Ok(());
     }
