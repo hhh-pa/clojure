@@ -280,6 +280,9 @@ impl PieceVec for Vec<(usize, usize)> {
 
 impl PieceVec for Vec<(u32, u32)> {
     fn push_piece(&mut self, start: usize, end: usize) {
+        if self.len() == self.capacity() && self.capacity() >= 32 * 1024 {
+            self.reserve_exact(self.capacity() / 2);
+        }
         self.push((start as u32, (end - start) as u32));
     }
     fn pop_piece(&mut self) {
@@ -346,7 +349,9 @@ fn split_pieces(
         .then(|| pattern_pieces_vec::<Vec<(u32, u32)>>(text, source, limit))
         .transpose()?;
     match spans {
-        Some(mut spans) if spans.len() >= SPLIT_LAZY_MIN => {
+        Some(mut spans)
+            if spans.len() >= SPLIT_LAZY_MIN || (spans.len() >= 2 && text.len() >= 4096) =>
+        {
             spans.shrink_to_fit();
             Ok(Value::Extension(Arc::new(SplitVecValue::new(
                 Arc::clone(base),
@@ -921,6 +926,17 @@ mod tests {
             split_pieces(&large, ",", 0, true).expect("large split"),
             Value::Extension(_)
         ));
+        let few_big: Arc<str> = Arc::from(format!("{},{}", "a".repeat(2500), "b".repeat(2500)));
+        assert!(matches!(
+            split_pieces(&few_big, ",", 0, true).expect("few big split"),
+            Value::Extension(_)
+        ));
+        let mut big_spans: Vec<(u32, u32)> = Vec::with_capacity(32 * 1024);
+        for i in 0..(32 * 1024) {
+            big_spans.push((i as u32, 1));
+        }
+        big_spans.push_piece(0, 1);
+        assert_eq!(big_spans.len(), 32 * 1024 + 1);
         assert!(split_pieces(&base, "(", 0, true).is_err());
     }
 

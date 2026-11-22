@@ -194,6 +194,20 @@ struct FnCtx<'ctx> {
     inline_depth: usize,
     /// Total inlined calls in this function (caps code-size growth).
     inlined_count: usize,
+    /// Lowest env index eligible for mid-block dead-local drops in the
+    /// active tail scope (`captures_end` for non-recurring arities, else
+    /// the innermost non-tail `let` depth).
+    tail_min: usize,
+    /// Whether the expression currently being lowered is in tail position
+    /// of the scope starting at `tail_min`.
+    in_tail: bool,
+    /// Un-taken symbol parameters (`env_idx -> args_idx`) that point into
+    /// the caller's argument array and may be dropped early only when the
+    /// caller passed ownership (`param_take_flag`).
+    borrowed_params: HashMap<usize, usize>,
+    /// Env indices of `let`-bound locals known to hold POD values (skip
+    /// mid-block early drop checks).
+    pod_locals: HashSet<usize>,
 }
 
 const INLINE_MAX_DEPTH: usize = 3;
@@ -344,10 +358,13 @@ impl<'ctx> Lowerer<'ctx> {
         };
         self.inline_arith = !units.iter().any(|u| mentions_rebinding(&u.expr));
         self.var_meta = !self.lite || program_reads_var_meta(units);
+        if self.lite {
+            let stable_candidates = stable_vars(units);
+            self.dead = dead_defs(units, &stable_candidates, self.var_meta);
+        }
         self.reserve_defns(units);
         if self.lite {
             self.reserve_stable(units);
-            self.dead = dead_defs(units, &self.stable);
         }
         let mut tops = Vec::with_capacity(units.len());
         for (ui, unit) in units.iter().enumerate() {
@@ -370,7 +387,10 @@ impl<'ctx> Lowerer<'ctx> {
     /// `def` copies the root in, and its set flag. Globals are numbered in
     /// var order so the module text is reproducible.
     fn reserve_stable(&mut self, units: &[TopUnit]) {
-        let mut found: Vec<((String, String), usize)> = stable_vars(units).into_iter().collect();
+        let mut found: Vec<((String, String), usize)> = stable_vars(units)
+            .into_iter()
+            .filter(|&(_, unit)| !self.dead.contains(&unit))
+            .collect();
         found.sort();
         for (i, (key, unit)) in found.into_iter().enumerate() {
             let root = self
@@ -415,7 +435,10 @@ impl<'ctx> Lowerer<'ctx> {
                 }
             }
         }
-        for u in units {
+        for (ui, u) in units.iter().enumerate() {
+            if self.dead.contains(&ui) {
+                continue;
+            }
             let Expr::Def {
                 sym,
                 init: Some(init),
@@ -676,6 +699,10 @@ impl<'ctx> Lowerer<'ctx> {
             moves: Vec::new(),
             inline_depth: 0,
             inlined_count: 0,
+            tail_min: usize::MAX,
+            in_tail: false,
+            borrowed_params: HashMap::new(),
+            pod_locals: HashSet::new(),
         }
     }
 
@@ -1329,9 +1356,14 @@ impl<'ctx> Lowerer<'ctx> {
         let owned = self_recurs(&arity.body);
         let n_param = f.func.get_nth_param(2).expect("n").into_int_value();
         let mut targets = Vec::with_capacity(pats.len());
+        let mut sym_params = Vec::new();
         for (i, pat) in pats.iter().enumerate() {
             let arg = self.elem(args, i);
+            let env_idx = f.env.len();
             let slots = self.bind_param(&mut f, pat, arg, n_param, i, owned)?;
+            if !owned && matches!(pat, Pattern::Symbol(_)) {
+                sym_params.push((env_idx, i));
+            }
             targets.push(((*pat).clone(), slots));
         }
         let min_slot = if owned { captures_end } else { f.env.len() };
@@ -1346,6 +1378,15 @@ impl<'ctx> Lowerer<'ctx> {
             captures_end
         };
         f.moves = collect_body_moves(&arity.body, min_slot, &f.env, &taken);
+        if !owned {
+            for (env_idx, param_i) in sym_params {
+                if !taken.contains(&env_idx) {
+                    f.borrowed_params.insert(env_idx, param_i);
+                }
+            }
+            f.tail_min = captures_end;
+            f.in_tail = true;
+        }
         let header = self.ctx.append_basic_block(f.func, "body");
         self.builder.build_unconditional_branch(header).expect("br");
         self.builder.position_at_end(header);
@@ -1719,17 +1760,84 @@ impl<'ctx> Lowerer<'ctx> {
         body: &[Expr],
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
+        let in_tail = std::mem::replace(&mut f.in_tail, false);
         let Some((last, init)) = body.split_last() else {
             self.write_nil(f.func, dest);
             return Ok(());
         };
-        for e in init {
+        for (i, e) in init.iter().enumerate() {
             if self.drops(e) {
                 continue;
             }
             self.lower_discard(f, e)?;
+            if in_tail {
+                self.drop_dead_after_stmt(f, e, &body[i + 1..]);
+            }
         }
+        f.in_tail = in_tail;
         self.lower(f, last, dest)
+    }
+
+    fn drop_dead_local(&self, f: &FnCtx<'ctx>, idx: usize) {
+        if f.pod_locals.contains(&idx) {
+            return;
+        }
+        let slot = self.local_slot(f, idx).expect("tail-scope local slot");
+        if let Some(&param_i) = f.borrowed_params.get(&idx) {
+            let n_param = f.func.get_nth_param(2).expect("n").into_int_value();
+            let take = self.param_take_flag(n_param, param_i);
+            let drop_b = self.ctx.append_basic_block(f.func, "param_drop");
+            let cont_b = self.ctx.append_basic_block(f.func, "param_cont");
+            self.builder
+                .build_conditional_branch(take, drop_b, cont_b)
+                .expect("br");
+            self.builder.position_at_end(drop_b);
+            self.drop_and_nil_slots(f.func, &[slot]);
+            self.builder.build_unconditional_branch(cont_b).expect("br");
+            self.builder.position_at_end(cont_b);
+            return;
+        }
+        self.drop_and_nil_slots(f.func, &[slot]);
+    }
+
+    fn drop_dead_after_stmt(&self, f: &FnCtx<'ctx>, stmt: &Expr, rest: &[Expr]) {
+        if !expr_has_loop(stmt) {
+            return;
+        }
+        for idx in f.tail_min..f.env.len() {
+            if expr_reads_local(stmt, idx)
+                && !expr_moves_local(stmt, idx, &f.moves)
+                && !rest.iter().any(|r| expr_reads_local(r, idx))
+            {
+                self.drop_dead_local(f, idx);
+            }
+        }
+    }
+
+    fn drop_dead_after_binding(
+        &self,
+        f: &FnCtx<'ctx>,
+        env_before: usize,
+        pat: &Pattern,
+        init: &Expr,
+        rest_bindings: &[(Pattern, Expr)],
+        body: &[Expr],
+    ) {
+        if !expr_has_loop(init) {
+            return;
+        }
+        for idx in f.tail_min..env_before {
+            let read_here = expr_reads_local(init, idx) || pat_reads_local(pat, idx);
+            if read_here
+                && !expr_moves_local(init, idx, &f.moves)
+                && !rest_bindings
+                    .iter()
+                    .any(|(p, e)| expr_reads_local(e, idx) || pat_reads_local(p, idx))
+                && !body.iter().any(|e| expr_reads_local(e, idx))
+            {
+                self.drop_dead_local(f, idx);
+            }
+        }
     }
 
     /// Whether a discarded statement can go unlowered: a value with no
@@ -1737,8 +1845,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// inert metadata write ([`is_inert_meta_statement`]) in a program
     /// that never reads var metadata.
     fn drops(&self, e: &Expr) -> bool {
-        matches!(e, Expr::VarRef(_) | Expr::Literal(_) | Expr::Quote(_))
-            || (!self.var_meta && is_inert_meta_statement(e))
+        drops_unit(e, self.var_meta)
     }
 
     fn bc_fx_call<'a>(
@@ -1821,6 +1928,7 @@ impl<'ctx> Lowerer<'ctx> {
         expr: &Expr,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
+        let in_tail = std::mem::replace(&mut f.in_tail, false);
         match expr {
             Expr::Literal(v) | Expr::Quote(v) => self.lower_const(f.func, v, dest),
             Expr::Local(i) => self.lower_local(f, expr, *i, dest),
@@ -1837,9 +1945,12 @@ impl<'ctx> Lowerer<'ctx> {
                 self.call("rt_n_varref", None, &[dest.into(), self.u64c(k)]);
                 Ok(())
             }
-            Expr::If { test, then, els } => self.lower_if(f, test, then, els, dest),
-            Expr::Do(body) => self.lower_body(f, body, dest),
-            Expr::Let { bindings, body } => self.lower_let(f, bindings, body, dest),
+            Expr::If { test, then, els } => self.lower_if(f, test, then, els, in_tail, dest),
+            Expr::Do(body) => {
+                f.in_tail = in_tail;
+                self.lower_body(f, body, dest)
+            }
+            Expr::Let { bindings, body } => self.lower_let(f, bindings, body, in_tail, dest),
             Expr::Loop { bindings, body } => self.lower_loop(f, bindings, body, dest),
             Expr::Recur(args) => self.lower_recur(f, args),
             Expr::Invoke { head, args, .. } => self.lower_invoke(f, head, args, dest),
@@ -2307,16 +2418,24 @@ impl<'ctx> Lowerer<'ctx> {
         f: &mut FnCtx<'ctx>,
         bindings: &[(Pattern, Expr)],
         body: &[Expr],
+        in_tail: bool,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
         let depth = f.env.len();
         let let_depth = f.let_slots.len();
+        let saved_tail_min = f.tail_min;
+        if !in_tail {
+            f.tail_min = depth;
+        }
         let mut bound = Vec::new();
-        self.lower_let_bindings(f, bindings, &mut bound)?;
+        self.lower_let_bindings(f, bindings, body, &mut bound)?;
         f.let_slots.extend_from_slice(&bound);
+        f.in_tail = true;
         self.lower_body(f, body, dest)?;
+        f.tail_min = saved_tail_min;
         f.let_slots.truncate(let_depth);
         f.env.truncate(depth);
+        f.pod_locals.retain(|&i| i < depth);
         // Release let-bound values at scope end (RSS parity).
         self.free_slots(f, &bound);
         Ok(())
@@ -2326,9 +2445,11 @@ impl<'ctx> Lowerer<'ctx> {
         &mut self,
         f: &mut FnCtx<'ctx>,
         bindings: &[(Pattern, Expr)],
+        body: &[Expr],
         bound: &mut Vec<PointerValue<'ctx>>,
     ) -> Result<(), Unsupported> {
-        for (pat, init) in bindings {
+        for (i, (pat, init)) in bindings.iter().enumerate() {
+            let env_before = f.env.len();
             if let Pattern::Vec(vp) = pat
                 && vp.rest.is_none()
                 && vp.as_sym.is_none()
@@ -2345,7 +2466,11 @@ impl<'ctx> Lowerer<'ctx> {
                 let t = self.slot(f);
                 self.lower(f, init, t)?;
                 self.bind_owned_slot(f, pat, t, bound)?;
+                if matches!(pat, Pattern::Symbol(_)) && is_pod_expr(init) {
+                    f.pod_locals.insert(env_before);
+                }
             }
+            self.drop_dead_after_binding(f, env_before, pat, init, &bindings[i + 1..], body);
         }
         Ok(())
     }
@@ -2395,12 +2520,17 @@ impl<'ctx> Lowerer<'ctx> {
         body: &[Expr],
         dests: &[PointerValue<'ctx>],
     ) -> Result<(), Unsupported> {
+        let in_tail = std::mem::replace(&mut f.in_tail, false);
         let (last, rest) = body.split_last().expect("non-empty body");
-        for e in rest {
+        for (i, e) in rest.iter().enumerate() {
             let t = self.slot(f);
             self.lower(f, e, t)?;
             self.free_slots(f, &[t]);
+            if in_tail {
+                self.drop_dead_after_stmt(f, e, &body[i + 1..]);
+            }
         }
+        f.in_tail = in_tail;
         self.lower_vec_destructure(f, last, dests)
     }
 
@@ -2410,6 +2540,7 @@ impl<'ctx> Lowerer<'ctx> {
         e: &Expr,
         dests: &[PointerValue<'ctx>],
     ) -> Result<(), Unsupported> {
+        let in_tail = std::mem::replace(&mut f.in_tail, false);
         match e {
             Expr::VecLit(elems, None) if elems.len() == dests.len() => {
                 for (elem, &d) in elems.iter().zip(dests) {
@@ -2417,11 +2548,16 @@ impl<'ctx> Lowerer<'ctx> {
                 }
                 Ok(())
             }
-            Expr::If { test, then, els } => self.lower_if_destructure(f, test, then, els, dests),
-            Expr::Let { bindings, body } if !body.is_empty() => {
-                self.lower_let_destructure(f, bindings, body, dests)
+            Expr::If { test, then, els } => {
+                self.lower_if_destructure(f, test, then, els, in_tail, dests)
             }
-            Expr::Do(forms) if !forms.is_empty() => self.lower_body_destructure(f, forms, dests),
+            Expr::Let { bindings, body } if !body.is_empty() => {
+                self.lower_let_destructure(f, bindings, body, in_tail, dests)
+            }
+            Expr::Do(forms) if !forms.is_empty() => {
+                f.in_tail = in_tail;
+                self.lower_body_destructure(f, forms, dests)
+            }
             Expr::Loop { bindings, body } if !body.is_empty() => {
                 self.lower_loop_destructure(f, bindings, body, dests)
             }
@@ -2458,6 +2594,7 @@ impl<'ctx> Lowerer<'ctx> {
         test: &Expr,
         then: &Expr,
         els: &Expr,
+        in_tail: bool,
         dests: &[PointerValue<'ctx>],
     ) -> Result<(), Unsupported> {
         let then_b = self.ctx.append_basic_block(f.func, "then");
@@ -2465,9 +2602,11 @@ impl<'ctx> Lowerer<'ctx> {
         let merge = self.ctx.append_basic_block(f.func, "merge");
         self.lower_cond(f, test, then_b, else_b)?;
         self.builder.position_at_end(then_b);
+        f.in_tail = in_tail;
         self.lower_vec_destructure(f, then, dests)?;
         self.builder.build_unconditional_branch(merge).expect("br");
         self.builder.position_at_end(else_b);
+        f.in_tail = in_tail;
         self.lower_vec_destructure(f, els, dests)?;
         self.builder.build_unconditional_branch(merge).expect("br");
         self.builder.position_at_end(merge);
@@ -2479,16 +2618,24 @@ impl<'ctx> Lowerer<'ctx> {
         f: &mut FnCtx<'ctx>,
         bindings: &[(Pattern, Expr)],
         body: &[Expr],
+        in_tail: bool,
         dests: &[PointerValue<'ctx>],
     ) -> Result<(), Unsupported> {
         let depth = f.env.len();
         let let_depth = f.let_slots.len();
+        let saved_tail_min = f.tail_min;
+        if !in_tail {
+            f.tail_min = depth;
+        }
         let mut bound = Vec::new();
-        self.lower_let_bindings(f, bindings, &mut bound)?;
+        self.lower_let_bindings(f, bindings, body, &mut bound)?;
         f.let_slots.extend_from_slice(&bound);
+        f.in_tail = true;
         self.lower_body_destructure(f, body, dests)?;
+        f.tail_min = saved_tail_min;
         f.let_slots.truncate(let_depth);
         f.env.truncate(depth);
+        f.pod_locals.retain(|&i| i < depth);
         self.free_slots(f, &bound);
         Ok(())
     }
@@ -2679,6 +2826,10 @@ impl<'ctx> Lowerer<'ctx> {
         let saved_env = std::mem::take(&mut f.env);
         let saved_recur = std::mem::take(&mut f.recur);
         let saved_moves = std::mem::take(&mut f.moves);
+        let saved_borrowed = std::mem::take(&mut f.borrowed_params);
+        let saved_pods = std::mem::take(&mut f.pod_locals);
+        let saved_tail_min = std::mem::replace(&mut f.tail_min, usize::MAX);
+        let saved_in_tail = std::mem::replace(&mut f.in_tail, false);
         let saved_captured = f.captured;
         let let_depth = f.let_slots.len();
         f.captured = self.ptr.const_null();
@@ -2693,6 +2844,10 @@ impl<'ctx> Lowerer<'ctx> {
         f.env = saved_env;
         f.recur = saved_recur;
         f.moves = saved_moves;
+        f.borrowed_params = saved_borrowed;
+        f.pod_locals = saved_pods;
+        f.tail_min = saved_tail_min;
+        f.in_tail = saved_in_tail;
         f.captured = saved_captured;
         res?;
         self.free_slots(f, &owned_slots);
@@ -3567,7 +3722,10 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        if self.try_lower_dot_product(f, call, dest)? || self.try_lower_print_join(f, call, dest)? {
+        if self.try_lower_dot_product(f, call, dest)?
+            || self.try_lower_print_join(f, call, dest)?
+            || self.try_lower_mapv_global_parse(f, call, dest)?
+        {
             return Ok(true);
         }
         let Some(hl) = hof_loop(call) else {
@@ -3585,6 +3743,75 @@ impl<'ctx> Lowerer<'ctx> {
         let lowered = self.lower_hof_loop(f, &hl, base, dest);
         f.moves = enclosing;
         lowered?;
+        Ok(true)
+    }
+
+    fn global_parse_num_mode(&self, var: &clj_value::Var) -> Option<u8> {
+        if var.sym.namespace() == Some("clojure.core") {
+            return match var.sym.name() {
+                "parse-long" => Some(0),
+                "parse-double" => Some(2),
+                _ => None,
+            };
+        }
+        let sr = self.stable_of(var)?;
+        if !self.stable_unchecked(sr) {
+            return None;
+        }
+        let arities = self.callees.get(&var_key(&var.sym))?;
+        let arity = arities
+            .iter()
+            .find(|a| a.rest.is_none() && a.fixed.len() == 1)?;
+        matches!(arity.fixed[0], Pattern::Symbol(_))
+            .then(|| parse_num_arity(arity, 0))
+            .flatten()
+    }
+
+    fn try_lower_mapv_global_parse(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "mapv" {
+            return Ok(false);
+        }
+        let [Expr::Global(var), coll] = call.args.as_slice() else {
+            return Ok(false);
+        };
+        let Some(mode) = self.global_parse_num_mode(var) else {
+            return Ok(false);
+        };
+        let coll_s = self.slot(f);
+        self.lower(f, coll, coll_s)?;
+        let done = self.ctx.append_basic_block(f.func, "mp_done");
+        let slow = self.ctx.append_basic_block(f.func, "mp_slow");
+        let hit = self
+            .call(
+                "rt_n_mapv_parse_num",
+                Some(self.i8t),
+                &[
+                    dest.into(),
+                    coll_s.into(),
+                    self.i8t.const_int(u64::from(mode), false).into(),
+                ],
+            )
+            .expect("hit");
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, hit, self.i8t.const_zero(), "mp_ok")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(ok, done, slow)
+            .expect("br");
+        self.builder.position_at_end(slow);
+        let fn_s = self.slot(f);
+        self.lower(f, &call.args[0], fn_s)?;
+        self.core_call_owned(f, call, &[fn_s, coll_s], dest);
+        self.free_slots(f, &[fn_s]);
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        self.free_slots(f, &[coll_s]);
         Ok(true)
     }
 
@@ -6047,22 +6274,81 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(true)
     }
 
+    fn try_lower_parse_ascii_long_if(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        test: &Expr,
+        then: &Expr,
+        els: &Expr,
+        in_tail: bool,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if !self.inline_arith {
+            return Ok(false);
+        }
+        let Some((tok, mode)) = parse_ascii_long_if(test, then, els) else {
+            return Ok(false);
+        };
+        if !matches!(
+            f.env.get(tok),
+            Some(Some(LocalRef::Slot(_) | LocalRef::Captured(_)))
+        ) {
+            return Ok(false);
+        }
+        let slot = self.local_slot(f, tok).expect("checked local slot");
+        let hit = self
+            .call(
+                "rt_n_mapv_parse_num",
+                Some(self.i8t),
+                &[
+                    dest.into(),
+                    slot.into(),
+                    self.i8t.const_int(u64::from(mode), false).into(),
+                ],
+            )
+            .expect("hit");
+        if mode != 5 {
+            return Ok(true);
+        }
+        let else_b = self.ctx.append_basic_block(f.func, "pl_else");
+        let merge = self.ctx.append_basic_block(f.func, "pl_done");
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, hit, self.i8t.const_zero(), "pl_ok")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(ok, merge, else_b)
+            .expect("br");
+        self.builder.position_at_end(else_b);
+        f.in_tail = in_tail;
+        self.lower(f, els, dest)?;
+        self.builder.build_unconditional_branch(merge).expect("br");
+        self.builder.position_at_end(merge);
+        Ok(true)
+    }
+
     fn lower_if(
         &mut self,
         f: &mut FnCtx<'ctx>,
         test: &Expr,
         then: &Expr,
         els: &Expr,
+        in_tail: bool,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
+        if self.try_lower_parse_ascii_long_if(f, test, then, els, in_tail, dest)? {
+            return Ok(());
+        }
         let then_b = self.ctx.append_basic_block(f.func, "then");
         let else_b = self.ctx.append_basic_block(f.func, "else");
         let merge = self.ctx.append_basic_block(f.func, "merge");
         self.lower_cond(f, test, then_b, else_b)?;
         self.builder.position_at_end(then_b);
+        f.in_tail = in_tail;
         self.lower(f, then, dest)?;
         self.builder.build_unconditional_branch(merge).expect("br");
         self.builder.position_at_end(else_b);
+        f.in_tail = in_tail;
         self.lower(f, els, dest)?;
         self.builder.build_unconditional_branch(merge).expect("br");
         self.builder.position_at_end(merge);
@@ -7391,8 +7677,62 @@ fn print_join_call(call: &clj_eval::expr::DirectCall) -> Option<PrintJoin<'_>> {
     (name == "print").then(|| print_str_join_nl(arg)).flatten()
 }
 
-fn parse_num_arity(arity: &Arity, base: usize) -> Option<u8> {
-    let [Expr::Invoke { head, args, .. }] = arity.body.as_slice() else {
+fn unwrap_single_do(e: &Expr) -> &Expr {
+    match e {
+        Expr::Do(xs) if xs.len() == 1 => &xs[0],
+        _ => e,
+    }
+}
+
+/// Match `(and (string? tok) (re-matches #"<pat>" tok))` returning `(tok, pat)`.
+fn match_str_re_matches_and(test: &Expr) -> Option<(usize, &str)> {
+    let Expr::Let { bindings, body } = test else {
+        return None;
+    };
+    let [(Pattern::Symbol(_), a)] = bindings.as_slice() else {
+        return None;
+    };
+    let [Expr::If { test, then: b, els }] = body.as_slice() else {
+        return None;
+    };
+    let (Expr::Local(g1), Expr::Local(g2)) = (test.as_ref(), els.as_ref()) else {
+        return None;
+    };
+    if g1 != g2 {
+        return None;
+    }
+    let ("string?", [Expr::Local(tok)]) = core_call(a)? else {
+        return None;
+    };
+    let ("re-matches", [Expr::Literal(Value::Regex(pat)), Expr::Local(tok2)]) = core_call(b)?
+    else {
+        return None;
+    };
+    (tok == tok2 && tok != g1).then_some((*tok, pat.as_ref()))
+}
+
+/// Match `(if (and (string? tok) (re-matches #"<pat>" tok)) (parse-long tok) els)`
+/// returning `(tok, mode)` (`4` `[+-]?[0-9]+` with nil `els`, `7` `-?[0-9]+` with
+/// nil `els`, `5` `[+-]?[0-9]{1,18}` with any `els`).
+fn parse_ascii_long_if(test: &Expr, then: &Expr, els: &Expr) -> Option<(usize, u8)> {
+    let (tok, pat) = match_str_re_matches_and(test)?;
+    let ("parse-long", [Expr::Local(tok3)]) = core_call(unwrap_single_do(then))? else {
+        return None;
+    };
+    if *tok3 != tok {
+        return None;
+    }
+    let nil_els = matches!(els, Expr::Literal(Value::Nil));
+    match pat {
+        "[+-]?[0-9]+" if nil_els => Some((tok, 4)),
+        "-?[0-9]+" if nil_els => Some((tok, 7)),
+        "[+-]?[0-9]{1,18}" => Some((tok, 5)),
+        _ => None,
+    }
+}
+
+fn parse_static_num_arity(body: &Expr, base: usize) -> Option<u8> {
+    let Expr::Invoke { head, args, .. } = body else {
         return None;
     };
     if !is_core_global(head, "__static*") {
@@ -7404,6 +7744,23 @@ fn parse_num_arity(arity: &Arity, base: usize) -> Option<u8> {
         (StaticOp::Parse("rt_n_parse_double"), [Expr::Local(i)]) if *i == base => Some(2),
         _ => None,
     }
+}
+
+fn parse_num_arity(arity: &Arity, base: usize) -> Option<u8> {
+    let [body] = arity.body.as_slice() else {
+        return None;
+    };
+    if let Expr::If { test, then, els } = body
+        && let Some((tok, mode)) = parse_ascii_long_if(test, then, els)
+        && tok == base
+    {
+        return match mode {
+            4 => Some(3),
+            7 => Some(6),
+            _ => None,
+        };
+    }
+    parse_static_num_arity(body, base)
 }
 
 /// `call` as a [`HofLoop`]: `(mapv F xs [ys])`, `(filterv F xs)`, `(some F xs)`,
@@ -8212,14 +8569,138 @@ fn stable_vars(units: &[TopUnit]) -> HashMap<(String, String), usize> {
         .collect()
 }
 
+fn expr_has_loop(e: &Expr) -> bool {
+    if matches!(e, Expr::Loop { .. }) {
+        return true;
+    }
+    let mut hit = false;
+    for_each_child(e, &mut |c| {
+        if !hit && expr_has_loop(c) {
+            hit = true;
+        }
+    });
+    hit
+}
+
+fn expr_reads_local(e: &Expr, idx: usize) -> bool {
+    if let Expr::Local(i) = e
+        && *i == idx
+    {
+        return true;
+    }
+    let mut hit = false;
+    for_each_child(e, &mut |c| {
+        if !hit && expr_reads_local(c, idx) {
+            hit = true;
+        }
+    });
+    hit
+}
+
+fn pat_reads_local(pat: &Pattern, idx: usize) -> bool {
+    let mut hit = false;
+    pattern_children(pat, &mut |e| {
+        if !hit && expr_reads_local(e, idx) {
+            hit = true;
+        }
+    });
+    hit
+}
+
+fn is_pod_expr(e: &Expr) -> bool {
+    match e {
+        Expr::Literal(
+            Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Double(_) | Value::Char(_),
+        ) => true,
+        Expr::DirectNative(call) => {
+            call.var.sym.namespace() == Some("clojure.core")
+                && matches!(
+                    call.var.sym.name(),
+                    "count"
+                        | "+"
+                        | "-"
+                        | "*"
+                        | "inc"
+                        | "dec"
+                        | "quot"
+                        | "rem"
+                        | "mod"
+                        | "max"
+                        | "min"
+                        | "abs"
+                        | "bit-and"
+                        | "bit-or"
+                        | "bit-xor"
+                        | "bit-not"
+                        | "bit-shift-left"
+                        | "bit-shift-right"
+                        | "unsigned-bit-shift-right"
+                        | "="
+                        | "=="
+                        | "not="
+                        | "<"
+                        | "<="
+                        | ">"
+                        | ">="
+                        | "not"
+                        | "zero?"
+                        | "pos?"
+                        | "neg?"
+                        | "nil?"
+                        | "some?"
+                        | "even?"
+                        | "odd?"
+                        | "int"
+                        | "long"
+                        | "double"
+                        | "char"
+                        | "boolean"
+                        | "unchecked-add"
+                        | "unchecked-subtract"
+                        | "unchecked-multiply"
+                        | "unchecked-inc"
+                        | "unchecked-dec"
+                        | "unchecked-negate"
+                )
+        }
+        _ => false,
+    }
+}
+
+fn drops_unit(e: &Expr, var_meta: bool) -> bool {
+    matches!(e, Expr::VarRef(_) | Expr::Literal(_) | Expr::Quote(_))
+        || (!var_meta && is_inert_meta_statement(e))
+}
+
+fn record_unit_var_reads(u: &TopUnit, reads: &mut HashSet<(String, String)>) {
+    let own = match &u.expr {
+        Expr::Def {
+            sym,
+            init: Some(init),
+            ..
+        } if matches!(init.as_ref(), Expr::Fn(_)) => Some(var_key(sym)),
+        _ => None,
+    };
+    visit_var_reads(&u.expr, &mut |sym| {
+        let k = var_key(sym);
+        if own.as_ref() != Some(&k) {
+            reads.insert(k);
+        }
+    });
+}
+
 /// The top-level `def`s a Lite program can drop (#271): a stable var
 /// nothing reads, whose init is pure and total ([`is_pure_total`]), in a
 /// program that cannot find vars by name. The snippets' boilerplate
 /// tables are mostly unused (an unread `digit-values` `zipmap` in 177 of
-/// 220 scripts, `separators` sets, `max-long`), and each cost startup
-/// work. A dropped def's own reads no longer count, so the set grows to
-/// a fixpoint (`max-long` frees `min-long`).
-fn dead_defs<V>(units: &[TopUnit], stable: &HashMap<(String, String), V>) -> HashSet<usize> {
+/// 220 scripts, `separators` sets, `max-long`, unused `defn`s), and each
+/// cost startup work. A dropped def's own reads no longer count, so the
+/// set grows to a fixpoint (`max-long` frees `min-long`).
+fn dead_defs<V>(
+    units: &[TopUnit],
+    stable: &HashMap<(String, String), V>,
+    var_meta: bool,
+) -> HashSet<usize> {
     let mut dead = HashSet::new();
     if units.iter().any(|u| finds_vars_by_name(&u.expr)) {
         return dead;
@@ -8228,10 +8709,8 @@ fn dead_defs<V>(units: &[TopUnit], stable: &HashMap<(String, String), V>) -> Has
     loop {
         let mut reads: HashSet<(String, String)> = HashSet::new();
         for (i, u) in units.iter().enumerate() {
-            if !dead.contains(&i) {
-                visit_var_reads(&u.expr, &mut |sym| {
-                    reads.insert(var_key(sym));
-                });
+            if !dead.contains(&i) && !drops_unit(&u.expr, var_meta) {
+                record_unit_var_reads(u, &mut reads);
             }
         }
         let grown: Vec<usize> = (units.iter().enumerate())
@@ -8260,10 +8739,13 @@ fn is_dead_def<V>(
     reads: &HashSet<(String, String)>,
     longs: &HashSet<(String, String)>,
 ) -> bool {
-    matches!(e, Expr::Def { sym, init: Some(init), .. }
-        if stable.contains_key(&var_key(sym))
-            && !reads.contains(&var_key(sym))
-            && is_pure_total(init, longs))
+    matches!(e, Expr::Def { sym, init: Some(init), meta, .. }
+    if stable.contains_key(&var_key(sym))
+        && !reads.contains(&var_key(sym))
+        && is_pure_total(init, longs)
+        && meta.as_deref().is_none_or(|ps| {
+            ps.iter().all(|(k, v)| is_pure_total(k, longs) && is_pure_total(v, longs))
+        }))
 }
 
 /// Report every var `e` reads, binds, sets, declares or takes as an
@@ -8346,7 +8828,7 @@ fn core_call(e: &Expr) -> Option<(&str, &[Expr])> {
 fn is_pure_total(e: &Expr, longs: &HashSet<(String, String)>) -> bool {
     let constant = |x: &Expr| matches!(x, Expr::Literal(_) | Expr::Quote(_));
     match e {
-        Expr::Literal(_) | Expr::Quote(_) => true,
+        Expr::Literal(_) | Expr::Quote(_) | Expr::Fn(_) => true,
         Expr::VecLit(items, None) | Expr::SetLit(items, None) => items.iter().all(constant),
         Expr::MapLit(pairs, None) => pairs.iter().all(|(k, v)| constant(k) && constant(v)),
         _ => {
@@ -8932,6 +9414,10 @@ mod tests {
             moves: Vec::new(),
             inline_depth: 0,
             inlined_count: 0,
+            tail_min: usize::MAX,
+            in_tail: false,
+            borrowed_params: HashMap::new(),
+            pod_locals: HashSet::new(),
         };
         let _ = lowerer.lower_tail_form(&mut f, &Expr::Literal(Value::Nil), dest);
     }

@@ -1109,6 +1109,8 @@ fn native_emit_ir_drops_unread_pure_defs_271() {
             "(def min-long (bit-shift-left 1 63))\n",
             "(def max-long (bit-not min-long))\n",
             "(def mixed-bits (bit-xor (bit-and 7 3) (unsigned-bit-shift-right 8 1)))\n",
+            "(defn unread-fn [x] (+ x 1))\n",
+            "(defn unread-rec [x] (if (pos? x) (unread-rec (dec x)) 0))\n",
             "(def used-k 5)\n",
             "(def noisy (do (println \"init\") 1))\n",
             "(def nonconst-v [used-k])\n",
@@ -1129,6 +1131,8 @@ fn native_emit_ir_drops_unread_pure_defs_271() {
         "min-long",
         "max-long",
         "mixed-bits",
+        "unread-fn",
+        "unread-rec",
     ] {
         assert!(!ir.contains(gone), "{gone} should drop:\n{ir}");
     }
@@ -1178,7 +1182,7 @@ fn native_emit_ir_caches_stable_var_roots_271() {
 (def wrapped [tbl (get '{a 1} 'a)])
 (defn bump [] (set! *dyn* 2))
 (defn odd-arity [] (:k {} 1 2))
-(println (early false) (late 1) *dyn* formed twice (setter) inner @#'taken (:k [1]) wrapped)
+(println (early false) (late 1) *dyn* formed twice (setter) inner @#'taken (:k [1]) wrapped (fn? bump) (fn? odd-arity))
 ";
     let text = emit(src, "stable.ll");
     for needle in [
@@ -1973,4 +1977,121 @@ fn native_emit_ir_inlines_helpers_and_elides_destructuring_271() {
         !text.contains("slice_error_fail") && !text.contains("9panicking"),
         "bitcode leaked a Rust panic symbol into emitted IR"
     );
+}
+
+#[test]
+fn native_emit_ir_slice_5s_global_colls_parse_token_and_early_drop_271() {
+    let emit = |src: &str, name: &str| {
+        let ir = tmp(name);
+        clj_aot::build_str(
+            src,
+            "s5s.clj",
+            &tmp("nope-5s"),
+            &EmitOptions {
+                emit_ir: Some(ir.clone()),
+                emit_obj: None,
+            },
+            &no_link(),
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("build");
+        let text = std::fs::read_to_string(&ir).expect("ir");
+        std::fs::remove_file(&ir).expect("cleanup");
+        text
+    };
+    let src = "\
+(ns s5s (:require [clojure.set :as set]))
+(def tbl [10 20 30])
+(defn sum-tbl []
+  (loop [i 0 acc 0]
+    (if (< i (count tbl))
+      (recur (inc i) (+ acc (nth tbl i)))
+      acc)))
+(defn parse-token [tok]
+  (when (and (string? tok) (re-matches #\"[+-]?[0-9]+\" tok))
+    (parse-long tok)))
+(defn parse-neg [tok]
+  (when (and (string? tok) (re-matches #\"-?[0-9]+\" tok))
+    (parse-long tok)))
+(defn parse-int18 [tok]
+  (if (and (string? tok) (re-matches #\"[+-]?[0-9]{1,18}\" tok))
+    (parse-long tok)
+    -1))
+(defn parse-other [tok]
+  (when (and (string? tok) (re-matches #\"[a-z]+\" tok))
+    (parse-long tok)))
+(defn early-drops [xs]
+  (let [n (count xs)
+        buf (transient (vec (repeat n 0)))
+        parts (loop [i 0 acc (transient [])]
+                (if (= i n)
+                  (persistent! acc)
+                  (do (assoc! buf i (nth xs i))
+                      (recur (inc i) (conj! acc (str (nth xs i)))))))]
+    (loop [j 0] (when (< j n) (nth buf j) (recur (inc j))))
+    (count parts)))
+(def ^{:k (+ 1 2)} dead-meta-def 123)
+(declare fwd-parse)
+(defn use-fwd [xs] (mapv fwd-parse xs))
+(defn fwd-parse [tok] (parse-long tok))
+(defn multi-stmt-parse [tok] (inc 1) (parse-long tok))
+(defn letfn-early-drop []
+  (letfn [(f [x] x)]
+    (when (and (string? f) (re-matches #\"[+-]?[0-9]+\" f)) (parse-long f))
+    (loop [i 0] (when (< i 2) (f i) (recur (inc i))))
+    1))
+(defn parse-near-misses [tok tok2]
+  [(if (let [a 1 b 2] a) 1 2)
+   (if (let [a 1] (inc a) a) 1 2)
+   (if (let [a 1] (if a tok tok2)) 1 2)
+   (if (and (string? tok) (pos? 1)) (parse-long tok) nil)
+   (if (and (string? tok) (re-matches #\"[+-]?[0-9]+\" tok)) (inc 1) nil)
+   (if (and (string? tok) (re-matches #\"[+-]?[0-9]+\" tok)) (parse-long tok2) nil)])
+(defn destr-drops [xs]
+  (let [[a b] (let [v [1 2 3]]
+                (let [w (count v)]
+                  (loop [i 0] (when (< i w) (recur (inc i))))
+                  [(count xs) 2]))
+        _ (loop [i 0] (when (< i (count xs)) (recur (inc i))))
+        {:keys [k m] :or {k xs m 0}} {:a 1}]
+    (+ a b (count k) m)))
+(defn non-parse-fn [a b] (+ a b))
+(defn mapv-cases [xs]
+  [(mapv parse-token xs)
+   (mapv parse-neg xs)
+   (mapv parse-long xs)
+   (mapv parse-double xs)
+   (mapv str xs)
+   (mapv non-parse-fn xs)
+   (mapv parse-int18 xs)
+   (use-fwd xs)
+   (mapv multi-stmt-parse xs)])
+(println (sum-tbl) (parse-token \"42\") (parse-neg \"-3\") (parse-int18 \"9\")
+         (early-drops [1 2]) (destr-drops [1]) (mapv-cases [\"1\" \"2\"])
+         (parse-near-misses \"1\" \"2\") (letfn-early-drop) (fn? parse-other))
+";
+    let text = emit(src, "slice-5s.ll");
+    // Unused clojure.set still boots Lite.
+    assert!(text.contains("@rt_n_main_lite"), "{text}");
+    // Scalar loop over stable global `tbl` emits `sc_hdr` and reads `tbl` directly.
+    let sum_tbl = text
+        .split("\ndefine ")
+        .find(|d| d.contains("s5s_sum_tbl("))
+        .expect("sum_tbl");
+    assert!(sum_tbl.contains("sc_hdr"), "{sum_tbl}");
+    // `parse-token`, `parse-neg`, `parse-int18`, and `(mapv parse-token ...)` use rt_n_mapv_parse_num.
+    assert!(text.contains("@rt_n_mapv_parse_num"), "{text}");
+    assert!(text.contains("pl_else"), "{text}");
+    assert!(text.contains("mp_slow"), "{text}");
+    // Mid-block dead-local drop emits param_drop for `xs` in `early-drops`.
+    assert!(text.contains("param_drop"), "{text}");
+
+    // Program using only parse-token / parse-int18 needs no regex capability at startup.
+    let no_re = emit(
+        "(defn pt [tok] (when (and (string? tok) (re-matches #\"[+-]?[0-9]+\" tok)) (parse-long tok)))\n\
+         (println (mapv pt [\"1\" \"2\"]))\n",
+        "slice-5s-no-re.ll",
+    );
+    assert!(!no_re.contains("call void @rt_n_cap_re"), "{no_re}");
+    assert!(!no_re.contains("rt_n_regex"), "{no_re}");
 }

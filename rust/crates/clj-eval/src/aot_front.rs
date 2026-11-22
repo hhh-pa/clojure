@@ -199,10 +199,12 @@ fn lib_units(
     if !leading_ns_requires(front, lib.ns) {
         return Ok(None);
     }
-    let Some(needed) = needed_defs(&front.units, lib.ns, lib.select).filter(|n| !n.is_empty())
-    else {
+    let Some(needed) = needed_defs(&front.units, lib.ns, lib.select) else {
         return Ok(None);
     };
+    if needed.is_empty() {
+        return Ok((lib.ns == "clojure.set").then_some(Vec::new()));
+    }
     let prev = eval.swap_source(Arc::from(lib.file));
     let read = read_units(eval, lib.text);
     eval.swap_source(prev);
@@ -665,6 +667,10 @@ mod tests {
         ] {
             assert_eq!(defs(src), (Vec::new(), Vec::new()), "{src}");
         }
+        assert_eq!(
+            defs("(ns t (:require [clojure.set :as s])) (println 1)"),
+            (vec!["clojure.set"], Vec::new()),
+        );
     }
 
     #[test]

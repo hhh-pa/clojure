@@ -1723,6 +1723,11 @@ pub(crate) trait Host {
     /// The closure `var` holds now, when a call with `argc` args
     /// may inline it.
     fn callee(&self, var: &Var, argc: usize) -> Option<Callee>;
+    /// Resolve a read-only global collection (`Expr::Global(var)`) to a
+    /// host-managed `Loc` (used by AOT for stable top-level vectors/tables).
+    fn resolve_global_coll(&mut self, _var: &Var) -> Option<Loc> {
+        None
+    }
 }
 
 /// A closure whose call a program inlines: the arity a call with
@@ -1831,6 +1836,7 @@ pub struct ScalarAst {
     pub boxed: Vec<bool>,
     pub primed: bool,
     pub primed_after_effect: bool,
+    pub global_colls: Vec<Var>,
     sites: Vec<Site>,
     roots: Vec<RootSite>,
     max_depth: usize,
@@ -1873,17 +1879,20 @@ fn build_ast(
         boxed: b.boxed,
         primed: b.primed,
         primed_after_effect: b.primed_after_effect,
+        global_colls: Vec::new(),
         sites: b.sites,
         roots: b.roots,
         max_depth: b.max_depth,
     })
 }
 
-struct AotHost<'a> {
+struct AotHost<'a, F> {
     callees: &'a std::collections::HashMap<(String, String), Arc<[Arity]>>,
+    can_read_global_coll: F,
+    global_colls: Vec<Var>,
 }
 
-impl Host for AotHost<'_> {
+impl<F: Fn(&Var) -> bool> Host for AotHost<'_, F> {
     fn resolve_local(&mut self, idx: usize) -> Loc {
         Loc::Reg(idx)
     }
@@ -1901,6 +1910,21 @@ impl Host for AotHost<'_> {
         let arities = self.callees.get(&(ns, var.sym.name().to_owned()))?;
         callee_for_arities(0, arities, argc, None)
     }
+
+    fn resolve_global_coll(&mut self, var: &Var) -> Option<Loc> {
+        if !(self.can_read_global_coll)(var) {
+            return None;
+        }
+        let idx = match self.global_colls.iter().position(|v| v.id == var.id) {
+            Some(i) => i,
+            None => {
+                let i = self.global_colls.len();
+                self.global_colls.push(var.clone());
+                i
+            }
+        };
+        Some(Loc::Up(idx))
+    }
 }
 
 /// Build the scalar AST for an AOT-compiled `loop` body (`None` when
@@ -1911,9 +1935,16 @@ pub fn compile_aot_loop(
     targets: &[usize],
     body_base: usize,
     callees: &std::collections::HashMap<(String, String), Arc<[Arity]>>,
+    can_read_global_coll: impl Fn(&Var) -> bool,
 ) -> Option<ScalarAst> {
-    let mut host = AotHost { callees };
-    build_ast(&mut host, body, targets, body_base)
+    let mut host = AotHost {
+        callees,
+        can_read_global_coll,
+        global_colls: Vec::new(),
+    };
+    let mut ast = build_ast(&mut host, body, targets, body_base)?;
+    ast.global_colls = host.global_colls;
+    Some(ast)
 }
 
 /// Compile `body` (one `loop`'s forms) over `targets`, whose
@@ -2121,6 +2152,15 @@ impl Builder<'_> {
         }
     }
 
+    /// A read-only collection operand: an invariant/passthrough local or a
+    /// host-resolved stable global collection (`nth`, `count`, destructure).
+    fn read_coll(&mut self, e: &Expr) -> Option<Loc> {
+        self.boxed_local(e).or_else(|| match e {
+            Expr::Global(var) => self.host.resolve_global_coll(var),
+            _ => None,
+        })
+    }
+
     /// Whether `e` may read local `g` (inside an inlined callee,
     /// over the callee's frame).
     fn reads(&self, e: &Expr, g: usize) -> bool {
@@ -2131,6 +2171,15 @@ impl Builder<'_> {
         }
     }
 
+    fn if_expr(&mut self, test: &Expr, then: &Expr, els: &Expr) -> IExpr {
+        if let Some(chosen) = const_branch(test, then, els) {
+            return self.expr(chosen);
+        }
+        let c = self.cond(test);
+        let (a, b) = self.branch_effects(|s| s.expr(then), |s| s.expr(els));
+        IExpr::Ctl(Box::new(Ctl::If(c, a, b)))
+    }
+
     fn expr(&mut self, e: &Expr) -> IExpr {
         match e {
             Expr::Literal(v) => Sv::of(v).map_or(IExpr::Deopt, IExpr::Kst),
@@ -2138,11 +2187,7 @@ impl Builder<'_> {
             Expr::Global(var) => IExpr::Global(var.clone()),
             Expr::DirectNative(call) => self.call(call),
             Expr::Invoke { head, args, .. } => self.invoke_expr(head, args),
-            Expr::If { test, then, els } => {
-                let c = self.cond(test);
-                let (a, b) = self.branch_effects(|s| s.expr(then), |s| s.expr(els));
-                IExpr::Ctl(Box::new(Ctl::If(c, a, b)))
-            }
+            Expr::If { test, then, els } => self.if_expr(test, then, els),
             Expr::Let { bindings, body } => self.let_expr(bindings, body),
             Expr::Loop { bindings, body } => self.inner_loop(bindings, body),
             Expr::Do(forms) => self.seq_expr(forms),
@@ -2218,7 +2263,7 @@ impl Builder<'_> {
         else {
             return None;
         };
-        let loc = self.boxed_local(coll)?;
+        let loc = self.read_coll(coll)?;
         let idx = self.expr(i);
         let t = self.slot();
         out.push((t, idx));
@@ -2452,7 +2497,7 @@ impl Builder<'_> {
             ("/", args) if !args.is_empty() => self.div_expr(args),
             ("nth", [coll, i]) => self.nth_expr(coll, i),
             ("count", [coll]) => self
-                .boxed_local(coll)
+                .read_coll(coll)
                 .map_or(IExpr::Deopt, |l| calc(Calc::Count(l))),
             ("int", [x]) => calc(Calc::Fp(FpCalc::Cast(Cast::Int, self.expr(x)))),
             ("long", [x]) => calc(Calc::Fp(FpCalc::Cast(Cast::Long, self.expr(x)))),
@@ -2474,14 +2519,14 @@ impl Builder<'_> {
     }
 
     fn nth_expr(&mut self, coll: &Expr, idx: &Expr) -> IExpr {
-        if let Some(loc) = self.boxed_local(coll) {
+        if let Some(loc) = self.read_coll(coll) {
             return calc(Calc::Nth(loc, self.expr(idx)));
         }
         if let Expr::DirectNative(inner) = coll {
             if let (Some("nth"), [outer, i]) =
                 (crate::vm_ops::core_name(inner), inner.args.as_slice())
             {
-                if let Some(loc) = self.boxed_local(outer) {
+                if let Some(loc) = self.read_coll(outer) {
                     let site = self.host.site(inner);
                     self.sites.push(site);
                     let outer_i = self.expr(i);
@@ -2521,6 +2566,9 @@ impl Builder<'_> {
                 self.sites.push(site);
                 return c;
             }
+        }
+        if let Expr::Literal(v) = e {
+            return Cond::Leaf(Cmp::Truthy(IExpr::Kst(Sv::bool(v.is_truthy()))));
         }
         Cond::Leaf(Cmp::Truthy(self.expr(e)))
     }
@@ -2565,6 +2613,9 @@ impl Builder<'_> {
     fn node(&mut self, e: &Expr) -> Node {
         match e {
             Expr::If { test, then, els } => {
+                if let Some(chosen) = const_branch(test, then, els) {
+                    return self.node(chosen);
+                }
                 let c = self.cond(test);
                 let (a, b) =
                     self.branch_effects(|s| Box::new(s.node(then)), |s| Box::new(s.node(els)));
@@ -2600,7 +2651,7 @@ impl Builder<'_> {
         let st = match e {
             Expr::Literal(_) | Expr::Local(_) => return Vec::new(),
             Expr::Do(forms) => return self.stmt_seq(forms),
-            Expr::If { test, then, els } => self.if_stmt(test, then, els),
+            Expr::If { test, then, els } => return self.if_stmts(test, then, els),
             Expr::Let { bindings, body } => {
                 let mark = self.lex.len();
                 let out = match self.let_bindings(bindings) {
@@ -2624,10 +2675,13 @@ impl Builder<'_> {
         vec![st]
     }
 
-    fn if_stmt(&mut self, test: &Expr, then: &Expr, els: &Expr) -> Stmt {
+    fn if_stmts(&mut self, test: &Expr, then: &Expr, els: &Expr) -> Vec<Stmt> {
+        if let Some(chosen) = const_branch(test, then, els) {
+            return self.stmts_of(chosen);
+        }
         let c = self.cond(test);
         let (a, b) = self.branch_effects(|s| s.stmts_of(then), |s| s.stmts_of(els));
-        Stmt::If(c, a.into(), b.into())
+        vec![Stmt::If(c, a.into(), b.into())]
     }
 
     /// `(assoc! t k v)`, `(conj! t v)` or `(pop! t)` over a boxed
@@ -2774,6 +2828,13 @@ fn exit_expr(v: &ExitVal) -> std::option::IntoIter<&IExpr> {
     .into_iter()
 }
 
+fn const_branch<'a>(test: &Expr, then: &'a Expr, els: &'a Expr) -> Option<&'a Expr> {
+    match test {
+        Expr::Literal(v) => Some(if v.is_truthy() { then } else { els }),
+        _ => None,
+    }
+}
+
 fn expr_str(e: &Expr) -> Option<&str> {
     match e {
         Expr::Quote(Value::Str(s)) | Expr::Literal(Value::Str(s)) => Some(s.as_ref()),
@@ -2849,7 +2910,7 @@ mod tests {
             },
             _ => None,
         });
-        let ast = compile_aot_loop(&body.expect("loop"), &[2], 3, &callees)?;
+        let ast = compile_aot_loop(&body.expect("loop"), &[2], 3, &callees, |_| false)?;
         let mut out = Vec::new();
         exits(&ast.node, &mut out);
         Some(out.iter().any(|v| matches!(v, ExitVal::Boxed(_))))
@@ -2932,7 +2993,7 @@ mod tests {
                     let ns = sym.namespace().unwrap_or("user").to_owned();
                     callees.insert((ns, sym.name().to_owned()), Arc::clone(&fun.arities));
                     if let Expr::Loop { body, .. } = &fun.arities[0].body[0] {
-                        ast = compile_aot_loop(body, &[1, 2], 3, &callees);
+                        ast = compile_aot_loop(body, &[1, 2], 3, &callees, |_| false);
                     }
                 }
             }
@@ -2940,7 +3001,7 @@ mod tests {
         let ast = ast.expect("scalar ast");
         assert!(ast.primed);
         assert_eq!(ast.scalar, vec![true, true]);
-        assert!(compile_aot_loop(&[Expr::Local(1)], &[1], 2, &callees).is_none());
+        assert!(compile_aot_loop(&[Expr::Local(1)], &[1], 2, &callees, |_| false).is_none());
     }
 
     #[test]
@@ -3109,8 +3170,17 @@ mod tests {
                 },
                 _ => None,
             });
-            compile_aot_loop(&body.expect("loop"), &[2, 3], 4, &callees)
+            compile_aot_loop(&body.expect("loop"), &[2, 3], 4, &callees, |v| {
+                v.sym.name() == "tbl"
+            })
         };
+        let glb = compile_fn(
+            &mut ev,
+            "(def tbl [10 20 30]) (def blocked [1 2]) (defn f [t n] (loop [i 0 a 0] (if (< i (count tbl)) (do (if :else nil (assoc! t 0 0)) (if nil (assoc! t 0 0) nil) (let [x (if :else (if nil 0 1) 2)] (if (or false :else) (recur (inc i) (+ a x (nth tbl i) (nth tbl 0) (if (= i 99) (nth blocked 0) 0))) a))) (if nil 0 (if :else a 1))))) 1",
+        )
+        .expect("glb");
+        assert_eq!(glb.global_colls.len(), 1);
+        assert_eq!(glb.global_colls[0].sym.name(), "tbl");
         let pre = compile_fn(
             &mut ev,
             "1 (def x 1) (defn g [a] a) (defn f [t n] (loop [i 0 a 0] (if (< i n) (do (assoc! t i (+' a i)) (recur (inc i) a)) a)))",

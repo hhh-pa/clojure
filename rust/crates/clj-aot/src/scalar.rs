@@ -359,7 +359,9 @@ impl<'ctx> Lowerer<'ctx> {
         let depth = f.env.len();
         let body_base = depth + bindings.len();
         let slots: Vec<usize> = (depth..body_base).collect();
-        let Some(ast) = compile_aot_loop(body, &slots, body_base, &self.callees) else {
+        let Some(ast) = compile_aot_loop(body, &slots, body_base, &self.callees, |v| {
+            self.is_stable_global_coll(v)
+        }) else {
             return Ok(false);
         };
         let mut scan = AstScan::default();
@@ -472,7 +474,11 @@ impl<'ctx> Lowerer<'ctx> {
     }
 
     fn can_lower_scalar(&self, f: &FnCtx<'ctx>, ast: &ScalarAst, scan: &AstScan) -> bool {
-        if !scan.all_locs.iter().all(|loc| self.is_direct_loc(f, *loc)) {
+        if !scan
+            .all_locs
+            .iter()
+            .all(|loc| self.is_direct_loc(f, &ast.global_colls, *loc))
+        {
             return false;
         }
         if scan.has_effects && (ast.primed_after_effect || scan.has_deopt) {
@@ -481,16 +487,34 @@ impl<'ctx> Lowerer<'ctx> {
         true
     }
 
-    fn is_direct_loc(&self, f: &FnCtx<'ctx>, loc: Loc) -> bool {
-        matches!(
-            f.env.get(loc_reg_idx(loc)).copied().flatten(),
-            Some(LocalRef::Slot(_) | LocalRef::Captured(_))
-        )
+    fn is_stable_global_coll(&self, v: &Var) -> bool {
+        self.stable_of(v)
+            .is_some_and(|sr| self.stable_unchecked(sr))
     }
 
-    fn loc_slot(&self, f: &FnCtx<'ctx>, loc: Loc) -> PointerValue<'ctx> {
-        self.local_slot(f, loc_reg_idx(loc))
-            .expect("direct local slot")
+    fn is_direct_loc(&self, f: &FnCtx<'ctx>, global_colls: &[Var], loc: Loc) -> bool {
+        match loc {
+            Loc::Up(u) => global_colls
+                .get(u)
+                .is_some_and(|v| self.is_stable_global_coll(v)),
+            _ => matches!(
+                f.env.get(loc_reg_idx(loc)).copied().flatten(),
+                Some(LocalRef::Slot(_) | LocalRef::Captured(_))
+            ),
+        }
+    }
+
+    fn loc_slot(&self, f: &FnCtx<'ctx>, global_colls: &[Var], loc: Loc) -> PointerValue<'ctx> {
+        match loc {
+            Loc::Up(u) => {
+                self.stable_of(&global_colls[u])
+                    .expect("checked stable global coll")
+                    .root
+            }
+            _ => self
+                .local_slot(f, loc_reg_idx(loc))
+                .expect("direct local slot"),
+        }
     }
 
     pub(super) fn entry_alloca(
@@ -666,7 +690,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let mut load_vals = Vec::with_capacity(scan.loads.len());
         for &loc in &scan.loads {
-            let slot = self.loc_slot(f, loc);
+            let slot = self.loc_slot(f, &ast.global_colls, loc);
             let (ok, k, v) = self.unbox_scalar(slot, allow_fp);
             let next = self.ctx.append_basic_block(f.func, "sc_box_ok");
             self.builder
@@ -696,7 +720,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let mut colls = Vec::with_capacity(scan.colls.len());
         for &loc in &scan.colls {
-            colls.push(self.probe_coll(f, loc, scan, allow_fp));
+            colls.push(self.probe_coll(f, &ast.global_colls, loc, scan, allow_fp));
         }
         for i in 0..colls.len() {
             self.try_lock_tvec(f, &colls, i, allow_fp);
@@ -721,6 +745,7 @@ impl<'ctx> Lowerer<'ctx> {
     fn probe_coll(
         &self,
         f: &FnCtx<'ctx>,
+        global_colls: &[Var],
         loc: Loc,
         scan: &AstScan,
         allow_fp: bool,
@@ -729,7 +754,7 @@ impl<'ctx> Lowerer<'ctx> {
         let grows = scan.mutated_grow.contains(&loc);
         let needs_nth = scan.read_nth.contains(&loc);
         let needs_cnt = scan.read_count.contains(&loc);
-        let slot = self.loc_slot(f, loc);
+        let slot = self.loc_slot(f, global_colls, loc);
         let str_ptr = self.entry_alloca(f, self.ptr, "strp");
         let str_len = self.entry_alloca(f, self.i64t, "strn");
         let ivec_ptr = self.entry_alloca(f, self.ptr, "ivp");
@@ -1138,7 +1163,7 @@ impl<'ctx> Lowerer<'ctx> {
         match val {
             ExitVal::Const(v) => self.lower_const(f.func, v, dest)?,
             ExitVal::Box(loc) => {
-                let src = self.loc_slot(f, *loc);
+                let src = self.loc_slot(f, &[], *loc);
                 self.clone_v(f.func, dest, src);
             }
             ExitVal::Var(p) if !scalar[*p] => {

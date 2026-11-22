@@ -170,6 +170,9 @@ fn slurp_buf_reader(src: &mut dyn Read, out: &mut String) -> Result<(), NativeEr
         if buf.contains(&b'\r') {
             normalize_cr_in_place(&mut buf);
         }
+        if buf.capacity() - buf.len() > 64 * 1024 {
+            buf.shrink_to_fit();
+        }
         *out = String::from_utf8(buf).map_err(|_| utf8_io_err())?;
         return Ok(());
     }
@@ -1800,5 +1803,25 @@ mod tests {
         }
         state.stdin = Some(BufReader::new(Box::new(BoomRead)));
         assert!(more_input(&mut state).is_err());
+
+        struct ChunkRead {
+            data: Vec<u8>,
+            pos: usize,
+        }
+        impl std::io::Read for ChunkRead {
+            fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
+                let n = dst.len().min(4096).min(self.data.len() - self.pos);
+                dst[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+        let mut chunked = ChunkRead {
+            data: vec![b'a'; 150 * 1024],
+            pos: 0,
+        };
+        let mut slurped = String::new();
+        slurp_buf_reader(&mut chunked, &mut slurped).expect("slurp large");
+        assert_eq!(slurped.len(), 150 * 1024);
     }
 }

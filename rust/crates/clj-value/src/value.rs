@@ -431,10 +431,10 @@ impl PackedStrings {
             .buf
             .len()
             .saturating_add(sep_bytes.len().saturating_mul(n - 1));
-        if total > self.buf.capacity() {
-            return self.join(sep);
-        }
         let mut bytes = self.buf.into_bytes();
+        if total > bytes.capacity() {
+            bytes.reserve_exact(total - bytes.len());
+        }
         bytes.resize(total, 0);
         let mut write = total;
         for i in (0..n).rev() {
@@ -590,6 +590,41 @@ impl Vector {
         match &self.0.inner {
             VectorInner::Generic(t) => t.as_flat(),
             _ => None,
+        }
+    }
+
+    /// Whether this vector's backing storage is a contiguous flat buffer
+    /// (so `as_flat_*` probes succeed without trie traversal).
+    #[inline]
+    #[must_use]
+    pub fn is_flat(&self) -> bool {
+        match &self.0.inner {
+            VectorInner::Ints(t) => t.as_flat().is_some(),
+            VectorInner::Doubles(t) => t.as_flat().is_some(),
+            VectorInner::Chars(t) => t.as_flat().is_some(),
+            VectorInner::Generic(t) => t.as_flat().is_some(),
+            VectorInner::Strs(_) => true,
+        }
+    }
+
+    /// Copy the window `start..end` into a fresh [`Vector`], preserving
+    /// packed scalar storage (flat when `end - start <= FLAT_MAX`).
+    #[must_use]
+    pub fn slice_packed(&self, start: usize, end: usize) -> Self {
+        let len = end - start;
+        match &self.0.inner {
+            VectorInner::Ints(t) => {
+                Self::from_ints(t.iter_from(start).take(len).copied().collect())
+            }
+            VectorInner::Doubles(t) => {
+                Self::from_doubles(t.iter_from(start).take(len).copied().collect())
+            }
+            VectorInner::Chars(t) => {
+                Self::from_chars(t.iter_from(start).take(len).copied().collect())
+            }
+            VectorInner::Strs(_) | VectorInner::Generic(_) => {
+                Self::from_vec(self.iter_from(start).take(len).collect())
+            }
         }
     }
 
@@ -1409,6 +1444,21 @@ impl Vector {
         self.clone().set_nth_owned(index, v)
     }
 
+    /// Replace the item at `index` in place (`false` when out of bounds).
+    #[inline]
+    pub fn set_nth_mut(&mut self, index: usize, v: Value) -> bool {
+        if index >= self.len() {
+            return false;
+        }
+        let data = Arc::make_mut(&mut self.0);
+        let generic = set_inner(&mut data.inner, index, v);
+        if let Some(g) = generic {
+            data.inner = VectorInner::Generic(g);
+        }
+        data.id = next_vector_id();
+        true
+    }
+
     /// Replace the item at `index` on an owned vector (`None` when
     /// out of bounds — `self` is consumed either way, so check
     /// [`len`](Self::len) first when the vector must survive).
@@ -1418,18 +1468,10 @@ impl Vector {
     /// threading one accumulator through an `assoc` chain mutates in
     /// place after the first step. A foreign value converts typed
     /// storage once, like [`push_back`](Self::push_back).
+    #[inline]
     #[must_use]
     pub fn set_nth_owned(mut self, index: usize, v: Value) -> Option<Self> {
-        if index >= self.len() {
-            return None;
-        }
-        let data = Arc::make_mut(&mut self.0);
-        let generic = set_inner(&mut data.inner, index, v);
-        if let Some(g) = generic {
-            data.inner = VectorInner::Generic(g);
-        }
-        data.id = next_vector_id();
-        Some(self)
+        self.set_nth_mut(index, v).then_some(self)
     }
 
     /// Extract the item at `index` on an owned vector (`None` when out of
@@ -5868,6 +5910,26 @@ mod tests {
         assert_eq!(v_int, Vector::from_ints(vec![1, 2]));
         assert_eq!(v_dbl, Vector::from_doubles(vec![1.0, 2.0]));
         assert_eq!(v_chr, Vector::from_chars(vec!['a', 'b']));
+        assert!(v_int.is_flat());
+        assert!(v_dbl.is_flat());
+        assert!(v_chr.is_flat());
+        assert!(v_gen.is_flat());
+        assert!(v_str.is_flat());
+        assert_eq!(v_int.slice_packed(0, 1).as_flat_ints(), Some(&[1][..]));
+        assert_eq!(v_dbl.slice_packed(1, 2).as_flat_doubles(), Some(&[2.0][..]));
+        assert_eq!(v_chr.slice_packed(1, 2), Vector::from_chars(vec!['b']));
+        assert_eq!(
+            v_gen.slice_packed(0, 1),
+            Vector::from_vec(vec![Value::Int(1)])
+        );
+        assert_eq!(
+            v_str.slice_packed(1, 2),
+            Vector::from_vec(vec![Value::Str(Arc::from("b"))])
+        );
+        let mut mut_v = v_int.clone();
+        assert!(mut_v.set_nth_mut(1, Value::Int(9)));
+        assert!(!mut_v.set_nth_mut(9, Value::Int(0)));
+        assert_eq!(mut_v.as_flat_ints(), Some(&[1, 9][..]));
         assert_eq!(
             v_gen,
             Vector::from_vec(vec![Value::Int(1), Value::Double(2.0)])
@@ -5971,11 +6033,14 @@ mod tests {
         let ss_rebuilt = new_set().with_ordered_members((0..10).map(Value::Int).collect());
         assert_eq!(ss_rebuilt.size(), 10);
 
-        // String-packed Vector::iter_from
+        // String-packed Vector::iter_from and PackedStrings::into_joined reserve path
         let mut ps = PackedStrings::new();
         assert!(ps.try_push("a"));
         assert!(ps.try_push("b"));
         assert!(ps.try_push("c"));
+        assert_eq!(ps.join("--"), "a--b--c");
+        let ps_grow = ps.clone();
+        assert_eq!(ps_grow.into_joined("----"), "a----b----c");
         let sv = Vector::from_packed_strs(ps);
         assert_eq!(sv.iter_from(1).count(), 2);
     }

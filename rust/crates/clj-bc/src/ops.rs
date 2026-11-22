@@ -234,6 +234,29 @@ fn write_val_ref<O: OutSlot>(out: &mut O, vr: ValueRef<'_>) -> bool {
 }
 
 #[inline]
+fn subvec_val_ref(
+    backing: &clj_value::Vector,
+    start: usize,
+    end: usize,
+    i: usize,
+) -> Option<ValueRef<'_>> {
+    if i < end.saturating_sub(start) {
+        start
+            .checked_add(i)
+            .and_then(|idx| backing.get_val_ref(idx))
+    } else {
+        None
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn count_subvec(e: &dyn clj_value::ExtensionValue) -> Option<usize> {
+    e.as_subvector_parts()
+        .map(|(_, start, end)| end.saturating_sub(start))
+}
+
+#[inline]
 fn coll_count(v: &Value, str_ascii: Option<StrAsciiFn>) -> Option<usize> {
     match v {
         Value::Nil => Some(0),
@@ -243,6 +266,7 @@ fn coll_count(v: &Value, str_ascii: Option<StrAsciiFn>) -> Option<usize> {
         Value::Set(s) => Some(s.size()),
         Value::Str(s) if is_ascii_cached(v, s, str_ascii) => Some(s.len()),
         Value::Transient(t) => transient_vec_len(t),
+        Value::Extension(e) => count_subvec(e.as_ref()),
         _ => None,
     }
 }
@@ -363,7 +387,24 @@ fn apply1_peek<O: OutSlot>(out: &mut O, a: &Value) -> bool {
                 None => write_val(out, Value::Nil),
             }
         }
+        Value::Extension(e) => peek_subvec(out, e.as_ref()),
         _ => false,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn peek_subvec<O: OutSlot>(out: &mut O, e: &dyn clj_value::ExtensionValue) -> bool {
+    let Some((v, start, end)) = e.as_subvector_parts() else {
+        return false;
+    };
+    match end
+        .checked_sub(1)
+        .filter(|&last| last >= start)
+        .and_then(|last| v.get_val_ref(last))
+    {
+        Some(vr) => write_val_ref(out, vr),
+        None => write_val(out, Value::Nil),
     }
 }
 
@@ -384,7 +425,20 @@ fn apply1_first<O: OutSlot>(out: &mut O, a: &Value) -> bool {
             None => write_val(out, Value::Nil),
             _ => false,
         },
+        Value::Extension(e) => first_subvec(out, e.as_ref()),
         _ => false,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn first_subvec<O: OutSlot>(out: &mut O, e: &dyn clj_value::ExtensionValue) -> bool {
+    let Some((v, start, end)) = e.as_subvector_parts() else {
+        return false;
+    };
+    match subvec_val_ref(v, start, end, 0) {
+        Some(vr) => write_val_ref(out, vr),
+        None => write_val(out, Value::Nil),
     }
 }
 
@@ -659,7 +713,25 @@ fn nth_fast<O: OutSlot>(
         },
         Value::Str(s) => nth_str_slot(out, coll, s, ok, nf, str_ascii),
         Value::Transient(t) => nth_transient(out, t, ok, nf),
+        Value::Extension(e) => nth_subvec(out, e.as_ref(), ok, nf),
         _ => false,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn nth_subvec<O: OutSlot>(
+    out: &mut O,
+    e: &dyn clj_value::ExtensionValue,
+    ok: Option<usize>,
+    nf: Option<&Value>,
+) -> bool {
+    let Some((v, start, end)) = e.as_subvector_parts() else {
+        return false;
+    };
+    match ok.and_then(|i| subvec_val_ref(v, start, end, i)) {
+        Some(vr) => write_val_ref(out, vr),
+        None => nf.is_some_and(|d| clone_fast(out, d)),
     }
 }
 
@@ -756,7 +828,39 @@ fn get_fast<O: OutSlot>(
             None => false,
         },
         Value::Str(s) => get_str_fast(out, coll, s, key, nf, str_ascii),
+        Value::Extension(e) => get_subvec(out, e.as_ref(), key, nf),
         _ => false,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn get_subvec<O: OutSlot>(
+    out: &mut O,
+    e: &dyn clj_value::ExtensionValue,
+    key: &Value,
+    nf: Option<&Value>,
+) -> bool {
+    let Some((v, start, end)) = e.as_subvector_parts() else {
+        return false;
+    };
+    match index_i32(key) {
+        Some(i) => match subvec_val_ref(v, start, end, i) {
+            Some(vr) => write_val_ref(out, vr),
+            None => write_not_found(out, nf),
+        },
+        None => false,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn contains_subvec(e: &dyn clj_value::ExtensionValue, key: &Value) -> Option<bool> {
+    match (e.as_subvector_parts(), key) {
+        (Some((_, start, end)), Value::Int(n)) => {
+            Some(usize::try_from(*n).is_ok_and(|idx| idx < end.saturating_sub(start)))
+        }
+        _ => None,
     }
 }
 
@@ -771,6 +875,10 @@ fn contains_fast<O: OutSlot>(out: &mut O, coll: &Value, key: &Value) -> bool {
         Value::Vector(v) => match key {
             Value::Int(n) => usize::try_from(*n).is_ok_and(|idx| idx < v.len()),
             _ => return false,
+        },
+        Value::Extension(e) => match contains_subvec(e.as_ref(), key) {
+            Some(hit) => hit,
+            None => return false,
         },
         _ => return false,
     };
@@ -865,6 +973,18 @@ pub(crate) fn scalar_count(v: &Value, len_out: &mut i64, str_ascii: Option<StrAs
     true
 }
 
+#[cold]
+#[inline(never)]
+fn scalar_nth_subvec(
+    e: &dyn clj_value::ExtensionValue,
+    i: usize,
+    allow_fp: bool,
+) -> Option<(u8, i64)> {
+    e.as_subvector_parts()
+        .and_then(|(v, start, end)| subvec_val_ref(v, start, end, i))
+        .and_then(|vr| scalar_val_ref(vr, allow_fp))
+}
+
 /// Unboxed `nth` fast path writing `(k_out, v_out)` (`0 = Int, 1 = Char, 2 = Bool`,
 /// plus `3 = Double` when `allow_fp`).
 #[inline]
@@ -885,6 +1005,7 @@ pub(crate) fn scalar_nth(
             .flatten()
             .map(|c| (1, i64::from(u32::from(c)))),
         Value::Transient(t) => scalar_nth_transient(t, i, allow_fp),
+        Value::Extension(e) => scalar_nth_subvec(e.as_ref(), i, allow_fp),
         _ => None,
     };
     let Some((k, val)) = pair else {
@@ -905,6 +1026,22 @@ fn scalar_nth_transient(t: &clj_value::Transient, i: usize, allow_fp: bool) -> O
         .and_then(|vr| scalar_val_ref(vr, allow_fp))
 }
 
+#[cold]
+#[inline(never)]
+fn ext_subvec_ref(e: &dyn clj_value::ExtensionValue, idx: usize) -> Option<ValueRef<'_>> {
+    e.as_subvector_parts()
+        .and_then(|(v, start, end)| subvec_val_ref(v, start, end, idx))
+}
+
+#[inline]
+fn vec_or_subvec_ref(coll: &Value, idx: usize) -> Option<ValueRef<'_>> {
+    match coll {
+        Value::Vector(v) => v.get_val_ref(idx),
+        Value::Extension(e) => ext_subvec_ref(e.as_ref(), idx),
+        _ => None,
+    }
+}
+
 /// Unboxed nested `nth` (`coll[idx][item]`) for destructured tuple vectors.
 #[inline]
 pub(crate) fn scalar_nth2(
@@ -921,15 +1058,10 @@ pub(crate) fn scalar_nth2(
     let Ok(j) = usize::try_from(item) else {
         return false;
     };
-    let Some(ValueRef::Ref(Value::Vector(inner))) = (match coll {
-        Value::Vector(v) => v.get_val_ref(i),
-        _ => None,
-    }) else {
+    let Some(ValueRef::Ref(inner)) = vec_or_subvec_ref(coll, i) else {
         return false;
     };
-    let Some((k, val)) = inner
-        .get_val_ref(j)
-        .and_then(|vr| scalar_val_ref(vr, allow_fp))
+    let Some((k, val)) = vec_or_subvec_ref(inner, j).and_then(|vr| scalar_val_ref(vr, allow_fp))
     else {
         return false;
     };
@@ -1000,13 +1132,26 @@ pub(crate) fn scalar_conj_d(tval: &Value, bits: i64) -> bool {
     }
 }
 
-/// Probe `v` as a flat packed integer vector, writing its element pointer and length.
+#[inline]
+fn flat_window<'a, T>(
+    v: &'a Value,
+    as_flat: impl FnOnce(&'a clj_value::Vector) -> Option<&'a [T]>,
+) -> Option<&'a [T]> {
+    match v {
+        Value::Vector(vec) => as_flat(vec),
+        Value::Extension(e) => {
+            let (vec, start, end) = e.as_subvector_parts()?;
+            as_flat(vec)?.get(start..end)
+        }
+        _ => None,
+    }
+}
+
+/// Probe `v` as a flat packed integer vector (or subvector), writing its element
+/// pointer and length.
 #[inline]
 pub(crate) fn scalar_ivec_probe(v: &Value, ptr_out: &mut *const i64, len_out: &mut i64) -> bool {
-    let Value::Vector(vec) = v else {
-        return false;
-    };
-    let Some(slice) = vec.as_flat_ints() else {
+    let Some(slice) = flat_window(v, clj_value::Vector::as_flat_ints) else {
         return false;
     };
     *ptr_out = slice.as_ptr();
@@ -1014,13 +1159,11 @@ pub(crate) fn scalar_ivec_probe(v: &Value, ptr_out: &mut *const i64, len_out: &m
     true
 }
 
-/// Probe `v` as a flat packed `f64` vector, writing its element pointer and length.
+/// Probe `v` as a flat packed `f64` vector (or subvector), writing its element
+/// pointer and length.
 #[inline]
 pub(crate) fn scalar_dvec_probe(v: &Value, ptr_out: &mut *const f64, len_out: &mut i64) -> bool {
-    let Value::Vector(vec) = v else {
-        return false;
-    };
-    let Some(slice) = vec.as_flat_doubles() else {
+    let Some(slice) = flat_window(v, clj_value::Vector::as_flat_doubles) else {
         return false;
     };
     *ptr_out = slice.as_ptr();
@@ -1028,13 +1171,11 @@ pub(crate) fn scalar_dvec_probe(v: &Value, ptr_out: &mut *const f64, len_out: &m
     true
 }
 
-/// Probe `v` as a flat generic [`Value`] vector, writing its element pointer and length.
+/// Probe `v` as a flat generic [`Value`] vector (or subvector), writing its
+/// element pointer and length.
 #[inline]
 pub(crate) fn scalar_gvec_probe(v: &Value, ptr_out: &mut *const Value, len_out: &mut i64) -> bool {
-    let Value::Vector(vec) = v else {
-        return false;
-    };
-    let Some(slice) = vec.as_flat_values() else {
+    let Some(slice) = flat_window(v, clj_value::Vector::as_flat_values) else {
         return false;
     };
     *ptr_out = slice.as_ptr();

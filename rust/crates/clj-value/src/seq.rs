@@ -715,6 +715,7 @@ pub struct SubVectorValue {
     vec: Vector,
     start: usize,
     end: usize,
+    orig_start: usize,
     meta: Option<Map>,
 }
 
@@ -727,6 +728,7 @@ impl SubVectorValue {
             vec,
             start,
             end,
+            orig_start: start,
             meta: None,
         }
     }
@@ -747,6 +749,26 @@ impl SubVectorValue {
     #[must_use]
     pub fn end(&self) -> usize {
         self.end
+    }
+
+    /// The logical start offset in the original uncompacted backing vector
+    /// (preserves JVM `SubVector.assocN` negative-index bounds).
+    #[must_use]
+    pub fn orig_start(&self) -> usize {
+        self.orig_start
+    }
+
+    /// Set the logical start offset in the original backing vector.
+    #[must_use]
+    pub fn with_orig_start(mut self, orig_start: usize) -> Self {
+        self.orig_start = orig_start;
+        self
+    }
+
+    /// Mutate the backing vector at absolute index `abs` in place (for
+    /// uniquely-owned `assoc` paths; caller upholds `abs < self.vec.len()`).
+    pub fn set_abs_in_place(&mut self, abs: usize, v: Value) {
+        self.vec.set_nth_mut(abs, v);
     }
 
     /// The window length.
@@ -811,6 +833,7 @@ impl SubVectorValue {
             vec: Vector::from_vec(backing),
             start: self.start,
             end,
+            orig_start: self.orig_start,
             meta: self.meta.clone(),
         }
     }
@@ -856,6 +879,14 @@ impl crate::ExtensionValue for SubVectorValue {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_subvector_parts(&self) -> Option<(&Vector, usize, usize)> {
+        Some((&self.vec, self.start, self.end))
     }
 }
 
@@ -2274,6 +2305,12 @@ mod tests {
         let seq = RealizedSeq::new(Seq::eager(vec![int(1), int(2)]).expect("seq"));
         assert!(!sv.dyn_eq(&seq));
         assert_eq!(hash_ext(&sv), hash_ext(&same));
+        let mut sv_mut = sv.with_orig_start(5);
+        assert_eq!(sv_mut.orig_start(), 5);
+        assert!(sv_mut.as_subvector_parts().is_some());
+        assert!(sv_mut.as_any_mut().is_some());
+        sv_mut.set_abs_in_place(0, int(9));
+        assert_eq!(sv_mut.nth(0), Some(int(9)));
     }
 
     #[test]

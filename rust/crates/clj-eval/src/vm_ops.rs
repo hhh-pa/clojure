@@ -1188,6 +1188,70 @@ impl Upd for Assoc {
     }
 }
 
+#[cold]
+#[inline(never)]
+fn try_assoc_subvec(
+    mut ext: Arc<dyn clj_value::ExtensionValue>,
+    i: i64,
+    v: &mut Value,
+) -> Result<Value, Value> {
+    let Some((start, end, orig_start, compact)) = ext
+        .as_any()
+        .downcast_ref::<clj_value::SubVectorValue>()
+        .map(|sv| {
+            let len = sv.len();
+            (
+                sv.start(),
+                sv.end(),
+                sv.orig_start(),
+                len <= 256 && sv.vec().len() > len,
+            )
+        })
+    else {
+        return Err(Value::Extension(ext));
+    };
+    let len = end - start;
+    let Ok(idx) = usize::try_from(i as i32) else {
+        return Err(Value::Extension(ext));
+    };
+    if idx >= len {
+        return Err(Value::Extension(ext));
+    }
+    let val = take(v);
+    if !compact {
+        if let Some(sv_mut) = Arc::get_mut(&mut ext)
+            .and_then(|e| e.as_any_mut())
+            .and_then(|a| a.downcast_mut::<clj_value::SubVectorValue>())
+        {
+            sv_mut.set_abs_in_place(start + idx, val);
+            return Ok(Value::Extension(ext));
+        }
+    }
+    let sv = ext
+        .as_any()
+        .downcast_ref::<clj_value::SubVectorValue>()
+        .expect("checked SubVectorValue");
+    let next = if compact {
+        let backing = sv
+            .vec()
+            .slice_packed(start, end)
+            .set_nth_owned(idx, val)
+            .expect("idx < len");
+        clj_value::SubVectorValue::new(backing, 0, len)
+            .with_orig_start(orig_start)
+            .with_meta(sv.meta().cloned())
+    } else {
+        let backing = sv
+            .vec()
+            .set_nth(start + idx, val)
+            .expect("abs < backing len");
+        clj_value::SubVectorValue::new(backing, start, end)
+            .with_orig_start(orig_start)
+            .with_meta(sv.meta().cloned())
+    };
+    Ok(Value::Extension(Arc::new(next)))
+}
+
 fn try_assoc_leaf(coll: Value, k: &mut Value, v: &mut Value) -> Result<Value, Value> {
     match (coll, &*k) {
         (Value::Vector(x), Value::Int(i)) => match usize::try_from(*i as i32) {
@@ -1200,6 +1264,7 @@ fn try_assoc_leaf(coll: Value, k: &mut Value, v: &mut Value) -> Result<Value, Va
         (Value::Map(m), k_ref) if !m.is_sorted() && crate::vm_intrinsics::is_scalar_key(k_ref) => {
             Ok(Value::Map(m.insert(take(k), take(v))))
         }
+        (Value::Extension(ext), Value::Int(i)) => try_assoc_subvec(ext, *i, v),
         (other, _) => Err(other),
     }
 }
@@ -2791,10 +2856,11 @@ mod tests {
 mod apply_tests {
     use super::{APPLY1, APPLY2, APPLY3, APPLYN, BINARY, NARY, RE_MATCHES_OP, TERNARY, UNARY};
     use super::{
-        CharOf, CompareNum, DerefCell, Op1, Op2, UncheckedAdd, UncheckedDec, UncheckedInc,
-        UncheckedMul, UncheckedNegate, UncheckedSub,
+        Assoc, CharOf, CompareNum, DerefCell, Op1, Op2, UncheckedAdd, UncheckedDec, UncheckedInc,
+        UncheckedMul, UncheckedNegate, UncheckedSub, Upd,
     };
     use clj_value::Value;
+    use std::sync::Arc;
 
     #[test]
     fn unchecked_deref_char_and_compare_ops_271() {
@@ -3081,5 +3147,41 @@ mod apply_tests {
         );
         let mut v_nmap = nested_map;
         assert!(try_swap_in_place(&mut v_nmap, &assoc_in_fn, &[path2, Value::Int(42)]).is_some());
+
+        // try_assoc_subvec branches: non-subvec ext, negative/OOB idx, compacting,
+        // unique in-place, and shared non-compacting.
+        let non_sv = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from("a b"),
+            Arc::new(vec![(0, 1), (2, 1)]),
+        )));
+        assert_eq!(
+            Assoc::apply(&mut [non_sv, Value::Int(0), Value::Int(1)]),
+            None
+        );
+        let sv_wide = Value::Extension(Arc::new(clj_value::SubVectorValue::new(
+            Vector::from_ints(vec![10, 20, 30, 40]),
+            1,
+            3,
+        )));
+        assert_eq!(
+            Assoc::apply(&mut [sv_wide.clone(), Value::Int(-1), Value::Int(9)]),
+            None
+        );
+        assert_eq!(
+            Assoc::apply(&mut [sv_wide.clone(), Value::Int(2), Value::Int(9)]),
+            None
+        );
+        let compacted =
+            Assoc::apply(&mut [sv_wide, Value::Int(0), Value::Int(99)]).expect("compact");
+        let shared = compacted.clone();
+        let mutated_shared =
+            Assoc::apply(&mut [compacted, Value::Int(1), Value::Int(88)]).expect("shared");
+        drop(shared);
+        let mutated_unique =
+            Assoc::apply(&mut [mutated_shared, Value::Int(0), Value::Int(77)]).expect("unique");
+        assert_eq!(
+            mutated_unique,
+            Value::Vector(Vector::from_ints(vec![77, 88]))
+        );
     }
 }

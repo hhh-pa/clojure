@@ -1426,14 +1426,36 @@ pub fn unreduce(v: &mut Value) -> bool {
     true
 }
 
-fn str_window(coll: &Value) -> Option<(usize, usize)> {
-    if let Value::Vector(v) = coll {
-        return Some((0, v.len()));
+enum StrColl<'a> {
+    Vec(&'a Vector, usize, usize),
+    Split(&'a clj_value::SplitVecValue),
+}
+
+impl<'a> StrColl<'a> {
+    fn from_value(coll: &'a Value) -> Option<Self> {
+        if let Value::Vector(v) = coll {
+            return Some(Self::Vec(v, 0, v.len()));
+        }
+        if let Some(sp) = crate::lazy::as_splitvec(coll) {
+            return Some(Self::Split(sp));
+        }
+        crate::lazy::as_subvector(coll).map(|sv| Self::Vec(sv.vec(), sv.start(), sv.end()))
     }
-    if let Some(sp) = crate::lazy::as_splitvec(coll) {
-        return Some((0, sp.len()));
+
+    fn window(&self) -> (usize, usize) {
+        match *self {
+            Self::Vec(_, start, end) => (start, end),
+            Self::Split(sp) => (0, sp.len()),
+        }
     }
-    crate::lazy::as_subvector(coll).map(|sv| (sv.start(), sv.end()))
+
+    #[inline]
+    fn get(&self, i: usize) -> Option<&'a str> {
+        match *self {
+            Self::Vec(v, _, _) => vec_str_at(v, i),
+            Self::Split(sp) => sp.piece_str(i),
+        }
+    }
 }
 
 fn vec_str_at(v: &Vector, i: usize) -> Option<&str> {
@@ -1444,38 +1466,84 @@ fn vec_str_at(v: &Vector, i: usize) -> Option<&str> {
     }
 }
 
-fn str_item(coll: &Value, i: usize) -> Option<&str> {
-    if let Value::Vector(v) = coll {
-        return vec_str_at(v, i);
+#[inline]
+fn parse_ascii_long(s: &str, allow_plus: bool, max_18: bool) -> Option<i64> {
+    let bytes = s.as_bytes();
+    let (neg, rest) = match bytes.first()? {
+        b'-' => (true, &bytes[1..]),
+        b'+' if allow_plus => (false, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    if rest.is_empty() {
+        return None;
     }
-    if let Some(sp) = crate::lazy::as_splitvec(coll) {
-        return sp.piece_str(i);
+    if rest.len() <= 18 {
+        let mut acc: u64 = 0;
+        for &b in rest {
+            let d = b.wrapping_sub(b'0');
+            if d > 9 {
+                return None;
+            }
+            acc = acc * 10 + u64::from(d);
+        }
+        return Some(if neg { -(acc as i64) } else { acc as i64 });
     }
-    vec_str_at(crate::lazy::as_subvector(coll)?.vec(), i)
+    if max_18 || !s.is_ascii() {
+        return None;
+    }
+    parse_long_str(s)
+}
+
+fn try_parse_token(coll: &Value, mode: u8) -> Option<Value> {
+    if mode == 5 {
+        let Value::Str(s) = coll else { return None };
+        return parse_ascii_long(s, true, true).map(Value::Int);
+    }
+    let allow_plus = mode == 4;
+    let v = match coll {
+        Value::Str(s) => parse_ascii_long(s, allow_plus, false).map_or(Value::Nil, Value::Int),
+        _ => Value::Nil,
+    };
+    Some(v)
+}
+
+#[inline]
+fn parse_int_item(s: &str, mode: u8) -> Option<i64> {
+    if mode == 3 || mode == 6 {
+        return parse_ascii_long(s, mode == 3, false);
+    }
+    let n = parse_long_str(s)?;
+    if mode == 1 && i32::try_from(n).is_err() {
+        return None;
+    }
+    Some(n)
 }
 
 /// Parse a string collection (`Vector`, `SplitVecValue`, `SubVectorValue`)
 /// in one pass without materializing token strings (`mode`: 0 `Long/parseLong`,
-/// 1 `Integer/parseInt`, 2 `Double/parseDouble`). Returns `None` on non-string
-/// collections or any malformed token so the caller's general path raises the
-/// exact exception at the failing element.
+/// 1 `Integer/parseInt`, 2 `Double/parseDouble`, 3 ASCII `[+-]?[0-9]+`,
+/// 6 ASCII `-?[0-9]+`), or parse a single string token (`mode`: 4
+/// `(when (and (string? s) (re-matches #"[+-]?[0-9]+" s)) (parse-long s))`,
+/// 5 1..18-digit ASCII `(if (and (string? s) (re-matches #"[+-]?[0-9]{1,18}" s))
+/// (parse-long s) els)`, 7 `(when (and (string? s) (re-matches #"-?[0-9]+" s))
+/// (parse-long s))`).
 #[must_use]
 pub fn try_mapv_parse_num(coll: &Value, mode: u8) -> Option<Value> {
-    let (start, end) = str_window(coll)?;
+    if matches!(mode, 4 | 5 | 7) {
+        return try_parse_token(coll, mode);
+    }
+    let src = StrColl::from_value(coll)?;
+    let (start, end) = src.window();
     if mode == 2 {
         let mut out = Vec::with_capacity(end - start);
         for i in start..end {
-            out.push(parse_double_str(str_item(coll, i)?)?);
+            out.push(parse_double_str(src.get(i)?)?);
         }
         return Some(Value::Vector(Vector::from_flat_doubles(out)));
     }
     let mut ints = Vec::with_capacity(end - start);
     for i in start..end {
-        let n = parse_long_str(str_item(coll, i)?)?;
-        if mode == 1 && i32::try_from(n).is_err() {
-            return None;
-        }
-        ints.push(n);
+        ints.push(parse_int_item(src.get(i)?, mode)?);
     }
     Some(Value::Vector(Vector::from_flat_ints(ints)))
 }
@@ -2157,5 +2225,74 @@ mod tests {
         vb_dg.push(Value::Bool(true));
         assert!(format!("{vb_dg:?}").contains("Generic"));
         assert_eq!(vb_dg.freeze().len(), 3);
+
+        // try_mapv_parse_num modes 3..=7
+        let toks = Value::Vector(clj_value::Vector::from_vec(vec![
+            Value::Str(Arc::from("42")),
+            Value::Str(Arc::from("-7")),
+        ]));
+        assert_eq!(
+            try_mapv_parse_num(&toks, 3),
+            Some(Value::Vector(clj_value::Vector::from_ints(vec![42, -7])))
+        );
+        assert_eq!(
+            try_mapv_parse_num(&toks, 6),
+            Some(Value::Vector(clj_value::Vector::from_ints(vec![42, -7])))
+        );
+        let plus_tok = Value::Vector(clj_value::Vector::from_vec(vec![Value::Str(Arc::from(
+            "+5",
+        ))]));
+        assert_eq!(try_mapv_parse_num(&plus_tok, 6), None);
+        let non_ascii = Value::Vector(clj_value::Vector::from_vec(vec![Value::Str(Arc::from(
+            "１",
+        ))]));
+        assert_eq!(try_mapv_parse_num(&non_ascii, 3), None);
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("-123")), 4),
+            Some(Value::Int(-123))
+        );
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("+5")), 7),
+            Some(Value::Nil)
+        );
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("-5")), 7),
+            Some(Value::Int(-5))
+        );
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("abc")), 4),
+            Some(Value::Nil)
+        );
+        assert_eq!(try_mapv_parse_num(&Value::Int(5), 4), Some(Value::Nil));
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("99")), 5),
+            Some(Value::Int(99))
+        );
+        assert_eq!(try_mapv_parse_num(&Value::Str(Arc::from("x")), 5), None);
+        assert_eq!(try_mapv_parse_num(&Value::Nil, 5), None);
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("")), 4),
+            Some(Value::Nil)
+        );
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("-")), 4),
+            Some(Value::Nil)
+        );
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("+7")), 4),
+            Some(Value::Int(7))
+        );
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("9223372036854775807")), 4),
+            Some(Value::Int(i64::MAX))
+        );
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("9223372036854775807")), 5),
+            None
+        );
+        assert_eq!(
+            try_mapv_parse_num(&Value::Str(Arc::from("١٢٣٤٥٦٧٨٩٠١٢٣٤٥٦٧٨٩")), 4),
+            Some(Value::Nil)
+        );
     }
 }

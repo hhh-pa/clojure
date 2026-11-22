@@ -488,7 +488,9 @@ fn subvector_conj(sv: &SubVectorValue, x: Value) -> Value {
         v.clone().push_back(x)
     };
     Value::Extension(Arc::new(
-        SubVectorValue::new(backing, sv.start(), sv.end() + 1).with_meta(sv.meta().cloned()),
+        SubVectorValue::new(backing, sv.start(), sv.end() + 1)
+            .with_orig_start(sv.orig_start())
+            .with_meta(sv.meta().cloned()),
     ))
 }
 
@@ -607,6 +609,8 @@ fn assoc_pv(
     ))
 }
 
+const SUBVEC_COMPACT_MAX: usize = 256;
+
 /// `assoc` on a subvector (stays a subvector; writes at the absolute
 /// index — even before the window, like the JVM).
 fn assoc_subvector(sv: &SubVectorValue, k: &Value, v: Value) -> Result<Value, NativeError> {
@@ -616,27 +620,41 @@ fn assoc_subvector(sv: &SubVectorValue, k: &Value, v: Value) -> Result<Value, Na
             "Key must be integer".to_owned(),
         ));
     };
-    let abs = sv.start() as i64 + (i as i32) as i64;
-    let end = sv.end() as i64;
-    if abs < 0 || abs > end {
+    let rel = i64::from(i as i32);
+    let len = sv.len() as i64;
+    if sv.orig_start() as i64 + rel < 0 || rel > len {
         return Err(NativeError::new(
             ThrowClass::IndexOutOfBoundsException,
             String::new(),
         ));
     }
-    if abs == end {
+    if rel == len {
         return Ok(subvector_conj(sv, v));
     }
-    let n = abs as usize;
-    // `abs < end <= backing len` on every live subvector, so this
-    // `set_nth` cannot fail.
-    let backing = sv
-        .vec()
-        .set_nth(n, v)
-        .expect("window index is below the backing length");
-    Ok(Value::Extension(Arc::new(
-        SubVectorValue::new(backing, sv.start(), sv.end()).with_meta(sv.meta().cloned()),
-    )))
+    let next = if rel < 0 {
+        sv.clone()
+    } else {
+        let idx = rel as usize;
+        if sv.len() <= SUBVEC_COMPACT_MAX && sv.vec().len() > sv.len() {
+            let backing = sv
+                .vec()
+                .slice_packed(sv.start(), sv.end())
+                .set_nth_owned(idx, v)
+                .expect("window index is below the compacted length");
+            SubVectorValue::new(backing, 0, sv.len())
+                .with_orig_start(sv.orig_start())
+                .with_meta(sv.meta().cloned())
+        } else {
+            let backing = sv
+                .vec()
+                .set_nth(sv.start() + idx, v)
+                .expect("window index is below the backing length");
+            SubVectorValue::new(backing, sv.start(), sv.end())
+                .with_orig_start(sv.orig_start())
+                .with_meta(sv.meta().cloned())
+        }
+    };
+    Ok(Value::Extension(Arc::new(next)))
 }
 
 /// `assoc` on a map-like host value (split from [`assoc3`] for
@@ -2068,7 +2086,7 @@ pub(crate) fn native_vec_owned(
         || crate::lazy::as_splitvec(&args[0]).is_some()
         || as_subvector(&args[0]).is_some()
     {
-        return Ok(args[0].clone().with_meta(None));
+        return Ok(std::mem::replace(&mut args[0], Value::Nil).with_meta(None));
     }
     // `RT.toArray`: non-seqables fail the conversion, not the seq
     // (`:vec-num`, `:vec-trans`).
@@ -2774,7 +2792,9 @@ fn pop_fallback(arg: &Value) -> Result<Value, NativeError> {
         // vector when `start == end`), so `end >= 1` here.
         let end = sv.end().checked_sub(1).expect("subvector is never empty");
         return Ok(Value::Extension(Arc::new(
-            SubVectorValue::new(sv.vec().clone(), sv.start(), end).with_meta(sv.meta().cloned()),
+            SubVectorValue::new(sv.vec().clone(), sv.start(), end)
+                .with_orig_start(sv.orig_start())
+                .with_meta(sv.meta().cloned()),
         )));
     }
     Err(cce_err(arg, "clojure.lang.IPersistentStack"))
@@ -2826,18 +2846,19 @@ fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeErr
     if let Some(r) = splitvec_subvec(v, start_v, end_v) {
         return r;
     }
-    let (backing, base, len) = match v {
-        Value::Vector(x) => (x.clone(), 0, x.len()),
+    let (backing, base, orig_base, len) = match v {
+        Value::Vector(x) => (x.clone(), 0, 0, x.len()),
         // `subvec` of a primitive vector is a plain subvector
         // (S15 oracle `j-subvec-cls`).
-        Value::PrimitiveVector(p) => (Vector::from_vec(p.items()), 0, p.len()),
+        Value::PrimitiveVector(p) => (Vector::from_vec(p.items()), 0, 0, p.len()),
         Value::MapEntry { key, val, .. } => (
             Vector::from_vec(vec![(**key).clone(), (**val).clone()]),
+            0,
             0,
             2,
         ),
         _ => match as_subvector(v) {
-            Some(sv) => (sv.vec().clone(), sv.start(), sv.len()),
+            Some(sv) => (sv.vec().clone(), sv.start(), sv.orig_start(), sv.len()),
             None => return Err(cce_err(v, "clojure.lang.IPersistentVector")),
         },
     };
@@ -2852,11 +2873,14 @@ fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeErr
     if su == eu {
         return Ok(Value::Vector(Vector::from_vec(Vec::new())));
     }
-    Ok(Value::Extension(Arc::new(SubVectorValue::new(
-        backing,
-        base + su,
-        base + eu,
-    ))))
+    let win = eu - su;
+    let sv = if win <= SUBVEC_COMPACT_MAX && !backing.is_flat() {
+        let flat = backing.slice_packed(base + su, base + eu);
+        SubVectorValue::new(flat, 0, win).with_orig_start(orig_base + su)
+    } else {
+        SubVectorValue::new(backing, base + su, base + eu).with_orig_start(orig_base + su)
+    };
+    Ok(Value::Extension(Arc::new(sv)))
 }
 
 fn native_subvec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -3594,5 +3618,47 @@ mod tests {
             .last(),
             Some(&Value::Int(20))
         );
+    }
+
+    #[test]
+    fn subvec_compaction_and_assoc_orig_start() {
+        let mut eval = crate::boot();
+        let base_i = Vector::from_ints((0..1030_i64).collect());
+        let trie_v = Value::Vector(base_i.clone().push_back(Value::Int(1030)));
+        assert!(!matches!(&trie_v, Value::Vector(v) if v.is_flat()));
+        // Compacts small window of a Trie backing while preserving orig_start.
+        let win = subvec3(&trie_v, &Value::Int(500), &Value::Int(510)).expect("subvec trie");
+        let sv = as_subvector(&win).expect("subvec");
+        assert_eq!(sv.start(), 0);
+        assert_eq!(sv.end(), 10);
+        assert_eq!(sv.orig_start(), 500);
+        assert!(sv.vec().is_flat());
+        // Negative index within orig_start succeeds without changing window.
+        let neg_ok = assoc_subvector(sv, &Value::Int(-1), Value::Int(99)).expect("neg assoc");
+        assert_eq!(
+            as_subvector(&neg_ok).expect("sv").nth(0),
+            Some(Value::Int(500))
+        );
+        // Negative index before 0 throws IOOBE.
+        assert!(assoc_subvector(sv, &Value::Int(-501), Value::Int(99)).is_err());
+        // Small window of a flat vector compacts on first assoc.
+        let flat_v = Value::Vector(Vector::from_ints((0..40_i64).collect()));
+        let flat_win = subvec3(&flat_v, &Value::Int(5), &Value::Int(10)).expect("flat win");
+        let flat_sv = as_subvector(&flat_win).expect("flat sv");
+        let assoc_c = assoc_subvector(flat_sv, &Value::Int(1), Value::Int(77)).expect("compact");
+        let c_sv = as_subvector(&assoc_c).expect("compacted");
+        assert_eq!(c_sv.vec().len(), 5);
+        assert_eq!(c_sv.nth(1), Some(Value::Int(77)));
+        // Large window (> 256) updates without compacting.
+        let big_win = subvec3(&trie_v, &Value::Int(10), &Value::Int(300)).expect("big win");
+        let big_sv = as_subvector(&big_win).expect("big sv");
+        let assoc_b = assoc_subvector(big_sv, &Value::Int(0), Value::Int(88)).expect("big assoc");
+        assert_eq!(
+            as_subvector(&assoc_b).expect("sv").nth(0),
+            Some(Value::Int(88))
+        );
+        // native_vec_owned moves subvec cleanly.
+        let moved = native_vec_owned(&mut eval, smallvec::smallvec![assoc_c]).expect("vec");
+        assert!(as_subvector(&moved).is_some());
     }
 }

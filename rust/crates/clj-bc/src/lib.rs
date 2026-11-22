@@ -1320,5 +1320,82 @@ mod tests {
         assert!(!ops::scalar_dtvec_lock(&tval, &mut dmptr, &mut dlen));
         assert!(!ops::scalar_dtvec_lock(&tmap, &mut dmptr, &mut dlen));
         assert!(!ops::scalar_dtvec_lock(&Value::Nil, &mut dmptr, &mut dlen));
+
+        // SubVectorValue fast paths across count/peek/first/nth/get/contains?/scalar probes.
+        let sv_int = Value::Extension(Arc::new(clj_value::SubVectorValue::new(
+            clj_value::Vector::from_ints(vec![10, 20, 30, 40]),
+            1,
+            3,
+        )));
+        let sv_empty = Value::Extension(Arc::new(clj_value::SubVectorValue::new(
+            clj_value::Vector::from_ints(vec![10, 20]),
+            1,
+            1,
+        )));
+        let sv_dbl = Value::Extension(Arc::new(clj_value::SubVectorValue::new(
+            clj_value::Vector::from_doubles(vec![1.0, 2.5, 3.5]),
+            1,
+            3,
+        )));
+        let sv_gen = Value::Extension(Arc::new(clj_value::SubVectorValue::new(
+            clj_value::Vector::from_vec(vec![Value::Nil, sv_int.clone(), Value::Bool(true)]),
+            1,
+            3,
+        )));
+        let non_sv = Value::Extension(Arc::new(clj_value::SplitVecValue::new(
+            Arc::from("a b"),
+            Arc::new(vec![(0, 1), (2, 1)]),
+        )));
+        assert_eq!(run1(BcOp1::Count, &sv_int), Some(Value::Int(2)));
+        assert_eq!(run1(BcOp1::Count, &non_sv), None);
+        assert_eq!(run1(BcOp1::Peek, &sv_int), Some(Value::Int(30)));
+        assert_eq!(run1(BcOp1::Peek, &sv_empty), Some(Value::Nil));
+        assert_eq!(run1(BcOp1::Peek, &non_sv), None);
+        assert_eq!(run1(BcOp1::First, &sv_int), Some(Value::Int(20)));
+        assert_eq!(run1(BcOp1::First, &sv_empty), Some(Value::Nil));
+        assert_eq!(run1(BcOp1::First, &non_sv), None);
+        assert_eq!(
+            run2(BcOp2::Nth, &sv_int, &Value::Int(1)),
+            Some(Value::Int(30))
+        );
+        assert_eq!(run2(BcOp2::Nth, &sv_int, &Value::Int(2)), None);
+        assert_eq!(
+            run3(BcOp3::Nth3, &sv_int, &Value::Int(2), &Value::Int(-1)),
+            Some(Value::Int(-1))
+        );
+        assert_eq!(run2(BcOp2::Nth, &non_sv, &Value::Int(0)), None);
+        assert_eq!(
+            run2(BcOp2::Get, &sv_int, &Value::Int(0)),
+            Some(Value::Int(20))
+        );
+        assert_eq!(run2(BcOp2::Get, &sv_int, &Value::Int(5)), Some(Value::Nil));
+        assert_eq!(run2(BcOp2::Get, &sv_int, &Value::Nil), None);
+        assert_eq!(run2(BcOp2::Get, &non_sv, &Value::Int(0)), None);
+        assert_eq!(
+            run2(BcOp2::Contains, &sv_int, &Value::Int(1)),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            run2(BcOp2::Contains, &sv_int, &Value::Int(2)),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(run2(BcOp2::Contains, &sv_int, &Value::Nil), None);
+        assert_eq!(run2(BcOp2::Contains, &non_sv, &Value::Int(0)), None);
+        assert!(ops::scalar_nth(&sv_int, 1, &mut k, &mut v, None, false));
+        assert_eq!((k, v), (0, 30));
+        assert!(!ops::scalar_nth(&sv_int, 2, &mut k, &mut v, None, false));
+        assert!(!ops::scalar_nth(&non_sv, 0, &mut k, &mut v, None, false));
+        assert!(ops::scalar_nth2(&sv_gen, 0, 1, &mut k, &mut v, false));
+        assert_eq!((k, v), (0, 30));
+        assert!(!ops::scalar_nth2(&non_sv, 0, 0, &mut k, &mut v, false));
+        assert!(ops::scalar_ivec_probe(&sv_int, &mut iptr, &mut ilen));
+        assert_eq!(ilen, 2);
+        assert!(!ops::scalar_ivec_probe(&non_sv, &mut iptr, &mut ilen));
+        assert!(ops::scalar_dvec_probe(&sv_dbl, &mut dptr, &mut dlen));
+        assert_eq!(dlen, 2);
+        assert!(!ops::scalar_dvec_probe(&non_sv, &mut dptr, &mut dlen));
+        assert!(ops::scalar_gvec_probe(&sv_gen, &mut gptr, &mut glen));
+        assert_eq!(glen, 2);
+        assert!(!ops::scalar_gvec_probe(&non_sv, &mut gptr, &mut glen));
     }
 }

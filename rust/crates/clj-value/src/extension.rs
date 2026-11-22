@@ -451,6 +451,12 @@ pub trait ExtensionValue: std::fmt::Debug + Send + Sync {
     fn java_str(&self) -> Option<String> {
         None
     }
+
+    /// Backing vector and window bounds when this extension is a
+    /// [`crate::SubVectorValue`] (`None` for all other extensions).
+    fn as_subvector_parts(&self) -> Option<(&crate::Vector, usize, usize)> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1159,6 +1165,7 @@ mod tests {
 
     #[test]
     fn other_extension_dispatches() {
+        assert!(OtherExt.as_subvector_parts().is_none());
         let other = Value::Extension(Arc::new(OtherExt));
         assert_eq!(pr(&other), "#test.Other");
         assert_eq!(other, other.clone());
