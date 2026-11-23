@@ -1363,6 +1363,11 @@ pub fn apply_own(id: u32, args: &mut [Value]) -> Option<Value> {
         .and_then(|(_, _, f)| f(args))
 }
 
+/// The owned three-argument `assoc` operation, without opcode dispatch.
+pub fn assoc_owned(args: &mut [Value; 3]) -> Option<Value> {
+    <crate::vm_ops::Assoc as crate::vm_ops::Upd>::apply(args)
+}
+
 /// Repack unboxed 2-key path arguments back into their nested vector form
 /// when [`apply_own`] falls back to the general `assoc-in`, `update-in`,
 /// or `swap!` native.

@@ -679,6 +679,51 @@ pub extern "C" fn rt_n_op3(
     }
 }
 
+/// Update a long at an index in an owned vector, preserving the input on a miss.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_assoc_nth_step(
+    out: &mut Value,
+    coll: &mut Value,
+    idx: &Value,
+    step: i64,
+) -> u8 {
+    let (Value::Vector(v), Value::Int(i)) = (&mut *coll, idx) else {
+        return 0;
+    };
+    let Ok(i) = i32::try_from(*i).and_then(usize::try_from) else {
+        return 0;
+    };
+    let old = match v.get_val_ref(i) {
+        Some(clj_value::ValueRef::Int(n)) => n,
+        Some(clj_value::ValueRef::Ref(Value::Int(n))) => *n,
+        _ => return 0,
+    };
+    let Some(next) = old.checked_add(step) else {
+        return 0;
+    };
+    let set = v.set_nth_mut(i, Value::Int(next));
+    debug_assert!(set);
+    *out = std::mem::replace(coll, Value::Nil);
+    1
+}
+
+/// Three-argument `assoc` over owned slots.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_assoc_own3(out: &mut Value, k: u64, args: &mut [Value; 3]) -> i32 {
+    if let Some(v) = native_abi::assoc_owned(args) {
+        *out = v;
+        return 0;
+    }
+    let moved = args
+        .iter_mut()
+        .map(|arg| std::mem::replace(arg, Value::Nil))
+        .collect();
+    finish(
+        out,
+        with_active(|eval| native::call_core_var(eval, k as usize, moved)),
+    )
+}
+
 /// [`rt_n_core_ref`] over owned args (a local taken at its last use,
 /// #259): the inline op over them when it covers the case, else var
 /// `k`'s native with the args moved in (each slot left nil), so an
@@ -1419,6 +1464,8 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_scaled_long,
         rt_n_op3,
         rt_n_core_own,
+        rt_n_assoc_own3,
+        rt_n_assoc_nth_step,
         rt_n_enter_fn,
         rt_n_leave,
         rt_n_def_begin,

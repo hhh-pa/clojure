@@ -3764,11 +3764,52 @@ impl<'ctx> Lowerer<'ctx> {
             || self.try_lower_scaled_long(f, call, dest)?
             || self.try_lower_char_selection(f, call, dest)?
             || self.try_lower_mapped_str_join(f, call, dest)?
-            || (self.inline_arith && self.try_lower_hof_loop(f, call, dest)?)
+            || (self.inline_arith && self.try_lower_collection_call(f, call, dest)?)
         {
             return Ok(());
         }
         self.lower_direct_with(f, call, None, dest)
+    }
+
+    fn try_lower_assoc_nth_step(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        let Some((coll, idx, step)) = assoc_nth_step_args(call, f).and_then(|(coll, idx, step)| {
+            let coll = self.slot_of(f, coll)?;
+            let idx = self.local_slot(f, idx)?;
+            (coll != idx && coll != dest && idx != dest).then_some((coll, idx, step))
+        }) else {
+            return Ok(false);
+        };
+        let hit = self
+            .call(
+                "rt_n_assoc_nth_step",
+                Some(self.i8t),
+                &[dest.into(), coll.into(), idx.into(), self.u64c(step as u64)],
+            )
+            .expect("assoc status");
+        let missed = self.ctx.append_basic_block(f.func, "assoc_nth_miss");
+        let done = self.ctx.append_basic_block(f.func, "assoc_nth_done");
+        let hit = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                hit,
+                self.i8t.const_zero(),
+                "assoc_nth_hit",
+            )
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(hit, done, missed)
+            .expect("br");
+        self.builder.position_at_end(missed);
+        self.lower_direct_with(f, call, None, dest)?;
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        Ok(true)
     }
 
     fn try_lower_char_selection(
@@ -3930,20 +3971,21 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(true)
     }
 
-    /// Run a [`HofLoop`] inline (#271 Slice 4c). The collection (and a
+    /// Specialize a collection call or run a [`HofLoop`] inline. The collection (and a
     /// `reduce` init) evaluate in argument order; then a persistent vector
     /// or long range runs the `fn`'s body per item right here, with its
     /// params bound like a `let` (no closure, no lazy seq, no call). Any
     /// other collection takes the general call, the `fn` made into a
     /// closure, over the already-evaluated collection: exactly what `run`
     /// does, lazy forcing order included.
-    fn try_lower_hof_loop(
+    fn try_lower_collection_call(
         &mut self,
         f: &mut FnCtx<'ctx>,
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        if self.try_lower_first_mapped(f, call, dest)?
+        if self.try_lower_assoc_nth_step(f, call, dest)?
+            || self.try_lower_first_mapped(f, call, dest)?
             || self.try_lower_dot_product(f, call, dest)?
             || self.try_lower_print_join(f, call, dest)?
             || self.try_lower_mapv_global_parse(f, call, dest)?
@@ -4430,7 +4472,7 @@ impl<'ctx> Lowerer<'ctx> {
         Ok((kind, plan, Some(RangeSrc { call, args })))
     }
 
-    /// [`try_lower_hof_loop`] once the moves are safe.
+    /// [`try_lower_collection_call`] once the moves are safe.
     /// A fused loop's first collection, planned for its shape: the
     /// parse-num probe reads the collection value, so a probed `mapv`
     /// keeps the materialized path (`rt_n_iter_plan`); anything else
@@ -4594,7 +4636,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
-    /// The inline loop of [`try_lower_hof_loop`] over a vector (items by
+    /// The inline loop of [`try_lower_collection_call`] over a vector (items by
     /// index) or a long range (items by arithmetic): binds the params,
     /// lowers the body with its own moves (a param or a body local may be
     /// moved; an enclosing local is read afresh every item), and folds the
@@ -4881,7 +4923,7 @@ impl<'ctx> Lowerer<'ctx> {
         lowered
     }
 
-    /// The general path of [`try_lower_hof_loop`]: the `fn` as a closure,
+    /// The general path of [`try_lower_collection_call`]: the `fn` as a closure,
     /// then the original core calls (`map` then `dorun` / `vec` / `into`,
     /// or `mapv` / `reduce`) over the evaluated collection.
     #[allow(clippy::too_many_arguments)]
@@ -5219,12 +5261,20 @@ impl<'ctx> Lowerer<'ctx> {
                 self.lower(f, a, *e)?;
             }
         }
-        let op = op_name
-            .and_then(|name| native_abi::own_op(name, n).or_else(|| native_abi::inline_op(name, n)))
-            .unwrap_or(u32::MAX);
-        let aref = self.slots_ref(f, arr, n);
-        let st = self
-            .call(
+        let st = if op_name == Some("assoc") && n == 3 {
+            self.call(
+                "rt_n_assoc_own3",
+                Some(self.i32t),
+                &[dest.into(), self.u64c(k), arr.into()],
+            )
+        } else {
+            let op = op_name
+                .and_then(|name| {
+                    native_abi::own_op(name, n).or_else(|| native_abi::inline_op(name, n))
+                })
+                .unwrap_or(u32::MAX);
+            let aref = self.slots_ref(f, arr, n);
+            self.call(
                 "rt_n_core_own",
                 Some(self.i32t),
                 &[
@@ -5234,7 +5284,8 @@ impl<'ctx> Lowerer<'ctx> {
                     aref.into(),
                 ],
             )
-            .expect("st");
+        }
+        .expect("owned call status");
         self.check(f, st);
         self.free_slot_array(f, arr, elems);
         Ok(())
@@ -9272,6 +9323,32 @@ fn mapped_str_join(call: &clj_eval::expr::DirectCall) -> Option<(&str, &Expr)> {
     };
     (is_core_global(str_fn, "str") && is_core_global(map_fn, "str"))
         .then_some((sep.as_ref(), input))
+}
+
+/// Match a vector update and indexed read of the same locals. The read
+/// must be the collection's last use so the update can take its slot.
+fn assoc_nth_step_args(
+    call: &clj_eval::expr::DirectCall,
+    f: &FnCtx<'_>,
+) -> Option<(usize, usize, i64)> {
+    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "assoc" {
+        return None;
+    }
+    let [Expr::Local(coll), Expr::Local(idx), op] = call.args.as_slice() else {
+        return None;
+    };
+    let (name, [item]) = core_call(op)? else {
+        return None;
+    };
+    let step = match name {
+        "inc" => 1,
+        "dec" => -1,
+        _ => return None,
+    };
+    let ("nth", [source @ Expr::Local(c), Expr::Local(i)]) = core_call(item)? else {
+        return None;
+    };
+    (*coll == *c && *idx == *i && is_move(f, source)).then_some((*coll, *idx, step))
 }
 
 fn scaled_long_args(call: &clj_eval::expr::DirectCall) -> Option<[&Expr; 3]> {
