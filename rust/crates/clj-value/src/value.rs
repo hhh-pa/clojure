@@ -623,10 +623,11 @@ impl PackedStrings {
     }
 
     fn iter_from(&self, start: usize) -> PackedStringsIter<'_> {
+        let len = self.len();
         PackedStringsIter {
             ps: self,
-            lo: start.min(self.ends.len()),
-            hi: self.len(),
+            lo: start.min(len),
+            hi: len,
         }
     }
 }
@@ -5994,8 +5995,15 @@ mod tests {
         assert_eq!(packed.get_str(items.len()), None);
         assert_eq!(packed.raw_buf(), items.concat());
         assert_eq!(packed.clone().into_joined("·"), items.join("·"));
+        let vector = Vector::from_packed_strs(packed.clone());
+        let tail: Vec<_> = vector.iter_from(6).collect();
+        assert_eq!(
+            tail,
+            [Value::Str(Arc::from(second)), Value::Str(Arc::from("last"))]
+        );
+        assert!(vector.iter_from(items.len()).next().is_none());
         let mut text = String::new();
-        assert!(Vector::from_packed_strs(packed.clone()).push_to_string(&mut text));
+        assert!(vector.push_to_string(&mut text));
         assert_eq!(text, items.concat());
 
         let len = text.len();
