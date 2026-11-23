@@ -3943,7 +3943,8 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        if self.try_lower_dot_product(f, call, dest)?
+        if self.try_lower_first_mapped(f, call, dest)?
+            || self.try_lower_dot_product(f, call, dest)?
             || self.try_lower_print_join(f, call, dest)?
             || self.try_lower_mapv_global_parse(f, call, dest)?
             || self.try_lower_atom_nth(f, call, dest)?
@@ -3965,6 +3966,38 @@ impl<'ctx> Lowerer<'ctx> {
         let lowered = self.lower_hof_loop(f, &hl, base, dest);
         f.moves = enclosing;
         lowered?;
+        Ok(true)
+    }
+
+    fn try_lower_first_mapped(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "first" {
+            return Ok(false);
+        }
+        let [coll] = call.args.as_slice() else {
+            return Ok(false);
+        };
+        if !matches!(
+            core_call(coll),
+            Some(("map" | "mapcat" | "filter" | "remove", [_, _]))
+        ) {
+            return Ok(false);
+        }
+        let input = self.slot(f);
+        self.lower(f, coll, input)?;
+        let st = self
+            .call(
+                "rt_n_first_mapped",
+                Some(self.i32t),
+                &[dest.into(), input.into()],
+            )
+            .expect("first status");
+        self.check(f, st);
+        self.free_slots(f, &[input]);
         Ok(true)
     }
 

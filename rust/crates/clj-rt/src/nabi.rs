@@ -1042,6 +1042,13 @@ pub extern "C" fn rt_n_first(out: &mut Value, v: &Value) -> i32 {
     finish(out, with_active(|eval| native_abi::first(eval, v)))
 }
 
+/// Take the first item of a fresh lazy sequence.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_first_mapped(out: &mut Value, seq: &mut Value) -> i32 {
+    let seq = std::mem::replace(seq, Value::Nil);
+    finish(out, with_active(|eval| native_abi::first_mapped(eval, seq)))
+}
+
 /// `v = (next v)` in place.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_next_mut(v: &mut Value) -> i32 {
@@ -1441,6 +1448,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_nth_nil,
         rt_n_gseq,
         rt_n_first,
+        rt_n_first_mapped,
         rt_n_next_mut,
         rt_n_destructure,
         rt_n_destr_map,

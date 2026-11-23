@@ -454,6 +454,21 @@ pub fn first(eval: &mut Evaluator, s: &Value) -> Step {
     crate::lazy::first_value(eval, s)
 }
 
+/// Consume a sequence to take its first item. A sole lazy pipeline can
+/// skip memoizing its cells while still realizing the original chunks.
+pub fn first_mapped(eval: &mut Evaluator, seq: Value) -> Step {
+    let mut first = Value::Nil;
+    let walked = crate::lazy::walk_sole_map(eval, &seq, &mut |_, item| {
+        first = item;
+        Ok(false)
+    });
+    let result = match walked {
+        Some(step) => step.map(|()| first),
+        None => crate::lazy::first_value(eval, &seq),
+    };
+    result.map_err(|s| eval.throw(crate::ns::signal_to_native(s)))
+}
+
 /// `(next s)`.
 pub fn next(eval: &mut Evaluator, s: &Value) -> Step {
     crate::lazy::next_value(eval, s)
@@ -2245,6 +2260,13 @@ mod tests {
             Some(Value::Int(5))
         );
         assert_eq!(apply_re_matches(&pat, &aa), Some(aa));
+    }
+
+    #[test]
+    fn first_mapped_accepts_an_ordinary_vector() {
+        let mut eval = Evaluator::new_bare("user");
+        let vec = Value::Vector(Vector::from_ints(vec![7, 8]));
+        assert_eq!(first_mapped(&mut eval, vec).unwrap(), Value::Int(7));
     }
 
     #[test]
