@@ -1640,7 +1640,11 @@ fn native_emit_ir_lowers_double_scalar_loops_and_gvec_271() {
     assert!(fp_body.contains("llvm.sqrt.f64"), "{fp_body}");
     assert!(fp_body.contains("llvm.fabs.f64"), "{fp_body}");
     assert!(fp_body.contains("sc_glb_ok"), "{fp_body}");
-    assert!(fp_body.contains("sc_div_ok"), "{fp_body}");
+    // With the scale inlined, LLVM can specialize division by 2.0.
+    assert!(
+        fp_body.contains("fmul double") && fp_body.contains("5.000000e-01"),
+        "{fp_body}"
+    );
     assert!(fp_body.contains("sc_d2i_ok"), "{fp_body}");
 
     let int_body = text

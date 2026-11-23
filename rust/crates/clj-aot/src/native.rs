@@ -289,6 +289,14 @@ struct StableRoot<'ctx> {
     unit: usize,
     root: PointerValue<'ctx>,
     set: PointerValue<'ctx>,
+    kind: StableKind,
+}
+
+#[derive(Clone, Copy)]
+enum StableKind {
+    Unknown,
+    Scalar(clj_eval::aot_scalar::Sv),
+    Lookup,
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -358,13 +366,13 @@ impl<'ctx> Lowerer<'ctx> {
         };
         self.inline_arith = !units.iter().any(|u| mentions_rebinding(&u.expr));
         self.var_meta = !self.lite || program_reads_var_meta(units);
-        if self.lite {
-            let stable_candidates = stable_vars(units);
-            self.dead = dead_defs(units, &stable_candidates, self.var_meta);
+        let stable = self.lite.then(|| stable_vars(units));
+        if let Some(candidates) = &stable {
+            self.dead = dead_defs(units, candidates, self.var_meta);
         }
         self.reserve_defns(units);
-        if self.lite {
-            self.reserve_stable(units);
+        if let Some(candidates) = stable {
+            self.reserve_stable(candidates);
         }
         let mut tops = Vec::with_capacity(units.len());
         for (ui, unit) in units.iter().enumerate() {
@@ -386,13 +394,13 @@ impl<'ctx> Lowerer<'ctx> {
     /// ([`stable_vars`]): an internal global holding `nil` until the var's
     /// `def` copies the root in, and its set flag. Globals are numbered in
     /// var order so the module text is reproducible.
-    fn reserve_stable(&mut self, units: &[TopUnit]) {
-        let mut found: Vec<((String, String), usize)> = stable_vars(units)
+    fn reserve_stable(&mut self, vars: HashMap<(String, String), (usize, StableKind)>) {
+        let mut found: Vec<_> = vars
             .into_iter()
-            .filter(|&(_, unit)| !self.dead.contains(&unit))
+            .filter(|(_, (unit, _))| !self.dead.contains(unit))
             .collect();
-        found.sort();
-        for (i, (key, unit)) in found.into_iter().enumerate() {
+        found.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (i, (key, (unit, kind))) in found.into_iter().enumerate() {
             let root = self
                 .module
                 .add_global(self.slot_ty, None, &format!("clj_root{i}"));
@@ -410,6 +418,7 @@ impl<'ctx> Lowerer<'ctx> {
                     unit,
                     root: root.as_pointer_value(),
                     set: set.as_pointer_value(),
+                    kind,
                 },
             );
         }
@@ -1370,7 +1379,7 @@ impl<'ctx> Lowerer<'ctx> {
         let taken = if owned {
             (captures_end..f.env.len()).collect()
         } else {
-            self.own_consumed_params(&mut f, &arity.body, captures_end, &pats, &mut targets)
+            self.own_consumed_params(&mut f, &arity.body, captures_end, &sym_params, &mut targets)
         };
         let min_slot = if taken.is_empty() {
             min_slot
@@ -1410,32 +1419,24 @@ impl<'ctx> Lowerer<'ctx> {
         f: &mut FnCtx<'ctx>,
         body: &[Expr],
         captures_end: usize,
-        pats: &[&Pattern],
+        sym_params: &[(usize, usize)],
         targets: &mut [(Pattern, Vec<PointerValue<'ctx>>)],
     ) -> Vec<usize> {
-        let symbols: Vec<usize> = pats
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| matches!(p, Pattern::Symbol(_)))
-            .map(|(i, _)| captures_end + i)
-            .collect();
+        let symbols: Vec<usize> = sym_params.iter().map(|&(local, _)| local).collect();
         let probe = collect_body_moves(body, captures_end, &f.env, &symbols);
-        let taken: Vec<usize> = symbols
-            .into_iter()
-            .filter(|i| probe.iter().any(|m| m.1 == *i) && !borrow_only(body, *i))
-            .collect();
-        if taken.is_empty() {
-            return taken;
-        }
         let n = f.func.get_nth_param(2).expect("n").into_int_value();
-        for &i in &taken {
-            let param_idx = i - captures_end;
-            let take = self.param_take_flag(n, param_idx);
-            let arg = self.local_slot(f, i).expect("param slot");
+        let mut taken = Vec::new();
+        for &(local, param) in sym_params {
+            if !probe.iter().any(|m| m.1 == local) || borrow_only(body, local) {
+                continue;
+            }
+            let take = self.param_take_flag(n, param);
+            let arg = self.local_slot(f, local).expect("param slot");
             let s = self.slot(f);
             self.take_or_clone(f, s, arg, take);
-            f.env[i] = Some(LocalRef::Slot(s));
-            targets[param_idx].1 = vec![s];
+            f.env[local] = Some(LocalRef::Slot(s));
+            targets[param].1 = vec![s];
+            taken.push(local);
         }
         taken
     }
@@ -1477,7 +1478,8 @@ impl<'ctx> Lowerer<'ctx> {
     // ---- patterns ----------------------------------------------------------
 
     /// Bind an arity parameter `pat` from `arg` (taking/cloning owned symbol
-    /// params for `recur` arities; reading destructured params in place).
+    /// params for `recur` arities). Destructured values have their own
+    /// slots, so a caller-owned input can be released after binding.
     fn bind_param(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -1487,7 +1489,7 @@ impl<'ctx> Lowerer<'ctx> {
         i: usize,
         owned: bool,
     ) -> Result<Vec<PointerValue<'ctx>>, Unsupported> {
-        match pat {
+        let slots = match pat {
             Pattern::Symbol(_) => {
                 let src = if owned {
                     let s = self.slot(f);
@@ -1498,11 +1500,12 @@ impl<'ctx> Lowerer<'ctx> {
                     arg
                 };
                 f.env.push(Some(LocalRef::Slot(src)));
-                Ok(vec![src])
+                return Ok(vec![src]);
             }
             Pattern::Vec(v) => self.bind_vec(f, v, arg),
             Pattern::Map(m) => self.bind_map(f, m, pat, arg),
-        }
+        };
+        slots.inspect(|_| self.drop_taken_arg(f, arg, n_param, i))
     }
 
     /// Bind `pat` taking ownership of `slot`: a symbol adopts `slot`
@@ -1785,19 +1788,29 @@ impl<'ctx> Lowerer<'ctx> {
         let slot = self.local_slot(f, idx).expect("tail-scope local slot");
         if let Some(&param_i) = f.borrowed_params.get(&idx) {
             let n_param = f.func.get_nth_param(2).expect("n").into_int_value();
-            let take = self.param_take_flag(n_param, param_i);
-            let drop_b = self.ctx.append_basic_block(f.func, "param_drop");
-            let cont_b = self.ctx.append_basic_block(f.func, "param_cont");
-            self.builder
-                .build_conditional_branch(take, drop_b, cont_b)
-                .expect("br");
-            self.builder.position_at_end(drop_b);
+            self.drop_taken_arg(f, slot, n_param, param_i);
+        } else {
             self.drop_and_nil_slots(f.func, &[slot]);
-            self.builder.build_unconditional_branch(cont_b).expect("br");
-            self.builder.position_at_end(cont_b);
-            return;
         }
+    }
+
+    fn drop_taken_arg(
+        &self,
+        f: &FnCtx<'ctx>,
+        slot: PointerValue<'ctx>,
+        n_param: IntValue<'ctx>,
+        param: usize,
+    ) {
+        let take = self.param_take_flag(n_param, param);
+        let drop_b = self.ctx.append_basic_block(f.func, "param_drop");
+        let cont_b = self.ctx.append_basic_block(f.func, "param_cont");
+        self.builder
+            .build_conditional_branch(take, drop_b, cont_b)
+            .expect("br");
+        self.builder.position_at_end(drop_b);
         self.drop_and_nil_slots(f.func, &[slot]);
+        self.builder.build_unconditional_branch(cont_b).expect("br");
+        self.builder.position_at_end(cont_b);
     }
 
     fn drop_dead_after_stmt(&self, f: &FnCtx<'ctx>, stmt: &Expr, rest: &[Expr]) {
@@ -2951,6 +2964,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
         if self.try_lower_static(f, head, args, dest)?
             || self.try_lower_kw_invoke(f, head, args, dest)?
+            || self.try_lower_stable_lookup(f, head, args, dest)?
         {
             return Ok(());
         }
@@ -3206,6 +3220,48 @@ impl<'ctx> Lowerer<'ctx> {
         );
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
+        self.free_slots(f, &temps);
+        self.drop_and_nil_slots(f.func, &moved);
+        Ok(true)
+    }
+
+    /// Invoke a stable map, set, symbol, or keyword through its borrowed
+    /// root. The defining top-level unit established both the value and
+    /// its lookup semantics before this code can run.
+    fn try_lower_stable_lookup(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        head: &Expr,
+        args: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        let Expr::Global(var) = head else {
+            return Ok(false);
+        };
+        let Some(root) = self.stable_of(var) else {
+            return Ok(false);
+        };
+        if !self.stable_unchecked(root)
+            || !matches!(root.kind, StableKind::Lookup)
+            || !(1..=2).contains(&args.len())
+        {
+            return Ok(false);
+        }
+        let (refs, temps, moved) = self.arg_refs(f, args, dest)?;
+        let default = refs
+            .get(1)
+            .copied()
+            .unwrap_or_else(|| self.ptr.const_null());
+        self.call(
+            "rt_n_lookup_call",
+            Some(self.i8t),
+            &[
+                dest.into(),
+                root.root.into(),
+                refs[0].into(),
+                default.into(),
+            ],
+        );
         self.free_slots(f, &temps);
         self.drop_and_nil_slots(f.func, &moved);
         Ok(true)
@@ -3705,11 +3761,92 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(());
         }
         if self.try_lower_assoc_conj(f, call, Some(dest))?
+            || self.try_lower_scaled_long(f, call, dest)?
+            || self.try_lower_mapped_str_join(f, call, dest)?
             || (self.inline_arith && self.try_lower_hof_loop(f, call, dest)?)
         {
             return Ok(());
         }
         self.lower_direct_with(f, call, None, dest)
+    }
+
+    fn try_lower_mapped_str_join(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if !self.inline_arith {
+            return Ok(false);
+        }
+        let Some((separator, input)) = mapped_str_join(call) else {
+            return Ok(false);
+        };
+        let coll = self.slot(f);
+        self.lower(f, input, coll)?;
+        let sep = self.str_ptr(separator);
+        let status = self
+            .call(
+                "rt_n_join_mapped_str",
+                Some(self.i32t),
+                &[dest.into(), sep.into(), coll.into()],
+            )
+            .expect("join status");
+        self.check(f, status);
+        self.free_slots(f, &[coll]);
+        Ok(true)
+    }
+
+    fn try_lower_scaled_long(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if !self.inline_arith {
+            return Ok(false);
+        }
+        let Some(args) = scaled_long_args(call) else {
+            return Ok(false);
+        };
+        // Only inert operands may be read before the product is checked.
+        // Cloning the forms keeps their original last-use moves in the
+        // fallback. The probe borrows local operands.
+        let borrowed = args.map(Expr::clone);
+        let (refs, temps, _) = self.arg_refs(f, &borrowed, dest)?;
+        let hit = self
+            .call(
+                "rt_n_scaled_long",
+                Some(self.i8t),
+                &[dest.into(), refs[0].into(), refs[1].into(), refs[2].into()],
+            )
+            .expect("hit");
+        self.free_slots(f, &temps);
+        let boxed = self.ctx.append_basic_block(f.func, "scale_boxed");
+        let scaled = self.ctx.append_basic_block(f.func, "scale_fast");
+        let done = self.ctx.append_basic_block(f.func, "scale_done");
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, hit, self.i8t.const_zero(), "scale_hit")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(ok, scaled, boxed)
+            .expect("br");
+        self.builder.position_at_end(scaled);
+        for arg in args {
+            if let Expr::Local(idx) = arg
+                && is_move(f, arg)
+                && let Some(slot) = self.local_slot(f, *idx).filter(|&slot| slot != dest)
+            {
+                self.drop_and_nil_slots(f.func, &[slot]);
+            }
+        }
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(boxed);
+        self.lower_direct_with(f, call, None, dest)?;
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        Ok(true)
     }
 
     /// Run a [`HofLoop`] inline (#271 Slice 4c). The collection (and a
@@ -8633,7 +8770,7 @@ fn arity_free(arity: &Arity, base: usize, out: &mut BTreeSet<usize>) {
 /// at its place in program order), it is not `^:dynamic`, and the
 /// program never `set!`s it or takes it as a var object (`#'v`) outside
 /// the inert units `defn` itself emits.
-fn stable_vars(units: &[TopUnit]) -> HashMap<(String, String), usize> {
+fn stable_vars(units: &[TopUnit]) -> HashMap<(String, String), (usize, StableKind)> {
     debug_assert!(!units.iter().any(|u| mentions_rebinding(&u.expr)));
     let key = |sym: &Symbol| {
         (
@@ -8659,14 +8796,14 @@ fn stable_vars(units: &[TopUnit]) -> HashMap<(String, String), usize> {
         .filter_map(|(i, u)| match &u.expr {
             Expr::Def {
                 sym,
-                init: Some(_),
+                init: Some(init),
                 meta,
                 ..
             } if !is_dynamic_def(sym, meta.as_deref())
                 && defs.get(&key(sym)) == Some(&1)
                 && !tainted.contains(&key(sym)) =>
             {
-                Some((key(sym), i))
+                Some((key(sym), (i, stable_kind(init))))
             }
             _ => None,
         })
@@ -8924,6 +9061,62 @@ fn core_call(e: &Expr) -> Option<(&str, &[Expr])> {
     };
     let sym = &call.var.sym;
     (sym.namespace() == Some("clojure.core")).then(|| (sym.name(), &call.args[..]))
+}
+
+fn mapped_str_join(call: &clj_eval::expr::DirectCall) -> Option<(&str, &Expr)> {
+    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "apply" {
+        return None;
+    }
+    let [str_fn, interposed] = call.args.as_slice() else {
+        return None;
+    };
+    let Some(("interpose", [Expr::Literal(Value::Str(sep)), mapped])) = core_call(interposed)
+    else {
+        return None;
+    };
+    let Some(("map", [map_fn, input])) = core_call(mapped) else {
+        return None;
+    };
+    (is_core_global(str_fn, "str") && is_core_global(map_fn, "str"))
+        .then_some((sep.as_ref(), input))
+}
+
+fn scaled_long_args(call: &clj_eval::expr::DirectCall) -> Option<[&Expr; 3]> {
+    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "long" {
+        return None;
+    }
+    let [quotient] = call.args.as_slice() else {
+        return None;
+    };
+    let Some(("quot", [product, divisor])) = core_call(quotient) else {
+        return None;
+    };
+    let Some(("*", [lhs, rhs])) = core_call(product) else {
+        return None;
+    };
+    let args = [lhs, rhs, divisor];
+    args.iter()
+        .all(|e| {
+            matches!(
+                e,
+                Expr::Local(_) | Expr::Literal(Value::Int(_) | Value::BigInt(_))
+            )
+        })
+        .then_some(args)
+}
+
+fn stable_kind(init: &Expr) -> StableKind {
+    match init {
+        Expr::Literal(Value::Map(_) | Value::Set(_) | Value::Keyword(_) | Value::Symbol(_))
+        | Expr::Quote(Value::Map(_) | Value::Set(_) | Value::Keyword(_) | Value::Symbol(_))
+        | Expr::MapLit(..)
+        | Expr::SetLit(..) => StableKind::Lookup,
+        Expr::Literal(v) | Expr::Quote(v) => {
+            clj_eval::aot_scalar::Sv::of(v).map_or(StableKind::Unknown, StableKind::Scalar)
+        }
+        other if matches!(core_call(other), Some(("zipmap", [_, _]))) => StableKind::Lookup,
+        _ => StableKind::Unknown,
+    }
 }
 
 /// Fuse only inert indices. An index expression may mutate the atom or

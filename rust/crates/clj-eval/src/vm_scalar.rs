@@ -87,8 +87,10 @@ impl Sv {
         }
     }
 
+    /// The scalar representation of a boxed primitive.
     #[inline(always)]
-    fn of(v: &Value) -> Option<Self> {
+    #[must_use]
+    pub fn of(v: &Value) -> Option<Self> {
         match v {
             Value::Int(n) => Some(Sv::int(*n)),
             Value::Char(c) => Some(Sv {

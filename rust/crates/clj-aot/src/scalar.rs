@@ -700,25 +700,7 @@ impl<'ctx> Lowerer<'ctx> {
             self.builder.position_at_end(next);
             load_vals.push((k, v));
         }
-        let mut global_ids = Vec::with_capacity(scan.globals.len());
-        let mut global_vals = Vec::with_capacity(scan.globals.len());
-        for var in &scan.globals {
-            let tmp = self.slot(f);
-            let kv = self.var_of(var);
-            match self.stable_of(var) {
-                Some(sr) => self.clone_stable(f, sr, kv, tmp),
-                None => self.emit_deref(f.func, tmp, kv),
-            }
-            let (ok, k, v) = self.unbox_scalar(tmp, allow_fp);
-            self.free_slots(f, &[tmp]);
-            let next = self.ctx.append_basic_block(f.func, "sc_glb_ok");
-            self.builder
-                .build_conditional_branch(ok, next, boxed_hdr)
-                .expect("br");
-            self.builder.position_at_end(next);
-            global_ids.push(var.id);
-            global_vals.push((k, v));
-        }
+        let (global_ids, global_vals) = self.scalar_globals(f, &scan.globals, allow_fp, boxed_hdr);
         let mut colls = Vec::with_capacity(scan.colls.len());
         for &loc in &scan.colls {
             colls.push(self.probe_coll(f, &ast.global_colls, loc, scan, allow_fp));
@@ -741,6 +723,50 @@ impl<'ctx> Lowerer<'ctx> {
             scratch_v,
             deopt_bb,
         }
+    }
+
+    fn scalar_globals(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        globals: &[Var],
+        allow_fp: bool,
+        boxed: BasicBlock<'ctx>,
+    ) -> (Vec<u64>, Vec<(IntValue<'ctx>, IntValue<'ctx>)>) {
+        globals
+            .iter()
+            .map(|var| (var.id, self.scalar_global(f, var, allow_fp, boxed)))
+            .unzip()
+    }
+
+    fn scalar_global(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        var: &Var,
+        allow_fp: bool,
+        boxed: BasicBlock<'ctx>,
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let root = self.stable_of(var);
+        if let Some(sr) = root
+            && self.stable_unchecked(sr)
+            && let super::StableKind::Scalar(sv) = sr.kind
+            && (allow_fp || sv.k != K::Double)
+        {
+            return self.scalar_constant(sv);
+        }
+        let tmp = self.slot(f);
+        let k = self.var_of(var);
+        match root {
+            Some(sr) => self.clone_stable(f, sr, k, tmp),
+            None => self.emit_deref(f.func, tmp, k),
+        }
+        let (ok, kind, bits) = self.unbox_scalar(tmp, allow_fp);
+        self.free_slots(f, &[tmp]);
+        let next = self.ctx.append_basic_block(f.func, "sc_glb_ok");
+        self.builder
+            .build_conditional_branch(ok, next, boxed)
+            .expect("br");
+        self.builder.position_at_end(next);
+        (kind, bits)
     }
 
     fn probe_coll(
@@ -1910,18 +1936,7 @@ impl<'ctx> Lowerer<'ctx> {
             IExpr::Slot(sl) => Ok((self.load_i8(s.k_slots[*sl]), self.load_i64(s.v_slots[*sl]))),
             IExpr::Loc(loc) => Ok(s.load_val(*loc)),
             IExpr::Global(var) => Ok(s.global_val(var.id)),
-            IExpr::Kst(sv) => {
-                let k = match sv.k {
-                    K::Int => 0,
-                    K::Char => 1,
-                    K::Bool => 2,
-                    K::Double => 3,
-                };
-                Ok((
-                    self.i8t.const_int(k, false),
-                    self.i64t.const_int(sv.v as u64, true),
-                ))
-            }
+            IExpr::Kst(sv) => Ok(self.scalar_constant(*sv)),
             IExpr::Calc(c) => self.lower_sc_calc(f, s, c),
             IExpr::Ctl(c) => self.lower_sc_ctl(f, s, c),
             IExpr::Deopt => {
@@ -1933,6 +1948,19 @@ impl<'ctx> Lowerer<'ctx> {
                 Ok((self.i8t.const_zero(), self.i64t.const_zero()))
             }
         }
+    }
+
+    fn scalar_constant(&self, sv: clj_eval::aot_scalar::Sv) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let k = match sv.k {
+            K::Int => 0,
+            K::Char => 1,
+            K::Bool => 2,
+            K::Double => 3,
+        };
+        (
+            self.i8t.const_int(k, false),
+            self.i64t.const_int(sv.v as u64, true),
+        )
     }
 
     fn lower_sc_ctl(
@@ -3120,10 +3148,10 @@ impl<'ctx> Lowerer<'ctx> {
         self.emit_shof_empty(f.func, kind, acc, dest, done);
 
         self.builder.position_at_end(non_empty_bb);
-        let session =
-            self.init_hof_session(f, ast.nslots, &ast.global_colls, &scan, boxed_bb, deopt_bb);
         let src1 = self.probe_hof_src(f, st1, st1.n, boxed_bb);
         let src2 = st2.map(|s2| self.probe_hof_src(f, s2, st1.n, boxed_bb));
+        let session =
+            self.init_hof_session(f, ast.nslots, &ast.global_colls, &scan, boxed_bb, deopt_bb);
         match kind {
             ScalarHofKind::Collect => self.emit_shof_collect(
                 f,
@@ -3259,25 +3287,7 @@ impl<'ctx> Lowerer<'ctx> {
             self.builder.position_at_end(next);
             load_vals.push((k, v));
         }
-        let mut global_ids = Vec::with_capacity(scan.globals.len());
-        let mut global_vals = Vec::with_capacity(scan.globals.len());
-        for var in &scan.globals {
-            let tmp = self.slot(f);
-            let kv = self.var_of(var);
-            match self.stable_of(var) {
-                Some(sr) => self.clone_stable(f, sr, kv, tmp),
-                None => self.emit_deref(f.func, tmp, kv),
-            }
-            let (ok, k, v) = self.unbox_scalar(tmp, true);
-            self.free_slots(f, &[tmp]);
-            let next = self.ctx.append_basic_block(f.func, "hsc_glb_ok");
-            self.builder
-                .build_conditional_branch(ok, next, boxed_bb)
-                .expect("br");
-            self.builder.position_at_end(next);
-            global_ids.push(var.id);
-            global_vals.push((k, v));
-        }
+        let (global_ids, global_vals) = self.scalar_globals(f, &scan.globals, true, boxed_bb);
         let colls = scan
             .colls
             .iter()

@@ -119,12 +119,22 @@ pub(crate) fn walk_seq(
     if let Some(done) = walk_sole_map(eval, &coll, &mut visit) {
         return done;
     }
-    let mut seq = seq_value(eval, &coll).map_err(signal_to_native)?;
+    let seq = seq_value(eval, &coll).map_err(signal_to_native)?;
     // The walk holds `seq`, never `coll`: owned callers nilled the
     // arg slot (`take_walk_coll`), so dropping the head here frees
     // memoized chunks as the walk advances (borrow callers pass a
     // cheap clone, retaining as before).
     drop(coll);
+    walk_seq_steps(eval, seq, visit)
+}
+
+/// Visit the items of each realized unit before advancing. This also
+/// accepts the original input of `map`, which steps it directly.
+pub(crate) fn walk_seq_steps(
+    eval: &mut Evaluator,
+    mut seq: Value,
+    mut visit: impl FnMut(&mut Evaluator, &Value) -> Result<Walk, NativeError>,
+) -> Result<(), NativeError> {
     // Step-wise, not `first`/`next` per head: a chunked step hands
     // over its whole chunk (a range rebuilt its 32-item chunk for
     // every `first`). Forcing order is unchanged: each step forces

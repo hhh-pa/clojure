@@ -24,6 +24,7 @@ use clj_value::{
     BindCounts, Keyword, List, Map, RangeNum, Set, Symbol, ThrowClass, Throwable, Value, Var,
     Vector, new_map,
 };
+use num_traits::ToPrimitive;
 
 use crate::error::{NativeError, Signal};
 use crate::eval::Evaluator;
@@ -31,6 +32,42 @@ use crate::expr::{CaseTest, NsClause};
 
 /// The result of every step: a value or a pending throw.
 pub type Step = Result<Value, Signal>;
+
+/// Render a sequence with an inert separator. The compiler uses this
+/// for `(apply str (interpose sep (map str coll)))`.
+pub fn join_mapped_str(eval: &mut Evaluator, sep: &str, coll: Value) -> Step {
+    use crate::seqs::{Walk, walk_seq_steps};
+
+    let mut out = String::new();
+    let mut first = true;
+    let mut singleton = None;
+    let mut append = |eval: &mut Evaluator, item: &Value| {
+        if std::mem::take(&mut first) {
+            // `str` of a single string returns the original string.
+            if let Value::Str(s) = item {
+                singleton = Some(Arc::clone(s));
+                return Ok(Walk::Continue);
+            }
+        } else {
+            if let Some(s) = singleton.take() {
+                out.push_str(&s);
+            }
+            out.push_str(sep);
+        }
+        crate::core::str_push(&mut out, eval, item)?;
+        Ok(Walk::Continue)
+    };
+    if let Value::Vector(v) = coll {
+        for item in v.iter() {
+            append(eval, &item).map_err(|err| eval.throw(err))?;
+        }
+    } else {
+        // A lazy input must produce its whole chunk before any item's
+        // potentially effectful `str` (such as a host `toString`) runs.
+        walk_seq_steps(eval, coll, append).map_err(|err| eval.throw(err))?;
+    }
+    Ok(Value::Str(singleton.unwrap_or_else(|| Arc::from(out))))
+}
 
 /// Call `f` with `args` exactly like an interpreted call.
 pub fn invoke(eval: &mut Evaluator, f: &Value, args: &[Value]) -> Step {
@@ -817,6 +854,35 @@ pub fn parse_double_str(s: &str) -> Option<f64> {
     crate::core::parse_double_str(s)
 }
 
+/// Try the fixed-width integer path for `(long (quot (* a b) d))`.
+/// A Long product must fit a Long. A product involving a BigInt can
+/// use all 128 bits, and only its final quotient must fit a Long.
+#[must_use]
+pub fn try_scaled_long(a: &Value, b: &Value, d: &Value) -> Option<i64> {
+    let product = scaled_product(a, b)?;
+    let divisor = match d {
+        Value::Int(d) if matches!((a, b), (Value::Int(_), Value::Int(_))) => {
+            return (*d != 0).then(|| (product as i64).wrapping_div(*d));
+        }
+        Value::Int(d) => i128::from(*d),
+        Value::BigInt(d) => d.to_i128()?,
+        _ => return None,
+    };
+    i64::try_from(product.checked_div(divisor)?).ok()
+}
+
+fn scaled_product(a: &Value, b: &Value) -> Option<i128> {
+    let integral = |v: &Value| match v {
+        Value::Int(n) => Some(*n),
+        Value::BigInt(n) => n.to_i64(),
+        _ => None,
+    };
+    match (a, b) {
+        (Value::Int(a), Value::Int(b)) => a.checked_mul(*b).map(i128::from),
+        _ => Some(i128::from(integral(a)?) * i128::from(integral(b)?)),
+    }
+}
+
 /// Call `callee` (a cached var root) with `args` by value: a native
 /// runs its entry directly (an owned-args entry gets them moved in —
 /// no per-arg clone/drop, and head-releasing loopers can free as they
@@ -1588,6 +1654,7 @@ fn parse_ascii_long(s: &str, allow_plus: bool, max_18: bool) -> Option<i64> {
     let (neg, rest) = match bytes.first()? {
         b'-' => (true, &bytes[1..]),
         b'+' if allow_plus => (false, &bytes[1..]),
+        b'+' => return None,
         _ => (false, bytes),
     };
     if rest.is_empty() {
@@ -2149,6 +2216,12 @@ mod tests {
 
     #[test]
     fn try_mapv_parse_num_covers_vectors_splits_subvecs_and_misses() {
+        let signed = Value::Str(Arc::from("+1000000000000000000"));
+        assert_eq!(try_mapv_parse_num(&signed, 7), Some(Value::Nil));
+        assert_eq!(
+            try_mapv_parse_num(&signed, 4),
+            Some(Value::Int(1_000_000_000_000_000_000))
+        );
         let strs = |xs: &[&str]| {
             Value::Vector(Vector::from_vec(
                 xs.iter().map(|s| Value::Str(Arc::from(*s))).collect(),

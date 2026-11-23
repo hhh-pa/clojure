@@ -574,7 +574,7 @@ fn native_binary_exercises_lite_ns_stdin_and_full_cli() {
 #[test]
 fn native_binary_maps_packed_vectors_and_restarts_on_type_change() {
     let source = "(def weights [4 5 6])
-                  (def offset 2)
+                  (def offset (+ 1 1))
                   (def ^:dynamic *weight* 1)
                   (defn add-weights [extra]
                     (mapv (fn [i] (+ (nth weights i) extra offset)) (range 3)))
@@ -673,5 +673,37 @@ fn scalar_row_reads_keep_early_errors_and_results() {
     assert_eq!(
         (stdout.as_str(), stderr.as_str(), code),
         ("10\n0\n1 5 1\n", "", 0)
+    );
+}
+
+#[test]
+fn native_stable_lookups_and_scalars_match_boxed_values() {
+    let source = "(def table {:a 3})
+                  (def chars (zipmap \"éx\" (range)))
+                  (def allowed #{:a})
+                  (def read-label ':label)
+                  (def delta 0.5)
+                  (defn adjust [nums] (mapv (fn [x] (+ delta x)) nums))
+                  (println (table :a) (table :missing 7)
+                           (chars \\x) (allowed :a) (read-label {:label :ok}))
+                  (println (adjust [2 3]))";
+    let (stdout, stderr, code, _) = build_mode_and_run("stable-kinds", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("3 7 1 :a :ok\n[2.5 3.5]\n", "", 0)
+    );
+}
+
+#[test]
+fn native_owned_arguments_follow_destructured_parameters() {
+    let source = "(defn extend [[x y] items {:keys [z]}]
+                     (conj items (+ x y z)))
+                  (let [pair [1 2] items [4]]
+                    (println (extend pair items {:z 3}) pair items))
+                  (println (extend [1 2] [4] {:z 3}))";
+    let (stdout, stderr, code, _) = build_mode_and_run("mixed-parameters", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[4 6] [1 2] [4]\n[4 6]\n", "", 0)
     );
 }

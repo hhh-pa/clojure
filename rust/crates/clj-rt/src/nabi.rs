@@ -421,6 +421,17 @@ pub extern "C" fn rt_n_print_join(hit: &mut u8, sep: &Value, coll: &Value, flags
     }))
 }
 
+/// Render mapped strings separated by the compiler-supplied literal.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_join_mapped_str(out: &mut Value, sep: &CSlice<u8>, coll: &mut Value) -> i32 {
+    let input = std::mem::replace(coll, Value::Nil);
+    let text = sep.as_str();
+    finish(
+        out,
+        with_active(|eval| native_abi::join_mapped_str(eval, &text, input)),
+    )
+}
+
 /// Fold `res` (taken: left nil) into `acc` using `clojure.core/+` for a
 /// compiled `(reduce + [init] (map F ...))` loop.
 #[unsafe(no_mangle)]
@@ -605,6 +616,18 @@ pub extern "C" fn rt_n_op2_re(out: &mut Value, k: u64, a: &Value, b: &Value) -> 
             0
         }
         None => core_fallback(out, k, &[a, b]),
+    }
+}
+
+/// The integer multiply/quotient path for a result narrowed to Long.
+/// Returns 0 when the ordinary Clojure arithmetic must handle the operands.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_scaled_long(out: &mut Value, a: &Value, b: &Value, d: &Value) -> u8 {
+    if let Some(n) = native_abi::try_scaled_long(a, b, d) {
+        *out = Value::Int(n);
+        1
+    } else {
+        0
     }
 }
 
@@ -1353,6 +1376,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_mapv_parse_num,
         rt_n_dot,
         rt_n_print_join,
+        rt_n_join_mapped_str,
         rt_n_add_acc,
         rt_n_regex,
         rt_n_static_field,
@@ -1372,6 +1396,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_op1,
         rt_n_op2,
         rt_n_op2_re,
+        rt_n_scaled_long,
         rt_n_op3,
         rt_n_core_own,
         rt_n_enter_fn,

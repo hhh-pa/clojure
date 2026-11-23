@@ -62,3 +62,42 @@
 (println (try (nth @nil 0) (catch Exception _ :deref-failed))
          (try (nth (nth @nil 0) 0) (catch Exception _ :deref-failed))
          (try (nth (nth @(atom []) 0) 0) (catch Exception _ :out-of-bounds)))
+
+(defn scaled-long [a b d]
+  (long (quot (* a b) d)))
+
+(println (scaled-long 7 -5 3)
+         (scaled-long 2305843009213693952N 4 2)
+         (scaled-long 2 5 18446744073709551615N)
+         (scaled-long -9223372036854775808 1 -1)
+         (scaled-long 5.5 4 2)
+         (scaled-long 6 5 2.0)
+         (long (quot 20 3)))
+(println (try (scaled-long 9223372036854775807 2 2)
+              (catch ArithmeticException _ :overflow))
+         (try (scaled-long 2 5 0) (catch ArithmeticException _ :zero-divisor)))
+(let [read-divisor? (atom false)]
+  (try (long (quot (* 9223372036854775807 2)
+                   (do (reset! read-divisor? true) 2)))
+       (catch ArithmeticException _ nil))
+  (println @read-divisor?))
+
+(let [seen (atom [])
+      input (map (fn [x] (swap! seen conj x) x) [1 2 3])]
+  (println (apply str (interpose ", " (map str input))) @seen))
+(println (apply str (interpose ", " (map str [])))
+         (apply str (interpose " · " (map str [nil \é -2]))))
+(println (try (apply str (interpose ", " (map str 22)))
+              (catch Exception _ :not-seqable)))
+(println (apply str (interpose ", " [1 2]))
+         (try (long) (catch Exception _ :arity)))
+(let [s (str "fresh-" 7)]
+  (println (identical? s (apply str (interpose ", " (map str (list s)))))
+           (apply str (interpose ", " (map str [s "other"])))))
+(let [seen (atom [])
+      input (map (fn [x]
+                   (swap! seen conj [:map x])
+                   (reify Object
+                     (toString [_] (swap! seen conj [:str x]) (str x))))
+                 [1 2 3])]
+  (println (apply str (interpose ", " (map str input))) @seen))
