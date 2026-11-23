@@ -3825,77 +3825,31 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "nth" {
-            return Ok(false);
-        }
-        let [coll, idx] = call.args.as_slice() else {
+        let Some((deref, atom, indices)) = atom_nth_args(call) else {
             return Ok(false);
         };
-        if let Expr::DirectNative(inner_nth) = coll
-            && inner_nth.var.sym.namespace() == Some("clojure.core")
-            && inner_nth.var.sym.name() == "nth"
-            && let [Expr::DirectNative(deref_c), u] = inner_nth.args.as_slice()
-            && deref_c.var.sym.namespace() == Some("clojure.core")
-            && deref_c.var.sym.name() == "deref"
-            && let [atom_e] = deref_c.args.as_slice()
-        {
-            let a_s = self.slot(f);
-            self.lower(f, atom_e, a_s)?;
-            let u_s = self.slot(f);
-            self.lower(f, u, u_s)?;
-            let v_s = self.slot(f);
-            self.lower(f, idx, v_s)?;
-            let k = (self.var_of(&deref_c.var) << 32) | self.var_of(&call.var);
-            let st = self
-                .call(
-                    "rt_n_op3",
-                    Some(self.i32t),
-                    &[
-                        dest.into(),
-                        self.i32t
-                            .const_int(u64::from(native_abi::OP_ATOM_NTH2), false)
-                            .into(),
-                        self.u64c(k),
-                        a_s.into(),
-                        u_s.into(),
-                        v_s.into(),
-                    ],
-                )
-                .expect("st");
-            self.check(f, st);
-            self.free_slots(f, &[a_s, u_s, v_s]);
-            return Ok(true);
+        let (helper, op) = if indices.len() == 1 {
+            ("rt_n_op2", native_abi::OP_ATOM_NTH)
+        } else {
+            ("rt_n_op3", native_abi::OP_ATOM_NTH2)
+        };
+        let k = (self.var_of(deref) << 32) | self.var_of(&call.var);
+        let mut args = vec![
+            dest.into(),
+            self.i32t.const_int(u64::from(op), false).into(),
+            self.u64c(k),
+        ];
+        let mut slots = Vec::new();
+        for expr in std::iter::once(atom).chain(indices) {
+            let slot = self.slot(f);
+            self.lower(f, expr, slot)?;
+            slots.push(slot);
+            args.push(slot.into());
         }
-        if let Expr::DirectNative(deref_c) = coll
-            && deref_c.var.sym.namespace() == Some("clojure.core")
-            && deref_c.var.sym.name() == "deref"
-            && let [atom_e] = deref_c.args.as_slice()
-        {
-            let a_s = self.slot(f);
-            self.lower(f, atom_e, a_s)?;
-            let i_s = self.slot(f);
-            self.lower(f, idx, i_s)?;
-            let k = (self.var_of(&deref_c.var) << 32) | self.var_of(&call.var);
-            let st = self
-                .call(
-                    "rt_n_op2",
-                    Some(self.i32t),
-                    &[
-                        dest.into(),
-                        self.i32t
-                            .const_int(u64::from(native_abi::OP_ATOM_NTH), false)
-                            .into(),
-                        self.u64c(k),
-                        a_s.into(),
-                        i_s.into(),
-                    ],
-                )
-                .expect("st");
-            self.check(f, st);
-            self.free_slots(f, &[a_s, i_s]);
-            return Ok(true);
-        }
-        Ok(false)
+        let st = self.call(helper, Some(self.i32t), &args).expect("status");
+        self.check(f, st);
+        self.free_slots(f, &slots);
+        Ok(true)
     }
 
     fn try_lower_swap_fx(
@@ -8970,6 +8924,36 @@ fn core_call(e: &Expr) -> Option<(&str, &[Expr])> {
     };
     let sym = &call.var.sym;
     (sym.namespace() == Some("clojure.core")).then(|| (sym.name(), &call.args[..]))
+}
+
+/// Fuse only inert indices. An index expression may mutate the atom or
+/// throw after the dereference, and a nested lookup can itself throw.
+fn atom_nth_args(
+    call: &clj_eval::expr::DirectCall,
+) -> Option<(&clj_value::Var, &Expr, Vec<&Expr>)> {
+    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "nth" {
+        return None;
+    }
+    let [coll, idx] = call.args.as_slice() else {
+        return None;
+    };
+    let (source, indices) = match core_call(coll) {
+        Some(("nth", [source, row])) => (source, vec![row, idx]),
+        _ => (coll, vec![idx]),
+    };
+    if !indices
+        .iter()
+        .all(|e| matches!(e, Expr::Local(_) | Expr::Literal(Value::Int(_))))
+    {
+        return None;
+    }
+    let Expr::DirectNative(deref) = source else {
+        return None;
+    };
+    let Some(("deref", [atom])) = core_call(source) else {
+        return None;
+    };
+    Some((&deref.var, atom, indices))
 }
 
 /// Whether evaluating `e` can neither fail nor be observed: a constant,

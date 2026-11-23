@@ -1798,6 +1798,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn packed_builder_freezes_its_numeric_storage() {
+        let mut ints = vec_builder(2, 1);
+        assert!(
+            matches!(vec_done(&mut ints), Value::Vector(v) if v.as_flat_ints() == Some(&[0, 0]))
+        );
+        assert_eq!(vec_done(&mut ints), Value::Nil);
+        let mut doubles = vec_builder(2, 2);
+        assert!(
+            matches!(vec_done(&mut doubles), Value::Vector(v) if v.as_flat_doubles() == Some(&[0.0, 0.0]))
+        );
+        let map = clj_value::TransientMap::from_map(&clj_value::new_map());
+        let mut map = Value::Transient(clj_value::Transient::new(clj_value::TransientKind::Map(
+            map,
+        )));
+        assert_eq!(vec_done(&mut map), Value::Nil);
+    }
+
+    #[test]
     fn map_set_and_keyword_calls_look_up_directly_271() {
         let mut eval = crate::boot();
         let kw = |n: &str| Value::Keyword(Keyword::new(None, n));

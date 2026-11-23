@@ -1062,7 +1062,6 @@ fn is_small_scalar_key(k: &Value) -> bool {
 #[inline]
 fn small_scalar_eq(ek: &Value, k: &Value) -> bool {
     match (ek, k) {
-        (Value::Keyword(ekw), Value::Keyword(kw)) => ekw.ptr_eq(kw),
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Nil, Value::Nil) => true,
@@ -1659,41 +1658,24 @@ impl Vector {
         if start == end {
             return Ok(self);
         }
-        match (&self.0.inner, &other.0.inner) {
-            (VectorInner::Ints(_), VectorInner::Ints(s)) => {
-                let Some(sl) = s.as_flat().and_then(|x| x.get(start..end)) else {
-                    return Err(self);
-                };
-                let data = Arc::make_mut(&mut self.0);
-                if let VectorInner::Ints(d) = &mut data.inner {
-                    d.extend_slice(sl);
-                }
-                data.id = next_vector_id();
-                Ok(self)
+        let data = Arc::make_mut(&mut self.0);
+        let appended = match (&mut data.inner, &other.0.inner) {
+            (VectorInner::Ints(dst), VectorInner::Ints(src)) => {
+                dst.extend_flat_window(src, start, end)
             }
-            (VectorInner::Doubles(_), VectorInner::Doubles(s)) => {
-                let Some(sl) = s.as_flat().and_then(|x| x.get(start..end)) else {
-                    return Err(self);
-                };
-                let data = Arc::make_mut(&mut self.0);
-                if let VectorInner::Doubles(d) = &mut data.inner {
-                    d.extend_slice(sl);
-                }
-                data.id = next_vector_id();
-                Ok(self)
+            (VectorInner::Doubles(dst), VectorInner::Doubles(src)) => {
+                dst.extend_flat_window(src, start, end)
             }
-            (VectorInner::Generic(_), VectorInner::Generic(s)) => {
-                let Some(sl) = s.as_flat().and_then(|x| x.get(start..end)) else {
-                    return Err(self);
-                };
-                let data = Arc::make_mut(&mut self.0);
-                if let VectorInner::Generic(d) = &mut data.inner {
-                    d.extend_slice(sl);
-                }
-                data.id = next_vector_id();
-                Ok(self)
+            (VectorInner::Generic(dst), VectorInner::Generic(src)) => {
+                dst.extend_flat_window(src, start, end)
             }
-            _ => Err(self),
+            _ => false,
+        };
+        if appended {
+            data.id = next_vector_id();
+            Ok(self)
+        } else {
+            Err(self)
         }
     }
 
@@ -2249,14 +2231,19 @@ impl Map {
             });
             return true;
         }
-        let Some(old) = self.trie().get(k).cloned() else {
+        let Some(slot) = self.trie_mut().get_mut(k) else {
             return false;
         };
-        let Ok(new) = f(old) else {
-            return false;
-        };
-        self.trie_mut().insert_mut(k.clone(), new);
-        true
+        match f(std::mem::replace(slot, Value::Nil)) {
+            Ok(new) => {
+                *slot = new;
+                true
+            }
+            Err(original) => {
+                *slot = original;
+                false
+            }
+        }
     }
 
     /// Convert a shaped map to the hash trie, then insert the
@@ -5714,6 +5701,59 @@ mod tests {
         let rebuilt = Map::with_vals(&big, vals.clone());
         for (i, (k, _)) in big.iter().enumerate() {
             assert_eq!(rebuilt.get(k), Some(&vals[i]));
+        }
+    }
+
+    #[test]
+    fn bulk_append_preserves_shared_vectors_and_uses_flat_windows() {
+        use super::Vector;
+
+        for items in [
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+            vec![Value::Double(1.0), Value::Double(2.0), Value::Double(3.0)],
+            vec![Value::Nil, Value::Bool(true), Value::Bool(false)],
+        ] {
+            let v = Vector::from_vec(items.clone());
+            assert_eq!(v.cannot_contain_nil(), !items.contains(&Value::Nil));
+            let mut want = items.clone();
+            want.extend_from_slice(&items[1..]);
+            let merged = v.clone().try_extend_flat_window(&v, 1, 3).unwrap();
+            assert_eq!(merged.iter().collect::<Vec<_>>(), want);
+            assert_eq!(v.iter().collect::<Vec<_>>(), items);
+            assert!(v.clone().try_extend_flat_window(&v, 1, 4).is_err());
+            assert_eq!(v.clone().try_extend_flat_window(&v, 2, 2).unwrap().len(), 3);
+        }
+
+        let v = Vector::from_flat_ints((0..2048).collect());
+        let merged = v.clone().try_extend_flat_window(&v, 0, v.len()).unwrap();
+        assert_eq!(merged.len(), 4096);
+        assert_eq!(merged.get(2048), Some(Value::Int(0)));
+        let other = Vector::from_doubles(vec![1.0]);
+        assert!(v.clone().try_extend_flat_window(&other, 0, 1).is_err());
+        let merged = merged.try_extend_flat_window(&v, 0, 1).unwrap();
+        assert_eq!(merged.get(4096), Some(Value::Int(0)));
+        assert_eq!(v.len(), 2048);
+    }
+
+    #[test]
+    fn update_existing_map_value_preserves_sharing_and_rolls_back_on_miss() {
+        use super::Map;
+
+        for size in [1, 20] {
+            let key = Value::Int(0);
+            let mut map = Map::from_kvs_last_wins(
+                (0..size).map(|i| (Value::Int(i), Value::Int(i))).collect(),
+            );
+            assert!(!map.update_existing_mut(&key, Err));
+            assert_eq!(map.get(&key), Some(&key));
+            let original = map.clone();
+            assert!(map.update_existing_mut(&key, |old| {
+                assert_eq!(old, key);
+                Ok(Value::Int(41))
+            }));
+            assert_eq!(map.get(&key), Some(&Value::Int(41)));
+            assert_eq!(original.get(&key), Some(&key));
+            assert!(!map.update_existing_mut(&Value::Int(-1), |_| panic!("missing key")));
         }
     }
 

@@ -3005,6 +3005,11 @@ mod apply_tests {
                 .expect("root")
         };
         let inc_fn = core_fn("inc");
+        let key = Value::Keyword(Keyword::new(None, "k"));
+        let map = Value::Map(Map::from_kvs_last_wins(vec![(key.clone(), Value::Nil)]));
+        let mut args = [map.clone(), key, inc_fn.clone()];
+        assert_eq!(apply_update3(&mut args), None);
+        assert_eq!(args[0], map);
         let dec_fn = core_fn("dec");
         let add_fn = core_fn("+");
         let assoc_fn = core_fn("assoc");
@@ -3201,6 +3206,40 @@ mod apply_tests {
         assert!(
             try_swap_in_place(&mut v_nmap, &assoc_in_fn, &[path2, Value::Int(42)], true).is_some()
         );
+        let atom = clj_value::Atom::new(v_nmap);
+        let mut args = smallvec::smallvec![
+            Value::Atom(atom.clone()),
+            assoc_in_fn.clone(),
+            ka.clone(),
+            kb.clone(),
+            Value::Int(50),
+        ];
+        let swap_val = own_op("swap-assoc-in2!", 5).expect("swap assoc-in op");
+        let swap_fx = own_op("swap-assoc-in2-fx!", 5).expect("swap assoc-in effect op");
+        args[1] = inc_fn.clone();
+        assert_eq!(apply_own(swap_val, &mut args), None);
+        args[1] = assoc_in_fn;
+        assert_eq!(
+            apply_own(swap_val, &mut args),
+            Some(atom.lock().value.clone())
+        );
+        args[3] = kb.clone();
+        args[4] = Value::Int(60);
+        assert_eq!(apply_own(swap_fx, &mut args), Some(Value::Nil));
+        assert_eq!(
+            try_swap_in_place(&mut Value::Int(1), &add_fn, &[Value::Int(2)], false),
+            Some(Value::Nil)
+        );
+        atom.lock().validator = Some(inc_fn);
+        assert_eq!(apply_own(swap_fx, &mut args), None);
+        repack_own_args(swap_fx, &mut args);
+        assert_eq!(args.len(), 4);
+        assert!(matches!(&args[2], Value::Vector(v) if v.len() == 2));
+        let swap_fx = own_op("swap-fx!", 3).expect("swap effect op");
+        assert_eq!(apply_own(swap_fx, &mut args[..3]), None);
+        args[0] = Value::Nil;
+        assert_eq!(apply_own(swap_fx, &mut args[..3]), None);
+        assert_eq!(apply_own(swap_val, &mut args), None);
 
         // try_assoc_subvec branches: non-subvec ext, negative/OOB idx, compacting,
         // unique in-place, and shared non-compacting.

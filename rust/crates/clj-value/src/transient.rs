@@ -1822,3 +1822,17 @@ mod tests {
         assert_eq!(tv_big_conj.len().unwrap(), 32_769);
     }
 }
+#[test]
+fn boolean_overwrite_accepts_only_live_generic_scalar_slots() {
+    use crate::{Value, Vector};
+
+    let mut integers = super::TransientVector::from_ints(vec![7]);
+    assert!(!integers.assoc_bool_in_bounds(0, true));
+    let vv = Vector::from_vec(vec![Value::Nil, Value::Str(std::sync::Arc::from("s"))]);
+    let mut tv = super::TransientVector::from_vector(&vv);
+    assert!(tv.assoc_bool_in_bounds(0, true));
+    assert!(!tv.assoc_bool_in_bounds(1, false));
+    assert!(!tv.assoc_bool_in_bounds(2, false));
+    assert_eq!(tv.persistent().unwrap().get(0), Some(Value::Bool(true)));
+    assert!(!tv.assoc_bool_in_bounds(0, false));
+}

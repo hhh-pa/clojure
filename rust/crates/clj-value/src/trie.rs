@@ -519,18 +519,21 @@ impl<T: Clone> Packed<T> {
         }
     }
 
-    /// Bulk-append a contiguous slice (stays flat when uniquely owned or
-    /// within [`FLAT_MAX`], else appends into the trie).
-    pub(crate) fn extend_slice(&mut self, src: &[T]) {
+    /// Bulk-append a contiguous window of a flat source.
+    pub(crate) fn extend_flat_window(&mut self, src: &Self, start: usize, end: usize) -> bool {
+        let Some(src) = src.as_flat().and_then(|slice| slice.get(start..end)) else {
+            return false;
+        };
         if let Packed::Flat(a) = self {
             if a.len() + src.len() <= FLAT_MAX || Arc::strong_count(a) == 1 {
                 Arc::make_mut(a).extend_from_slice(src);
-                return;
+                return true;
             }
         }
         for x in src {
             self.push(x.clone());
         }
+        true
     }
 
     /// Replace the item at `i` (`false` when out of bounds).

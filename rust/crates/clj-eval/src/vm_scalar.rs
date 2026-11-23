@@ -1723,6 +1723,10 @@ pub(crate) trait Host {
     /// The closure `var` holds now, when a call with `argc` args
     /// may inline it.
     fn callee(&self, var: &Var, argc: usize) -> Option<Callee>;
+    /// AOT's nested lookup only probes immutable persistent vectors.
+    fn can_defer_row_read(&self) -> bool {
+        false
+    }
     /// Resolve a read-only global collection (`Expr::Global(var)`) to a
     /// host-managed `Loc` (used by AOT for stable top-level vectors/tables).
     fn resolve_global_coll(&mut self, _var: &Var) -> Option<Loc> {
@@ -1827,6 +1831,7 @@ struct Builder<'h> {
     seen_effect: bool,
     /// Whether any primed operator can execute after an effect in the same iteration.
     primed_after_effect: bool,
+    deferred_row_read: bool,
 }
 
 /// The analyzed scalar AST of a `loop` body (shared by the VM's
@@ -1838,6 +1843,7 @@ pub struct ScalarAst {
     pub boxed: Vec<bool>,
     pub primed: bool,
     pub primed_after_effect: bool,
+    pub deferred_row_read: bool,
     pub global_colls: Vec<Var>,
     sites: Vec<Site>,
     roots: Vec<RootSite>,
@@ -1868,6 +1874,7 @@ fn build_ast(
         primed: false,
         seen_effect: false,
         primed_after_effect: false,
+        deferred_row_read: false,
     };
     let node = b.body(body);
     let clash = b.scalar.iter().zip(&b.boxed).any(|(s, x)| *s && *x);
@@ -1881,6 +1888,7 @@ fn build_ast(
         boxed: b.boxed,
         primed: b.primed,
         primed_after_effect: b.primed_after_effect,
+        deferred_row_read: b.deferred_row_read,
         global_colls: Vec::new(),
         sites: b.sites,
         roots: b.roots,
@@ -1905,6 +1913,10 @@ impl<F: Fn(&Var) -> bool> Host for AotHost<'_, F> {
 
     fn site(&self, call: &DirectCall) -> Site {
         Site::new(Arc::new(call.clone()))
+    }
+
+    fn can_defer_row_read(&self) -> bool {
+        true
     }
 
     fn callee(&self, var: &Var, argc: usize) -> Option<Callee> {
@@ -1971,6 +1983,7 @@ pub fn compile_aot_expr(
         primed: false,
         seen_effect: false,
         primed_after_effect: false,
+        deferred_row_read: false,
     };
     let expr = b.seq_expr(body);
     if b.seen_effect || misses(&expr) {
@@ -2291,7 +2304,7 @@ impl Builder<'_> {
         for (bi, (pat, init)) in bindings.iter().enumerate() {
             match pat {
                 Pattern::Symbol(_) => {
-                    if let Some(body) = let_body {
+                    if let Some(body) = let_body.filter(|_| self.host.can_defer_row_read()) {
                         if self.try_nth_ref_binding(init, &bindings[bi + 1..], body, &mut out) {
                             continue;
                         }
@@ -2345,6 +2358,7 @@ impl Builder<'_> {
         let site = self.host.site(call);
         self.sites.push(site);
         self.lex.push(Lex::NthRef(loc, t));
+        self.deferred_row_read = true;
         true
     }
 

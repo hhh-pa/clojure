@@ -573,12 +573,105 @@ fn native_binary_exercises_lite_ns_stdin_and_full_cli() {
 
 #[test]
 fn native_binary_maps_packed_vectors_and_restarts_on_type_change() {
-    let source = "(println (mapv (fn [x] (+ x 1)) [4 5 6])
+    let source = "(def weights [4 5 6])
+                  (def offset 2)
+                  (def ^:dynamic *weight* 1)
+                  (defn add-weights [extra]
+                    (mapv (fn [i] (+ (nth weights i) extra offset)) (range 3)))
+                  (println (mapv (fn [x] (+ x 1)) [4 5 6])
                            (mapv (fn [x y] (+ x y)) [0.5 1.5 2.5] (range 2))
-                           (mapv (fn [x] (if (zero? x) x (> x 1))) (range 3)))";
+                           (mapv (fn [x] (if (zero? x) x (> x 1))) (range 3)))
+                  (println (add-weights 3) (mapv (fn [x] (inc x)) []))
+                  (println (reduce (fn [a x] (+ a x)) 8 [])
+                           (every? (fn [x] (pos? x)) [])
+                           (count (filter (fn [x] (pos? x)) [])))
+                  (binding [*weight* 3]
+                    (println (mapv (fn [x] (+ x *weight*)) [1 2])))
+                  (letfn [(f [] 8)]
+                    (println (mapv (fn [x] (if f (inc x) x)) [2 4])))";
     let (stdout, stderr, code, _) = build_mode_and_run("packed-mapv", source, &[]);
     assert_eq!(
         (stdout.as_str(), stderr.as_str(), code),
-        ("[5 6 7] [0.5 2.5] [0 false true]\n", "", 0)
+        (
+            "[5 6 7] [0.5 2.5] [0 false true]\n[9 10 11] []\n8 true 0\n[4 5]\n[3 5]\n",
+            "",
+            0
+        )
+    );
+}
+
+#[test]
+fn atom_nth_reads_before_index_side_effects() {
+    let source = "(let [a (atom [[11 12]]) i 0]
+                     (println (nth @a i) (nth (nth @a i) 1))
+                     (println (nth (nth @a i) (do (reset! a [[21 22]]) 1)))
+                     (println (nth @a (do (reset! a [[31 32]]) i))))";
+    let (stdout, stderr, code, _) = build_mode_and_run("atom-nth-order", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[11 12] 12\n12\n[21 22]\n", "", 0)
+    );
+}
+
+#[test]
+fn native_swap_in_keeps_value_and_effect_position_semantics() {
+    let source = "(let [a (atom {:x {:y 0}})]
+                     (swap! a assoc-in [:x :y] 1)
+                     (swap! a assoc :z 2)
+                     (swap! a identity)
+                     (println (get-in @a [:x :y]) (:z @a))
+                     (println (get-in (swap! a assoc-in [:x :y] 3) [:x :y])))";
+    let (stdout, stderr, code, _) = build_mode_and_run("swap-in-positions", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("1 2\n3\n", "", 0)
+    );
+}
+
+#[test]
+fn scalar_row_reads_keep_early_errors_and_results() {
+    let source = "(defn row-sums [rows]
+                     (loop [i 0 acc 0]
+                       (if (< i (count rows))
+                         (let [row (nth rows i)]
+                           (recur (inc i) (+ acc (nth row 0) (nth row 1))))
+                         acc)))
+                  (defn update-before-next-row [rows dst]
+                    (loop [i 0 acc 0]
+                      (if (< i 2)
+                        (let [row (nth rows i)]
+                          (assoc! dst 0 i)
+                          (recur (inc i) (+ acc (nth row 0))))
+                        acc)))
+                  (println (row-sums [[1 2] [3 4]]))
+                  (let [dst (transient [9])]
+                    (try (update-before-next-row [[1]] dst)
+                         (catch IndexOutOfBoundsException _ (println (nth dst 0)))))
+                  (defn row-with-try [rows]
+                    (loop [i 0]
+                      (if (< i 1)
+                        (let [row (nth rows i)]
+                          (if (pos? (try (nth row 0) (catch Exception _ 0)))
+                            (recur (inc i))
+                            i))
+                        i)))
+                  (defn computed-row [rows use-rows]
+                    (loop [i 0 acc 0]
+                      (if (< i 1)
+                        (let [row (nth (if use-rows rows [[3]]) i)]
+                          (recur (inc i) (+ acc (nth row 0))))
+                        acc)))
+                  (defn conditional-nth [use-nth]
+                    (loop [i 0 acc 0]
+                      (if (< i 1)
+                        (let [n (inc i)]
+                          (recur n (+ acc (if use-nth (nth n 0) n))))
+                        acc)))
+                  (println (row-with-try [[2]]) (computed-row [[5]] true)
+                           (conditional-nth false))";
+    let (stdout, stderr, code, _) = build_mode_and_run("scalar-row-errors", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("10\n0\n1 5 1\n", "", 0)
     );
 }

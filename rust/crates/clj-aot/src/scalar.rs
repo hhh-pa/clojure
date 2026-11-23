@@ -481,7 +481,8 @@ impl<'ctx> Lowerer<'ctx> {
         {
             return false;
         }
-        if scan.has_effects && (ast.primed_after_effect || scan.has_deopt) {
+        if scan.has_effects && (ast.primed_after_effect || scan.has_deopt || ast.deferred_row_read)
+        {
             return false;
         }
         true
@@ -3098,39 +3099,12 @@ impl<'ctx> Lowerer<'ctx> {
         dest: PointerValue<'ctx>,
         done: BasicBlock<'ctx>,
     ) -> Result<(), Unsupported> {
-        if !self.inline_arith
-            || !self.use_bitcode
-            || !matches!(
-                hl.kind,
-                HofKind::Collect
-                    | HofKind::Reduce
-                    | HofKind::Sum
-                    | HofKind::Every
-                    | HofKind::CountFilter
-            )
-        {
-            return Ok(());
-        }
-        let n_params = if hl.kind == HofKind::Reduce || hl.coll2.is_some() {
-            2
-        } else {
-            1
-        };
-        let Some(ast) = compile_aot_expr(&hl.arity.body, n_params, base, &self.callees, |v| {
-            self.is_stable_global_coll(v)
-        }) else {
+        let Some(kind) = ScalarHofKind::of(hl) else {
             return Ok(());
         };
-        let mut scan = AstScan::default();
-        scan.scan_expr(&ast.expr);
-        if scan.has_effects
-            || !scan
-                .all_locs
-                .iter()
-                .all(|loc| self.is_direct_loc(f, &ast.global_colls, *loc))
-        {
+        let Some((ast, scan)) = self.scalar_hof_ast(f, hl, base) else {
             return Ok(());
-        }
+        };
         let boxed_bb = self.ctx.append_basic_block(f.func, "shof_boxed");
         let deopt_bb = self.ctx.append_basic_block(f.func, "shof_deopt");
         let empty_bb = self.ctx.append_basic_block(f.func, "shof_empty");
@@ -3143,15 +3117,15 @@ impl<'ctx> Lowerer<'ctx> {
             .build_conditional_branch(is_empty, empty_bb, non_empty_bb)
             .expect("br");
         self.builder.position_at_end(empty_bb);
-        self.emit_shof_empty(f.func, hl.kind, hl.init.is_some(), acc, dest, done);
+        self.emit_shof_empty(f.func, kind, acc, dest, done);
 
         self.builder.position_at_end(non_empty_bb);
         let session =
             self.init_hof_session(f, ast.nslots, &ast.global_colls, &scan, boxed_bb, deopt_bb);
         let src1 = self.probe_hof_src(f, st1, st1.n, boxed_bb);
         let src2 = st2.map(|s2| self.probe_hof_src(f, s2, st1.n, boxed_bb));
-        match hl.kind {
-            HofKind::Collect => self.emit_shof_collect(
+        match kind {
+            ScalarHofKind::Collect => self.emit_shof_collect(
                 f,
                 &session,
                 &ast.expr,
@@ -3164,14 +3138,14 @@ impl<'ctx> Lowerer<'ctx> {
                 deopt_bb,
                 boxed_bb,
             )?,
-            HofKind::Reduce => self.emit_shof_reduce(
+            ScalarHofKind::Reduce => self.emit_shof_reduce(
                 f, &session, &ast.expr, acc, st1.n, &src1, dest, done, deopt_bb, boxed_bb,
             )?,
-            HofKind::Sum => self.emit_shof_sum(
+            ScalarHofKind::Sum { has_init } => self.emit_shof_sum(
                 f,
                 &session,
                 &ast.expr,
-                hl.init.is_some(),
+                has_init,
                 acc,
                 st1.n,
                 &src1,
@@ -3181,29 +3155,57 @@ impl<'ctx> Lowerer<'ctx> {
                 deopt_bb,
                 boxed_bb,
             )?,
-            HofKind::Every => self.emit_shof_every(
+            ScalarHofKind::Every => self.emit_shof_every(
                 f, &session, &ast.expr, st1.n, &src1, dest, done, deopt_bb, boxed_bb,
             )?,
-            HofKind::CountFilter => self.emit_shof_count_filter(
+            ScalarHofKind::CountFilter => self.emit_shof_count_filter(
                 f, &session, &ast.expr, st1.n, &src1, dest, done, deopt_bb, boxed_bb,
             )?,
-            _ => unreachable!("filtered above"),
         }
         self.builder.position_at_end(boxed_bb);
         Ok(())
     }
 
+    fn scalar_hof_ast(
+        &self,
+        f: &FnCtx<'ctx>,
+        hl: &HofLoop<'_>,
+        base: usize,
+    ) -> Option<(clj_eval::aot_scalar::ScalarFnAst, AstScan)> {
+        if !self.inline_arith || !self.use_bitcode {
+            return None;
+        }
+        let n_params = if hl.kind == HofKind::Reduce || hl.coll2.is_some() {
+            2
+        } else {
+            1
+        };
+        let ast = compile_aot_expr(&hl.arity.body, n_params, base, &self.callees, |v| {
+            self.is_stable_global_coll(v)
+        })?;
+        let mut scan = AstScan::default();
+        scan.scan_expr(&ast.expr);
+        if scan.has_effects
+            || !scan
+                .all_locs
+                .iter()
+                .all(|loc| self.is_direct_loc(f, &ast.global_colls, *loc))
+        {
+            return None;
+        }
+        Some((ast, scan))
+    }
+
     fn emit_shof_empty(
         &self,
         func: FunctionValue<'ctx>,
-        kind: HofKind,
-        has_init: bool,
+        kind: ScalarHofKind,
         acc: PointerValue<'ctx>,
         dest: PointerValue<'ctx>,
         done: BasicBlock<'ctx>,
     ) {
         match kind {
-            HofKind::Collect => {
+            ScalarHofKind::Collect => {
                 self.call(
                     "rt_n_vec_new",
                     None,
@@ -3216,15 +3218,15 @@ impl<'ctx> Lowerer<'ctx> {
                 self.call("rt_n_vec_done", None, &[dest.into(), acc.into()]);
                 self.drop_and_nil_slots(func, &[acc]);
             }
-            HofKind::Reduce => self.move_v(func, dest, acc),
-            HofKind::Sum if has_init => self.move_v(func, dest, acc),
-            HofKind::Sum | HofKind::CountFilter => {
+            ScalarHofKind::Reduce | ScalarHofKind::Sum { has_init: true } => {
+                self.move_v(func, dest, acc);
+            }
+            ScalarHofKind::Sum { has_init: false } | ScalarHofKind::CountFilter => {
                 self.write_int(func, dest, self.i64t.const_zero());
             }
-            HofKind::Every => {
+            ScalarHofKind::Every => {
                 self.write_bool(func, dest, self.ctx.bool_type().const_int(1, false));
             }
-            _ => unreachable!("filtered above"),
         }
         self.builder.build_unconditional_branch(done).expect("br");
     }
@@ -3855,6 +3857,30 @@ impl<'ctx> Lowerer<'ctx> {
 
 /// Probed input collection source for a scalar HOF loop (either a long range
 /// or a flat packed `Int`/`Double` vector).
+#[derive(Clone, Copy)]
+enum ScalarHofKind {
+    Collect,
+    Reduce,
+    Sum { has_init: bool },
+    Every,
+    CountFilter,
+}
+
+impl ScalarHofKind {
+    fn of(hl: &HofLoop<'_>) -> Option<Self> {
+        Some(match hl.kind {
+            HofKind::Collect => Self::Collect,
+            HofKind::Reduce => Self::Reduce,
+            HofKind::Sum => Self::Sum {
+                has_init: hl.init.is_some(),
+            },
+            HofKind::Every => Self::Every,
+            HofKind::CountFilter => Self::CountFilter,
+            HofKind::Each | HofKind::FilterCollect | HofKind::Some => return None,
+        })
+    }
+}
+
 struct HofSrc<'ctx> {
     kind: IntValue<'ctx>,
     step: IntValue<'ctx>,

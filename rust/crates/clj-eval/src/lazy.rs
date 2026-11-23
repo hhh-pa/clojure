@@ -4665,36 +4665,29 @@ enum ConcatPart<'a> {
     RepeatDouble(f64, usize),
 }
 
+fn concat_vector_window(vec: &Vector, start: usize, end: usize) -> Option<ConcatPart<'_>> {
+    if start == end {
+        return Some(ConcatPart::Empty);
+    }
+    if let Some(xs) = vec.as_flat_ints() {
+        return xs.get(start..end).map(ConcatPart::Ints);
+    }
+    vec.as_flat_doubles()?
+        .get(start..end)
+        .map(ConcatPart::Doubles)
+}
+
 fn concat_part(v: &Value) -> Option<ConcatPart<'_>> {
     match v {
         Value::Nil => Some(ConcatPart::Empty),
-        Value::Vector(vec) => {
-            if vec.is_empty() {
-                return Some(ConcatPart::Empty);
-            }
-            if let Some(xs) = vec.as_flat_ints() {
-                return Some(ConcatPart::Ints(xs));
-            }
-            vec.as_flat_doubles().map(ConcatPart::Doubles)
-        }
+        Value::List(xs) if xs.is_empty() => Some(ConcatPart::Empty),
+        Value::Vector(vec) => concat_vector_window(vec, 0, vec.len()),
         Value::Extension(e) => {
             if let Some((vec, start, end)) = e.as_subvector_parts() {
-                if start == end {
-                    return Some(ConcatPart::Empty);
-                }
-                if let Some(xs) = vec.as_flat_ints().and_then(|s| s.get(start..end)) {
-                    return Some(ConcatPart::Ints(xs));
-                }
-                return vec
-                    .as_flat_doubles()
-                    .and_then(|s| s.get(start..end))
-                    .map(ConcatPart::Doubles);
+                return concat_vector_window(vec, start, end);
             }
             let r = e.as_any().downcast_ref::<clj_value::RepeatValue>()?;
             let n = usize::try_from(r.n()?.max(0)).ok()?;
-            if n == 0 {
-                return Some(ConcatPart::Empty);
-            }
             match r.x() {
                 Value::Int(x) => Some(ConcatPart::RepeatInt(*x, n)),
                 Value::Double(d) => Some(ConcatPart::RepeatDouble(*d, n)),
@@ -4705,41 +4698,30 @@ fn concat_part(v: &Value) -> Option<ConcatPart<'_>> {
     }
 }
 
+fn concat_len(parts: &[ConcatPart<'_>]) -> Option<usize> {
+    parts.iter().try_fold(0usize, |n, part| {
+        n.checked_add(match part {
+            ConcatPart::Empty => 0,
+            ConcatPart::Ints(xs) => xs.len(),
+            ConcatPart::Doubles(xs) => xs.len(),
+            ConcatPart::RepeatInt(_, count) | ConcatPart::RepeatDouble(_, count) => *count,
+        })
+    })
+}
+
 fn collect_concat_parts(parts: &[ConcatPart<'_>]) -> Option<Vector> {
-    let mut is_int = false;
-    let mut is_dbl = false;
-    let mut total = 0usize;
-    for p in parts {
-        match p {
-            ConcatPart::Empty => {}
-            ConcatPart::Ints(s) => {
-                is_int = true;
-                total = total.checked_add(s.len())?;
-            }
-            ConcatPart::RepeatInt(_, n) => {
-                is_int = true;
-                total = total.checked_add(*n)?;
-            }
-            ConcatPart::Doubles(s) => {
-                is_dbl = true;
-                total = total.checked_add(s.len())?;
-            }
-            ConcatPart::RepeatDouble(_, n) => {
-                is_dbl = true;
-                total = total.checked_add(*n)?;
-            }
-        }
-    }
-    if is_int && is_dbl {
-        return None;
-    }
-    if is_dbl {
+    let total = concat_len(parts)?;
+    if parts
+        .iter()
+        .any(|p| matches!(p, ConcatPart::Doubles(_) | ConcatPart::RepeatDouble(..)))
+    {
         let mut out = Vec::with_capacity(total);
         for p in parts {
             match p {
                 ConcatPart::Doubles(s) => out.extend_from_slice(s),
                 ConcatPart::RepeatDouble(d, n) => out.resize(out.len() + *n, *d),
-                _ => {}
+                ConcatPart::Empty => {}
+                _ => return None,
             }
         }
         return Some(Vector::from_flat_doubles(out));

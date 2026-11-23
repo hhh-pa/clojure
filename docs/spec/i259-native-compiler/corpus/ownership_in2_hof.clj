@@ -49,3 +49,16 @@
   (println (run-hofs (range 6)))
   (println (run-hofs '(0 1 2 3 4 5)))
   (println (run-atoms)))
+
+(defn atom-lookups [row matrix i j]
+  [(nth @row i) (nth (nth @matrix i) j)])
+
+(println (atom-lookups (atom [7 8]) (atom [[10 11] [12 13]]) 1 0))
+(println (atom-lookups (atom (subvec [7 8 9] 1))
+                       (atom [(subvec [10 11 12] 1)]) 0 1))
+(println (atom-lookups (atom '(8)) (atom '([12 13])) 0 1))
+(println (atom-lookups (volatile! '(8)) (atom ['(12 13)]) 0 1))
+(println (atom-lookups (atom [8 9]) (atom [[12 13]]) 0.0 1.0))
+(println (try (nth @nil 0) (catch Exception _ :deref-failed))
+         (try (nth (nth @nil 0) 0) (catch Exception _ :deref-failed))
+         (try (nth (nth @(atom []) 0) 0) (catch Exception _ :out-of-bounds)))

@@ -23,8 +23,9 @@ use clj_value::{Symbol, ThrowClass, Value};
 
 use crate::error::NativeError;
 use crate::eval::Evaluator;
-use crate::lazy::{StepUnit, is_seqable, seq_value, step_unit};
+use crate::lazy::is_seqable;
 use crate::ns::{check_arity, signal_to_native};
+use crate::seqs::{Walk, walk_seq};
 
 type Native = fn(&mut Evaluator, &[Value]) -> Result<Value, NativeError>;
 
@@ -252,33 +253,17 @@ fn join_vector_buf(
     Ok(out)
 }
 
-fn join_seq(eval: &mut Evaluator, sep: &str, coll: &Value) -> Result<Value, NativeError> {
+fn join_seq(eval: &mut Evaluator, sep: &str, coll: Value) -> Result<Value, NativeError> {
     let mut out = String::new();
     let mut first = true;
-    let mut cur = seq_value(eval, coll).map_err(signal_to_native)?;
-    loop {
-        match step_unit(eval, &cur).map_err(signal_to_native)? {
-            StepUnit::Empty => break,
-            StepUnit::One { head, tail } => {
-                cur = tail;
-                if !first {
-                    out.push_str(sep);
-                }
-                first = false;
-                crate::core::str_push(&mut out, eval, &head)?;
-            }
-            StepUnit::Chunk { items, tail } => {
-                cur = tail;
-                for item in items.iter() {
-                    if !first {
-                        out.push_str(sep);
-                    }
-                    first = false;
-                    crate::core::str_push(&mut out, eval, item)?;
-                }
-            }
+    walk_seq(eval, coll, |eval, item| {
+        if !first {
+            out.push_str(sep);
         }
-    }
+        first = false;
+        crate::core::str_push(&mut out, eval, item)?;
+        Ok(Walk::Continue)
+    })?;
     Ok(Value::Str(Arc::from(out)))
 }
 
@@ -303,12 +288,11 @@ fn native_join(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         }
         return Ok(Value::Str(Arc::from(join_vector_buf(eval, &sep, v)?)));
     }
-    join_seq(eval, &sep, coll)
+    join_seq(eval, &sep, coll.clone())
 }
 
-/// Owned-args `clojure.string/join`: drops uniquely held large vectors
-/// before allocating the result `Arc<str>` so peak RSS avoids holding
-/// both `parts` and the joined output simultaneously.
+/// Owned `clojure.string/join`: lets the seq walker release consumed
+/// chunks and drops the source vector before allocating the output string.
 pub(crate) fn native_join_owned(
     eval: &mut Evaluator,
     mut args: smallvec::SmallVec<[Value; 4]>,
@@ -330,6 +314,9 @@ pub(crate) fn native_join_owned(
                 return Ok(Value::Str(Arc::from(out.as_str())));
             }
             return native_join(eval, &[sep_val, Value::Vector(v)]);
+        }
+        if let Some(sep) = fast_join_sep(&sep_val).filter(|_| is_seqable(&coll)) {
+            return join_seq(eval, &sep, coll);
         }
         return native_join(eval, &[sep_val, coll]);
     }
@@ -519,11 +506,11 @@ fn lite_replace_by(
 fn lite_join(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.string/join", args, &[1, 2])?;
     if args.len() == 1 {
-        return join_seq(eval, "", &args[0]);
+        return join_seq(eval, "", args[0].clone());
     }
     let mut sep = String::new();
     crate::core::str_push(&mut sep, eval, &args[0])?;
-    join_seq(eval, &sep, &args[1])
+    join_seq(eval, &sep, args[1].clone())
 }
 
 #[cfg(test)]
