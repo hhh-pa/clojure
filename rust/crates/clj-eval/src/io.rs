@@ -496,7 +496,7 @@ fn print_impl(
 ) -> Result<Value, NativeError> {
     // Eager validation first (limits CCE before anything realizes
     // or writes, as before).
-    let snap = eval.print_snap()?;
+    let snap = eval.print_snap_mut()?;
     let mut opts = snap.opts.clone();
     if let Some(r) = readably {
         opts.readably = r;
@@ -544,6 +544,20 @@ fn print_impl(
 /// (other args, live print methods, `*print-dup*`, no args).
 fn write_plain_str(out: &Value, s: &str, ln: bool) -> Result<(), NativeError> {
     let _emission = EmissionGuard::acquire();
+    if matches!(
+        as_writer(out),
+        Some(Writer {
+            kind: WriterKind::Stdout,
+            ..
+        })
+    ) {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(s.as_bytes()).map_err(io_err)?;
+        if ln {
+            stdout.write_all(b"\n").map_err(io_err)?;
+        }
+        return Ok(());
+    }
     write_to_writer(out, s)?;
     if ln {
         write_to_writer(out, "\n")?;
@@ -771,7 +785,7 @@ pub(crate) fn try_print_join(
     let Some(kind) = classify_stream_join(coll) else {
         return Ok(false);
     };
-    let snap = eval.print_snap()?;
+    let snap = eval.print_snap_mut()?;
     if !eval.print_defaults_only || snap.dup {
         return Ok(false);
     }

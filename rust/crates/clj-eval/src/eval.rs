@@ -1322,17 +1322,36 @@ impl Evaluator {
                 return Ok(s.clone());
             }
         }
+        let snap = self.read_print_snap(epoch, bindings)?;
+        *self.print_snap.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap.clone());
+        Ok(snap)
+    }
+
+    /// Read print settings while the evaluator is already exclusively borrowed.
+    pub(crate) fn print_snap_mut(&mut self) -> Result<PrintSnap, NativeError> {
+        let (epoch, bindings) = (self.registry.epoch(), self.bindings.version());
+        let held = self.print_snap.get_mut().unwrap_or_else(|e| e.into_inner());
+        if let Some(snap) = held
+            .as_ref()
+            .filter(|snap| snap.epoch == epoch && snap.bindings == bindings)
+        {
+            return Ok(snap.clone());
+        }
+        let snap = self.read_print_snap(epoch, bindings)?;
+        *self.print_snap.get_mut().unwrap_or_else(|e| e.into_inner()) = Some(snap.clone());
+        Ok(snap)
+    }
+
+    fn read_print_snap(&self, epoch: u64, bindings: u64) -> Result<PrintSnap, NativeError> {
         let opts = crate::core::read_print_opts(self)?;
-        let snap = PrintSnap {
+        Ok(PrintSnap {
             epoch,
             bindings,
             dup: opts.dup,
             opts,
             out: self.core_read("*out*"),
             flush: self.core_read("*flush-on-newline*").is_truthy(),
-        };
-        *self.print_snap.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap.clone());
-        Ok(snap)
+        })
     }
 
     /// `clojure.core/<name>`'s var id (`None` when there is no such var),
