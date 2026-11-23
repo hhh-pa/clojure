@@ -286,13 +286,66 @@ impl std::fmt::Debug for Vector {
 }
 
 /// Flat byte buffer + end-offset table for homogeneous string vectors (#271).
-/// Each item `i` is `&buf[start..ends[i] as usize]` where `start` is
-/// `ends[i - 1]` (or `0` when `i == 0`), avoiding per-item `Value` slots
-/// and `Arc<str>` heap allocations.
+/// A run of adjacent identical strings can reference the same physical
+/// span, using an index in addition to the original end-offset table.
 #[derive(Clone, Debug, Default)]
 pub struct PackedStrings {
     buf: String,
     ends: Vec<u32>,
+    runs: Option<Box<StringRuns>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct StringRuns {
+    /// Each run is (physical item index, cumulative duplicate count).
+    entries: Vec<(usize, usize)>,
+    extra_bytes: usize,
+    expanded: std::sync::OnceLock<String>,
+}
+
+impl StringRuns {
+    #[inline(always)]
+    fn extra_items(&self) -> usize {
+        self.entries.last().map_or(0, |&(_, extra)| extra)
+    }
+
+    #[inline(always)]
+    fn physical_index(&self, i: usize) -> usize {
+        let after = self.entries.partition_point(|&(at, extra)| at + extra < i);
+        let skipped = after.checked_sub(1).map_or(0, |p| self.entries[p].1);
+        match self.entries.get(after) {
+            Some(&(at, _)) if i >= at + skipped => at,
+            _ => i - skipped,
+        }
+    }
+
+    fn push(&mut self, physical: usize, bytes: usize) {
+        let extra = self.extra_items() + 1;
+        match self.entries.last_mut() {
+            Some((at, count)) if *at == physical => *count = extra,
+            _ => self.entries.push((physical, extra)),
+        }
+        self.extra_bytes += bytes;
+        self.expanded.take();
+    }
+
+    fn pop(&mut self, physical: usize, bytes: usize) -> bool {
+        self.expanded.take();
+        let prev = self
+            .entries
+            .len()
+            .checked_sub(2)
+            .map_or(0, |p| self.entries[p].1);
+        let Some(last) = self.entries.last_mut().filter(|r| r.0 == physical) else {
+            return false;
+        };
+        last.1 -= 1;
+        self.extra_bytes -= bytes;
+        if last.1 == prev {
+            self.entries.pop();
+        }
+        true
+    }
 }
 
 impl PackedStrings {
@@ -308,6 +361,7 @@ impl PackedStrings {
         Self {
             buf: String::with_capacity(bytes),
             ends: Vec::with_capacity(n),
+            runs: None,
         }
     }
 
@@ -315,7 +369,7 @@ impl PackedStrings {
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.ends.len()
+        self.ends.len() + self.runs.as_ref().map_or(0, |r| r.extra_items())
     }
 
     /// Whether no strings are stored.
@@ -329,13 +383,21 @@ impl PackedStrings {
     #[inline]
     #[must_use]
     pub fn raw_buf(&self) -> &str {
-        &self.buf
+        match &self.runs {
+            Some(runs) => runs.expanded.get_or_init(|| self.join("")),
+            None => &self.buf,
+        }
     }
 
     /// Borrow string `idx` (`None` past the end; panic-free for `clj-bc` bitcode).
     #[inline]
     #[must_use]
     pub fn get_str(&self, idx: usize) -> Option<&str> {
+        self.physical_str(self.runs.as_ref().map_or(idx, |r| r.physical_index(idx)))
+    }
+
+    #[inline(always)]
+    fn physical_str(&self, idx: usize) -> Option<&str> {
         let end = *self.ends.get(idx)? as usize;
         let start = match idx.checked_sub(1) {
             Some(prev) => *self.ends.get(prev)? as usize,
@@ -347,8 +409,21 @@ impl PackedStrings {
     /// Append `s` when total bytes stay within `limit` (`false` otherwise).
     #[inline]
     pub(crate) fn push_bounded(&mut self, s: &str, limit: usize) -> bool {
-        if s.len() > limit.saturating_sub(self.buf.len()) {
+        let total = self.buf.len() + self.runs.as_ref().map_or(0, |r| r.extra_bytes);
+        if s.len() > limit.saturating_sub(total) {
             return false;
+        }
+        if self.buf.len() >= 4096
+            && s.len() >= 12
+            && self.physical_str(self.ends.len() - 1) == Some(s)
+        {
+            self.runs
+                .get_or_insert_with(Box::default)
+                .push(self.ends.len() - 1, s.len());
+            return true;
+        }
+        if let Some(runs) = &mut self.runs {
+            runs.expanded.take();
         }
         if self.buf.capacity() >= 256 * 1024 && s.len() > self.buf.capacity() - self.buf.len() {
             self.buf
@@ -371,12 +446,29 @@ impl PackedStrings {
     /// Drop the last string (`false` when empty).
     #[inline]
     pub fn pop(&mut self) -> bool {
+        if self.pop_repeated() {
+            return true;
+        }
         if self.ends.pop().is_none() {
             return false;
         }
         let new_len = self.ends.last().copied().unwrap_or(0) as usize;
         self.buf.truncate(new_len);
         true
+    }
+
+    fn pop_repeated(&mut self) -> bool {
+        if self.runs.is_none() {
+            return false;
+        }
+        let i = self.ends.len() - 1;
+        let bytes = self.physical_str(i).expect("last stored item").len();
+        let runs = self.runs.as_mut().expect("has run index");
+        let popped = runs.pop(i, bytes);
+        if runs.entries.is_empty() {
+            self.runs = None;
+        }
+        popped
     }
 
     /// Release excess capacity only when more than half the buffer is slack
@@ -393,6 +485,16 @@ impl PackedStrings {
     /// Join every stored string with `sep` directly from the flat buffer.
     #[must_use]
     pub fn join(&self, sep: &str) -> String {
+        if let Some(runs) = &self.runs {
+            let cap = self
+                .buf
+                .len()
+                .saturating_add(runs.extra_bytes)
+                .saturating_add(sep.len().saturating_mul(self.len() - 1));
+            let mut out = String::with_capacity(cap);
+            self.push_runs(&mut out, sep, runs);
+            return out;
+        }
         let n = self.ends.len();
         if n == 0 {
             return String::new();
@@ -414,11 +516,44 @@ impl PackedStrings {
         out
     }
 
+    fn push_runs(&self, out: &mut String, sep: &str, runs: &StringRuns) {
+        let mut repeats = runs.entries.iter().peekable();
+        let mut extra = 0;
+        let mut start = 0;
+        for (i, &end) in self.ends.iter().enumerate() {
+            if i != 0 {
+                out.push_str(sep);
+            }
+            let end = end as usize;
+            let text = &self.buf[start..end];
+            out.push_str(text);
+            if let Some(&(_, total)) = repeats.next_if(|&&(at, _)| at == i) {
+                for _ in extra..total {
+                    out.push_str(sep);
+                    out.push_str(text);
+                }
+                extra = total;
+            }
+            start = end;
+        }
+    }
+
+    fn push_to(&self, out: &mut String) {
+        if let Some(runs) = &self.runs {
+            self.push_runs(out, "", runs);
+        } else {
+            out.push_str(&self.buf);
+        }
+    }
+
     /// Join every stored string with `sep` in place inside `self.buf`, dropping
     /// `self.ends` before returning so peak RSS avoids holding both the packed
     /// strings buffer and a second output buffer simultaneously.
     #[must_use]
     pub fn into_joined(self, sep: &str) -> String {
+        if self.runs.is_some() {
+            return self.join(sep);
+        }
         let n = self.ends.len();
         if n == 0 {
             return String::new();
@@ -455,6 +590,11 @@ impl PackedStrings {
     /// Box all items into a `Vec<Value>`.
     #[must_use]
     pub fn to_values(&self) -> Vec<Value> {
+        if self.runs.is_some() {
+            return (0..self.len())
+                .map(|i| Value::Str(Arc::from(self.get_str(i).expect("in bounds"))))
+                .collect();
+        }
         let mut out = Vec::with_capacity(self.ends.len());
         let mut start = 0usize;
         for &end in &self.ends {
@@ -467,10 +607,10 @@ impl PackedStrings {
 
     /// Up to 32 items starting at `index` (matching `Packed::chunk_from`).
     fn chunk_from(&self, index: usize) -> Vec<Value> {
-        if index >= self.ends.len() {
+        if index >= self.len() {
             return Vec::new();
         }
-        let end = ((index / 32 + 1) * 32).min(self.ends.len());
+        let end = ((index / 32 + 1) * 32).min(self.len());
         let mut out = Vec::with_capacity(end - index);
         for i in index..end {
             out.push(Value::Str(Arc::from(self.get_str(i).expect("in bounds"))));
@@ -486,7 +626,7 @@ impl PackedStrings {
         PackedStringsIter {
             ps: self,
             lo: start.min(self.ends.len()),
-            hi: self.ends.len(),
+            hi: self.len(),
         }
     }
 }
@@ -1394,7 +1534,7 @@ impl Vector {
                 true
             }
             VectorInner::Strs(ps) => {
-                out.push_str(ps.raw_buf());
+                ps.push_to(out);
                 true
             }
             _ => false,
@@ -5818,6 +5958,58 @@ mod tests {
         );
         assert_eq!(large.len_opt(), Some(20));
         assert_eq!(large.get_small_scalar(&Value::Int(0)), None);
+    }
+
+    #[test]
+    fn packed_strings_preserve_order_and_bounds_across_repeated_runs() {
+        use super::{PackedStrings, Vector};
+
+        let prefix = "é".repeat(2048);
+        let first = "first repeated string";
+        let second = "another repeated string";
+        let mut items = vec![
+            prefix.as_str(),
+            first,
+            first,
+            "",
+            second,
+            second,
+            second,
+            "last",
+        ];
+        let mut packed = PackedStrings::new();
+        for text in &items {
+            assert!(packed.try_push(text));
+        }
+        assert_eq!(packed.runs.as_ref().unwrap().entries.len(), 2);
+        assert_eq!(packed.ends.len(), 5);
+        assert_eq!(packed.len(), items.len());
+        assert_eq!(
+            packed.to_values(),
+            items
+                .iter()
+                .map(|s| Value::Str(Arc::from(*s)))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(packed.get_str(items.len()), None);
+        assert_eq!(packed.raw_buf(), items.concat());
+        assert_eq!(packed.clone().into_joined("·"), items.join("·"));
+        let mut text = String::new();
+        assert!(Vector::from_packed_strs(packed.clone()).push_to_string(&mut text));
+        assert_eq!(text, items.concat());
+
+        let len = text.len();
+        assert!(!packed.push_bounded(first, len));
+        assert!(packed.try_push("after"));
+        assert_ne!(packed.raw_buf(), text);
+        assert!(packed.pop());
+        while items.len() > 1 {
+            assert_eq!(packed.raw_buf(), items.concat());
+            assert!(packed.pop());
+            items.pop();
+        }
+        assert!(packed.runs.is_none());
+        assert_eq!(packed.raw_buf(), prefix);
     }
 
     #[test]
