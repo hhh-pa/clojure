@@ -2278,8 +2278,11 @@ impl Map {
         // `Vector::push_back` — rpds still path-copies nodes shared
         // with *other* versions, so persistence is preserved).
         // `trie_mut` mints fresh identity exactly when shared (see
-        // [`Map::id`]), so the same-key early return needs no
-        // identity bookkeeping of its own.
+        // [`Map::id`]). For an unordered trie, whether the size
+        // grew also tells us whether the insert can promote its class.
+        if self.0.keys.is_none() {
+            return self.insert_unordered_trie(k, v);
+        }
         if self.trie().get(&k).is_some() {
             self.trie_mut().insert_mut(k, v);
             return;
@@ -2287,16 +2290,28 @@ impl Map {
         let size = self.trie().size();
         let promote =
             !self.0.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
-        if let Some(keys) = &mut self.data_mut().keys {
-            // Sorted maps keep the comparator-order sidecar
-            // alongside (plain maps iterate the trie, never the
-            // sidecar). In-repo sorted writes position through
-            // `with_ordered_entries`, so this arm only fires for
-            // direct out-of-crate writes.
-            Arc::make_mut(keys).push_back_mut(k.clone());
-        }
+        // Sorted maps keep the comparator-order sidecar alongside.
+        // The Clojure sorted-map path normally computes the position
+        // first. Direct callers can append through this method.
+        let keys = self
+            .data_mut()
+            .keys
+            .as_mut()
+            .expect("ordered trie has keys");
+        Arc::make_mut(keys).push_back_mut(k.clone());
         self.trie_mut().insert_mut(k, v);
         self.data_mut().hashy |= promote;
+    }
+
+    fn insert_unordered_trie(&mut self, k: Value, v: Value) {
+        let size = self.trie().size();
+        let promote =
+            !self.0.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
+        let trie = self.trie_mut();
+        trie.insert_mut(k, v);
+        if promote && trie.size() > size {
+            self.data_mut().hashy = true;
+        }
     }
 
     /// The shaped arm of [`Map::insert_mut`] (linear scan — the `==`
