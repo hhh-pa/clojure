@@ -929,6 +929,7 @@ pub(crate) const INLINE_MAP_MAX: usize = 16;
 struct MapShape {
     keys: Box<[Value]>,
     ascii_map: [u8; 128],
+    has_big_int_keys: bool,
 }
 
 fn build_ascii_map(keys: &[Value]) -> [u8; 128] {
@@ -1075,6 +1076,9 @@ fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
         let shape = Arc::new(MapShape {
             keys: keys.to_vec().into_boxed_slice(),
             ascii_map: build_ascii_map(keys),
+            has_big_int_keys: keys
+                .iter()
+                .any(|k| matches!(k, Value::BigInt(_) | Value::BigInteger(_))),
         });
         reg.insert_shape(keys, &shape);
         if exact {
@@ -1148,12 +1152,14 @@ impl std::fmt::Debug for Map {
 impl Map {
     /// Fast lookup for scalar keys (`Char`, `Keyword`, `Int`, `Bool`,
     /// `Nil`, `Str`) in inline-shaped maps without hashing or
-    /// recursive [`Value::eq`]. Returns `None` when backed by a trie
-    /// or for non-scalar keys so bitcode helpers can delegate to
-    /// `rt_n_*`.
+    /// recursive [`Value::eq`]. Returns `None` for unsupported keys
+    /// and representations so bitcode helpers can delegate to `rt_n_*`.
     #[inline]
     #[must_use]
     pub fn get_small_scalar(&self, k: &Value) -> Option<Option<&Value>> {
+        if self.is_sorted() {
+            return None;
+        }
         let small = self.0.small.as_deref()?;
         if let Value::Keyword(kw) = k {
             let pos = small
@@ -1170,7 +1176,8 @@ impl Map {
                 .get(*c as usize)
                 .map(|&idx| small.vals.get(idx as usize));
         }
-        if !is_small_scalar_key(k) {
+        // Long keys can equal BigInt and BigInteger keys.
+        if !is_small_scalar_key(k) || (matches!(k, Value::Int(_)) && small.shape.has_big_int_keys) {
             return None;
         }
         let pos = small
@@ -5951,6 +5958,16 @@ mod tests {
         );
         assert_eq!(small.get_small_scalar(&s), Some(Some(&Value::Int(6))));
         assert_eq!(small.get_small_scalar(&Value::Vector(vi)), None);
+        let big_key = Value::BigInt(Arc::new(7.into()));
+        let big = Map::from_kvs_last_wins(vec![(big_key, Value::Int(3))]);
+        assert_eq!(big.get_small_scalar(&Value::Int(7)), None);
+        assert_eq!(big.get(&Value::Int(7)), Some(&Value::Int(3)));
+        assert_eq!(
+            small
+                .with_sort(Some(super::SortSpec::Natural))
+                .get_small_scalar(&kw),
+            None
+        );
 
         let large = Map::from_kvs_last_wins(
             (0..20)

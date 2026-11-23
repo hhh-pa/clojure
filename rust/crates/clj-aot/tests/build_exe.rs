@@ -686,11 +686,16 @@ fn native_stable_lookups_and_scalars_match_boxed_values() {
                   (defn adjust [nums] (mapv (fn [x] (+ delta x)) nums))
                   (println (table :a) (table :missing 7)
                            (chars \\x) (allowed :a) (read-label {:label :ok}))
-                  (println (adjust [2 3]))";
+                  (println (adjust [2 3]))
+                  (let [big {1N :big}
+                        sorted (sorted-map-by (fn [x y] (compare (count x) (count y)))
+                                              \"aa\" :matched)]
+                    (println (get big 1 :missing) (contains? big 1)
+                             (get sorted \"bb\" :missing) (contains? sorted \"bb\")))";
     let (stdout, stderr, code, _) = build_mode_and_run("stable-kinds", source, &[]);
     assert_eq!(
         (stdout.as_str(), stderr.as_str(), code),
-        ("3 7 1 :a :ok\n[2.5 3.5]\n", "", 0)
+        ("3 7 1 :a :ok\n[2.5 3.5]\n:big true :matched true\n", "", 0)
     );
 }
 
