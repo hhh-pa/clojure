@@ -677,12 +677,11 @@ fn stream_flat_ints(
     sep: &str,
     ints: &[i64],
 ) -> Result<(), NativeError> {
-    use std::fmt::Write;
     for (i, &n) in ints.iter().enumerate() {
         if i > 0 {
             emit_stream_str(out, buf, sep)?;
         }
-        let _ = write!(buf, "{n}");
+        crate::core::push_long(buf, n);
         if buf.len() >= STREAM_CHUNK_BYTES {
             flush_stream_buf(out, buf)?;
         }

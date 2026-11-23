@@ -228,6 +228,18 @@ fn exact_join_cap(v: &clj_value::Vector, sep_len: usize) -> Option<usize> {
     Some(total)
 }
 
+pub(crate) fn join_longs(sep: &str, items: &[i64]) -> String {
+    let mut out = String::with_capacity(items.len().saturating_mul(sep.len() + 4));
+    if let Some((&head, tail)) = items.split_first() {
+        crate::core::push_long(&mut out, head);
+        for &n in tail {
+            out.push_str(sep);
+            crate::core::push_long(&mut out, n);
+        }
+    }
+    out
+}
+
 fn join_vector_buf(
     eval: &mut Evaluator,
     sep: &str,
@@ -235,6 +247,9 @@ fn join_vector_buf(
 ) -> Result<String, NativeError> {
     if let Some(ps) = v.as_packed_strs() {
         return Ok(ps.join(sep));
+    }
+    if let Some(ints) = v.as_flat_ints() {
+        return Ok(join_longs(sep, ints));
     }
     let cap = if v.len() >= 64 {
         exact_join_cap(v, sep.len()).unwrap_or_else(|| v.len().saturating_mul(sep.len() + 4))
@@ -529,7 +544,7 @@ mod tests {
             &[("clojure.string", "join"), ("clojure.core", "str")],
             false,
         );
-        // Large string/char/nil vector hits `exact_join_cap` (`Some`), while mixed ints hit `None`.
+        // The string/char/nil vector can precompute its exact output size.
         let mut strs: Vec<Value> = (0..70)
             .map(|i| Value::Str(Arc::from(format!("x{i}"))))
             .collect();
@@ -553,7 +568,18 @@ mod tests {
         .unwrap();
         assert!(format!("{out_ints:?}").contains("0123"));
 
-        // Small vector (`len < 64`) and `native_join` / `native_includes` fallbacks.
+        let mixed = (0..70).map(Value::Int).chain([Value::Bool(true)]).collect();
+        let out_mixed = native_join(
+            &mut eval,
+            &[
+                Value::Str(Arc::from(",")),
+                Value::Vector(Vector::from_vec(mixed)),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(out_mixed, Value::Str(s) if s.ends_with("69,true")));
+
+        // Small vector and `native_join` / `native_includes` fallbacks.
         let small = Value::Vector(Vector::from_vec(vec![Value::Int(1), Value::Int(2)]));
         assert_eq!(
             native_join(&mut eval, &[Value::Str(Arc::from(",")), small.clone()]).unwrap(),

@@ -58,6 +58,11 @@ pub fn join_mapped_str(eval: &mut Evaluator, sep: &str, coll: Value) -> Step {
         Ok(Walk::Continue)
     };
     if let Value::Vector(v) = coll {
+        if let Some(ints) = v.as_flat_ints() {
+            return Ok(Value::Str(Arc::from(crate::stdlib_natives::join_longs(
+                sep, ints,
+            ))));
+        }
         for item in v.iter() {
             append(eval, &item).map_err(|err| eval.throw(err))?;
         }

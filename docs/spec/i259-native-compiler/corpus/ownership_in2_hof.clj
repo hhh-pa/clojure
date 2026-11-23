@@ -87,6 +87,7 @@
   (println (apply str (interpose ", " (map str input))) @seen))
 (println (apply str (interpose ", " (map str [])))
          (apply str (interpose " · " (map str [nil \é -2]))))
+(println (apply str (interpose " · " (map str [-9223372036854775808 0 9223372036854775807]))))
 (println (try (apply str (interpose ", " (map str 22)))
               (catch Exception _ :not-seqable)))
 (println (apply str (interpose ", " [1 2]))
