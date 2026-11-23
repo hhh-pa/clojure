@@ -601,6 +601,38 @@ fn native_binary_maps_packed_vectors_and_restarts_on_type_change() {
 }
 
 #[test]
+fn native_packed_character_selection_matches_general_traversal() {
+    let source = r#"
+        (let [chars (vec "éé.é.as")
+              window (subvec chars 1 6)
+              effects (atom [])]
+          (prn (count (filter #(= % \é) chars)) (vec (filter #(= \é %) window)))
+          (println (apply str (vec (remove #(= % \.) window))))
+          (println (apply str (vec (drop-while #(= % \é) chars))))
+          (println (vec (drop-while #(= % \é) (vec "éé"))))
+          (prn (vec (remove #(= \a %) (map (fn [x] (swap! effects conj x) x) [\a 1 \b]))))
+          (prn @effects)
+          (println (apply str (vec (concat (subvec chars 0 2) (repeat 2 \x) (vec "z")))))
+          (prn (vec (concat [1] (repeat 2 \a))))
+          (prn (vec (filter (fn [x] (swap! effects conj x) (= x \a)) [\a])))
+          (prn (try (vec (remove #(= % \a))) (catch Exception _ :error)))
+          (prn @effects))
+    "#;
+    let (stdout, stderr, code, _) = build_mode_and_run("packed-char-selection", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            concat!(
+                "3 [\\é \\é]\nééa\n.é.as\n[]\n[1 \\b]\n[\\a 1 \\b]\nééxxz\n[1 \\a \\a]\n",
+                "[\\a]\n:error\n[\\a 1 \\b \\a]\n",
+            ),
+            "",
+            0
+        )
+    );
+}
+
+#[test]
 fn atom_nth_reads_before_index_side_effects() {
     let source = "(let [a (atom [[11 12]]) i 0]
                      (println (nth @a i) (nth (nth @a i) 1))

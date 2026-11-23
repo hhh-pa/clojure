@@ -723,6 +723,16 @@ impl Vector {
         }
     }
 
+    /// Borrow the contiguous packed Unicode scalar values.
+    #[inline]
+    #[must_use]
+    pub fn as_flat_chars(&self) -> Option<&[char]> {
+        match &self.0.inner {
+            VectorInner::Chars(items) => items.as_flat(),
+            _ => None,
+        }
+    }
+
     /// Borrow the flat generic [`Value`] slice when this vector is backed by
     /// flat generic storage (panic-free for `clj-bc` bitcode).
     #[inline(always)]

@@ -4661,8 +4661,10 @@ enum ConcatPart<'a> {
     Empty,
     Ints(&'a [i64]),
     Doubles(&'a [f64]),
+    Chars(&'a [char]),
     RepeatInt(i64, usize),
     RepeatDouble(f64, usize),
+    RepeatChar(char, usize),
 }
 
 fn concat_vector_window(vec: &Vector, start: usize, end: usize) -> Option<ConcatPart<'_>> {
@@ -4672,9 +4674,10 @@ fn concat_vector_window(vec: &Vector, start: usize, end: usize) -> Option<Concat
     if let Some(xs) = vec.as_flat_ints() {
         return xs.get(start..end).map(ConcatPart::Ints);
     }
-    vec.as_flat_doubles()?
-        .get(start..end)
-        .map(ConcatPart::Doubles)
+    if let Some(xs) = vec.as_flat_doubles() {
+        return xs.get(start..end).map(ConcatPart::Doubles);
+    }
+    vec.as_flat_chars()?.get(start..end).map(ConcatPart::Chars)
 }
 
 fn concat_part(v: &Value) -> Option<ConcatPart<'_>> {
@@ -4691,6 +4694,7 @@ fn concat_part(v: &Value) -> Option<ConcatPart<'_>> {
             match r.x() {
                 Value::Int(x) => Some(ConcatPart::RepeatInt(*x, n)),
                 Value::Double(d) => Some(ConcatPart::RepeatDouble(*d, n)),
+                Value::Char(c) => Some(ConcatPart::RepeatChar(*c, n)),
                 _ => None,
             }
         }
@@ -4704,37 +4708,61 @@ fn concat_len(parts: &[ConcatPart<'_>]) -> Option<usize> {
             ConcatPart::Empty => 0,
             ConcatPart::Ints(xs) => xs.len(),
             ConcatPart::Doubles(xs) => xs.len(),
-            ConcatPart::RepeatInt(_, count) | ConcatPart::RepeatDouble(_, count) => *count,
+            ConcatPart::Chars(xs) => xs.len(),
+            ConcatPart::RepeatInt(_, count)
+            | ConcatPart::RepeatDouble(_, count)
+            | ConcatPart::RepeatChar(_, count) => *count,
         })
     })
 }
 
 fn collect_concat_parts(parts: &[ConcatPart<'_>]) -> Option<Vector> {
     let total = concat_len(parts)?;
-    if parts
-        .iter()
-        .any(|p| matches!(p, ConcatPart::Doubles(_) | ConcatPart::RepeatDouble(..)))
-    {
-        let mut out = Vec::with_capacity(total);
-        for p in parts {
-            match p {
-                ConcatPart::Doubles(s) => out.extend_from_slice(s),
-                ConcatPart::RepeatDouble(d, n) => out.resize(out.len() + *n, *d),
-                ConcatPart::Empty => {}
-                _ => return None,
-            }
+    match parts.iter().find(|p| !matches!(p, ConcatPart::Empty)) {
+        Some(ConcatPart::Doubles(_) | ConcatPart::RepeatDouble(..)) => {
+            return collect_concat_doubles(parts, total);
         }
-        return Some(Vector::from_flat_doubles(out));
+        Some(ConcatPart::Chars(_) | ConcatPart::RepeatChar(..)) => {
+            return collect_concat_chars(parts, total);
+        }
+        _ => {}
     }
     let mut out = Vec::with_capacity(total);
     for p in parts {
         match p {
             ConcatPart::Ints(s) => out.extend_from_slice(s),
             ConcatPart::RepeatInt(x, n) => out.resize(out.len() + *n, *x),
-            _ => {}
+            ConcatPart::Empty => {}
+            _ => return None,
         }
     }
     Some(Vector::from_flat_ints(out))
+}
+
+fn collect_concat_doubles(parts: &[ConcatPart<'_>], total: usize) -> Option<Vector> {
+    let mut out = Vec::with_capacity(total);
+    for p in parts {
+        match p {
+            ConcatPart::Doubles(s) => out.extend_from_slice(s),
+            ConcatPart::RepeatDouble(d, n) => out.resize(out.len() + *n, *d),
+            ConcatPart::Empty => {}
+            _ => return None,
+        }
+    }
+    Some(Vector::from_flat_doubles(out))
+}
+
+fn collect_concat_chars(parts: &[ConcatPart<'_>], total: usize) -> Option<Vector> {
+    let mut out = Vec::with_capacity(total);
+    for p in parts {
+        match p {
+            ConcatPart::Chars(s) => out.extend_from_slice(s),
+            ConcatPart::RepeatChar(c, n) => out.resize(out.len() + *n, *c),
+            ConcatPart::Empty => {}
+            _ => return None,
+        }
+    }
+    Some(Vector::from_flat_chars(out))
 }
 
 fn collect_concat(p: &PendingSeq) -> Option<Vector> {
@@ -4752,7 +4780,7 @@ fn collect_concat(p: &PendingSeq) -> Option<Vector> {
         return None;
     };
     let tail = rest.get(*idx..)?;
-    let mut parts = Vec::with_capacity(1 + tail.len());
+    let mut parts = SmallVec::<[ConcatPart<'_>; 4]>::with_capacity(1 + tail.len());
     parts.push(concat_part(cur)?);
     for v in tail {
         parts.push(concat_part(v)?);
@@ -5972,6 +6000,26 @@ mod tests {
         let r = RangeValue::new(RangeNum::Int(0), None, RangeNum::Int(1), true, None);
         let v = Value::Extension(Arc::new(r));
         assert!(super::chunked_parts(&mut eval, &v).unwrap().is_none());
+    }
+
+    #[test]
+    fn collect_direct_concatenates_char_vectors_and_falls_back_for_mixed_types() {
+        let chars = Value::Vector(Vector::from_flat_chars(vec!['é', 'x']));
+        let repeat = Value::Extension(Arc::new(RepeatValue::new(Value::Char('ø'), Some(2))));
+        let ints = Value::Vector(Vector::from_flat_ints(vec![1]));
+        let text = concat_thunk(vec![chars.clone(), Value::Nil, repeat]);
+        assert_eq!(
+            collect_direct(&text).unwrap().as_flat_chars(),
+            Some(['é', 'x', 'ø', 'ø'].as_slice())
+        );
+        let doubles = Value::Vector(Vector::from_flat_doubles(vec![1.5]));
+        for pieces in [
+            vec![chars.clone(), ints.clone()],
+            vec![ints, chars.clone()],
+            vec![doubles, chars],
+        ] {
+            assert!(collect_direct(&concat_thunk(pieces)).is_none());
+        }
     }
 
     #[test]

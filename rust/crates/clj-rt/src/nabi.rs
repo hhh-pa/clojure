@@ -421,6 +421,18 @@ pub extern "C" fn rt_n_print_join(hit: &mut u8, sep: &Value, coll: &Value, flags
     }))
 }
 
+/// Probe a packed character vector or subvector for a fused traversal.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_select_chars(out: &mut Value, coll: &Value, codepoint: u32, mode: u8) -> i8 {
+    let Some(value) =
+        char::from_u32(codepoint).and_then(|c| native_abi::select_chars(coll, c, mode))
+    else {
+        return 0;
+    };
+    *out = value;
+    1
+}
+
 /// Render mapped strings separated by the compiler-supplied literal.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_join_mapped_str(out: &mut Value, sep: &CSlice<u8>, coll: &mut Value) -> i32 {
@@ -1376,6 +1388,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_mapv_parse_num,
         rt_n_dot,
         rt_n_print_join,
+        rt_n_select_chars,
         rt_n_join_mapped_str,
         rt_n_add_acc,
         rt_n_regex,

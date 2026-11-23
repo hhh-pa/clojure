@@ -102,3 +102,11 @@
                      (toString [_] (swap! seen conj [:str x]) (str x))))
                  [1 2 3])]
   (println (apply str (interpose ", " (map str input))) @seen))
+
+(let [cs (vec "éé.éa")
+      tail (subvec cs 1)]
+  (prn (count (filter #(= % \é) cs))
+       (vec (filter #(= \é %) tail))
+       (vec (remove #(= % \.) tail))
+       (vec (drop-while #(= % \é) cs))
+       (vec (drop-while #(= % \é) '(\é \a)))))

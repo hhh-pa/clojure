@@ -3762,12 +3762,93 @@ impl<'ctx> Lowerer<'ctx> {
         }
         if self.try_lower_assoc_conj(f, call, Some(dest))?
             || self.try_lower_scaled_long(f, call, dest)?
+            || self.try_lower_char_selection(f, call, dest)?
             || self.try_lower_mapped_str_join(f, call, dest)?
             || (self.inline_arith && self.try_lower_hof_loop(f, call, dest)?)
         {
             return Ok(());
         }
         self.lower_direct_with(f, call, None, dest)
+    }
+
+    fn try_lower_char_selection(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if !self.inline_arith {
+            return Ok(false);
+        }
+        let Some((inner, predicate, input, target, mode)) = char_selection(call, f.env.len())
+        else {
+            return Ok(false);
+        };
+        let coll = self.slot(f);
+        self.lower(f, input, coll)?;
+        let done = self.ctx.append_basic_block(f.func, "char_done");
+        self.emit_char_selection(f, dest, coll, target, mode, done);
+        let pred = self.slot(f);
+        let selected = self.slot(f);
+        self.lower(f, predicate, pred)?;
+        self.core_call_owned(f, inner, &[pred, coll], selected);
+        self.core_call_owned(f, call, &[selected], dest);
+        self.free_slots(f, &[pred, selected]);
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        self.free_slots(f, &[coll]);
+        Ok(true)
+    }
+
+    fn emit_char_selection(
+        &self,
+        f: &FnCtx<'ctx>,
+        dest: PointerValue<'ctx>,
+        coll: PointerValue<'ctx>,
+        target: u32,
+        mode: u8,
+        done: BasicBlock<'ctx>,
+    ) {
+        let hit = self
+            .call(
+                "rt_n_select_chars",
+                Some(self.i8t),
+                &[
+                    dest.into(),
+                    coll.into(),
+                    self.i32t.const_int(u64::from(target), false).into(),
+                    self.i8t.const_int(u64::from(mode), false).into(),
+                ],
+            )
+            .expect("selection status");
+        let fallback = self.ctx.append_basic_block(f.func, "char_fallback");
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, hit, self.i8t.const_zero(), "char_hit")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(ok, done, fallback)
+            .expect("br");
+        self.builder.position_at_end(fallback);
+    }
+
+    fn emit_char_filter_probe(
+        &self,
+        f: &FnCtx<'ctx>,
+        hl: &HofLoop<'_>,
+        base: usize,
+        coll: PointerValue<'ctx>,
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let mode = match hl.kind {
+            HofKind::CountFilter => 0,
+            HofKind::FilterCollect => 1,
+            _ => return,
+        };
+        if let Some(ch) = char_predicate(hl.arity, base) {
+            self.emit_char_selection(f, dest, coll, ch, mode, done);
+        }
     }
 
     fn try_lower_mapped_str_join(
@@ -4396,6 +4477,7 @@ impl<'ctx> Lowerer<'ctx> {
             rsrc2 = r;
         }
         let done = self.ctx.append_basic_block(f.func, "loop_done");
+        self.emit_char_filter_probe(f, hl, base, coll, dest, done);
         if let Some(mode) = probe {
             self.emit_parse_num_probe(f, coll, mode, dest, done);
         }
@@ -9061,6 +9143,50 @@ fn core_call(e: &Expr) -> Option<(&str, &[Expr])> {
     };
     let sym = &call.var.sym;
     (sym.namespace() == Some("clojure.core")).then(|| (sym.name(), &call.args[..]))
+}
+
+#[allow(clippy::type_complexity)]
+fn char_selection(
+    call: &clj_eval::expr::DirectCall,
+    local: usize,
+) -> Option<(&clj_eval::expr::DirectCall, &Expr, &Expr, u32, u8)> {
+    if call.var.sym.namespace() != Some("clojure.core") {
+        return None;
+    }
+    let [Expr::DirectNative(inner)] = call.args.as_slice() else {
+        return None;
+    };
+    if inner.var.sym.namespace() != Some("clojure.core") {
+        return None;
+    }
+    let mode = match (call.var.sym.name(), inner.var.sym.name()) {
+        ("vec", "remove") => 2,
+        ("vec", "drop-while") => 3,
+        _ => return None,
+    };
+    let [predicate, coll] = inner.args.as_slice() else {
+        return None;
+    };
+    let (_, arity) = inline_fn(predicate, 1)?;
+    Some((inner, predicate, coll, char_predicate(arity, local)?, mode))
+}
+
+fn char_predicate(arity: &Arity, local: usize) -> Option<u32> {
+    let [body] = arity.body.as_slice() else {
+        return None;
+    };
+    let ("=", [a, b]) = core_call(body)? else {
+        return None;
+    };
+    match (a, b) {
+        (Expr::Local(i), Expr::Literal(Value::Char(c)))
+        | (Expr::Literal(Value::Char(c)), Expr::Local(i))
+            if *i == local =>
+        {
+            Some(u32::from(*c))
+        }
+        _ => None,
+    }
 }
 
 fn mapped_str_join(call: &clj_eval::expr::DirectCall) -> Option<(&str, &Expr)> {

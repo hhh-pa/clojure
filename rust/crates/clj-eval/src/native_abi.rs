@@ -1399,6 +1399,34 @@ pub fn iter_plan(coll: &Value) -> Option<(u8, i64, i64, i64)> {
     }
 }
 
+/// Filter, count, or skip an initial run of one character in a packed
+/// vector. These cases compile from a pure, one-argument equality test.
+pub fn select_chars(coll: &Value, ch: char, mode: u8) -> Option<Value> {
+    let chars = match coll {
+        Value::Vector(v) => v.as_flat_chars()?,
+        Value::Extension(e) => {
+            let (v, start, end) = e.as_subvector_parts()?;
+            v.as_flat_chars()?.get(start..end)?
+        }
+        _ => return None,
+    };
+    if mode == 0 {
+        let n = chars.iter().filter(|&&c| c == ch).count();
+        return Some(Value::Int(n as i64));
+    }
+    let values = if mode == 3 {
+        let start = chars.iter().position(|&c| c != ch).unwrap_or(chars.len());
+        chars[start..].to_vec()
+    } else {
+        chars
+            .iter()
+            .copied()
+            .filter(|&c| (c == ch) == (mode == 1))
+            .collect()
+    };
+    Some(Value::Vector(Vector::from_flat_chars(values)))
+}
+
 /// A compiled loop's direct plan for `(range …)` with all-`Int` args
 /// (#271 Slice 5l), mirroring `lazy::long_range`'s classification without
 /// building the range value: `(2, count, start, step)` for a finite long
