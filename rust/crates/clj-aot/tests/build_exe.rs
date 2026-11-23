@@ -633,6 +633,31 @@ fn native_packed_character_selection_matches_general_traversal() {
 }
 
 #[test]
+fn recur_retains_an_unchanged_binding_used_by_other_operands() {
+    let source = r#"
+        (defn collect [i kept out]
+          (if (< i 3)
+            (recur (inc i) kept (conj out (conj kept i)))
+            [kept out]))
+        (println (collect 0 [1] []))
+        (println
+          (loop [i 0 a [:a] b [:b] kept [:shared]]
+            (if (< i 3)
+              (recur (inc i) b (conj a (first kept)) kept)
+              [a b kept])))
+    "#;
+    let (stdout, stderr, code, _) = build_mode_and_run("retained-recur-bindings", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            "[[1] [[1 0] [1 1] [1 2]]]\n[[:b :shared] [:a :shared :shared] [:shared]]\n",
+            "",
+            0
+        )
+    );
+}
+
+#[test]
 fn atom_nth_reads_before_index_side_effects() {
     let source = "(let [a (atom [[11 12]]) i 0]
                      (println (nth @a i) (nth (nth @a i) 1))

@@ -6711,14 +6711,20 @@ impl<'ctx> Lowerer<'ctx> {
     }
 
     fn lower_recur(&mut self, f: &mut FnCtx<'ctx>, args: &[Expr]) -> Result<(), Unsupported> {
-        let fresh: Result<Vec<PointerValue>, Unsupported> = args
+        let target = f.recur.last().expect("recur has a target");
+        let retained: Vec<_> = args
             .iter()
-            .map(|a| {
-                let t = self.slot(f);
-                self.lower(f, a, t).map(|()| t)
+            .zip(&target.patterns)
+            .map(|(arg, (pat, slots))| match (arg, pat, slots.as_slice()) {
+                (Expr::Local(i), Pattern::Symbol(_), [dst])
+                    if matches!(f.env[*i], Some(LocalRef::Slot(src)) if src == *dst) =>
+                {
+                    Some(*i)
+                }
+                _ => None,
             })
             .collect();
-        let fresh = fresh?;
+        let fresh = self.lower_recur_changes(f, args, &retained)?;
         // The analyzer only emits `recur` in tail position of a target.
         let target = f.recur.pop().expect("recur has a target");
         let depth = f.env.len();
@@ -6728,9 +6734,12 @@ impl<'ctx> Lowerer<'ctx> {
             self.drop_v(f.func, s);
         }
         for ((pat, slots), src) in target.patterns.iter().zip(&fresh) {
-            self.rebind_pattern(f, pat, *src, slots)?;
+            if let Some(src) = *src {
+                self.rebind_pattern(f, pat, src, slots)?;
+            }
         }
         f.env.truncate(depth);
+        let fresh: Vec<_> = fresh.into_iter().flatten().collect();
         self.free_slots(f, &fresh);
         self.builder
             .build_unconditional_branch(target.header)
@@ -6738,6 +6747,31 @@ impl<'ctx> Lowerer<'ctx> {
         f.recur.push(target);
         self.dead_end(f);
         Ok(())
+    }
+
+    fn lower_recur_changes(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        args: &[Expr],
+        retained: &[Option<usize>],
+    ) -> Result<Vec<Option<PointerValue<'ctx>>>, Unsupported> {
+        // The unchanged slots remain live at the back edge, even when
+        // another operand references them at its own last use.
+        let moves = f.moves.clone();
+        f.moves.retain(|m| !retained.contains(&Some(m.1)));
+        let fresh = args
+            .iter()
+            .zip(retained)
+            .map(|(expr, keep)| {
+                if keep.is_some() {
+                    return Ok(None);
+                }
+                let dst = self.slot(f);
+                self.lower(f, expr, dst).map(|()| Some(dst))
+            })
+            .collect();
+        f.moves = moves;
+        fresh
     }
 
     /// Build the captured array for a fn created at `base` and make the
