@@ -1075,10 +1075,53 @@ pub extern "C" fn rt_n_nth_nil(out: &mut Value, coll: &Value, i: u64) -> i32 {
     )
 }
 
+/// Two successive `nth` calls, without cloning a borrowed vector row.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_nth2(out: &mut Value, k: u64, coll: &Value, a: &Value, b: &Value) -> i32 {
+    if let Some(value) = native_abi::try_nth2(coll, a, b) {
+        *out = value;
+        return 0;
+    }
+    let mut row = Value::Nil;
+    let status = core_fallback(&mut row, k, &[coll, a]);
+    if status != 0 {
+        return status;
+    }
+    core_fallback(out, k, &[&row, b])
+}
+
+/// Index a vector's last item or run the original `peek` and `nth`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_peek_nth(out: &mut Value, k: u64, coll: &Value, index: &Value) -> i32 {
+    if let Some(value) = native_abi::try_peek_nth(coll, index) {
+        *out = value;
+        return 0;
+    }
+    let mut row = Value::Nil;
+    let status = core_fallback(&mut row, k >> 32, &[coll]);
+    if status != 0 {
+        return status;
+    }
+    core_fallback(out, k & 0xFFFF_FFFF, &[&row, index])
+}
+
 /// `out = gseq(v)` (`&` destructuring).
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_gseq(out: &mut Value, v: &Value) -> i32 {
     finish(out, with_active(|eval| native_abi::gseq(eval, v)))
+}
+
+/// Evaluate a `seq` test without allocating a sequence for strict collections.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_seq_nonempty(out: &mut Value, v: &Value) -> i32 {
+    if let Some(present) = native_abi::try_seq_nonempty(v) {
+        *out = Value::Bool(present);
+        return 0;
+    }
+    finish(
+        out,
+        with_active(|eval| native_abi::gseq(eval, v).map(|seq| Value::Bool(seq.is_truthy()))),
+    )
 }
 
 /// `out = (first v)`.
@@ -1102,6 +1145,13 @@ pub extern "C" fn rt_n_into_mapcat(out: &mut Value, f: &Value, coll: &mut Value)
         out,
         with_active(|eval| native_abi::into_mapcat(eval, f, coll)),
     )
+}
+
+/// `(vec (sort ...))` over owned sort arguments.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_sort_vec(out: &mut Value, args: &mut CSlice<Value>) -> i32 {
+    let args = take_args(args);
+    finish(out, with_active(|eval| native_abi::sort_vec(eval, args)))
 }
 
 /// `v = (next v)` in place.
@@ -1503,10 +1553,14 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_case,
         rt_n_equiv,
         rt_n_nth_nil,
+        rt_n_nth2,
+        rt_n_peek_nth,
         rt_n_gseq,
+        rt_n_seq_nonempty,
         rt_n_first,
         rt_n_first_mapped,
         rt_n_into_mapcat,
+        rt_n_sort_vec,
         rt_n_next_mut,
         rt_n_destructure,
         rt_n_destr_map,

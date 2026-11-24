@@ -4819,10 +4819,13 @@ fn collect_direct(v: &Value) -> Option<Vector> {
 }
 
 pub(crate) fn collect_all(eval: &mut Evaluator, v: Value) -> Result<Vec<Value>, Signal> {
-    // A vector's items copy out at their exact count (no growth
-    // doubling, no chunk copies).
-    if let Value::Vector(x) = &v {
-        return Ok(x.iter().collect());
+    if let Value::Vector(x) = v {
+        // Reuse owned boxed storage. Packed items box directly into the result.
+        return Ok(if x.is_packed() {
+            x.iter().collect()
+        } else {
+            x.into_vec()
+        });
     }
     let mut out = Vec::new();
     let mut push = |_: &mut Evaluator, item: Value| {
