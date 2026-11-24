@@ -720,6 +720,13 @@ Three general fixes found while auditing per-operation and startup costs (macOS 
 
 Measured on macOS (interleaved A/B over all 1754 snippet cases): neutral on the gate (median +1.1K per case, within noise; projected class moves 4 T->W, 4 L->T, 3 T->L, 1 W->T). These are correctness and complexity fixes for general code more than gate wins: the startup profile puts the typical Linux startup excess at 30-190K instructions spread over keyword/metadata constants and top-level initializers.
 
+### 6.51 Slice 5t: the AOT hot-text order packs the C runtime's archive members
+
+The AOT order (`rust/hot-text-aot.ld`) placed only Rust functions: glibc's static archives are built without function sections, so the profiled C functions (`malloc`, `memcpy` variants, `strlen`, start-up code) stayed scattered over the cold `.text`, each pulling in its own 64 KiB fault-around window. `scripts/bench/hot-text/hot_text.py --archive LIB.a` now maps the executed functions to the archive members defining them (`nm -A --defined-only`) and lists those members first in `.text.hot` (`*libc.a:malloc.o(.text .text.*)`), most workloads first; `regen-aot.sh` passes the toolchain's `libc.a`, `libm.a` and `libgcc.a`. The training set is unchanged (the generic workloads and the compiler corpus, never the snippets).
+
+- **Measured (fork probe, Linux, 98 snippet programs, empty stdin, peak RSS best of 3):** median -122 KB (p10 -256 KB, p90 +48 KB) against the order without members, both regenerated from the same profiles; 133 members.
+- **Verification:** fork run of `regen-aot.sh` + link: 72/72 corpus programs build and match `run`; the member mapping is exercised against GNU `nm -A` output.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
