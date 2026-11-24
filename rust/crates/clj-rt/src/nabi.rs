@@ -1104,6 +1104,13 @@ pub extern "C" fn rt_n_into_mapcat(out: &mut Value, f: &Value, coll: &mut Value)
     )
 }
 
+/// `(vec (sort ...))` over owned sort arguments.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_sort_vec(out: &mut Value, args: &mut CSlice<Value>) -> i32 {
+    let args = take_args(args);
+    finish(out, with_active(|eval| native_abi::sort_vec(eval, args)))
+}
+
 /// `v = (next v)` in place.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_next_mut(v: &mut Value) -> i32 {
@@ -1507,6 +1514,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_first,
         rt_n_first_mapped,
         rt_n_into_mapcat,
+        rt_n_sort_vec,
         rt_n_next_mut,
         rt_n_destructure,
         rt_n_destr_map,

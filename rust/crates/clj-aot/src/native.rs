@@ -3984,14 +3984,21 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        if self.try_lower_assoc_nth_step(f, call, dest)?
-            || self.try_lower_first_mapped(f, call, dest)?
-            || self.try_lower_into_mapcat(f, call, dest)?
-            || self.try_lower_dot_product(f, call, dest)?
-            || self.try_lower_print_join(f, call, dest)?
-            || self.try_lower_mapv_global_parse(f, call, dest)?
-            || self.try_lower_atom_nth(f, call, dest)?
-        {
+        if call.var.sym.namespace() != Some("clojure.core") {
+            return Ok(false);
+        }
+        let specialized = match call.var.sym.name() {
+            "assoc" => self.try_lower_assoc_nth_step(f, call, dest),
+            "first" => self.try_lower_first_mapped(f, call, dest),
+            "into" => self.try_lower_into_mapcat(f, call, dest),
+            "vec" => self.try_lower_sort_vec(f, call, dest),
+            "reduce" => self.try_lower_dot_product(f, call, dest),
+            "print" | "println" => self.try_lower_print_join(f, call, dest),
+            "mapv" => self.try_lower_mapv_global_parse(f, call, dest),
+            "nth" => self.try_lower_atom_nth(f, call, dest),
+            _ => Ok(false),
+        };
+        if specialized? {
             return Ok(true);
         }
         self.try_lower_hof_loop(f, call, dest)
@@ -4021,15 +4028,41 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(true)
     }
 
+    fn try_lower_sort_vec(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        let [arg] = call.args.as_slice() else {
+            return Ok(false);
+        };
+        let Some(("sort", args @ ([_] | [_, _]))) = core_call(arg) else {
+            return Ok(false);
+        };
+        let (base, elems) = self.slot_array(f, args.len());
+        for (arg, elem) in args.iter().zip(&elems) {
+            self.lower(f, arg, *elem)?;
+        }
+        let slice = self.slots_ref(f, base, args.len());
+        let status = self
+            .call(
+                "rt_n_sort_vec",
+                Some(self.i32t),
+                &[dest.into(), slice.into()],
+            )
+            .expect("sort status");
+        self.check(f, status);
+        self.free_slot_array(f, base, elems);
+        Ok(true)
+    }
+
     fn try_lower_first_mapped(
         &mut self,
         f: &mut FnCtx<'ctx>,
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "first" {
-            return Ok(false);
-        }
         let [coll] = call.args.as_slice() else {
             return Ok(false);
         };
@@ -4059,9 +4092,6 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "into" {
-            return Ok(false);
-        }
         let [Expr::VecLit(items, None), transform, src] = call.args.as_slice() else {
             return Ok(false);
         };
@@ -4114,9 +4144,6 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "mapv" {
-            return Ok(false);
-        }
         let [Expr::Global(var), coll] = call.args.as_slice() else {
             return Ok(false);
         };
@@ -8121,9 +8148,6 @@ fn dot_product_call(
     &Expr,
     &Expr,
 )> {
-    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "reduce" {
-        return None;
-    }
     let [plus, init, Expr::DirectNative(m)] = call.args.as_slice() else {
         return None;
     };
@@ -8184,16 +8208,11 @@ fn print_str_join_nl(arg: &Expr) -> Option<PrintJoin<'_>> {
 }
 
 fn print_join_call(call: &clj_eval::expr::DirectCall) -> Option<PrintJoin<'_>> {
-    if call.var.sym.namespace() != Some("clojure.core") {
-        return None;
-    }
     let [arg] = call.args.as_slice() else {
         return None;
     };
     let name = call.var.sym.name();
-    if (name == "println" || name == "print")
-        && let Some((join, sep, coll)) = is_str_join(arg)
-    {
+    if let Some((join, sep, coll)) = is_str_join(arg) {
         return Some(PrintJoin {
             join,
             str_call: None,
@@ -8297,9 +8316,6 @@ fn parse_num_arity(arity: &Arity, base: usize) -> Option<u8> {
 /// `(into [] (map|filter F xs [ys]))`, or `(count (filter|filterv F xs))`,
 /// all `clojure.core`.
 fn hof_loop<'a>(call: &'a clj_eval::expr::DirectCall) -> Option<HofLoop<'a>> {
-    if call.var.sym.namespace() != Some("clojure.core") {
-        return None;
-    }
     let one =
         |kind, fe: &'a Expr, init: Option<&'a Expr>, coll: &'a Expr, coll2: Option<&'a Expr>| {
             let n_params = if kind == HofKind::Reduce || coll2.is_some() {
@@ -9418,9 +9434,6 @@ fn assoc_nth_step_args(
     call: &clj_eval::expr::DirectCall,
     f: &FnCtx<'_>,
 ) -> Option<(usize, usize, i64)> {
-    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "assoc" {
-        return None;
-    }
     let [Expr::Local(coll), Expr::Local(idx), op] = call.args.as_slice() else {
         return None;
     };
@@ -9481,9 +9494,6 @@ fn stable_kind(init: &Expr) -> StableKind {
 fn atom_nth_args(
     call: &clj_eval::expr::DirectCall,
 ) -> Option<(&clj_value::Var, &Expr, Vec<&Expr>)> {
-    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "nth" {
-        return None;
-    }
     let [coll, idx] = call.args.as_slice() else {
         return None;
     };

@@ -495,6 +495,11 @@ pub fn into_mapcat(eval: &mut Evaluator, f: &Value, coll: Value) -> Step {
     ))
 }
 
+/// Sort using the core arities and return the sorted items as a vector.
+pub fn sort_vec(eval: &mut Evaluator, args: crate::SmallArgs) -> Step {
+    crate::seqs::sort_vector(eval, args).map_err(|e| eval.throw(e))
+}
+
 /// `(next s)`.
 pub fn next(eval: &mut Evaluator, s: &Value) -> Step {
     crate::lazy::next_value(eval, s)
