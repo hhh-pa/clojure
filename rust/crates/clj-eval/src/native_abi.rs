@@ -449,6 +449,23 @@ pub fn gseq(eval: &mut Evaluator, value: &Value) -> Step {
     eval.destructure_gseq(value)
 }
 
+/// Test seq presence for collections whose seq needs no realization.
+#[must_use]
+pub fn try_seq_nonempty(value: &Value) -> Option<bool> {
+    Some(match value {
+        Value::Nil => false,
+        Value::Vector(v) => !v.is_empty(),
+        Value::List(v) => !v.is_empty(),
+        Value::Map(v) => !v.is_empty(),
+        Value::Set(v) => !v.is_empty(),
+        Value::Str(v) => !v.is_empty(),
+        Value::Array(v) => !v.is_empty(),
+        Value::PrimitiveVector(v) => !v.is_empty(),
+        Value::MapEntry { .. } => true,
+        _ => return None,
+    })
+}
+
 /// `(first s)`.
 pub fn first(eval: &mut Evaluator, s: &Value) -> Step {
     crate::lazy::first_value(eval, s)
@@ -1068,12 +1085,10 @@ const TAG_MASK: u32 = RE_MATCHES_TAG | NARY_OP | OWN_BIT | (1 << 28);
 /// back to `(nth (deref atom) i)`).
 #[must_use]
 pub fn try_atom_nth(atom_v: &Value, idx_v: &Value) -> Option<Value> {
-    let (Value::Atom(atom), Value::Int(i)) = (atom_v, idx_v) else {
+    let Value::Atom(atom) = atom_v else {
         return None;
     };
-    let idx = i32::try_from(*i)
-        .ok()
-        .and_then(|n| usize::try_from(n).ok())?;
+    let idx = long_nth_index(idx_v)?;
     let state = atom.lock();
     match &state.value {
         Value::Vector(v) => v.get(idx),
@@ -1089,20 +1104,53 @@ pub fn try_atom_nth(atom_v: &Value, idx_v: &Value) -> Option<Value> {
 /// inner row vector (`None` falls back to `(nth (nth (deref atom) u) v)`).
 #[must_use]
 pub fn try_atom_nth2(atom_v: &Value, u_v: &Value, v_v: &Value) -> Option<Value> {
-    let (Value::Atom(atom), Value::Int(ui), Value::Int(vi)) = (atom_v, u_v, v_v) else {
+    let Value::Atom(atom) = atom_v else {
         return None;
     };
-    let u = i32::try_from(*ui)
-        .ok()
-        .and_then(|n| usize::try_from(n).ok())?;
-    let v = i32::try_from(*vi)
-        .ok()
-        .and_then(|n| usize::try_from(n).ok())?;
+    let (u, v) = (long_nth_index(u_v)?, long_nth_index(v_v)?);
     let state = atom.lock();
-    let Value::Vector(outer) = &state.value else {
+    vector_row_nth(&state.value, u, v)
+}
+
+/// Index a vector's row directly, borrowing it instead of cloning it.
+#[must_use]
+pub fn try_nth2(coll: &Value, u: &Value, v: &Value) -> Option<Value> {
+    let (u, v) = (long_nth_index(u)?, long_nth_index(v)?);
+    vector_row_nth(coll, u, v)
+}
+
+fn long_nth_index(index: &Value) -> Option<usize> {
+    let Value::Int(index) = index else {
         return None;
     };
-    match outer.get_ref(u)? {
+    i32::try_from(*index)
+        .ok()
+        .and_then(|n| usize::try_from(n).ok())
+}
+
+fn vector_row_nth(coll: &Value, u: usize, v: usize) -> Option<Value> {
+    let Value::Vector(outer) = coll else {
+        return None;
+    };
+    row_nth(outer.get_ref(u)?, v)
+}
+
+/// Index the last item of an ordinary vector while borrowing it.
+#[must_use]
+pub fn try_peek_nth(coll: &Value, index: &Value) -> Option<Value> {
+    let Value::Vector(outer) = coll else {
+        return None;
+    };
+    if outer.meta().is_some() {
+        return None;
+    }
+    let index = long_nth_index(index)?;
+    let last = outer.len().checked_sub(1)?;
+    row_nth(outer.get_ref(last)?, index)
+}
+
+fn row_nth(row: &Value, v: usize) -> Option<Value> {
+    match row {
         Value::Vector(row) => row.get(v),
         Value::Extension(e) => {
             let (row, start, end) = e.as_subvector_parts()?;
