@@ -3986,6 +3986,7 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> Result<bool, Unsupported> {
         if self.try_lower_assoc_nth_step(f, call, dest)?
             || self.try_lower_first_mapped(f, call, dest)?
+            || self.try_lower_into_mapcat(f, call, dest)?
             || self.try_lower_dot_product(f, call, dest)?
             || self.try_lower_print_join(f, call, dest)?
             || self.try_lower_mapv_global_parse(f, call, dest)?
@@ -3993,6 +3994,15 @@ impl<'ctx> Lowerer<'ctx> {
         {
             return Ok(true);
         }
+        self.try_lower_hof_loop(f, call, dest)
+    }
+
+    fn try_lower_hof_loop(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
         let Some(hl) = hof_loop(call) else {
             return Ok(false);
         };
@@ -4040,6 +4050,40 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("first status");
         self.check(f, st);
         self.free_slots(f, &[input]);
+        Ok(true)
+    }
+
+    fn try_lower_into_mapcat(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "into" {
+            return Ok(false);
+        }
+        let [Expr::VecLit(items, None), transform, src] = call.args.as_slice() else {
+            return Ok(false);
+        };
+        if !items.is_empty() {
+            return Ok(false);
+        }
+        let Some(("mapcat", [fe])) = core_call(transform) else {
+            return Ok(false);
+        };
+        let callable = self.slot(f);
+        self.lower(f, fe, callable)?;
+        let coll = self.slot(f);
+        self.lower(f, src, coll)?;
+        let st = self
+            .call(
+                "rt_n_into_mapcat",
+                Some(self.i32t),
+                &[dest.into(), callable.into(), coll.into()],
+            )
+            .expect("collect status");
+        self.check(f, st);
+        self.free_slots(f, &[callable, coll]);
         Ok(true)
     }
 

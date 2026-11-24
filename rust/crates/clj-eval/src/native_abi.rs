@@ -469,6 +469,32 @@ pub fn first_mapped(eval: &mut Evaluator, seq: Value) -> Step {
     result.map_err(|s| eval.throw(crate::ns::signal_to_native(s)))
 }
 
+/// Collect a `mapcat` transduction into a fresh vector. The accumulator is
+/// local to this call, so each emitted item can append without locking it.
+pub fn into_mapcat(eval: &mut Evaluator, f: &Value, coll: Value) -> Step {
+    use crate::seqs::{Walk, call_checked, walk_seq};
+
+    let mut out = clj_value::TransientVector::new();
+    let prepared = crate::vm::Prepared::of(f, 1);
+    walk_seq(eval, coll, |eval, item| {
+        let inner = match &prepared {
+            Some(p) => p
+                .call1(eval, crate::vm::clone_value(item))
+                .map_err(crate::ns::signal_to_native)?,
+            None => call_checked(eval, f, std::slice::from_ref(item))?,
+        };
+        walk_seq(eval, inner, |_, item| {
+            out.conj(item.clone()).expect("collector remains valid");
+            Ok(Walk::Continue)
+        })?;
+        Ok(Walk::Continue)
+    })
+    .map_err(|e| eval.throw(e))?;
+    Ok(Value::Vector(
+        out.persistent().expect("collector remains valid"),
+    ))
+}
+
 /// `(next s)`.
 pub fn next(eval: &mut Evaluator, s: &Value) -> Step {
     crate::lazy::next_value(eval, s)

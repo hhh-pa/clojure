@@ -1094,6 +1094,16 @@ pub extern "C" fn rt_n_first_mapped(out: &mut Value, seq: &mut Value) -> i32 {
     finish(out, with_active(|eval| native_abi::first_mapped(eval, seq)))
 }
 
+/// Collect a `mapcat` into an empty vector.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_into_mapcat(out: &mut Value, f: &Value, coll: &mut Value) -> i32 {
+    let coll = std::mem::replace(coll, Value::Nil);
+    finish(
+        out,
+        with_active(|eval| native_abi::into_mapcat(eval, f, coll)),
+    )
+}
+
 /// `v = (next v)` in place.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_next_mut(v: &mut Value) -> i32 {
@@ -1496,6 +1506,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_gseq,
         rt_n_first,
         rt_n_first_mapped,
+        rt_n_into_mapcat,
         rt_n_next_mut,
         rt_n_destructure,
         rt_n_destr_map,
