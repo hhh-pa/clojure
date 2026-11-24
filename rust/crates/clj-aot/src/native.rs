@@ -3200,7 +3200,7 @@ impl<'ctx> Lowerer<'ctx> {
             let k = self.value_const(kw)?;
             self.const_ref(k)
         };
-        let (args_refs, temps, moved) = self.arg_refs(f, args.iter(), dest)?;
+        let (args_refs, temps, moved) = self.arg_refs(f, args, dest)?;
         let mut refs = vec![args_refs[0], kref];
         refs.extend(args_refs.iter().skip(1));
         let bc = self.ctx.append_basic_block(f.func, "kw_get");
@@ -3247,7 +3247,7 @@ impl<'ctx> Lowerer<'ctx> {
         {
             return Ok(false);
         }
-        let (refs, temps, moved) = self.arg_refs(f, args.iter(), dest)?;
+        let (refs, temps, moved) = self.arg_refs(f, args, dest)?;
         let default = refs
             .get(1)
             .copied()
@@ -3286,7 +3286,7 @@ impl<'ctx> Lowerer<'ctx> {
         let Some((op, rest)) = static_call_op(args) else {
             return Ok(false);
         };
-        let (refs, temps, moved) = self.arg_refs(f, rest.iter(), dest)?;
+        let (refs, temps, moved) = self.arg_refs(f, rest, dest)?;
         let slow = self.ctx.append_basic_block(f.func, "static_slow");
         let done = self.ctx.append_basic_block(f.func, "static_done");
         self.emit_static_fast(f, op, &refs, dest, slow, done);
@@ -3935,7 +3935,7 @@ impl<'ctx> Lowerer<'ctx> {
         // Cloning the forms keeps their original last-use moves in the
         // fallback. The probe borrows local operands.
         let borrowed = args.map(Expr::clone);
-        let (refs, temps, _) = self.arg_refs(f, borrowed.iter(), dest)?;
+        let (refs, temps, _) = self.arg_refs(f, &borrowed, dest)?;
         let hit = self
             .call(
                 "rt_n_scaled_long",
@@ -3984,21 +3984,14 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        if call.var.sym.namespace() != Some("clojure.core") {
-            return Ok(false);
-        }
-        let specialized = match call.var.sym.name() {
-            "assoc" => self.try_lower_assoc_nth_step(f, call, dest),
-            "first" => self.try_lower_first_mapped(f, call, dest),
-            "into" => self.try_lower_into_mapcat(f, call, dest),
-            "vec" => self.try_lower_sort_vec(f, call, dest),
-            "reduce" => self.try_lower_dot_product(f, call, dest),
-            "print" | "println" => self.try_lower_print_join(f, call, dest),
-            "mapv" => self.try_lower_mapv_global_parse(f, call, dest),
-            "nth" => self.try_lower_nested_nth(f, call, dest),
-            _ => Ok(false),
-        };
-        if specialized? {
+        if self.try_lower_assoc_nth_step(f, call, dest)?
+            || self.try_lower_first_mapped(f, call, dest)?
+            || self.try_lower_into_mapcat(f, call, dest)?
+            || self.try_lower_dot_product(f, call, dest)?
+            || self.try_lower_print_join(f, call, dest)?
+            || self.try_lower_mapv_global_parse(f, call, dest)?
+            || self.try_lower_atom_nth(f, call, dest)?
+        {
             return Ok(true);
         }
         self.try_lower_hof_loop(f, call, dest)
@@ -4028,41 +4021,15 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(true)
     }
 
-    fn try_lower_sort_vec(
-        &mut self,
-        f: &mut FnCtx<'ctx>,
-        call: &clj_eval::expr::DirectCall,
-        dest: PointerValue<'ctx>,
-    ) -> Result<bool, Unsupported> {
-        let [arg] = call.args.as_slice() else {
-            return Ok(false);
-        };
-        let Some(("sort", args @ ([_] | [_, _]))) = core_call(arg) else {
-            return Ok(false);
-        };
-        let (base, elems) = self.slot_array(f, args.len());
-        for (arg, elem) in args.iter().zip(&elems) {
-            self.lower(f, arg, *elem)?;
-        }
-        let slice = self.slots_ref(f, base, args.len());
-        let status = self
-            .call(
-                "rt_n_sort_vec",
-                Some(self.i32t),
-                &[dest.into(), slice.into()],
-            )
-            .expect("sort status");
-        self.check(f, status);
-        self.free_slot_array(f, base, elems);
-        Ok(true)
-    }
-
     fn try_lower_first_mapped(
         &mut self,
         f: &mut FnCtx<'ctx>,
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
+        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "first" {
+            return Ok(false);
+        }
         let [coll] = call.args.as_slice() else {
             return Ok(false);
         };
@@ -4092,6 +4059,9 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
+        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "into" {
+            return Ok(false);
+        }
         let [Expr::VecLit(items, None), transform, src] = call.args.as_slice() else {
             return Ok(false);
         };
@@ -4144,6 +4114,9 @@ impl<'ctx> Lowerer<'ctx> {
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
+        if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "mapv" {
+            return Ok(false);
+        }
         let [Expr::Global(var), coll] = call.args.as_slice() else {
             return Ok(false);
         };
@@ -4213,45 +4186,6 @@ impl<'ctx> Lowerer<'ctx> {
         let st = self.call(helper, Some(self.i32t), &args).expect("status");
         self.check(f, st);
         self.free_slots(f, &slots);
-        Ok(true)
-    }
-
-    fn try_lower_nested_nth(
-        &mut self,
-        f: &mut FnCtx<'ctx>,
-        call: &clj_eval::expr::DirectCall,
-        dest: PointerValue<'ctx>,
-    ) -> Result<bool, Unsupported> {
-        if self.try_lower_atom_nth(f, call, dest)? {
-            return Ok(true);
-        }
-        let [Expr::DirectNative(inner), index] = call.args.as_slice() else {
-            return Ok(false);
-        };
-        if inner.var.sym.namespace() != Some("clojure.core") || !inert_index(index) {
-            return Ok(false);
-        }
-        let (helper, prefix, args) = match (inner.var.sym.name(), inner.args.as_slice()) {
-            ("nth", [source, row]) if inert_index(row) => {
-                ("rt_n_nth2", 0, vec![source, row, index])
-            }
-            ("peek", [source]) => (
-                "rt_n_peek_nth",
-                self.var_of(&inner.var) << 32,
-                vec![source, index],
-            ),
-            _ => return Ok(false),
-        };
-        let (refs, temps, moved) = self.arg_refs(f, args.into_iter(), dest)?;
-        let k = prefix | self.var_of(&call.var);
-        let mut params = vec![dest.into(), self.u64c(k)];
-        params.extend(refs.into_iter().map(BasicMetadataValueEnum::from));
-        let st = self
-            .call(helper, Some(self.i32t), &params)
-            .expect("nth status");
-        self.check(f, st);
-        self.free_slots(f, &temps);
-        self.drop_and_nil_slots(f.func, &moved);
         Ok(true)
     }
 
@@ -5139,7 +5073,7 @@ impl<'ctx> Lowerer<'ctx> {
         if bc_sym.is_none() && fast.is_none() && is_direct_moving(f, call, core_name.as_deref()) {
             return self.lower_direct_moving(f, call, k, core_name.as_deref(), dest);
         }
-        let (refs, temps, moved) = self.arg_refs(f, call.args.iter(), dest)?;
+        let (refs, temps, moved) = self.arg_refs(f, &call.args, dest)?;
         let slow = self.ctx.append_basic_block(f.func, "native_slow");
         let done = self.ctx.append_basic_block(f.func, "native_done");
         self.emit_direct_inline(
@@ -5430,10 +5364,10 @@ impl<'ctx> Lowerer<'ctx> {
     /// the fresh slots (`temps`), and any borrowed local slots at their
     /// last use (`moved`) to release right after the call completes.
     #[allow(clippy::type_complexity)]
-    fn arg_refs<'arg>(
+    fn arg_refs(
         &mut self,
         f: &mut FnCtx<'ctx>,
-        mut args: impl ExactSizeIterator<Item = &'arg Expr> + Clone,
+        args: &[Expr],
         dest: PointerValue<'ctx>,
     ) -> Result<
         (
@@ -5446,9 +5380,9 @@ impl<'ctx> Lowerer<'ctx> {
         let mut refs = Vec::with_capacity(args.len());
         let mut temps = Vec::new();
         let mut moved = Vec::new();
-        while let Some(a) = args.next() {
+        for (i, a) in args.iter().enumerate() {
             let local = match a {
-                Expr::Local(idx) => self.borrowable_before(f, *idx, args.clone()),
+                Expr::Local(idx) => self.borrowable_before(f, *idx, &args[i + 1..]),
                 _ => None,
             };
             if let Some(p) = local.filter(|p| *p != dest) {
@@ -5619,16 +5553,16 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// The slot holding local `idx`'s value, when it can be borrowed
     /// safely across subsequent call arguments `rest`.
-    fn borrowable_before<'arg>(
+    fn borrowable_before(
         &self,
         f: &FnCtx<'ctx>,
         idx: usize,
-        rest: impl IntoIterator<Item = &'arg Expr>,
+        rest: &[Expr],
     ) -> Option<PointerValue<'ctx>> {
         // A local some occurrence in the remaining arguments of the same
         // call moves is copied instead: moving later in arg evaluation
         // would overwrite or invalidate this borrowed slot.
-        if rest.into_iter().any(|e| expr_moves_local(e, idx, &f.moves)) {
+        if rest.iter().any(|e| expr_moves_local(e, idx, &f.moves)) {
             return None;
         }
         self.slot_of(f, idx)
@@ -6710,33 +6644,6 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(())
     }
 
-    fn lower_seq_test(
-        &mut self,
-        f: &mut FnCtx<'ctx>,
-        arg: &Expr,
-        then_b: BasicBlock<'ctx>,
-        else_b: BasicBlock<'ctx>,
-    ) -> Result<(), Unsupported> {
-        let t = self.slot(f);
-        let (refs, temps, moved) = self.arg_refs(f, std::iter::once(arg), t)?;
-        let status = self
-            .call(
-                "rt_n_seq_nonempty",
-                Some(self.i32t),
-                &[t.into(), refs[0].into()],
-            )
-            .expect("seq status");
-        self.check(f, status);
-        let present = self.truthy(t);
-        self.free_slots(f, &temps);
-        self.free_slots(f, &[t]);
-        self.drop_and_nil_slots(f.func, &moved);
-        self.builder
-            .build_conditional_branch(present, then_b, else_b)
-            .expect("br");
-        Ok(())
-    }
-
     fn try_lower_cond_call(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -6750,16 +6657,9 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let name = call.var.sym.name();
         let n = call.args.len();
-        match (name, call.args.as_slice()) {
-            ("not", [arg]) => {
-                self.lower_cond(f, arg, else_b, then_b)?;
-                return Ok(true);
-            }
-            ("seq", [arg]) => {
-                self.lower_seq_test(f, arg, then_b, else_b)?;
-                return Ok(true);
-            }
-            _ => {}
+        if name == "not" && n == 1 {
+            self.lower_cond(f, &call.args[0], else_b, then_b)?;
+            return Ok(true);
         }
         let fast = fast_op(call.fast, n);
         let is_cmp = matches!(
@@ -6777,7 +6677,7 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(false);
         }
         let slow_t = self.slot(f);
-        let (refs, temps, moved) = self.arg_refs(f, call.args.iter(), slow_t)?;
+        let (refs, temps, moved) = self.arg_refs(f, &call.args, slow_t)?;
         let join = self.ctx.append_basic_block(f.func, "cond.join");
         let here = self.builder.get_insert_block().expect("bb");
         self.builder.position_at_end(join);
@@ -6952,17 +6852,7 @@ impl<'ctx> Lowerer<'ctx> {
                 _ => None,
             })
             .collect();
-        let dead = Self::dead_recur_slots(f, target, args);
-        let direct: Vec<_> = target
-            .patterns
-            .iter()
-            .map(|(pat, slots)| match (pat, slots.as_slice()) {
-                (Pattern::Symbol(_), [slot]) if dead.contains(slot) => Some(*slot),
-                _ => None,
-            })
-            .collect();
-        self.drop_and_nil_slots(f.func, &dead);
-        let fresh = self.lower_recur_changes(f, args, &retained, &direct)?;
+        let fresh = self.lower_recur_changes(f, args, &retained)?;
         // The analyzer only emits `recur` in tail position of a target.
         let target = f.recur.pop().expect("recur has a target");
         let depth = f.env.len();
@@ -6987,41 +6877,11 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(())
     }
 
-    /// A replaced binding that none of the operands or pattern defaults
-    /// read can release its old value before evaluating the new values.
-    fn dead_recur_slots(
-        f: &FnCtx<'ctx>,
-        target: &RecurTarget<'ctx>,
-        args: &[Expr],
-    ) -> Vec<PointerValue<'ctx>> {
-        let mut used = BTreeSet::new();
-        for arg in args {
-            reads(arg, &mut used);
-        }
-        for (pat, _) in &target.patterns {
-            pattern_children(pat, &mut |e| reads(e, &mut used));
-        }
-        let live: Vec<_> = used
-            .into_iter()
-            .filter_map(|i| match f.env.get(i) {
-                Some(Some(LocalRef::Slot(slot))) => Some(*slot),
-                _ => None,
-            })
-            .collect();
-        target
-            .patterns
-            .iter()
-            .flat_map(|(_, slots)| slots.iter().copied())
-            .filter(|slot| !live.contains(slot))
-            .collect()
-    }
-
     fn lower_recur_changes(
         &mut self,
         f: &mut FnCtx<'ctx>,
         args: &[Expr],
         retained: &[Option<usize>],
-        direct: &[Option<PointerValue<'ctx>>],
     ) -> Result<Vec<Option<PointerValue<'ctx>>>, Unsupported> {
         // The unchanged slots remain live at the back edge, even when
         // another operand references them at its own last use.
@@ -7030,15 +6890,12 @@ impl<'ctx> Lowerer<'ctx> {
         let fresh = args
             .iter()
             .zip(retained)
-            .zip(direct)
-            .map(|((expr, keep), slot)| {
+            .map(|(expr, keep)| {
                 if keep.is_some() {
                     return Ok(None);
                 }
-                let dst = slot.unwrap_or_else(|| self.slot(f));
-                self.lower(f, expr, dst)?;
-                // A simple dead binding receives its operand directly.
-                Ok(slot.is_none().then_some(dst))
+                let dst = self.slot(f);
+                self.lower(f, expr, dst).map(|()| Some(dst))
             })
             .collect();
         f.moves = moves;
@@ -8221,6 +8078,9 @@ fn dot_product_call(
     &Expr,
     &Expr,
 )> {
+    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "reduce" {
+        return None;
+    }
     let [plus, init, Expr::DirectNative(m)] = call.args.as_slice() else {
         return None;
     };
@@ -8281,11 +8141,16 @@ fn print_str_join_nl(arg: &Expr) -> Option<PrintJoin<'_>> {
 }
 
 fn print_join_call(call: &clj_eval::expr::DirectCall) -> Option<PrintJoin<'_>> {
+    if call.var.sym.namespace() != Some("clojure.core") {
+        return None;
+    }
     let [arg] = call.args.as_slice() else {
         return None;
     };
     let name = call.var.sym.name();
-    if let Some((join, sep, coll)) = is_str_join(arg) {
+    if (name == "println" || name == "print")
+        && let Some((join, sep, coll)) = is_str_join(arg)
+    {
         return Some(PrintJoin {
             join,
             str_call: None,
@@ -8389,6 +8254,9 @@ fn parse_num_arity(arity: &Arity, base: usize) -> Option<u8> {
 /// `(into [] (map|filter F xs [ys]))`, or `(count (filter|filterv F xs))`,
 /// all `clojure.core`.
 fn hof_loop<'a>(call: &'a clj_eval::expr::DirectCall) -> Option<HofLoop<'a>> {
+    if call.var.sym.namespace() != Some("clojure.core") {
+        return None;
+    }
     let one =
         |kind, fe: &'a Expr, init: Option<&'a Expr>, coll: &'a Expr, coll2: Option<&'a Expr>| {
             let n_params = if kind == HofKind::Reduce || coll2.is_some() {
@@ -8810,7 +8678,7 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(false);
         }
         let tmp = self.slot(f);
-        let (refs, temps, moved) = self.arg_refs(f, call.args.iter(), tmp)?;
+        let (refs, temps, moved) = self.arg_refs(f, &call.args, tmp)?;
         let done = self.ctx.append_basic_block(f.func, "cb_done");
         let nfx = self.ctx.append_basic_block(f.func, "cb_nfx");
         let ok = self
@@ -9507,6 +9375,9 @@ fn assoc_nth_step_args(
     call: &clj_eval::expr::DirectCall,
     f: &FnCtx<'_>,
 ) -> Option<(usize, usize, i64)> {
+    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "assoc" {
+        return None;
+    }
     let [Expr::Local(coll), Expr::Local(idx), op] = call.args.as_slice() else {
         return None;
     };
@@ -9562,16 +9433,14 @@ fn stable_kind(init: &Expr) -> StableKind {
     }
 }
 
-/// An index ready to read before a nested lookup.
-fn inert_index(e: &Expr) -> bool {
-    matches!(e, Expr::Local(_) | Expr::Literal(Value::Int(_)))
-}
-
 /// Fuse only inert indices. An index expression may mutate the atom or
 /// throw after the dereference, and a nested lookup can itself throw.
 fn atom_nth_args(
     call: &clj_eval::expr::DirectCall,
 ) -> Option<(&clj_value::Var, &Expr, Vec<&Expr>)> {
+    if call.var.sym.namespace() != Some("clojure.core") || call.var.sym.name() != "nth" {
+        return None;
+    }
     let [coll, idx] = call.args.as_slice() else {
         return None;
     };
@@ -9579,7 +9448,10 @@ fn atom_nth_args(
         Some(("nth", [source, row])) => (source, vec![row, idx]),
         _ => (coll, vec![idx]),
     };
-    if !indices.iter().all(|e| inert_index(e)) {
+    if !indices
+        .iter()
+        .all(|e| matches!(e, Expr::Local(_) | Expr::Literal(Value::Int(_))))
+    {
         return None;
     }
     let Expr::DirectNative(deref) = source else {

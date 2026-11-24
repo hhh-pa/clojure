@@ -967,21 +967,23 @@ fn sort_by_index(items: &mut [Value], cmp: fn(&Value, &Value) -> std::cmp::Order
     }
     let mut idx: Vec<usize> = (0..items.len()).collect();
     idx.sort_by(|&a, &b| cmp(&items[a], &items[b]));
-    permute(items, &mut idx);
+    permute(items, &idx);
 }
 
 /// Apply a sort permutation in place (`idx[pos]` is the item that
-/// belongs at `pos`). Follow each cycle and mark its positions in order.
-fn permute(items: &mut [Value], idx: &mut [usize]) {
-    for start in 0..idx.len() {
-        let mut pos = start;
-        while idx[pos] != start {
-            let src = idx[pos];
-            items.swap(pos, src);
-            idx[pos] = pos;
-            pos = src;
+/// belongs at `pos`): each item moves once.
+fn permute(items: &mut [Value], idx: &[usize]) {
+    // dest[i]: where the item now at `i` belongs.
+    let mut dest = vec![0usize; items.len()];
+    for (pos, &src) in idx.iter().enumerate() {
+        dest[src] = pos;
+    }
+    for i in 0..items.len() {
+        while dest[i] != i {
+            let j = dest[i];
+            items.swap(i, j);
+            dest.swap(i, j);
         }
-        idx[pos] = pos;
     }
 }
 
@@ -1067,35 +1069,6 @@ fn sort_str_int_pairs(items: &mut [Value]) -> bool {
     true
 }
 
-/// Cache the keys of pairs holding a long and a packed long vector.
-/// The inner vector's length sorts before its items, as in `compare`.
-fn sort_int_intvec_pairs(items: &mut [Value]) -> bool {
-    let Some(keys): Option<Vec<_>> = items.iter().map(int_intvec_pair_key).collect() else {
-        return false;
-    };
-    let mut idx: Vec<usize> = (0..keys.len()).collect();
-    idx.sort_by(|&i, &j| keys[i].cmp(&keys[j]));
-    drop(keys);
-    permute(items, &mut idx);
-    true
-}
-
-fn int_intvec_pair_key(v: &Value) -> Option<(i64, usize, &[i64])> {
-    let Value::Vector(pair) = v else {
-        return None;
-    };
-    if pair.len() != 2 {
-        return None;
-    }
-    match (pair.get_ref(0), pair.get_ref(1)) {
-        (Some(Value::Int(n)), Some(Value::Vector(v))) => {
-            let ints = v.as_flat_ints()?;
-            Some((*n, ints.len(), ints))
-        }
-        _ => None,
-    }
-}
-
 /// Whether `v` is a vector whose items are all `Int`.
 fn is_int_vector(v: &Value) -> bool {
     match v {
@@ -1165,7 +1138,7 @@ fn sort_int_tuples(items: &mut [Value]) -> bool {
     let key = |i: usize| &keys[i * k..(i + 1) * k];
     let mut idx: Vec<usize> = (0..items.len()).collect();
     idx.sort_by(|&a, &b| key(a).cmp(key(b)));
-    permute(items, &mut idx);
+    permute(items, &idx);
     true
 }
 
@@ -1183,7 +1156,6 @@ fn sort_default(items: &mut [Value]) -> Result<(), NativeError> {
     if sort_all_ints(items)
         || sort_all_ascii_strs(items)
         || sort_str_int_pairs(items)
-        || sort_int_intvec_pairs(items)
         || sort_int_tuples(items)
         || sort_int_vectors(items)
     {
@@ -1199,38 +1171,8 @@ fn native_sort(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
 
 pub(crate) fn native_sort_owned(
     eval: &mut Evaluator,
-    args: SmallVec<[Value; 4]>,
-) -> Result<Value, NativeError> {
-    Ok(sorted_seq(sort_items_owned(eval, args)?))
-}
-
-pub(crate) fn sort_vector(
-    eval: &mut Evaluator,
-    args: SmallVec<[Value; 4]>,
-) -> Result<Value, NativeError> {
-    let packed_ints = match args.as_slice() {
-        [Value::Vector(v)] => v.as_flat_ints(),
-        _ => None,
-    };
-    if let Some(ints) = packed_ints {
-        let mut sorted = ints.to_vec();
-        sorted.sort_unstable();
-        return Ok(Value::Vector(Vector::from_ints(sorted)));
-    }
-    let items = sort_items_owned(eval, args)?;
-    if matches!(items.first(), Some(Value::Str(_))) {
-        // The standard collector may pack an initial run of strings.
-        return collect_packed(eval, sorted_seq(items))
-            .map(Value::Vector)
-            .map_err(signal_to_native);
-    }
-    Ok(Value::Vector(Vector::from_vec(items)))
-}
-
-fn sort_items_owned(
-    eval: &mut Evaluator,
     mut args: SmallVec<[Value; 4]>,
-) -> Result<Vec<Value>, NativeError> {
+) -> Result<Value, NativeError> {
     check_arity("clojure.core/sort", &args, &[1, 2])?;
     let comp = if args.len() == 1 {
         None
@@ -1256,16 +1198,18 @@ fn sort_items_owned(
             })?;
         }
     }
-    Ok(items)
-}
-
-fn sorted_seq(items: Vec<Value>) -> Value {
     // `ArraySeq` (counted, never `IDrop`, no metadata);
     // empty/nil inputs answer `()`.
     if items.is_empty() {
-        return empty_list_value();
+        return Ok(empty_list_value());
     }
-    realized_value(items, false, true, false, clj_value::SeqKind::Array)
+    Ok(realized_value(
+        items,
+        false,
+        true,
+        false,
+        clj_value::SeqKind::Array,
+    ))
 }
 
 fn native_sort_by(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -1304,7 +1248,16 @@ pub(crate) fn native_sort_by_owned(
         let r = sort_cmp(eval, cmp.as_ref(), &comp, &ka, &kb)?;
         afunction_order(r, || sort_cmp(eval, cmp.as_ref(), &comp, &kb, &ka))
     })?;
-    Ok(sorted_seq(items))
+    if items.is_empty() {
+        return Ok(empty_list_value());
+    }
+    Ok(realized_value(
+        items,
+        false,
+        true,
+        false,
+        clj_value::SeqKind::Array,
+    ))
 }
 
 /// `(keyfn x)` for `sort-by`: the prepared callee when the keyfn has one
