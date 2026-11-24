@@ -6852,7 +6852,17 @@ impl<'ctx> Lowerer<'ctx> {
                 _ => None,
             })
             .collect();
-        let fresh = self.lower_recur_changes(f, args, &retained)?;
+        let dead = Self::dead_recur_slots(f, target, args);
+        let direct: Vec<_> = target
+            .patterns
+            .iter()
+            .map(|(pat, slots)| match (pat, slots.as_slice()) {
+                (Pattern::Symbol(_), [slot]) if dead.contains(slot) => Some(*slot),
+                _ => None,
+            })
+            .collect();
+        self.drop_and_nil_slots(f.func, &dead);
+        let fresh = self.lower_recur_changes(f, args, &retained, &direct)?;
         // The analyzer only emits `recur` in tail position of a target.
         let target = f.recur.pop().expect("recur has a target");
         let depth = f.env.len();
@@ -6877,11 +6887,41 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(())
     }
 
+    /// A replaced binding that none of the operands or pattern defaults
+    /// read can release its old value before evaluating the new values.
+    fn dead_recur_slots(
+        f: &FnCtx<'ctx>,
+        target: &RecurTarget<'ctx>,
+        args: &[Expr],
+    ) -> Vec<PointerValue<'ctx>> {
+        let mut used = BTreeSet::new();
+        for arg in args {
+            reads(arg, &mut used);
+        }
+        for (pat, _) in &target.patterns {
+            pattern_children(pat, &mut |e| reads(e, &mut used));
+        }
+        let live: Vec<_> = used
+            .into_iter()
+            .filter_map(|i| match f.env.get(i) {
+                Some(Some(LocalRef::Slot(slot))) => Some(*slot),
+                _ => None,
+            })
+            .collect();
+        target
+            .patterns
+            .iter()
+            .flat_map(|(_, slots)| slots.iter().copied())
+            .filter(|slot| !live.contains(slot))
+            .collect()
+    }
+
     fn lower_recur_changes(
         &mut self,
         f: &mut FnCtx<'ctx>,
         args: &[Expr],
         retained: &[Option<usize>],
+        direct: &[Option<PointerValue<'ctx>>],
     ) -> Result<Vec<Option<PointerValue<'ctx>>>, Unsupported> {
         // The unchanged slots remain live at the back edge, even when
         // another operand references them at its own last use.
@@ -6890,12 +6930,15 @@ impl<'ctx> Lowerer<'ctx> {
         let fresh = args
             .iter()
             .zip(retained)
-            .map(|(expr, keep)| {
+            .zip(direct)
+            .map(|((expr, keep), slot)| {
                 if keep.is_some() {
                     return Ok(None);
                 }
-                let dst = self.slot(f);
-                self.lower(f, expr, dst).map(|()| Some(dst))
+                let dst = slot.unwrap_or_else(|| self.slot(f));
+                self.lower(f, expr, dst)?;
+                // A simple dead binding receives its operand directly.
+                Ok(slot.is_none().then_some(dst))
             })
             .collect();
         f.moves = moves;
