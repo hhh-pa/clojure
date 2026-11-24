@@ -5371,6 +5371,7 @@ impl<'ctx> Lowerer<'ctx> {
                 self.lower(f, a, *e)?;
             }
         }
+        let lean_done = self.try_lean_own(f, op_name, n, dest, arr, &elems);
         let st = if op_name == Some("assoc") && n == 3 {
             self.call(
                 "rt_n_assoc_own3",
@@ -5397,8 +5398,54 @@ impl<'ctx> Lowerer<'ctx> {
         }
         .expect("owned call status");
         self.check(f, st);
+        if let Some(done) = lean_done {
+            self.builder.build_unconditional_branch(done).expect("br");
+            self.builder.position_at_end(done);
+        }
         self.free_slot_array(f, arr, elems);
         Ok(())
+    }
+
+    /// Vector `assoc`/`conj` on a uniquely held flat vector first try the
+    /// inlined in-place bitcode path (#271): a hit moves the updated
+    /// vector (arg 0) to `dest` and jumps to the returned block; a miss
+    /// leaves the args untouched for the general owned call the caller
+    /// emits next, which must then branch to that block.
+    fn try_lean_own(
+        &mut self,
+        f: &FnCtx<'ctx>,
+        op_name: Option<&str>,
+        n: usize,
+        dest: PointerValue<'ctx>,
+        arr: PointerValue<'ctx>,
+        elems: &[PointerValue<'ctx>],
+    ) -> Option<BasicBlock<'ctx>> {
+        let sym = match (op_name, n) {
+            (Some("assoc"), 3) => "rt_bc_assoc_own3",
+            (Some("conj"), 2) => "rt_bc_conj_own2",
+            _ => return None,
+        };
+        if !self.use_bitcode {
+            return None;
+        }
+        let hit = self
+            .call(sym, Some(self.i8t), &[arr.into()])
+            .expect("lean status");
+        let hit = self
+            .builder
+            .build_int_compare(IntPredicate::NE, hit, self.i8t.const_zero(), "lean_hit")
+            .expect("cmp");
+        let fast = self.ctx.append_basic_block(f.func, "lean_hit");
+        let slow = self.ctx.append_basic_block(f.func, "lean_slow");
+        let done = self.ctx.append_basic_block(f.func, "lean_done");
+        self.builder
+            .build_conditional_branch(hit, fast, slow)
+            .expect("br");
+        self.builder.position_at_end(fast);
+        self.move_v(f.func, dest, elems[0]);
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(slow);
+        Some(done)
     }
 
     /// [`lower_direct`](Self::lower_direct) for a program that may rebind

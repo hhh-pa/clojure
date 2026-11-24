@@ -339,6 +339,23 @@ bc_str_ops3! {
     rt_bc_3_get => BcOp3::Get3,
 }
 
+/// Owned `assoc` entrypoint over the moved `[coll key val]` args
+/// (#271): `1` when `args[0]` was updated in place (the caller moves
+/// it to the result), `0` (nothing touched) for `rt_n_assoc_own3`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_assoc_own3(args: &mut [Value; 3]) -> i8 {
+    i8::from(ops::assoc_own3(args))
+}
+
+/// Owned `conj` entrypoint over the moved `[coll x]` args (#271), like
+/// [`rt_bc_assoc_own3`] (fallback: the general `rt_n_core_own`).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_conj_own2(args: &mut [Value; 2]) -> i8 {
+    i8::from(ops::conj_own2(args))
+}
+
 /// Effect-position `pop!` entrypoint: returns `1` with `Value::Nil` on hit.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
@@ -556,6 +573,25 @@ mod tests {
     use num_bigint::BigInt;
     use num_rational::BigRational;
     use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn owned_vector_ops_hit_unique_vectors_only_271() {
+        let mut args = [
+            Value::Vector(Vector::from_ints(vec![1])),
+            Value::Int(0),
+            Value::Int(5),
+        ];
+        assert!(crate::ops::assoc_own3(&mut args));
+        assert!(!crate::ops::assoc_own3(&mut [
+            Value::Nil,
+            Value::Int(0),
+            Value::Int(1)
+        ]));
+        let grown = Vector::from_ints(Vec::with_capacity(2)).push_back(Value::Int(1));
+        let mut conj = [Value::Vector(grown), Value::Int(2)];
+        assert!(crate::ops::conj_own2(&mut conj));
+        assert!(!crate::ops::conj_own2(&mut [Value::Nil, Value::Int(2)]));
+    }
 
     extern "C" fn test_str_ascii(v: &Value) -> u8 {
         match v {

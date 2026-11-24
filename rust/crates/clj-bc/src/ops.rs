@@ -931,6 +931,30 @@ pub(crate) fn assoc_bang_fast<O: OutSlot>(
     finish_bang(out, ok, tval, keep_ret)
 }
 
+/// Owned `(assoc v i x)` on a uniquely held flat vector (#271 lean
+/// owned path): updates `args[0]` in place and returns `true` (the
+/// caller moves it to the result); `false` leaves `args` untouched for
+/// the general owned `assoc` (see `Vector::assoc_unique`).
+#[inline]
+pub(crate) fn assoc_own3(args: &mut [Value; 3]) -> bool {
+    let [coll, key, val] = args;
+    match (coll, index_i32(key)) {
+        (Value::Vector(v), Some(i)) => v.assoc_unique(i, val),
+        _ => false,
+    }
+}
+
+/// Owned `(conj v x)` on a uniquely held flat vector (#271), like
+/// [`assoc_own3`] (see `Vector::conj_unique`).
+#[inline(always)]
+pub(crate) fn conj_own2(args: &mut [Value; 2]) -> bool {
+    let [coll, x] = args;
+    match coll {
+        Value::Vector(v) => v.conj_unique(x),
+        _ => false,
+    }
+}
+
 #[inline]
 fn scalar_val_ref(vr: ValueRef<'_>, allow_fp: bool) -> Option<(u8, i64)> {
     match vr {

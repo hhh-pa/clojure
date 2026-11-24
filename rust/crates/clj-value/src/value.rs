@@ -1609,6 +1609,71 @@ impl Vector {
         self.clone().set_nth_owned(index, v)
     }
 
+    /// `assoc` in place on a uniquely held flat vector (#271 lean
+    /// owned path, inlined into AOT programs as bitcode, so it runs no
+    /// drop glue and touches no runtime statics): writes `*v` at
+    /// `index` and returns `true` only when this handle and its flat
+    /// storage are unique, `index` is in bounds, and the value fits the
+    /// packing without retyping (a long into longs, a double into
+    /// doubles, anything over a scalar item of generic storage, which
+    /// takes `*v`, leaving nil). Otherwise nothing changes and the
+    /// general [`set_nth_owned`](Self::set_nth_owned) path applies. The
+    /// identity stays: no other handle can observe the old version,
+    /// like a uniquely owned map updated in place.
+    #[inline]
+    pub fn assoc_unique(&mut self, index: usize, v: &mut Value) -> bool {
+        let Some(data) = Arc::get_mut(&mut self.0) else {
+            return false;
+        };
+        match (&mut data.inner, &mut *v) {
+            (VectorInner::Ints(p), Value::Int(n)) => put_unique(p, index, *n),
+            (VectorInner::Doubles(p), Value::Double(d)) => put_unique(p, index, *d),
+            (VectorInner::Generic(p), v) => {
+                match p.unique_flat_mut().and_then(|xs| xs.get_mut(index)) {
+                    Some(slot)
+                        if matches!(
+                            slot,
+                            Value::Nil
+                                | Value::Bool(_)
+                                | Value::Int(_)
+                                | Value::Double(_)
+                                | Value::Char(_)
+                        ) =>
+                    {
+                        // A scalar needs no drop (none runs here).
+                        std::mem::forget(std::mem::replace(slot, std::mem::replace(v, Value::Nil)));
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// `conj` in place on a uniquely held, non-empty flat vector below
+    /// [`FLAT_MAX`](crate::trie::FLAT_MAX) items, within its capacity (#271 lean owned path),
+    /// under [`assoc_unique`](Self::assoc_unique)'s rules: `false`
+    /// changes nothing and leaves the general [`push_back`](Self::push_back).
+    #[inline(always)]
+    pub fn conj_unique(&mut self, v: &mut Value) -> bool {
+        let Some(data) = Arc::get_mut(&mut self.0) else {
+            return false;
+        };
+        match (&mut data.inner, &mut *v) {
+            (VectorInner::Ints(p), Value::Int(n)) => push_unique(p, *n),
+            (VectorInner::Doubles(p), Value::Double(d)) => push_unique(p, *d),
+            (VectorInner::Generic(p), v) => match pushable(p) {
+                Some(xs) => {
+                    xs.push(std::mem::replace(v, Value::Nil));
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Replace the item at `index` in place (`false` when out of bounds).
     #[inline]
     pub fn set_nth_mut(&mut self, index: usize, v: Value) -> bool {
@@ -1919,6 +1984,42 @@ fn push_packed_str(ps: &mut Arc<PackedStrings>, s: Arc<str>) -> Option<crate::tr
     let mut g = crate::trie::Packed::from_vec(ps.to_values());
     g.push(Value::Str(s));
     Some(g)
+}
+
+/// Write `x` at `i` of a uniquely held flat run (see
+/// [`Vector::assoc_unique`]; `T` is a scalar, so nothing drops).
+#[inline]
+fn put_unique<T: Clone + Copy>(p: &mut crate::trie::Packed<T>, i: usize, x: T) -> bool {
+    match p.unique_flat_mut().and_then(|xs| xs.get_mut(i)) {
+        Some(slot) => {
+            *slot = x;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Append `x` to a uniquely held, non-empty flat run below
+/// [`FLAT_MAX`](crate::trie::FLAT_MAX) (see [`Vector::conj_unique`]).
+#[inline(always)]
+fn push_unique<T: Clone + Copy>(p: &mut crate::trie::Packed<T>, x: T) -> bool {
+    match pushable(p) {
+        Some(xs) => {
+            xs.push(x);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The run's items when [`Vector::conj_unique`] may append in place:
+/// within capacity too, so the append never grows the buffer (the
+/// general path grows it, keeping appends amortized O(1)) and the
+/// inlined bitcode carries no reallocation call.
+#[inline(always)]
+fn pushable<T: Clone>(p: &mut crate::trie::Packed<T>) -> Option<&mut Vec<T>> {
+    p.unique_flat_mut()
+        .filter(|xs| !xs.is_empty() && xs.len() < crate::trie::FLAT_MAX && xs.len() < xs.capacity())
 }
 
 fn push_inner(inner: &mut VectorInner, v: Value) -> Option<crate::trie::Packed<Value>> {
@@ -4560,7 +4661,7 @@ mod tests {
         Value, bigdec_result, find_map_dup, find_set_dup, intern_literal_strings, intern_string,
         new_map, new_set, plain_equals,
     };
-    use crate::{HostDef, HostInst, HostKind, HostVal, Keyword, Symbol};
+    use crate::{HostDef, HostInst, HostKind, HostVal, Keyword, Symbol, Vector};
 
     #[test]
     fn vector_iter_nth_skips_flat_and_trie_vectors() {
@@ -6377,6 +6478,81 @@ mod tests {
                 Value::Str(Arc::from("a")),
                 Value::Str(Arc::from("b")),
             ])))
+        );
+    }
+
+    #[test]
+    fn unique_vector_updates_only_touch_unshared_flat_storage_271() {
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        // Longs: in place when unique, in bounds, and a long.
+        let mut v = Vector::from_ints(vec![1, 2, 3]);
+        let id = v.id();
+        assert!(v.assoc_unique(1, &mut Value::Int(9)));
+        assert_eq!(v.id(), id, "the identity stays");
+        assert!(!v.assoc_unique(3, &mut Value::Int(9)), "past the end");
+        assert!(!v.assoc_unique(0, &mut Value::Double(1.5)), "would retype");
+        assert_eq!(v.iter().collect::<Vec<_>>(), [1, 9, 3].map(Value::Int));
+        // A second handle or shared storage: nothing changes.
+        let shared = v.clone();
+        assert!(!v.assoc_unique(0, &mut Value::Int(7)));
+        assert!(!v.conj_unique(&mut Value::Int(7)));
+        drop(shared);
+        let mut meta_view = v.clone().with_meta(None);
+        assert!(
+            !meta_view.assoc_unique(0, &mut Value::Int(7)),
+            "storage shared with v"
+        );
+        assert_eq!(v.get(0), Some(Value::Int(1)));
+        // Doubles.
+        let mut d = Vector::from_doubles(vec![0.5, 1.5]);
+        assert!(d.assoc_unique(0, &mut Value::Double(2.5)));
+        assert!(!d.assoc_unique(0, &mut Value::Int(2)));
+        assert_eq!(d.get(0), Some(Value::Double(2.5)));
+        // Generic: replaces scalar items only, taking the value.
+        let mut g = Vector::from_vec(vec![kw("a"), Value::Nil]);
+        let mut x = kw("b");
+        assert!(g.assoc_unique(1, &mut x));
+        assert_eq!(x, Value::Nil, "the value moved in");
+        assert!(
+            !g.assoc_unique(0, &mut Value::Int(1)),
+            "a heap item would drop"
+        );
+        assert!(!g.assoc_unique(5, &mut Value::Int(1)));
+        assert_eq!(g.get(1), Some(kw("b")));
+        // Other storages and the trie decline.
+        let mut c = Vector::from_chars(vec!['a']);
+        assert!(!c.assoc_unique(0, &mut Value::Char('b')));
+        assert!(!c.conj_unique(&mut Value::Char('b')));
+        let mut big = Vector::from_ints(vec![0; 1024]).push_back(Value::Int(0));
+        assert!(!big.assoc_unique(0, &mut Value::Int(1)));
+        // conj: within capacity only, never on empty vectors.
+        let mut e = Vector::from_ints(Vec::new());
+        assert!(!e.conj_unique(&mut Value::Int(1)));
+        let mut p = Vector::from_ints(Vec::with_capacity(4));
+        p = p.push_back(Value::Int(1));
+        assert!(p.conj_unique(&mut Value::Int(2)));
+        assert!(!p.conj_unique(&mut Value::Double(2.0)));
+        let mut pd = Vector::from_doubles(Vec::with_capacity(4)).push_back(Value::Double(1.0));
+        assert!(pd.conj_unique(&mut Value::Double(2.0)));
+        let mut full = Vector::from_ints(vec![1]);
+        while full.conj_unique(&mut Value::Int(0)) {}
+        let at_cap = full.len();
+        full = full.push_back(Value::Int(0));
+        assert_eq!(full.len(), at_cap + 1, "the general path grows it");
+        let mut pg = Vector::from_vec(Vec::with_capacity(4)).push_back(kw("a"));
+        let mut y = kw("c");
+        assert!(pg.conj_unique(&mut y));
+        assert_eq!(y, Value::Nil);
+        let mut z = kw("z");
+        while pg.conj_unique(&mut z) {
+            z = kw("z");
+        }
+        assert_eq!(z, kw("z"), "a full generic run keeps the value");
+        assert_eq!(p.iter().collect::<Vec<_>>(), [1, 2].map(Value::Int));
+        let mut flat_max = Vector::from_ints(vec![0; 1023]).push_back(Value::Int(0));
+        assert!(
+            !flat_max.conj_unique(&mut Value::Int(1)),
+            "a full flat run moves to the trie"
         );
     }
 

@@ -538,25 +538,8 @@ pub(crate) fn native_reduce_owned(
 ) -> Result<Value, NativeError> {
     check_arity("clojure.core/reduce", &args, &[2, 3])?;
     let f = args[0].clone();
-    // Eductions reduce without `IReduce` (2-arg takes the JVM cast)
-    // and complete through `(completing f)` in 3-arg (oracle
-    // `eduction-reduce*`, `core.clj` source).
-    let coll = if args.len() == 2 { &args[1] } else { &args[2] };
-    if let Some((xform, ecoll)) = crate::xform::Eduction::parts(coll) {
-        if args.len() == 2 {
-            return Err(NativeError::cast(
-                &jvm_class_of(coll),
-                "clojure.lang.IReduce",
-            ));
-        }
-        let completing = crate::xform::completing_fn(eval, f.clone(), None);
-        return crate::xform::transduce_into(
-            eval,
-            &xform.clone(),
-            &completing,
-            args[1].clone(),
-            ecoll.clone(),
-        );
+    if let Some(done) = reduce_early(eval, &f, &args) {
+        return done;
     }
     // The init moves out (nothing reads `args[1]` again): a kept
     // copy would pin every subtree the first step leaves untouched,
@@ -597,6 +580,105 @@ pub(crate) fn native_reduce_owned(
         return call_checked(eval, &f, &[]);
     }
     Ok(acc)
+}
+
+/// The `reduce` shapes answered before the general walk: an eduction
+/// (`IReduce`-less, completing in 3-arg) and a numeric `(reduce + …)`
+/// over a vector (`None`: walk).
+fn reduce_early(
+    eval: &mut Evaluator,
+    f: &Value,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    // Eductions reduce without `IReduce` (2-arg takes the JVM cast)
+    // and complete through `(completing f)` in 3-arg (oracle
+    // `eduction-reduce*`, `core.clj` source).
+    let coll = if args.len() == 2 { &args[1] } else { &args[2] };
+    if let Some((xform, ecoll)) = crate::xform::Eduction::parts(coll) {
+        if args.len() == 2 {
+            return Some(Err(NativeError::cast(
+                &jvm_class_of(coll),
+                "clojure.lang.IReduce",
+            )));
+        }
+        let completing = crate::xform::completing_fn(eval, f.clone(), None);
+        return Some(crate::xform::transduce_into(
+            eval,
+            &xform.clone(),
+            &completing,
+            args[1].clone(),
+            ecoll.clone(),
+        ));
+    }
+    reduce_add_vector(f, (args.len() == 3).then(|| &args[1]), coll).map(Ok)
+}
+
+/// A long or double operand of [`reduce_add_vector`].
+#[derive(Clone, Copy)]
+enum AddNum {
+    Int(i64),
+    Double(f64),
+}
+
+impl AddNum {
+    fn of(v: &Value) -> Option<Self> {
+        match *v {
+            Value::Int(n) => Some(Self::Int(n)),
+            Value::Double(d) => Some(Self::Double(d)),
+            _ => None,
+        }
+    }
+
+    /// Two-arg `+` on longs and doubles (`None` on long overflow,
+    /// which the native reports: `+` throws, `+'` promotes).
+    fn add(self, other: Self) -> Option<Self> {
+        Some(match (self, other) {
+            (Self::Int(a), Self::Int(b)) => Self::Int(a.checked_add(b)?),
+            (Self::Int(a), Self::Double(b)) => Self::Double(a as f64 + b),
+            (Self::Double(a), Self::Int(b)) => Self::Double(a + b as f64),
+            (Self::Double(a), Self::Double(b)) => Self::Double(a + b),
+        })
+    }
+
+    fn value(self) -> Value {
+        match self {
+            Self::Int(n) => Value::Int(n),
+            Self::Double(d) => Value::Double(d),
+        }
+    }
+}
+
+/// `(reduce + [init] v)` over a vector of longs and doubles (#271): a
+/// left fold in the general path's order (so doubles round alike)
+/// without a boxed step call per item. `None` hands anything else to
+/// the general walk unchanged: a step fn other than the genuine `+`
+/// (or `+'`), another collection, an empty vector without an init,
+/// any non-long/double operand, or a long overflow (`+` is pure, so
+/// restarting there repeats only arithmetic).
+fn reduce_add_vector(f: &Value, init: Option<&Value>, coll: &Value) -> Option<Value> {
+    if crate::ext::as_native(f)?.fast != crate::ext::FastArith::Add {
+        return None;
+    }
+    let Value::Vector(v) = coll else {
+        return None;
+    };
+    let mut items = v.iter();
+    let first = match init {
+        Some(acc) => acc.clone(),
+        None => items.next()?,
+    };
+    let mut acc = AddNum::of(&first)?;
+    if let Some(ints) = v.as_flat_ints() {
+        let skip = usize::from(init.is_none());
+        for &n in &ints[skip..] {
+            acc = acc.add(AddNum::Int(n))?;
+        }
+        return Some(acc.value());
+    }
+    for item in items {
+        acc = acc.add(AddNum::of(&item)?)?;
+    }
+    Some(acc.value())
 }
 
 /// One `reduce` step over the moved accumulator: through the

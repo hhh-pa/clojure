@@ -536,6 +536,16 @@ impl<T: Clone> Packed<T> {
         true
     }
 
+    /// The flat run's items when this handle holds them alone (#271
+    /// lean owned updates): `None` for shared runs and the trie.
+    #[inline(always)]
+    pub(crate) fn unique_flat_mut(&mut self) -> Option<&mut Vec<T>> {
+        match self {
+            Packed::Flat(a) => Arc::get_mut(a),
+            Packed::Trie(_) => None,
+        }
+    }
+
     /// Replace the item at `i` (`false` when out of bounds).
     pub(crate) fn set(&mut self, i: usize, x: T) -> bool {
         match self {

@@ -25,11 +25,12 @@ use clj_bc::{
     rt_bc_2_mod, rt_bc_2_mul, rt_bc_2_not_eq, rt_bc_2_nth, rt_bc_2_num_eq, rt_bc_2_quot,
     rt_bc_2_rem, rt_bc_2_shl, rt_bc_2_shr, rt_bc_2_str_ends_with, rt_bc_2_str_includes,
     rt_bc_2_str_starts_with, rt_bc_2_sub, rt_bc_2_ushr, rt_bc_3_assoc_bang, rt_bc_3_assoc_bang_fx,
-    rt_bc_3_get, rt_bc_3_nth, rt_bc_clone, rt_bc_deref, rt_bc_is_pod, rt_bc_scalar_assoc,
-    rt_bc_scalar_assoc_d, rt_bc_scalar_conj, rt_bc_scalar_conj_d, rt_bc_scalar_count,
-    rt_bc_scalar_dtvec_lock, rt_bc_scalar_dvec, rt_bc_scalar_gvec, rt_bc_scalar_ivec,
-    rt_bc_scalar_nth, rt_bc_scalar_nth2, rt_bc_scalar_pop, rt_bc_scalar_same_transient,
-    rt_bc_scalar_str, rt_bc_scalar_tvec_lock, rt_bc_scalar_tvec_unlock,
+    rt_bc_3_get, rt_bc_3_nth, rt_bc_assoc_own3, rt_bc_clone, rt_bc_conj_own2, rt_bc_deref,
+    rt_bc_is_pod, rt_bc_scalar_assoc, rt_bc_scalar_assoc_d, rt_bc_scalar_conj, rt_bc_scalar_conj_d,
+    rt_bc_scalar_count, rt_bc_scalar_dtvec_lock, rt_bc_scalar_dvec, rt_bc_scalar_gvec,
+    rt_bc_scalar_ivec, rt_bc_scalar_nth, rt_bc_scalar_nth2, rt_bc_scalar_pop,
+    rt_bc_scalar_same_transient, rt_bc_scalar_str, rt_bc_scalar_tvec_lock,
+    rt_bc_scalar_tvec_unlock,
 };
 use clj_value::{BindCounts, FastVars, Transient, TransientKind, TransientVector, Value, Vector};
 
@@ -257,4 +258,30 @@ fn abi_shims_exercise_pod_ops_and_fallbacks() {
     assert!(!mptr.is_null());
     rt_bc_scalar_tvec_unlock(&fx_tval);
     rt_bc_scalar_tvec_unlock(&iv);
+}
+
+#[test]
+fn owned_vector_assoc_and_conj_update_unique_vectors_in_place_271() {
+    let mut args = [
+        Value::Vector(Vector::from_ints(vec![1, 2])),
+        Value::Int(0),
+        Value::Int(9),
+    ];
+    assert_eq!(rt_bc_assoc_own3(&mut args), 1);
+    assert_eq!(args[0], Value::Vector(Vector::from_ints(vec![9, 2])));
+    // Misses leave every arg in place: a non-vector, a non-index key, a
+    // shared vector.
+    let mut miss = [Value::Nil, Value::Int(0), Value::Int(1)];
+    assert_eq!(rt_bc_assoc_own3(&mut miss), 0);
+    let mut miss = [args[0].clone(), Value::Int(-1), Value::Int(1)];
+    assert_eq!(rt_bc_assoc_own3(&mut miss), 0);
+    let mut shared = [args[0].clone(), Value::Int(0), Value::Int(1)];
+    assert_eq!(rt_bc_assoc_own3(&mut shared), 0);
+    assert_eq!(shared[2], Value::Int(1));
+    let grown = Vector::from_ints(Vec::with_capacity(4)).push_back(Value::Int(1));
+    let mut conj = [Value::Vector(grown), Value::Int(2)];
+    assert_eq!(rt_bc_conj_own2(&mut conj), 1);
+    assert_eq!(conj[0], Value::Vector(Vector::from_ints(vec![1, 2])));
+    let mut conj_miss = [Value::Nil, Value::Int(2)];
+    assert_eq!(rt_bc_conj_own2(&mut conj_miss), 0);
 }
