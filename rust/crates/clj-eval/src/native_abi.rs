@@ -1419,6 +1419,16 @@ const OWN_OPS: &[(&str, usize, OwnFn)] = &[
         5,
         crate::vm_ops::apply_swap_assoc_in2_fx,
     ),
+    (
+        "dissoc",
+        2,
+        <crate::vm_ops::DissocOwn as crate::vm_ops::Upd>::apply,
+    ),
+    (
+        "disj",
+        2,
+        <crate::vm_ops::DisjOwn as crate::vm_ops::Upd>::apply,
+    ),
 ];
 
 /// Opcode for [`apply_own`], matching core fns whose in-place `Upd`

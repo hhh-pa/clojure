@@ -2336,9 +2336,12 @@ pub(crate) fn is_default_import(simple: &str) -> bool {
         .as_bytes()
         .first()
         .is_some_and(u8::is_ascii_uppercase)
-        && DEFAULT_IMPORTS
-            .iter()
-            .any(|fqn| fqn.rsplit('.').next() == Some(simple))
+        && DEFAULT_IMPORTS.iter().any(|fqn| {
+            // `fqn` ends in `.simple` (a suffix compare, no reverse
+            // split: every uppercase `def` asks, #271).
+            fqn.strip_suffix(simple)
+                .is_some_and(|pkg| pkg.ends_with('.'))
+        })
 }
 
 /// The default imports as `(simple-name, class)` pairs for

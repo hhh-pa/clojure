@@ -2717,6 +2717,8 @@ pub(crate) const OWNED_CORE_ENTRIES: &[(&str, OwnedNativeFnPtr)] = &[
     ("assoc-in", crate::coll::native_assoc_in_owned),
     ("conj", crate::coll::native_conj_owned),
     ("count", crate::coll::native_count_owned),
+    ("disj", crate::coll::native_disj_owned),
+    ("dissoc", crate::coll::native_dissoc_owned),
     ("empty?", crate::coll::native_emptyp_owned),
     ("into", crate::coll::native_into_owned),
     ("last", crate::coll::native_last_owned),

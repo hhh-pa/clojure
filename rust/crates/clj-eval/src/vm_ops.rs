@@ -1602,6 +1602,50 @@ impl Upd for Conj {
     }
 }
 
+/// Owned `dissoc` of one scalar key (#271): a uniquely held map (a
+/// moved loop accumulator) drops the key in place; the borrowed
+/// [`Dissoc`] op path-copies.
+pub(crate) struct DissocOwn;
+
+impl Upd for DissocOwn {
+    #[inline(always)]
+    fn apply(args: &mut [Value]) -> Option<Value> {
+        let [coll, k] = args else { return None };
+        if !crate::vm_intrinsics::is_scalar_key(k) {
+            return None;
+        }
+        match std::mem::replace(coll, Value::Nil) {
+            Value::Map(m) if !m.is_sorted() => Some(Value::Map(m.without(k))),
+            Value::Nil => Some(Value::Nil),
+            other => {
+                *coll = other;
+                None
+            }
+        }
+    }
+}
+
+/// Owned `disj` of one scalar member (#271), like [`DissocOwn`].
+pub(crate) struct DisjOwn;
+
+impl Upd for DisjOwn {
+    #[inline(always)]
+    fn apply(args: &mut [Value]) -> Option<Value> {
+        let [coll, x] = args else { return None };
+        if !crate::vm_intrinsics::is_scalar_key(x) {
+            return None;
+        }
+        match std::mem::replace(coll, Value::Nil) {
+            Value::Set(s) if !s.is_sorted() => Some(Value::Set(s.without(x))),
+            Value::Nil => Some(Value::Nil),
+            other => {
+                *coll = other;
+                None
+            }
+        }
+    }
+}
+
 /// `+`/`-`/`*` over numbers the inline path covers: checked `Int`
 /// pairs, and `Double` with either side (`Int` widened, like the
 /// native's `to_f64`).

@@ -709,6 +709,17 @@ Inspecting the Slice 5l Linux RSS gap showed 219 of 229 MEM losses sitting withi
 
 Measured on macOS (`libinsn.dylib`, vs Slice 5q, byte-identical output on all 18 scripts): `hindley_milner.o` `__TEXT` 301 KB → 212 KB (−89 KB, −29.6%; binary TEXT −96 KB, PEAK_FP −32 KB, INS −1.8%); `suffix_array` 620.57M → 593.69M (**0.957x**, −26.88M), `count_strings` 56.86M → 53.28M (**0.937x**, −3.58M), `approx_inference` 159.39M → 155.78M (**0.977x**, −3.60M), `q_learning` 62.84M → 61.10M (**0.972x**, −1.74M), `sudoku` 357.59M → 355.42M (−2.17M), `connected_component` 918.76M → 916.84M (−1.93M, PEAK_FP −16 KB), `fortune_voronoi` −48 KB TEXT, `backprop` −32 KB TEXT, 17/18 benchmarks strictly faster than 5q.
 
+### 6.50 Slice 5s: JDK-ASCII regex classes, owned `disj`/`dissoc`, and a suffix-compare default-import check
+
+Three general fixes found while auditing per-operation and startup costs (macOS `libinsn` microbenchmarks; Linux callgrind of 55 snippet programs on empty stdin, fork probe `probe/init2-271`).
+
+- **JDK-ASCII predefined regex classes (`clj-eval/src/re.rs`):** the JDK matches `\d \D \w \W \s \S \b \B` over ASCII only (without `UNICODE_CHARACTER_CLASS`); the `regex` crate defaults them to Unicode. `ascii_classes` rewrites them before every compile (`[[:digit:]]`, `[:digit:]` inside a bracket class, `(?-u:\b)`), so `(re-seq #"\d+" "12 ٣٤")` is `("12")` like the JVM, and a compile no longer builds the Unicode class tables (`\w` ~2.8M instructions, `\d` ~0.9M). The hand-scanned `\s+` split no longer needs all-ASCII text.
+- **Owned `disj`/`dissoc` (`clj-eval/src/{vm_ops,native_abi,coll,ns}.rs`):** both were on the AOT's owned-move list but only had borrowing implementations, so a moved loop accumulator was cloned and then path-copied on every call. `DisjOwn`/`DissocOwn` join `OWN_OPS` (unsorted collection, scalar key; anything else restores the operand and falls back), and `native_disj_owned`/`native_dissoc_owned` join `OWNED_CORE_ENTRIES` for the general path. A 64-member set `disj`+`conj` cycle: 8.2K -> 3.5K instructions; 8-member: 2.1K -> 0.9K; a 64-entry map `dissoc`+`assoc`: 3.9K -> 2.4K.
+- **Default-import check (`clj-eval/src/classemu.rs`):** every `def` of an uppercase name (`EPS`, `INF`) scanned ~170 default imports with a reverse split (~26K instructions per such script on Linux); a suffix compare replaces it.
+- **Verification:** `re::tests::ascii_classes_follow_the_jdk_defaults`; corpus `owned_disj_dissoc.clj` (moved and shared operands, nil, sorted, non-scalar keys, records, wrong types, every arity) replayed against `run`.
+
+Measured on macOS (interleaved A/B over all 1754 snippet cases): neutral on the gate (median +1.1K per case, within noise; projected class moves 4 T->W, 4 L->T, 3 T->L, 1 W->T). These are correctness and complexity fixes for general code more than gate wins: the startup profile puts the typical Linux startup excess at 30-190K instructions spread over keyword/metadata constants and top-level initializers.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

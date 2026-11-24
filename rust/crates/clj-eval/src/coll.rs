@@ -1213,30 +1213,41 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 }
 
 fn native_disj(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_disj_owned(eval, args.iter().cloned().collect())
+}
+
+/// `disj` over an owned set (#271): a uniquely held set (a loop
+/// accumulator the AOT moves in) drops members in place instead of
+/// path-copying its index and order sidecar per call.
+pub(crate) fn native_disj_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Err(NativeError::arity("clojure.core/disj", 0));
     }
+    let coll = std::mem::replace(&mut args[0], Value::Nil);
     if args.len() == 1 {
-        return Ok(args[0].clone());
+        return Ok(coll);
     }
-    match &args[0] {
+    match coll {
         Value::Nil => Ok(Value::Nil),
         Value::Set(s) if s.is_sorted() => {
-            let mut out = s.clone();
+            let mut out = s;
             for k in &args[1..] {
                 out = sorted_without_set(eval, &out, k)?;
             }
             Ok(Value::Set(out))
         }
-        Value::Set(s) => {
-            let mut out = s.clone();
+        Value::Set(mut out) => {
             for k in &args[1..] {
                 let k = crate::lazy::realize_key(eval, k).map_err(signal_to_native)?;
                 out = out.without(&k);
             }
             Ok(Value::Set(out))
         }
-        v => Err(cce_err(v, "clojure.lang.IPersistentSet")),
+        v => Err(cce_err(&v, "clojure.lang.IPersistentSet")),
     }
 }
 
@@ -1430,12 +1441,20 @@ fn dissoc_record(
 }
 
 fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/dissoc", args, 1)?;
-    if args.len() == 1 {
-        return Ok(args[0].clone());
-    }
-    if matches!(args[0], Value::Nil) {
-        return Ok(Value::Nil);
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_dissoc_owned(eval, args.iter().cloned().collect())
+}
+
+/// `dissoc` over an owned map (#271): a uniquely held map (a loop
+/// accumulator the AOT moves in) drops keys in place instead of
+/// path-copying per call.
+pub(crate) fn native_dissoc_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/dissoc", &args, 1)?;
+    if args.len() == 1 || matches!(args[0], Value::Nil) {
+        return Ok(std::mem::replace(&mut args[0], Value::Nil));
     }
     if let Some(i) = crate::types::struct_inst(&args[0]) {
         return dissoc_struct(i, &args[1..]);
@@ -1447,17 +1466,16 @@ fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     if let Some(i) = crate::types::record_inst(&args[0]) {
         return dissoc_record(eval, i, &args[1..]);
     }
-    let Value::Map(m) = &args[0] else {
-        return Err(cce_err(&args[0], "clojure.lang.IPersistentMap"));
+    let mut out = match std::mem::replace(&mut args[0], Value::Nil) {
+        Value::Map(m) => m,
+        other => return Err(cce_err(&other, "clojure.lang.IPersistentMap")),
     };
-    if m.is_sorted() {
-        let mut out = m.clone();
+    if out.is_sorted() {
         for k in &args[1..] {
             out = sorted_without_map(eval, &out, k)?;
         }
         return Ok(Value::Map(out));
     }
-    let mut out = m.clone();
     for k in &args[1..] {
         let k = crate::lazy::realize_key(eval, k).map_err(signal_to_native)?;
         out = out.without(&k);
