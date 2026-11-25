@@ -703,6 +703,21 @@ impl Vector {
         }
     }
 
+    /// [`get_val_ref`](Self::get_val_ref) over flat long, double and
+    /// generic storage only (`None` for tries, chars, strings and
+    /// indices past the end): small enough to inline into compiled
+    /// `nth` (#271).
+    #[inline(always)]
+    #[must_use]
+    pub fn flat_val_ref(&self, index: usize) -> Option<ValueRef<'_>> {
+        match &self.0.inner {
+            VectorInner::Ints(t) => t.as_flat()?.get(index).copied().map(ValueRef::Int),
+            VectorInner::Doubles(t) => t.as_flat()?.get(index).copied().map(ValueRef::Double),
+            VectorInner::Generic(t) => t.as_flat()?.get(index).map(ValueRef::Ref),
+            _ => None,
+        }
+    }
+
     /// Borrow the flat packed `i64` slice when this vector is backed by flat ints.
     #[inline(always)]
     #[must_use]
@@ -1225,6 +1240,25 @@ fn small_scalar_eq(ek: &Value, k: &Value) -> bool {
         (Value::Nil, Value::Nil) => true,
         (Value::Str(x), Value::Str(y)) => **x == **y,
         _ => false,
+    }
+}
+
+/// `m = k` for a nil, boolean, long, char or keyword key, decided
+/// without the full `=`: only the same kind can equal such a key, except
+/// that big integers can equal a long (`None`, like any other key kind).
+#[inline(always)]
+fn scalar_member_eq(m: &Value, k: &Value) -> Option<bool> {
+    match (m, k) {
+        (Value::Int(x), Value::Int(y)) => Some(x == y),
+        (Value::Keyword(x), Value::Keyword(y)) => Some(x == y),
+        (Value::Char(x), Value::Char(y)) => Some(x == y),
+        (Value::Bool(x), Value::Bool(y)) => Some(x == y),
+        (Value::Nil, Value::Nil) => Some(true),
+        (Value::BigInt(_) | Value::BigInteger(_), Value::Int(_)) => None,
+        (_, Value::Int(_) | Value::Keyword(_) | Value::Char(_) | Value::Bool(_) | Value::Nil) => {
+            Some(false)
+        }
+        _ => None,
     }
 }
 
@@ -2973,6 +3007,28 @@ impl Set {
         }
     }
 
+    /// [`get`](Self::get) on a small unsorted set by a nil, boolean,
+    /// long, char or keyword key, member by member without the full `=`
+    /// (#271: inlined into compiled code). `Some(None)`: absent; `None`:
+    /// a hashed or sorted set, another key kind, or a big-integer member
+    /// that may equal a long key.
+    #[inline]
+    #[must_use]
+    pub fn get_small_scalar(&self, k: &Value) -> Option<Option<&Value>> {
+        let SetStorage::Small(items) = &self.0.storage else {
+            return None;
+        };
+        if self.is_sorted() {
+            return None;
+        }
+        for m in items {
+            if scalar_member_eq(m, k)? {
+                return Some(Some(m));
+            }
+        }
+        Some(None)
+    }
+
     /// The stored member equal to `v`, if present (`get` on a set
     /// returns the member, not the key).
     #[inline]
@@ -3642,6 +3698,22 @@ pub fn extension_with_meta(
 }
 
 impl Value {
+    /// `*self = v`, without the out-of-line drop-glue call when `self`
+    /// holds a plain scalar (nothing to free): the common case for the
+    /// runtime shims, which write slots compiled code has just dropped
+    /// (#271).
+    #[inline(always)]
+    pub fn assign(&mut self, v: Value) {
+        if matches!(
+            self,
+            Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Double(_) | Value::Char(_)
+        ) {
+            std::mem::forget(std::mem::replace(self, v));
+        } else {
+            *self = v;
+        }
+    }
+
     /// Clojure truthiness: only `nil` and `false` are false.
     #[must_use]
     pub fn is_truthy(&self) -> bool {
@@ -3764,32 +3836,42 @@ fn cell_meta_eq(same_cell: bool, a: Option<Map>, b: Option<Map>) -> bool {
 }
 
 impl PartialEq for Value {
+    /// Longs and keywords (the common lookup keys) compare without a
+    /// stack frame; every other pair takes [`value_eq_full`] (#271:
+    /// its frame cost more than the compare in set and map probes).
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Value::Nil, Value::Nil) => true,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
-            // `=` on doubles is `==` (`0.0` ≡ `-0.0`, NaN never).
-            // Mixed `Int`/`Double` is never `=` (`Numbers.equal`
-            // requires one category; `(== 1 1.0)` is the value
-            // comparison, arriving with numerics in S4).
-            (Value::Double(a), Value::Double(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::Char(a), Value::Char(b)) => a == b,
-            (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::Keyword(a), Value::Keyword(b)) => a == b,
-            // Sequential equality crosses List/Vector.
-            (Value::List(a), Value::List(b)) => list_eq(a, b),
-            (Value::Vector(a), Value::Vector(b)) => vector_eq(a, b),
-            (Value::List(a), Value::Vector(b)) | (Value::Vector(b), Value::List(a)) => {
-                list_vector_eq(a, b)
-            }
-            // Realized seqs compare sequentially against
-            // List/Vector/realized seqs (never maps, sets, or
-            // pending seqs, which `=` realizes first).
-            (a, b) if either_seq(a, b) => seq_items_eq(a, b),
-            pair => value_eq_mid(pair.0, pair.1),
+            _ => value_eq_full(self, other),
         }
+    }
+}
+
+#[inline(never)]
+fn value_eq_full(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Nil, Value::Nil) => true,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        // `=` on doubles is `==` (`0.0` ≡ `-0.0`, NaN never).
+        // Mixed `Int`/`Double` is never `=` (`Numbers.equal`
+        // requires one category; `(== 1 1.0)` is the value
+        // comparison, arriving with numerics in S4).
+        (Value::Double(a), Value::Double(b)) => a == b,
+        (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Char(a), Value::Char(b)) => a == b,
+        (Value::Symbol(a), Value::Symbol(b)) => a == b,
+        // Sequential equality crosses List/Vector.
+        (Value::List(a), Value::List(b)) => list_eq(a, b),
+        (Value::Vector(a), Value::Vector(b)) => vector_eq(a, b),
+        (Value::List(a), Value::Vector(b)) | (Value::Vector(b), Value::List(a)) => {
+            list_vector_eq(a, b)
+        }
+        // Realized seqs compare sequentially against
+        // List/Vector/realized seqs (never maps, sets, or
+        // pending seqs, which `=` realizes first).
+        (a, b) if either_seq(a, b) => seq_items_eq(a, b),
+        pair => value_eq_mid(pair.0, pair.1),
     }
 }
 
@@ -4025,44 +4107,55 @@ fn hash_tower_value<H: Hasher>(v: &Value, state: &mut H) {
 }
 
 impl Hash for Value {
+    /// Nil and longs (the common hashed keys) hash inline into the
+    /// trie probe; every other value takes [`hash_value_full`] (#271:
+    /// its frame cost several times the two hasher writes).
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Family markers keep unequal types apart (`Int` and
-        // `Double` hash separately — they are never `=`).
         match self {
-            Value::Nil => state.write_u8(0),
-            Value::Bool(b) => {
-                state.write_u8(1);
-                state.write_u8(u8::from(*b));
-            }
             Value::Int(i) => {
                 state.write_u8(2);
                 state.write_i64(*i);
             }
-            Value::Double(d) => {
-                state.write_u8(3);
-                state.write_u64(double_hash_bits(*d));
-            }
-            Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
-                hash_tower_value(self, state);
-            }
-            Value::Str(s) => {
-                state.write_u8(4);
-                s.hash(state);
-            }
-            Value::Char(c) => {
-                state.write_u8(5);
-                c.hash(state);
-            }
-            Value::Symbol(s) => {
-                state.write_u8(6);
-                s.hash(state);
-            }
-            Value::Keyword(k) => {
-                state.write_u8(7);
-                k.hash(state);
-            }
-            other => hash_value_mid(other, state),
+            Value::Nil => state.write_u8(0),
+            other => hash_value_full(other, state),
         }
+    }
+}
+
+#[inline(never)]
+fn hash_value_full<H: Hasher>(v: &Value, state: &mut H) {
+    // Family markers keep unequal types apart (`Int` and
+    // `Double` hash separately — they are never `=`).
+    match v {
+        Value::Bool(b) => {
+            state.write_u8(1);
+            state.write_u8(u8::from(*b));
+        }
+        Value::Double(d) => {
+            state.write_u8(3);
+            state.write_u64(double_hash_bits(*d));
+        }
+        Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
+            hash_tower_value(v, state);
+        }
+        Value::Str(s) => {
+            state.write_u8(4);
+            s.hash(state);
+        }
+        Value::Char(c) => {
+            state.write_u8(5);
+            c.hash(state);
+        }
+        Value::Symbol(s) => {
+            state.write_u8(6);
+            s.hash(state);
+        }
+        Value::Keyword(k) => {
+            state.write_u8(7);
+            k.hash(state);
+        }
+        other => hash_value_mid(other, state),
     }
 }
 
@@ -4768,6 +4861,8 @@ mod tests {
         assert_eq!(c[0], 9);
         // The AOT compiler reads a char's code point at offset 4 (#259).
         assert_eq!(u32::from_ne_bytes(c[4..8].try_into().expect("4")), 0x1F600);
+        // ... and tests for a vector before its flat `nth` front (#271).
+        assert_eq!(bytes(&Value::Vector(Vector::from_ints(vec![1])))[0], 13);
     }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -6479,6 +6574,58 @@ mod tests {
                 Value::Str(Arc::from("b")),
             ])))
         );
+    }
+
+    #[test]
+    fn assign_frees_a_heap_slot_and_overwrites_a_scalar_one_271() {
+        let held = Arc::<str>::from("held");
+        let mut slot = Value::Str(Arc::clone(&held));
+        slot.assign(Value::Int(1));
+        assert_eq!(Arc::strong_count(&held), 1, "the old string was dropped");
+        slot.assign(Value::Bool(true));
+        assert!(matches!(slot, Value::Bool(true)));
+    }
+
+    #[test]
+    fn small_set_scalar_lookups_match_full_equality_271() {
+        use super::{Set, SortSpec};
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        let s = Set::from_items_checked(vec![
+            Value::Int(1),
+            kw("a"),
+            Value::Char('x'),
+            Value::Bool(true),
+            Value::Nil,
+            Value::Str("s".into()),
+        ])
+        .unwrap();
+        // Hits return the stored member, each scalar kind alone.
+        for k in [
+            Value::Int(1),
+            kw("a"),
+            Value::Char('x'),
+            Value::Bool(true),
+            Value::Nil,
+        ] {
+            assert_eq!(s.get_small_scalar(&k), Some(s.get(&k)));
+            assert!(s.get(&k).is_some());
+        }
+        // Misses: no other kind equals such a key.
+        for k in [Value::Int(2), kw("b"), Value::Char('y'), Value::Bool(false)] {
+            assert_eq!(s.get_small_scalar(&k), Some(None));
+        }
+        // Other key kinds take the full `=`.
+        assert_eq!(s.get_small_scalar(&Value::Str("s".into())), None);
+        // A big integer may equal a long key.
+        let big = Set::from_items_checked(vec![Value::BigInt(Arc::new(7.into()))]).unwrap();
+        assert_eq!(big.get_small_scalar(&Value::Int(7)), None);
+        assert!(big.contains(&Value::Int(7)));
+        // Sorted and hashed sets keep their own lookups.
+        let sorted = s.clone().with_sort(Some(SortSpec::Natural));
+        assert_eq!(sorted.get_small_scalar(&Value::Int(1)), None);
+        let large = Set::from_items_checked((0..20).map(Value::Int).collect()).unwrap();
+        assert_eq!(large.get_small_scalar(&Value::Int(1)), None);
+        assert!(large.contains(&Value::Int(19)));
     }
 
     #[test]

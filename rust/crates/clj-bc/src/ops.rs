@@ -718,6 +718,30 @@ fn nth_fast<O: OutSlot>(
     }
 }
 
+/// `(nth v i)` over flat vector storage, the front compiled code calls
+/// before the general read (#271): longs and doubles are written in
+/// place, generic items cloned; `false` (tries, strings, transients,
+/// indices out of range, non-long indices) leaves `out` untouched.
+#[inline(always)]
+pub(crate) fn nth_flat<O: OutSlot>(out: &mut O, coll: &Value, idx: &Value) -> bool {
+    let (Value::Vector(v), Value::Int(i)) = (coll, idx) else {
+        return false;
+    };
+    match usize::try_from(*i).ok().and_then(|i| v.flat_val_ref(i)) {
+        Some(ValueRef::Int(n)) => write_val(out, Value::Int(n)),
+        Some(ValueRef::Double(d)) => write_val(out, Value::Double(d)),
+        Some(ValueRef::Ref(item)) => clone_item(out, item),
+        _ => false,
+    }
+}
+
+/// [`clone_fast`] out of line: its variant switch would give the front a
+/// stack frame on every path.
+#[inline(never)]
+fn clone_item<O: OutSlot>(out: &mut O, item: &Value) -> bool {
+    clone_fast(out, item)
+}
+
 #[cold]
 #[inline(never)]
 fn nth_subvec<O: OutSlot>(
@@ -822,14 +846,13 @@ fn get_fast<O: OutSlot>(
             },
             None => false,
         },
-        Value::Map(m) => match m.get_small_scalar(key) {
+        Value::Str(s) => get_str_fast(out, coll, s, key, nf, str_ascii),
+        Value::Extension(e) => get_subvec(out, e.as_ref(), key, nf),
+        _ => match small_lookup(coll, key) {
             Some(Some(val)) => clone_fast(out, val),
             Some(None) => write_not_found(out, nf),
             None => false,
         },
-        Value::Str(s) => get_str_fast(out, coll, s, key, nf, str_ascii),
-        Value::Extension(e) => get_subvec(out, e.as_ref(), key, nf),
-        _ => false,
     }
 }
 
@@ -853,6 +876,19 @@ fn get_subvec<O: OutSlot>(
     }
 }
 
+/// A small map's value or a small set's member by a scalar key
+/// (`Some(None)`: absent; `None`: any other collection or key, which
+/// takes the runtime), shared by `get`, `contains?` and read chains
+/// (#271).
+#[inline(always)]
+fn small_lookup<'a>(coll: &'a Value, key: &Value) -> Option<Option<&'a Value>> {
+    match coll {
+        Value::Map(m) => m.get_small_scalar(key),
+        Value::Set(s) => s.get_small_scalar(key),
+        _ => None,
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn contains_subvec(e: &dyn clj_value::ExtensionValue, key: &Value) -> Option<bool> {
@@ -868,10 +904,6 @@ fn contains_subvec(e: &dyn clj_value::ExtensionValue, key: &Value) -> Option<boo
 fn contains_fast<O: OutSlot>(out: &mut O, coll: &Value, key: &Value) -> bool {
     let ans = match coll {
         Value::Nil => false,
-        Value::Map(m) => match m.get_small_scalar(key) {
-            Some(found) => found.is_some(),
-            None => return false,
-        },
         Value::Vector(v) => match key {
             Value::Int(n) => usize::try_from(*n).is_ok_and(|idx| idx < v.len()),
             _ => return false,
@@ -880,7 +912,10 @@ fn contains_fast<O: OutSlot>(out: &mut O, coll: &Value, key: &Value) -> bool {
             Some(hit) => hit,
             None => return false,
         },
-        _ => return false,
+        _ => match small_lookup(coll, key) {
+            Some(found) => found.is_some(),
+            None => return false,
+        },
     };
     write_val(out, Value::Bool(ans))
 }
@@ -940,7 +975,7 @@ pub(crate) fn assoc_bang_fast<O: OutSlot>(
 pub(crate) fn read_ref(coll: &Value, key: &Value, get: bool) -> *const Value {
     let found = match coll {
         Value::Vector(v) => index_i32(key).and_then(|i| v.get_ref(i)),
-        Value::Map(m) if get => m.get_small_scalar(key).flatten(),
+        _ if get => small_lookup(coll, key).flatten(),
         _ => None,
     };
     found.map_or(std::ptr::null(), std::ptr::from_ref)

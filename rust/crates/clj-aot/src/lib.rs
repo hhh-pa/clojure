@@ -315,22 +315,35 @@ fn should_inline_hint(name: &str) -> bool {
         )
 }
 
+/// Small fronts compiled code tries before a general helper at many call
+/// sites: one shared out-of-line copy (#271: inlined, the `nth` front
+/// added ~450 bytes of code per site, and its failed check slowed the
+/// general helper's inlined reads of strings and transients).
+fn should_not_inline(name: &str) -> bool {
+    name == "rt_bc_nth_flat"
+}
+
 fn mark_internal_inline<'ctx>(
     ctx: &'ctx Context,
     module: &inkwell::module::Module<'ctx>,
     names: &[String],
 ) {
-    let inline_attr = ctx.create_enum_attribute(
-        inkwell::attributes::Attribute::get_named_enum_kind_id("inlinehint"),
-        0,
-    );
+    let attr = |kind: &str| {
+        ctx.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id(kind),
+            0,
+        )
+    };
+    let (hint, never) = (attr("inlinehint"), attr("noinline"));
     for name in names {
         let Some(func) = module.get_function(name) else {
             continue;
         };
         func.set_linkage(inkwell::module::Linkage::Internal);
-        if should_inline_hint(name) {
-            func.add_attribute(inkwell::attributes::AttributeLoc::Function, inline_attr);
+        if should_not_inline(name) {
+            func.add_attribute(inkwell::attributes::AttributeLoc::Function, never);
+        } else if should_inline_hint(name) {
+            func.add_attribute(inkwell::attributes::AttributeLoc::Function, hint);
         }
     }
 }

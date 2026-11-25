@@ -774,6 +774,31 @@ fn native_read_chains_borrow_through_nested_reads_271() {
 }
 
 #[test]
+fn native_nth_front_and_small_set_lookups_match_general_reads_271() {
+    let source = "(defn at [v i] (nth v i))
+                  (defn at3 [v i d] (nth v i d))
+                  (def big (vec (range 2000)))
+                  (defn has [s k] (contains? s k))
+                  (defn getk [s k] (get s k))
+                  (println (at [1 2 3] 1) (at [1.5 2.5] 1) (at [[1] :k] 0) (at big 1500)
+                           (at \"abc\" 2) (at (transient [4 5]) 1) (at3 [1 2] 5 :d)
+                           (at3 [1 2] -1 :d) (at (subvec [1 2 3] 1) 0))
+                  (println (has #{1 :a} 1) (has #{1 :a} 2) (has #{1N} 1) (has #{1.0} 1)
+                           (has (sorted-set 3 1) 1) (has (set (range 20)) 7)
+                           (getk #{1N} 1) (getk #{:a} :b) (getk #{\\c} \\c))
+                  (println (try (at [1 2] 5) (catch Exception _ :oob)))";
+    let (stdout, stderr, code, _) = build_mode_and_run("nth-front-sets", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            "2 2.5 [1] 1500 c 5 :d :d 2\ntrue false true false true true 1N nil c\n:oob\n",
+            "",
+            0
+        )
+    );
+}
+
+#[test]
 fn native_owned_arguments_follow_destructured_parameters() {
     let source = "(defn extend [[x y] items {:keys [z]}]
                      (conj items (+ x y z)))

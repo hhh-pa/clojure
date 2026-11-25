@@ -1185,6 +1185,7 @@ pub fn apply_inline(id: u32, args: &[&Value]) -> Option<Value> {
 }
 
 /// [`apply_inline`] for one arg.
+#[inline]
 #[must_use]
 pub fn apply1(id: u32, a: &Value) -> Option<Value> {
     crate::vm_ops::APPLY1.get(id as usize)?.1(a)
@@ -1201,6 +1202,7 @@ pub fn apply2(id: u32, a: &Value, b: &Value) -> Option<Value> {
 
 /// [`apply_inline`] for two args excluding `re-matches` (keeps `regex_automata`
 /// stripped from non-regex AOT binaries).
+#[inline]
 #[must_use]
 pub fn apply2_no_re(id: u32, a: &Value, b: &Value) -> Option<Value> {
     crate::vm_ops::APPLY2.get(id as usize)?.1(a, b)

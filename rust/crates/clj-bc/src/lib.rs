@@ -309,6 +309,15 @@ bc_str_ops2! {
     rt_bc_2_get => BcOp2::Get,
 }
 
+/// `(nth coll i)` over flat vector storage ([`ops::nth_flat`]), the
+/// out-of-line front compiled code calls before [`rt_bc_2_nth`] or
+/// `rt_bc_3_nth` (`1` = written, `0` = take the general read, #271).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_nth_flat(out: &mut MaybeUninit<Value>, coll: &Value, idx: &Value) -> i8 {
+    i8::from(ops::nth_flat(out, coll, idx))
+}
+
 #[cfg(not(test))]
 bc_ops3! {
     rt_bc_3_assoc_bang => BcOp3::AssocBang,
@@ -610,6 +619,37 @@ mod tests {
     }
 
     #[test]
+    fn nth_flat_reads_flat_vectors_only_271() {
+        let read = |coll: &Value, idx: Value| {
+            let mut out = None;
+            crate::ops::nth_flat(&mut out, coll, &idx).then(|| out.unwrap())
+        };
+        let ints = Value::Vector(Vector::from_ints(vec![4, 5]));
+        let doubles = Value::Vector(Vector::from_doubles(vec![1.5]));
+        let items = Value::Vector(Vector::from_vec(vec![Value::Vector(Vector::from_ints(
+            vec![1],
+        ))]));
+        let trie = Value::Vector(
+            (0..2000).fold(Vector::from_ints(vec![]), |v, i| v.push_back(Value::Int(i))),
+        );
+        assert_eq!(read(&ints, Value::Int(1)), Some(Value::Int(5)));
+        assert_eq!(read(&doubles, Value::Int(0)), Some(Value::Double(1.5)));
+        assert_eq!(
+            read(&items, Value::Int(0)),
+            Some(Value::Vector(Vector::from_ints(vec![1])))
+        );
+        // Misses leave the read to the general path.
+        assert_eq!(read(&ints, Value::Int(2)), None);
+        assert_eq!(read(&ints, Value::Int(-1)), None);
+        assert_eq!(read(&ints, Value::Nil), None);
+        assert_eq!(read(&trie, Value::Int(5)), None);
+        assert_eq!(run2(BcOp2::Nth, &trie, &Value::Int(5)), Some(Value::Int(5)));
+        assert_eq!(read(&str_val("ab"), Value::Int(0)), None);
+        let chars = Value::Vector(Vector::from_chars(vec!['a']));
+        assert_eq!(read(&chars, Value::Int(0)), None);
+    }
+
+    #[test]
     fn read_refs_borrow_stored_values_only_271() {
         let row = Value::Vector(Vector::from_ints(vec![7]));
         let rows = Vector::from_vec(vec![row.clone()]);
@@ -633,6 +673,9 @@ mod tests {
         );
         assert!(crate::ops::read_ref(&m, &Value::Int(3), true).is_null());
         assert!(crate::ops::read_ref(&Value::Nil, &a, true).is_null());
+        let s = Value::Set(Set::from_items_checked(vec![a.clone()]).unwrap());
+        assert!(!crate::ops::read_ref(&s, &a, true).is_null(), "set member");
+        assert!(crate::ops::read_ref(&s, &Value::Int(3), true).is_null());
     }
 
     extern "C" fn test_str_ascii(v: &Value) -> u8 {
@@ -1100,6 +1143,22 @@ mod tests {
         assert_eq!(run2(BcOp2::Get, &smap, &kw), Some(Value::Int(8)));
         assert_eq!(run2(BcOp2::Get, &smap, &Value::Int(1)), Some(Value::Nil));
         assert_eq!(run2(BcOp2::Get, &lmap, &Value::Int(0)), None);
+        // Small sets answer scalar keys inline (#271); a long key against
+        // a big-integer member, and hashed sets, take the runtime.
+        let sset = Value::Set(Set::from_items_checked(vec![kw.clone(), Value::Int(3)]).unwrap());
+        let bset = Value::Set(
+            Set::from_items_checked(vec![Value::BigInt(Arc::new(BigInt::from(3)))]).unwrap(),
+        );
+        let lset = Value::Set(Set::from_items_checked((0..20).map(Value::Int).collect()).unwrap());
+        assert_eq!(run2(BcOp2::Get, &sset, &Value::Int(3)), Some(Value::Int(3)));
+        assert_eq!(run2(BcOp2::Get, &sset, &Value::Int(4)), Some(Value::Nil));
+        assert_eq!(run2(BcOp2::Get, &bset, &Value::Int(3)), None);
+        assert_eq!(run2(BcOp2::Contains, &sset, &kw), Some(Value::Bool(true)));
+        assert_eq!(
+            run2(BcOp2::Contains, &sset, &Value::Int(4)),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(run2(BcOp2::Contains, &lset, &Value::Int(0)), None);
         assert_eq!(
             run2(BcOp2::Get, &str_ok, &Value::Int(0)),
             Some(Value::Char('h'))

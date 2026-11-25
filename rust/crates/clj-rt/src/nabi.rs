@@ -542,7 +542,7 @@ pub extern "C" fn rt_n_core_ref(out: &mut Value, op: u32, k: u64, args: &CSlice<
     let args = args.get();
     match native_abi::apply_inline(op, args) {
         Some(v) => {
-            *out = v;
+            out.assign(v);
             0
         }
         None => core_fallback(out, k, args),
@@ -570,7 +570,7 @@ fn core_fallback(out: &mut Value, k: u64, args: &[&Value]) -> i32 {
             .expect("a direct core call's var holds its native");
         match entry.call_refs(eval, args) {
             Ok(v) => {
-                *out = v;
+                out.assign(v);
                 0
             }
             Err(e) => {
@@ -586,7 +586,7 @@ fn core_fallback(out: &mut Value, k: u64, args: &[&Value]) -> i32 {
 pub extern "C" fn rt_n_op1(out: &mut Value, op: u32, k: u64, a: &Value) -> i32 {
     match native_abi::apply1(op, a) {
         Some(v) => {
-            *out = v;
+            out.assign(v);
             0
         }
         None => core_fallback(out, k, &[a]),
@@ -598,24 +598,31 @@ pub extern "C" fn rt_n_op1(out: &mut Value, op: u32, k: u64, a: &Value) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_op2(out: &mut Value, op: u32, k: u64, a: &Value, b: &Value) -> i32 {
     if op == native_abi::OP_ATOM_NTH {
-        if let Some(v) = native_abi::try_atom_nth(a, b) {
-            *out = v;
-            return 0;
-        }
-        let mut derefed = Value::Nil;
-        let st = core_fallback(&mut derefed, k >> 32, &[a]);
-        if st != 0 {
-            return st;
-        }
-        return core_fallback(out, k & 0xFFFF_FFFF, &[&derefed, b]);
+        return op2_atom_nth(out, k, a, b);
     }
     match native_abi::apply2_no_re(op, a, b) {
         Some(v) => {
-            *out = v;
+            out.assign(v);
             0
         }
         None => core_fallback(out, k, &[a, b]),
     }
+}
+
+/// `(nth @a i)` for [`rt_n_op2`], out of line so the common ops run
+/// without its frame.
+#[inline(never)]
+fn op2_atom_nth(out: &mut Value, k: u64, a: &Value, b: &Value) -> i32 {
+    if let Some(v) = native_abi::try_atom_nth(a, b) {
+        *out = v;
+        return 0;
+    }
+    let mut derefed = Value::Nil;
+    let st = core_fallback(&mut derefed, k >> 32, &[a]);
+    if st != 0 {
+        return st;
+    }
+    core_fallback(out, k & 0xFFFF_FFFF, &[&derefed, b])
 }
 
 /// Dedicated inline `(re-matches pat s)` fast path so `rt_n_op2` stays free of
@@ -654,29 +661,36 @@ pub extern "C" fn rt_n_op3(
     c: &Value,
 ) -> i32 {
     if op == native_abi::OP_ATOM_NTH2 {
-        if let Some(v) = native_abi::try_atom_nth2(a, b, c) {
-            *out = v;
-            return 0;
-        }
-        let mut derefed = Value::Nil;
-        let st = core_fallback(&mut derefed, k >> 32, &[a]);
-        if st != 0 {
-            return st;
-        }
-        let mut row = Value::Nil;
-        let st = core_fallback(&mut row, k & 0xFFFF_FFFF, &[&derefed, b]);
-        if st != 0 {
-            return st;
-        }
-        return core_fallback(out, k & 0xFFFF_FFFF, &[&row, c]);
+        return op3_atom_nth2(out, k, a, b, c);
     }
     match native_abi::apply3(op, a, b, c) {
         Some(v) => {
-            *out = v;
+            out.assign(v);
             0
         }
         None => core_fallback(out, k, &[a, b, c]),
     }
+}
+
+/// `(nth (nth @a i) j)` for [`rt_n_op3`], out of line like
+/// [`op2_atom_nth`].
+#[inline(never)]
+fn op3_atom_nth2(out: &mut Value, k: u64, a: &Value, b: &Value, c: &Value) -> i32 {
+    if let Some(v) = native_abi::try_atom_nth2(a, b, c) {
+        *out = v;
+        return 0;
+    }
+    let mut derefed = Value::Nil;
+    let st = core_fallback(&mut derefed, k >> 32, &[a]);
+    if st != 0 {
+        return st;
+    }
+    let mut row = Value::Nil;
+    let st = core_fallback(&mut row, k & 0xFFFF_FFFF, &[&derefed, b]);
+    if st != 0 {
+        return st;
+    }
+    core_fallback(out, k & 0xFFFF_FFFF, &[&row, c])
 }
 
 /// Update a long at an index in an owned vector, preserving the input on a miss.

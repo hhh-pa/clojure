@@ -50,6 +50,7 @@ const NONE: u64 = u64::MAX;
 /// `Value` tags the inline paths test (pinned by `value_layout_abi`).
 const TAG_INT: u64 = 2;
 const TAG_CHAR: u64 = 9;
+const TAG_VECTOR: u64 = 13;
 
 /// Why a program cannot (yet) be lowered natively.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5251,6 +5252,9 @@ impl<'ctx> Lowerer<'ctx> {
     ) {
         self.builder.position_at_end(bb);
         self.drop_v(func, dest);
+        if matches!(shim, "rt_bc_2_nth" | "rt_bc_3_nth") {
+            self.emit_nth_flat(func, refs, dest, done);
+        }
         let mut call_args: Vec<BasicMetadataValueEnum> = vec![dest.into()];
         call_args.extend(refs.iter().map(|r| BasicMetadataValueEnum::from(*r)));
         if matches!(
@@ -5268,6 +5272,49 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder
             .build_conditional_branch(hit, done, slow)
             .expect("br");
+    }
+
+    /// `(nth coll i)`'s front: a flat vector's item straight to `done`
+    /// (`rt_bc_nth_flat`, one shared copy, #271), else on to the general
+    /// read at the insertion point. Only vectors make the call, so a
+    /// string or transient read pays one tag compare.
+    fn emit_nth_flat(
+        &self,
+        func: FunctionValue<'ctx>,
+        refs: &[PointerValue<'ctx>],
+        dest: PointerValue<'ctx>,
+        done: BasicBlock<'ctx>,
+    ) {
+        let general = self.ctx.append_basic_block(func, "nth_general");
+        let flat = self.ctx.append_basic_block(func, "nth_flat");
+        let is_vec = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                self.tag(refs[0]),
+                self.i8t.const_int(TAG_VECTOR, false),
+                "is_vec",
+            )
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(is_vec, flat, general)
+            .expect("br");
+        self.builder.position_at_end(flat);
+        let ok = self
+            .call(
+                "rt_bc_nth_flat",
+                Some(self.i8t),
+                &[dest.into(), refs[0].into(), refs[1].into()],
+            )
+            .expect("ok");
+        let hit = self
+            .builder
+            .build_int_compare(IntPredicate::NE, ok, self.i8t.const_zero(), "flat")
+            .expect("cmp");
+        self.builder
+            .build_conditional_branch(hit, done, general)
+            .expect("br");
+        self.builder.position_at_end(general);
     }
 
     /// The slow path of a direct-native call: the VM's inline op over the
