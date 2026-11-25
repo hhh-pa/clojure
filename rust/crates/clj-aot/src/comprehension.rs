@@ -63,6 +63,45 @@ enum Step<'a> {
     Stage(Box<Stage<'a>>),
 }
 
+/// Where a comprehension's items go.
+#[derive(Clone, Copy)]
+enum Sink<'ctx> {
+    /// Pushed into a vector builder.
+    Push(PointerValue<'ctx>),
+    /// Folded into an accumulator by `+` (`(reduce + [init] E)`, Slice 6b);
+    /// without an init, `first` holds 1 until the first item, which then
+    /// becomes the accumulator as `reduce` takes it (no `+` call).
+    Sum {
+        acc: PointerValue<'ctx>,
+        first: Option<PointerValue<'ctx>>,
+    },
+}
+
+/// What consumes a comprehension.
+enum Consumer<'a> {
+    /// `vec` / `into []`: the vector itself.
+    Vector,
+    /// A consumer realizing the whole sequence in order, called over its
+    /// vector: `(into to E)` (with `to`), `count`, `sort`, `set`.
+    Call(Option<&'a Expr>),
+    /// `(reduce + [init] E)`.
+    Sum(Option<&'a Expr>),
+}
+
+/// `call` as a comprehension's consumer, with the comprehension.
+fn consumer_of(call: &DirectCall) -> Option<(Consumer<'_>, &Expr)> {
+    let plus = |e: &Expr| is_core_global(e, "+");
+    Some(match (call.var.sym.name(), call.args.as_slice()) {
+        ("vec", [e]) => (Consumer::Vector, e),
+        ("into", [Expr::VecLit(items, None), e]) if items.is_empty() => (Consumer::Vector, e),
+        ("into", [to, e]) => (Consumer::Call(Some(to)), e),
+        ("count" | "sort" | "set", [e]) => (Consumer::Call(None), e),
+        ("reduce", [p, init, e]) if plus(p) => (Consumer::Sum(Some(init)), e),
+        ("reduce", [p, e]) if plus(p) => (Consumer::Sum(None), e),
+        _ => return None,
+    })
+}
+
 /// `e` as a comprehension stage whose whole shape lowers here.
 fn stage(e: &Expr) -> Option<Stage<'_>> {
     let Expr::DirectNative(call) = e else {
@@ -132,21 +171,79 @@ fn names_skip(e: &Expr) -> bool {
 impl<'ctx> Lowerer<'ctx> {
     /// `dest = (vec E)` / `(into [] E)` for a comprehension `E` with nested
     /// bindings or filters (a single unfiltered binding is a traversal
-    /// loop already, see `hof_loop`).
+    /// loop already, see `hof_loop`); or (#271 Slice 6b) a consumer that
+    /// always realizes the whole sequence in order — `(into to E)` for any
+    /// `to`, `(count E)`, `(sort E)`, `(set E)` over the vector of `E`'s
+    /// items, and `(reduce + [init] E)` folding them as they come (`+`
+    /// never stops a `reduce`) — its other args evaluated first, as the
+    /// call would.
     pub(super) fn try_lower_comprehension(
         &mut self,
         f: &mut FnCtx<'ctx>,
         call: &DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        let e = match (call.var.sym.name(), call.args.as_slice()) {
-            ("vec", [e]) => e,
-            ("into", [Expr::VecLit(items, None), e]) if items.is_empty() => e,
-            _ => return Ok(false),
+        let Some((consumer, e)) = consumer_of(call) else {
+            return Ok(false);
         };
         let Some(st) = stage(e).filter(|s| s.kind != Kind::Map) else {
             return Ok(false);
         };
+        let (prior, sink) = match consumer {
+            Consumer::Sum(init) => self.sum_sink(f, init)?,
+            Consumer::Call(Some(to)) => {
+                let s = self.slot(f);
+                self.lower(f, to, s)?;
+                (Some(s), self.push_sink(f))
+            }
+            _ => (None, self.push_sink(f)),
+        };
+        // The analysis saw each stage `fn` as a closure made once, so its
+        // last-use moves may take a local an inline body reads again on the
+        // next item: no moves here, and no tail position inside the loops.
+        let moves = std::mem::take(&mut f.moves);
+        let tail = std::mem::replace(&mut f.in_tail, false);
+        let lowered = self.emit_stage(f, &st, sink);
+        f.moves = moves;
+        f.in_tail = tail;
+        lowered?;
+        self.finish_comprehension(f, call, &consumer, prior, sink, dest);
+        Ok(true)
+    }
+
+    /// The comprehension's value into `dest` from its sink: the vector,
+    /// the consumer's call over it, or the `+` fold.
+    fn finish_comprehension(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &DirectCall,
+        consumer: &Consumer<'_>,
+        prior: Option<PointerValue<'ctx>>,
+        sink: Sink<'ctx>,
+        dest: PointerValue<'ctx>,
+    ) {
+        match (consumer, sink) {
+            (Consumer::Vector, Sink::Push(acc)) => {
+                self.call("rt_n_vec_done", None, &[dest.into(), acc.into()]);
+                self.free_slots(f, &[acc]);
+            }
+            (_, Sink::Push(acc)) => {
+                let items = self.slot(f);
+                self.call("rt_n_vec_done", None, &[items.into(), acc.into()]);
+                let args: Vec<PointerValue<'ctx>> = prior.into_iter().chain([items]).collect();
+                self.core_call_owned(f, call, &args, dest);
+                self.free_slots(f, &args);
+                self.free_slots(f, &[acc]);
+            }
+            (_, Sink::Sum { acc, .. }) => {
+                self.move_v(f.func, dest, acc);
+                self.free_slots(f, &[acc]);
+            }
+        }
+    }
+
+    /// A fresh vector-builder sink.
+    fn push_sink(&mut self, f: &mut FnCtx<'ctx>) -> Sink<'ctx> {
         let acc = self.slot(f);
         self.call(
             "rt_n_vec_new",
@@ -157,27 +254,103 @@ impl<'ctx> Lowerer<'ctx> {
                 self.i8t.const_zero().into(),
             ],
         );
-        // The analysis saw each stage `fn` as a closure made once, so its
-        // last-use moves may take a local an inline body reads again on the
-        // next item: no moves here, and no tail position inside the loops.
-        let moves = std::mem::take(&mut f.moves);
-        let tail = std::mem::replace(&mut f.in_tail, false);
-        let lowered = self.emit_stage(f, &st, acc);
-        f.moves = moves;
-        f.in_tail = tail;
-        lowered?;
-        self.call("rt_n_vec_done", None, &[dest.into(), acc.into()]);
-        self.free_slots(f, &[acc]);
-        Ok(true)
+        Sink::Push(acc)
     }
 
-    /// One stage's items into `acc`: indexed over a vector or long range,
+    /// A `+` fold's sink: the init (lowered first), else `0` and a pending
+    /// first item.
+    fn sum_sink(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        init: Option<&Expr>,
+    ) -> Result<(Option<PointerValue<'ctx>>, Sink<'ctx>), Unsupported> {
+        let acc = self.slot(f);
+        let first = match init {
+            Some(e) => {
+                self.lower(f, e, acc)?;
+                None
+            }
+            None => {
+                self.write_int(f.func, acc, self.i64t.const_zero());
+                let flag = self.entry_alloca(f, self.i8t, "sum_first");
+                self.builder
+                    .build_store(flag, self.i8t.const_int(1, false))
+                    .expect("store");
+                Some(flag)
+            }
+        };
+        Ok((None, Sink::Sum { acc, first }))
+    }
+
+    /// One item into `sink` (`res` taken).
+    fn sink_item(&mut self, f: &mut FnCtx<'ctx>, sink: Sink<'ctx>, res: PointerValue<'ctx>) {
+        match sink {
+            Sink::Push(acc) => {
+                self.call("rt_n_vec_push", None, &[acc.into(), res.into()]);
+            }
+            Sink::Sum { acc, first } => {
+                let join = self.ctx.append_basic_block(f.func, "sum_join");
+                if let Some(flag) = first {
+                    let set = self.ctx.append_basic_block(f.func, "sum_set");
+                    let add = self.ctx.append_basic_block(f.func, "sum_add");
+                    let pending = self
+                        .builder
+                        .build_load(self.i8t, flag, "first")
+                        .expect("load")
+                        .into_int_value();
+                    let is_first = self
+                        .builder
+                        .build_int_compare(IntPredicate::NE, pending, self.i8t.const_zero(), "f")
+                        .expect("cmp");
+                    self.builder
+                        .build_conditional_branch(is_first, set, add)
+                        .expect("br");
+                    self.builder.position_at_end(set);
+                    self.move_v(f.func, acc, res);
+                    self.builder
+                        .build_store(flag, self.i8t.const_zero())
+                        .expect("store");
+                    self.builder.build_unconditional_branch(join).expect("br");
+                    self.builder.position_at_end(add);
+                }
+                let st = self
+                    .call("rt_n_add_acc", Some(self.i32t), &[acc.into(), res.into()])
+                    .expect("st");
+                self.check(f, st);
+                self.builder.build_unconditional_branch(join).expect("br");
+                self.builder.position_at_end(join);
+            }
+        }
+    }
+
+    /// Every item of `seq` (taken) into `sink`.
+    fn sink_all(&mut self, f: &mut FnCtx<'ctx>, sink: Sink<'ctx>, seq: PointerValue<'ctx>) {
+        let status = match sink {
+            Sink::Push(acc) => self.call(
+                "rt_n_vec_push_all",
+                Some(self.i32t),
+                &[acc.into(), seq.into()],
+            ),
+            Sink::Sum { acc, first } => {
+                let flag = first.unwrap_or_else(|| self.ptr.const_null());
+                self.call(
+                    "rt_n_add_all",
+                    Some(self.i32t),
+                    &[acc.into(), flag.into(), seq.into()],
+                )
+            }
+        }
+        .expect("status");
+        self.check(f, status);
+    }
+
+    /// One stage's items into `sink`: indexed over a vector or long range,
     /// else through the stage's own core call.
     fn emit_stage(
         &mut self,
         f: &mut FnCtx<'ctx>,
         st: &Stage<'_>,
-        acc: PointerValue<'ctx>,
+        sink: Sink<'ctx>,
     ) -> Result<(), Unsupported> {
         let base = f.env.len();
         let coll = self.slot(f);
@@ -193,7 +366,7 @@ impl<'ctx> Lowerer<'ctx> {
             .build_conditional_branch(is_direct, direct, general)
             .expect("br");
         self.builder.position_at_end(direct);
-        let state = self.load_loop_state(acc, coll, kind, plan);
+        let state = self.load_loop_state(coll, coll, kind, plan);
         let i_ptr = self.entry_alloca(f, self.i64t, "comp_i");
         let cur_ptr = self.entry_alloca(f, self.i64t, "comp_cur");
         self.builder
@@ -228,7 +401,7 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("add");
         self.builder.build_store(i_ptr, i_next).expect("store");
         f.env.push(Some(LocalRef::Slot(item)));
-        let stepped = self.emit_step(f, &st.body, acc);
+        let stepped = self.emit_step(f, &st.body, sink);
         f.env.truncate(base);
         stepped?;
         self.drop_and_nil_slots(f.func, &[item]);
@@ -248,14 +421,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let seq = self.slot(f);
         self.core_call_owned(f, st.call, &args, seq);
-        let status = self
-            .call(
-                "rt_n_vec_push_all",
-                Some(self.i32t),
-                &[acc.into(), seq.into()],
-            )
-            .expect("status");
-        self.check(f, status);
+        self.sink_all(f, sink, seq);
         self.free_slots(f, &args);
         self.free_slots(f, &[seq]);
         self.free_slots(f, &range_args);
@@ -269,20 +435,20 @@ impl<'ctx> Lowerer<'ctx> {
         &mut self,
         f: &mut FnCtx<'ctx>,
         step: &Step<'_>,
-        acc: PointerValue<'ctx>,
+        sink: Sink<'ctx>,
     ) -> Result<(), Unsupported> {
         match step {
             Step::Let {
                 bindings,
                 body,
                 next,
-            } => self.emit_let_step(f, bindings, body, next, acc),
+            } => self.emit_let_step(f, bindings, body, next, sink),
             Step::When { test, next } => {
                 let then_b = self.ctx.append_basic_block(f.func, "comp_when");
                 let join = self.ctx.append_basic_block(f.func, "comp_skip");
                 self.lower_cond(f, test, then_b, join)?;
                 self.builder.position_at_end(then_b);
-                self.emit_step(f, next, acc)?;
+                self.emit_step(f, next, sink)?;
                 self.builder.build_unconditional_branch(join).expect("br");
                 self.builder.position_at_end(join);
                 Ok(())
@@ -290,11 +456,11 @@ impl<'ctx> Lowerer<'ctx> {
             Step::Item(body) => {
                 let res = self.slot(f);
                 self.lower_body(f, body, res)?;
-                self.call("rt_n_vec_push", None, &[acc.into(), res.into()]);
+                self.sink_item(f, sink, res);
                 self.free_slots(f, &[res]);
                 Ok(())
             }
-            Step::Stage(st) => self.emit_stage(f, st, acc),
+            Step::Stage(st) => self.emit_stage(f, st, sink),
         }
     }
 
@@ -306,7 +472,7 @@ impl<'ctx> Lowerer<'ctx> {
         bindings: &[(Pattern, Expr)],
         body: &[Expr],
         next: &Step<'_>,
-        acc: PointerValue<'ctx>,
+        sink: Sink<'ctx>,
     ) -> Result<(), Unsupported> {
         let depth = f.env.len();
         let let_depth = f.let_slots.len();
@@ -316,7 +482,7 @@ impl<'ctx> Lowerer<'ctx> {
             .lower_let_bindings(f, bindings, body, &mut bound)
             .and_then(|()| {
                 f.let_slots.extend_from_slice(&bound);
-                self.emit_step(f, next, acc)
+                self.emit_step(f, next, sink)
             });
         f.tail_min = tail_min;
         f.let_slots.truncate(let_depth);

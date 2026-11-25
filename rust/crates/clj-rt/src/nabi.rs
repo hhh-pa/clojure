@@ -392,6 +392,16 @@ pub extern "C" fn rt_n_vec_push_all(acc: &mut Value, coll: &mut Value) -> i32 {
     }))
 }
 
+/// Fold every item of `coll` (taken: left nil) into `acc` with `+`; a
+/// non-null `first` set to 1 makes the first item the accumulator.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_add_all(acc: &mut Value, first: Option<&mut u8>, coll: &mut Value) -> i32 {
+    let coll = std::mem::replace(coll, Value::Nil);
+    native::status(with_active(|eval| {
+        native_abi::add_all(eval, acc, first, coll)
+    }))
+}
+
 /// Unwrap a `reduced` accumulator in place: 1 when it was one.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_unreduce(v: &mut Value) -> u8 {
@@ -1519,6 +1529,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_vec_new,
         rt_n_vec_push,
         rt_n_vec_push_all,
+        rt_n_add_all,
         rt_n_vec_done,
         rt_n_unreduce,
         rt_n_mapv_parse_num,

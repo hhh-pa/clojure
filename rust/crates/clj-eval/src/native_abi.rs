@@ -1739,6 +1739,37 @@ pub fn vec_push_all(eval: &mut Evaluator, acc: &mut Value, coll: Value) -> Resul
     walked.map_err(|e| native_throw(eval, e))
 }
 
+/// Fold every item of `coll` (any seqable, realized in order) into `acc`
+/// with `+` as [`add_acc`] does: a compiled `(reduce + [init] E)` over a
+/// comprehension stage it cannot index (#271 Slice 6b). A set `first` flag
+/// (no init) makes the first item the accumulator itself, as `reduce` does.
+pub fn add_all(
+    eval: &mut Evaluator,
+    acc: &mut Value,
+    mut first: Option<&mut u8>,
+    coll: Value,
+) -> Result<(), Signal> {
+    let mut failed = None;
+    let walked = crate::seqs::walk_seq(eval, coll, |eval, item| {
+        if let Some(flag) = first.as_deref_mut().filter(|f| **f != 0) {
+            *flag = 0;
+            *acc = item.clone();
+            return Ok(crate::seqs::Walk::Continue);
+        }
+        match add_acc(eval, acc, item.clone()) {
+            Ok(()) => Ok(crate::seqs::Walk::Continue),
+            Err(sig) => {
+                failed = Some(sig);
+                Ok(crate::seqs::Walk::Stop)
+            }
+        }
+    });
+    match failed {
+        Some(sig) => Err(sig),
+        None => walked.map_err(|e| native_throw(eval, e)),
+    }
+}
+
 /// The loop's result: its [`VecBuilder`] or scalar `TransientVector` frozen
 /// into a persistent vector.
 pub fn vec_done(acc: &mut Value) -> Value {

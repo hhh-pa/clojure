@@ -22,6 +22,18 @@
 (println (try (vec (for [a xs b (range a)] (/ 10 (- b 1)))) (catch ArithmeticException _ "div0")))
 (let [side (atom [])]
   (println (vec (for [a (range 2) b (range 2)] (do (swap! side conj [a b]) b))) @side))
+;; Consumers that realize the whole sequence take its native vector (#271 Slice 6b).
+(println (count (for [a xs b xs :when (< a b)] [a b])) (sort (for [a xs b [3 1] :when (odd? b)] (* a b)))
+         (set (for [a xs b xs] (+ a b))) (into {} (for [a xs :when (odd? a)] [a (* a a)])))
+(println (into #{} (for [a xs b xs] (- a b))) (into (sorted-set) (for [a xs :let [b (* 2 a)]] b))
+         (into [0] (for [a xs :when (even? a)] a)) (count (for [a [] b xs] a)))
+;; `(reduce + [init] E)` folds the items as they come (Slice 6b).
+(println (reduce + (for [a xs b xs :when (< a b)] (* a b))) (reduce + 0.5 (for [a xs :when (odd? a)] a))
+         (reduce + (for [a [] b xs] a)) (reduce + (for [a ["x"] :when (string? a)] a))
+         (reduce + 10 (for [a (list 1 2) b (list 3)] (* a b))) (reduce + (for [a (list 1 2) b xs] b))
+         (reduce + (for [a [5] :when true] a)) (reduce + (for [a xs :when (odd? a)] (* 1.5 a))))
+(println (try (reduce + (for [a xs :when (odd? a)] (if (= a 3) :k a))) (catch ClassCastException _ :cast))
+         (try (reduce + 0 (for [a (list 1 :k) b [1]] a)) (catch ClassCastException _ :cast2)))
 ;; Shapes that keep the general path.
 (println (vec (for [a xs] a)) (vec (mapcat (fn [x] [x x]) xs)) (vec (mapcat (fn [x] (inc x) (list x)) xs)))
 (println (vec (mapcat identity [[1] [2]])) (vec (str/split "a b" #" ")) (vec (filter odd? xs)))

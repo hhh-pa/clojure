@@ -800,6 +800,17 @@ A `for` with more than one binding, or with `:when`/`:let`, expands (`clj-eval/s
 
 Measured (macOS): a nested 10x10 `(vec (for …))` 121.8K -> 52.7K instructions per call, a nested `for` with `:when` 119.2K -> 16.3K. Interleaved A/B over all 1754 cases against the same-session 5z build: median +0.6K, mean +2.6K (no case with a nested comprehension worse; the largest rises are programs without any `for`, which swing both ways across their own cases); `pl_resolution` -14%, `center_star` -6 to -10%, `line_arrangement` -5%, `generalized_suffix_tree` -5%.
 
+### 6.59 Slice 6b: more consumers of native comprehensions
+
+6a lowered nested and filtered comprehensions under `vec` and `into []` only. Among the losing programs' nested or filtered `for` sites, the other consumers are `reduce` (6), `into {}` (4), `first` (3), `let` (3), `every?` (2), `count`, `into #{}`/`(sorted-set)` and `some` (1 each).
+
+- **Whole-sequence consumers (`clj-aot/src/comprehension.rs`):** `(into to E)` for any `to`, `(count E)`, `(sort E)` and `(set E)` always realize the whole sequence in order, so they run the comprehension into a vector natively and then call the consumer over it (`to` evaluated first, as the call would): same result, items, effects and first exception.
+- **`(reduce + [init] E)`:** `+` never returns `reduced`, so the items fold into the accumulator as they come (`rt_n_add_acc`, no intermediate vector); without an init the first item becomes the accumulator untouched, as `reduce` takes it, and an empty sequence gives `0`; a stage over a collection it cannot index folds the stage's own sequence (`rt_n_add_all`, new).
+- **Not lowered:** `first`, `some` and `every?` may stop early, and the lazy form realizes chunks of 32, so a side-effecting body would run a different number of times; `reduce` with any other function may stop at `reduced`.
+- **Verification:** corpus `comprehensions.clj` gains every consumer, `+` folds with and without an init, over no items and one non-number item, on the general path, and with cast errors raised mid-fold; `native_corpus` replays it through the JIT.
+
+Measured (macOS, per call): `(count (into {} (for [a (range 8) b (range 8) :when (< a b)] …)))` 260K -> 178K instructions, `(reduce + 0.0 (for [k (range 50) :when …] (nth w k)))` 37.3K -> 4.9K.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
