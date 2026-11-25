@@ -4106,15 +4106,49 @@ impl<'ctx> Lowerer<'ctx> {
             call.span = span;
             Expr::DirectNative(Box::new(call))
         };
-        let arity = Arity {
-            fixed: (0..n).map(|i| Pattern::Symbol(format!("eta{i}"))).collect(),
-            rest: None,
-            body: vec![body],
+        Some(eta_wrap(format!("clojure.core/{name}--eta"), n, body))
+    }
+
+    /// Whether `fe`, a fn passed by name, calls with `n` args as an eta
+    /// `fn` ([`named_fn`](Self::named_fn)) builds.
+    fn named_callable(&self, fe: &Expr, n: usize) -> bool {
+        let Expr::Global(var) = fe else { return false };
+        if var.sym.namespace() == Some("clojure.core") {
+            return self.eta.contains_key(&(var.sym.name().to_owned(), n));
+        }
+        self.stable_of(var).is_some_and(|sr| self.unit >= sr.unit)
+            && self.direct_target(fe, n).is_some()
+    }
+
+    /// `fe`, a fn passed by name, as the one-arity `fn` calling it with `n`
+    /// params from `base`: a `clojure.core` fn through its eta template
+    /// ([`eta_fn`](Self::eta_fn)), or (#271 Slice 6e) a program `defn` with
+    /// a compiled fixed arity of `n` whose var is stable here (its `def`
+    /// has run and nothing rebinds it), so calling the var per item calls
+    /// the root the traversal would have read once: a guarded direct call
+    /// (or the callee inlined) instead of a generic invoke per item.
+    fn named_fn(
+        &self,
+        fe: &Expr,
+        n: usize,
+        base: usize,
+        span: clj_reader::Span,
+    ) -> Option<&'static FunExpr> {
+        let Expr::Global(var) = fe.clone() else {
+            return None;
         };
-        Some(Box::leak(Box::new(FunExpr {
-            display: format!("clojure.core/{name}--eta"),
-            arities: std::sync::Arc::from(vec![arity]),
-        })))
+        if !self.named_callable(fe, n) {
+            return None;
+        }
+        if var.sym.namespace() == Some("clojure.core") {
+            return self.eta_fn(var.sym.name(), n, base, span);
+        }
+        let body = Expr::Invoke {
+            head: Box::new(fe.clone()),
+            args: (base..base + n).map(Expr::Local).collect(),
+            span,
+        };
+        Some(eta_wrap(format!("{}--eta", var.sym), n, body))
     }
 
     fn try_lower_hof_loop(
@@ -8778,6 +8812,20 @@ struct LoopFn<'a> {
     eta: Option<&'a Expr>,
 }
 
+/// The one-arity `fn` of `n` params (`eta0`…) whose body is `body`, kept for
+/// the whole build (a loop borrows its arity as it does a literal `fn`'s).
+fn eta_wrap(display: String, n: usize, body: Expr) -> &'static FunExpr {
+    let arity = Arity {
+        fixed: (0..n).map(|i| Pattern::Symbol(format!("eta{i}"))).collect(),
+        rest: None,
+        body: vec![body],
+    };
+    Box::leak(Box::new(FunExpr {
+        display,
+        arities: std::sync::Arc::from(vec![arity]),
+    }))
+}
+
 /// Resolves a traversal's fn argument to its [`LoopFn`] at one param base.
 struct LoopFns<'r, 'ctx> {
     lowerer: &'r Lowerer<'ctx>,
@@ -8786,8 +8834,8 @@ struct LoopFns<'r, 'ctx> {
 }
 
 impl LoopFns<'_, '_> {
-    /// `fe` taking `params` args per item: a literal `fn`, or a
-    /// `clojure.core` fn with an eta template.
+    /// `fe` taking `params` args per item: a literal `fn`, or a fn by name
+    /// ([`Lowerer::named_fn`]).
     fn of<'a>(&self, fe: &'a Expr, params: usize) -> Option<LoopFn<'a>> {
         if let Some((fun, arity)) = inline_fn(fe, params) {
             return Some(LoopFn {
@@ -8796,15 +8844,7 @@ impl LoopFns<'_, '_> {
                 eta: None,
             });
         }
-        let Expr::Global(var) = fe else {
-            return None;
-        };
-        if var.sym.namespace() != Some("clojure.core") {
-            return None;
-        }
-        let fun = self
-            .lowerer
-            .eta_fn(var.sym.name(), params, self.base, self.span)?;
+        let fun = self.lowerer.named_fn(fe, params, self.base, self.span)?;
         Some(LoopFn {
             fun,
             arity: &fun.arities[0],

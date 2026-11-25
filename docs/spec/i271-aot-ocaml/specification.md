@@ -829,6 +829,16 @@ The traversal loops (5x) cover a single `(map F xs)` under `vec`, `into []`, `re
 
 Measured (macOS): interleaved A/B over all 1754 cases against the same-session 6c build: median -0.4K, mean -4.2K; `value_iteration` -13%, `purged_cv` -5%, `gray_code` -4%, `jones_mueller` -3.7%; no rise above 1.5% outside the randomized quick_sort/quickselect cases.
 
+### 6.62 Slice 6e: fns passed by name, program `defn`s included
+
+A traversal (`mapv`, `filterv`, `reduce`, `some`, `every?`, a `map` under `vec`/`into []`/`dorun`, …) of a literal `fn` or a `clojure.core` fn by name runs as a native loop (5x), but a program `defn` by name (`(mapv parse-row lines)`, `(reduce step acc xs)`) took the generic core call: one generic invoke per item, about 390 instructions per item on macOS against 15–55 for the native loop. Programs pass their own fns by name to traversals at 139 sites, 32 `mapv`, 13 `map`, 4 `reduce` and 4 `every?` of them in the programs with INS non-wins. Comprehension stages (6a/6d) took only literal `fn`s.
+
+- **Resolution (`Lowerer::named_fn`, `clj-aot/src/native.rs`):** a fn passed by name becomes the one-arity eta `fn` calling it with the traversal's args: a `clojure.core` fn through its eta template (as before), or a program `defn` whose var is stable at the site (`stable_of`: its `def` has run, as for the cheap direct-call entry, and nothing in the program rebinds it) and which has a compiled fixed arity for the arg count (`direct_target`). The eta's call is the ordinary guarded direct call (or the callee inlined), and its args get last-use moves like a literal `fn`'s (a `reduce` accumulator moves into the call). The traversal would have read the var's root once; a stable var's root cannot change, so calling it per item is the same fn. A var the program redefines, a fn used before its `def` has run, and a variadic or missing arity keep the generic call. The general path (a non-vector, non-range collection) evaluates the name as before.
+- **Comprehension stages (`clj-aot/src/comprehension.rs`):** a `map` stage whose fn is a name that resolves (`StageFn::Named`, `Step::NamedItem`) lowers like a literal one: `(apply str (map label xs))`, `(into #{} (map f xs))`, `(count (map f xs))`.
+- **Verification:** corpus `named_fns.clj` (mapv, filterv, reduce with and without init and an accumulator updated in place, every?, some, two collections, multi-arity and variadic defns, a private defn, side effects in order, exceptions inside the traversal, empty inputs and `reduce`'s zero-arg error, traversals inside compiled fns and of a fn parameter, a forward-declared fn used before its `def`, a self-redefining var whose root the traversal reads once), output identical between `run` and the native binary.
+
+Measured (macOS, per item of `(mapv f (range n))` with `f` a one-line `defn`): 393 -> 15 instructions at top level, 384 -> 21 inside a compiled fn.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

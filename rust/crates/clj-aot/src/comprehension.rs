@@ -42,10 +42,21 @@ enum Kind {
 struct Stage<'a> {
     kind: Kind,
     call: &'a DirectCall,
-    fun: &'a FunExpr,
+    fun: StageFn<'a>,
     coll: &'a Expr,
     body: Step<'a>,
 }
+
+/// A stage's `fn`: a literal one, or (#271 Slice 6e) a fn by name
+/// (`(map count rows)`, `(map parse-row lines)`: [`Lowerer::named_fn`]).
+#[derive(Clone, Copy)]
+enum StageFn<'a> {
+    Literal(&'a FunExpr),
+    Named(&'a Expr),
+}
+
+/// Whether a fn by name lowers as a `map` stage's one-arg eta `fn`.
+type Named<'n> = dyn Fn(&Expr) -> bool + 'n;
 
 /// A stage `fn`'s body: its `:let`s and `:when`s down to the item or the
 /// next stage.
@@ -60,6 +71,8 @@ enum Step<'a> {
         next: Box<Step<'a>>,
     },
     Item(&'a [Expr]),
+    /// A `map` stage's fn by name over its param (Slice 6e).
+    NamedItem(&'a Expr, clj_reader::Span),
     Stage(Box<Stage<'a>>),
 }
 
@@ -113,7 +126,7 @@ fn applies_whole(g: &Expr) -> bool {
 }
 
 /// `e` as a comprehension stage whose whole shape lowers here.
-fn stage(e: &Expr) -> Option<Stage<'_>> {
+fn stage<'a>(e: &'a Expr, named: &Named<'_>) -> Option<Stage<'a>> {
     let Expr::DirectNative(call) = e else {
         return None;
     };
@@ -128,17 +141,25 @@ fn stage(e: &Expr) -> Option<Stage<'_>> {
         }
         _ => return None,
     };
-    let (fun, arity) = inline_fn(fe, 1)?;
-    let body = match kind {
-        Kind::Map => Step::Item(&arity.body),
-        _ => step(&arity.body, kind)?,
-    };
-    Some(Stage {
+    if let Some((fun, arity)) = inline_fn(fe, 1) {
+        let body = match kind {
+            Kind::Map => Step::Item(&arity.body),
+            _ => step(&arity.body, kind, named)?,
+        };
+        return Some(Stage {
+            kind,
+            call,
+            fun: StageFn::Literal(fun),
+            coll,
+            body,
+        });
+    }
+    (kind == Kind::Map && named(fe)).then_some(Stage {
         kind,
         call,
-        fun,
+        fun: StageFn::Named(fe),
         coll,
-        body,
+        body: Step::NamedItem(fe, call.span),
     })
 }
 
@@ -146,19 +167,19 @@ fn stage(e: &Expr) -> Option<Stage<'_>> {
 /// and `if`s whose else is the stage's skip (the `__for-keep*` sentinel,
 /// or `nil` for an outer stage), ending in the item (which must not name
 /// the sentinel) or the next stage.
-fn step(body: &[Expr], kind: Kind) -> Option<Step<'_>> {
+fn step<'a>(body: &'a [Expr], kind: Kind, named: &Named<'_>) -> Option<Step<'a>> {
     match body {
         [Expr::Let { bindings, body }] => Some(Step::Let {
             bindings,
             body,
-            next: Box::new(step(body, kind)?),
+            next: Box::new(step(body, kind, named)?),
         }),
         [Expr::If { test, then, els }] if skips(els, kind) => Some(Step::When {
             test,
-            next: Box::new(step(std::slice::from_ref(then), kind)?),
+            next: Box::new(step(std::slice::from_ref(then), kind, named)?),
         }),
         [e] if kind == Kind::Keep => (!names_skip(e)).then_some(Step::Item(body)),
-        [e] => stage(e).map(|s| Step::Stage(Box::new(s))),
+        [e] => stage(e, named).map(|s| Step::Stage(Box::new(s))),
         _ => None,
     }
 }
@@ -200,7 +221,8 @@ impl<'ctx> Lowerer<'ctx> {
         // a traversal loop already (see `hof_loop`); under the other
         // consumers it runs here too (#271 Slice 6d).
         let single_ok = matches!(consumer, Consumer::Call(_));
-        let Some(st) = stage(e).filter(|s| s.kind != Kind::Map || single_ok) else {
+        let named = |fe: &Expr| self.named_callable(fe, 1);
+        let Some(st) = stage(e, &named).filter(|s| s.kind != Kind::Map || single_ok) else {
             return Ok(false);
         };
         let (prior, sink) = match consumer {
@@ -426,7 +448,10 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.position_at_end(general);
         let range_args = self.materialize_range_srcs(f, rsrc.as_ref(), None, coll, None);
         let closure = self.slot(f);
-        self.make_closure(f, st.fun, base, closure)?;
+        match st.fun {
+            StageFn::Literal(fun) => self.make_closure(f, fun, base, closure)?,
+            StageFn::Named(fe) => self.lower(f, fe, closure)?,
+        }
         let mut args = vec![closure, coll];
         for extra in &st.call.args[2..] {
             let s = self.slot(f);
@@ -470,6 +495,15 @@ impl<'ctx> Lowerer<'ctx> {
             Step::Item(body) => {
                 let res = self.slot(f);
                 self.lower_body(f, body, res)?;
+                self.sink_item(f, sink, res);
+                self.free_slots(f, &[res]);
+                Ok(())
+            }
+            Step::NamedItem(fe, span) => {
+                let param = f.env.len() - 1;
+                let fun = self.named_fn(fe, 1, param, *span).expect("named_callable");
+                let res = self.slot(f);
+                self.lower_body(f, &fun.arities[0].body, res)?;
                 self.sink_item(f, sink, res);
                 self.free_slots(f, &[res]);
                 Ok(())
