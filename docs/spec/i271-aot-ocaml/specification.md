@@ -839,6 +839,25 @@ A traversal (`mapv`, `filterv`, `reduce`, `some`, `every?`, a `map` under `vec`/
 
 Measured (macOS, per item of `(mapv f (range n))` with `f` a one-line `defn`): 393 -> 15 instructions at top level, 384 -> 21 inside a compiled fn.
 
+### 6.63 Slice 6f: runtime declarations say what the runtime does with their params
+
+A native program links against the runtime archive without cross-module optimization, and the compiler declared every runtime ABI fn bare. So once a slot's address reached any runtime call (every boxed op's slow path takes its operands by address), LLVM had to assume every later call could rewrite it. It kept every tag reload and every drop check after each call: a boxed `(inc d)` in a loop costs a tag-switch drop of a temporary the loop had just set to nil.
+
+- **Attributes (`Lowerer::annotate_runtime_decl`, `clj-aot/src/native.rs`):** each `rt_n_*` declaration is annotated from the fn's Rust signature in `clj-rt/src/nabi.rs`, parsed once from that source (`runtime_abi`), so the declarations cannot drift from the definitions:
+  - `nounwind`: an `extern "C"` Rust fn aborts on a panic instead of unwinding.
+  - `captures(none)` on reference params (`&T`, `&mut T`, `Option<&…>`): safe Rust cannot keep a non-`'static` reference past the call, and the ABI's only `unsafe` code builds slices bounded by the borrow.
+  - `readonly` on shared references: every interior-mutable part of a `Value` (atoms, refs, transients, volatiles, …) sits behind an `Arc`, so a `&Value` never writes the 32-byte slot.
+  - Nothing on raw or fn pointer params: `Code`, which `rt_n_make_fn` and the boot keep.
+  - The `f64` math fns (`rt_n_math_*`) are pure: `memory(none) willreturn nounwind`.
+- **Effect:** in the `mask-digits` table loop of the sudoku programs the top-level function's IR shrinks from 1622 to 1249 lines (68 to 53 drop calls, 61 to 41 tag switches).
+- **Verification:**
+  - Unit test `runtime_abi_params_follow_their_rust_types_271`: a synthetic signature with every param shape, plus the real table.
+  - Emit test `runtime_declarations_carry_their_abi_attributes_271`: the declared `rt_n_drop`, `rt_n_op2` and `rt_n_math_sin`, with their attribute groups.
+  - The full native corpus and the snippet sweep are unchanged.
+  - Three emit tests pinned block names inside traversal loops (`some_hit`, `every_fail`) and the scalar loop's `sc_deopt`; LLVM now sinks those blocks' stores into the loop exit and drops the emptied blocks. The tests instead check that each traversal keeps its general-path entry block (`loop_general`, one per lowered traversal) and that the loop keeps its unboxed counter and in-place `conj!` (`sc_int_ok`, `sc_conj_try`).
+
+Measured (macOS, interleaved A/B over all 1754 cases against the same-session 6e build): median -5.4K instructions, mean -115K; ratio quantiles q05 0.985, q50 0.998, q95 1.009; `convex_hull` -12%, `segment_tree` -10%, `boyer_moore` -5.5%, the sudoku programs -5%; `edit_distance` +7 to +8% (its scalar loop now unrolls differently; it runs at 0.39x OCaml).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

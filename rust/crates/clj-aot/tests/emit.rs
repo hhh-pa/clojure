@@ -17,6 +17,14 @@ fn tmp(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("clj-aot-emit-{}-{name}", std::process::id()))
 }
 
+/// The traversal loops a function body's IR holds: one general-path entry
+/// block each.
+fn general_paths(body: &str) -> usize {
+    body.lines()
+        .filter(|l| l.starts_with("loop_general"))
+        .count()
+}
+
 fn no_link() -> LinkOptions {
     LinkOptions {
         runtime_archive: None,
@@ -1394,8 +1402,10 @@ fn native_emit_ir_keeps_loops_with_boxed_exits_scalar_271() {
     let text = std::fs::read_to_string(&ir).expect("ir");
     std::fs::remove_file(&ir).expect("cleanup");
     // The `(persistent! acc)` exit reads only a local bound before the
-    // loop, so the loop stays scalar (it was boxed for the exit alone).
-    assert!(text.contains("sc_deopt"), "{text}");
+    // loop, so the loop stays scalar (it was boxed for the exit alone):
+    // its unboxed counter and in-place `conj!` remain.
+    assert!(text.contains("sc_int_ok"), "{text}");
+    assert!(text.contains("sc_conj_try"), "{text}");
 }
 
 #[test]
@@ -1490,7 +1500,10 @@ fn native_emit_ir_fuses_filter_some_and_in2_moves_271() {
         .find(|d| d.contains("user_hofs("))
         .expect("hofs fn");
     assert!(hofs_body.contains("filter_keep"), "{hofs_body}");
-    assert!(hofs_body.contains("some_hit"), "{hofs_body}");
+    // Every traversal runs as a loop, `some` included: each keeps its
+    // general path's entry block (its hit and miss blocks may fold into
+    // the loop once LLVM knows the runtime calls leave its slots alone).
+    assert_eq!(general_paths(hofs_body), 7, "{hofs_body}");
     assert!(hofs_body.contains("@rt_n_core_own"), "{hofs_body}");
 }
 
@@ -1577,7 +1590,7 @@ fn native_emit_ir_fuses_dot_parse_num_and_hof2_271() {
         .find(|d| d.contains("user_hof2("))
         .expect("hof2 fn");
     assert!(hof2_body.contains("loop_cur2"), "{hof2_body}");
-    assert!(hof2_body.contains("every_fail"), "{hof2_body}");
+    assert_eq!(general_paths(hof2_body), 4, "{hof2_body}");
     assert!(hof2_body.contains("sum_set"), "{hof2_body}");
     assert!(hof2_body.contains("@rt_n_add_acc"), "{hof2_body}");
     // Regression guard: bitcode linked into user modules (`clj-bc`) must stay
@@ -2100,4 +2113,50 @@ fn native_emit_ir_slice_5s_global_colls_parse_token_and_early_drop_271() {
     );
     assert!(!no_re.contains("call void @rt_n_cap_re"), "{no_re}");
     assert!(!no_re.contains("rt_n_regex"), "{no_re}");
+}
+
+#[test]
+fn runtime_declarations_carry_their_abi_attributes_271() {
+    let ir = tmp("attrs.ll");
+    clj_aot::build_str(
+        "(defn f [x y] (+ (Math/sin x) (* x y)))\n(println (f 1.0 2) (f 2 3))\n",
+        "f.clj",
+        &tmp("nope"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let decl = |name: &str| {
+        text.lines()
+            .find(|l| l.starts_with("declare") && l.contains(&format!("@{name}(")))
+            .unwrap_or_else(|| panic!("no {name}:\n{text}"))
+            .to_owned()
+    };
+    assert!(
+        decl("rt_n_drop").contains("(ptr captures(none))"),
+        "{}",
+        decl("rt_n_drop")
+    );
+    let op2 = decl("rt_n_op2");
+    assert!(
+        op2.contains("(ptr captures(none), i32, i64, ptr readonly captures(none), ptr readonly captures(none))"),
+        "{op2}"
+    );
+    // Attribute groups: `nounwind` on the ABI fns, `memory(none)` on math.
+    let group = |line: &str| {
+        let id = line.rsplit('#').next().expect("group").trim().to_owned();
+        text.lines()
+            .find(|l| l.starts_with(&format!("attributes #{id} ")))
+            .expect("attribute group")
+            .to_owned()
+    };
+    assert!(group(&op2).contains("nounwind"), "{}", group(&op2));
+    let sin = decl("rt_n_math_sin");
+    assert!(group(&sin).contains("memory(none)"), "{}", group(&sin));
 }

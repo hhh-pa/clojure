@@ -511,7 +511,53 @@ impl<'ctx> Lowerer<'ctx> {
             Some(r) => r.fn_type(params, false),
             None => self.ctx.void_type().fn_type(params, false),
         };
-        self.module.add_function(name, ty, Some(Linkage::External))
+        let f = self.module.add_function(name, ty, Some(Linkage::External));
+        self.annotate_runtime_decl(f, name);
+        f
+    }
+
+    /// What a runtime ABI declaration may promise LLVM (#271 Slice 6f).
+    /// The program links against the runtime archive without cross-module
+    /// optimization, so a bare declaration makes every slot whose address
+    /// reaches any runtime call escape: LLVM must assume each later call
+    /// rewrites it, and keeps every tag reload and drop check. From the
+    /// fn's Rust signature in `clj-rt/src/nabi.rs` ([`runtime_abi`]):
+    /// `nounwind` (an `extern "C"` fn aborts on a panic instead of
+    /// unwinding), `captures(none)` on reference params (safe Rust cannot
+    /// keep a non-`'static` reference past the call; the ABI's only
+    /// `unsafe` builds slices that live as long as the borrow), and
+    /// `readonly` on shared ones (a `Value` keeps every interior-mutable
+    /// part behind an `Arc`, so a `&Value` never writes its slot). Raw and
+    /// fn pointer params (`Code`, which the runtime keeps) get nothing. The
+    /// `f64` math fns are pure: `memory(none) willreturn nounwind`.
+    fn annotate_runtime_decl(&self, f: FunctionValue<'ctx>, name: &str) {
+        let attr = |kind: &str| {
+            self.ctx.create_enum_attribute(
+                inkwell::attributes::Attribute::get_named_enum_kind_id(kind),
+                0,
+            )
+        };
+        let fun = inkwell::attributes::AttributeLoc::Function;
+        if name.starts_with("rt_n_math_") {
+            for kind in ["nounwind", "willreturn", "memory"] {
+                f.add_attribute(fun, attr(kind));
+            }
+            return;
+        }
+        let Some(params) = runtime_abi().get(name) else {
+            return;
+        };
+        f.add_attribute(fun, attr("nounwind"));
+        let declared = f.get_type().get_param_types();
+        for (i, (p, ty)) in params.iter().zip(declared).enumerate() {
+            let loc = inkwell::attributes::AttributeLoc::Param(i as u32);
+            if *p != AbiParam::Plain && ty.is_pointer_type() {
+                f.add_attribute(loc, attr("captures"));
+            }
+            if *p == AbiParam::Shared && ty.is_pointer_type() {
+                f.add_attribute(loc, attr("readonly"));
+            }
+        }
     }
 
     fn call_raw(
@@ -8812,6 +8858,62 @@ struct LoopFn<'a> {
     eta: Option<&'a Expr>,
 }
 
+/// How a runtime ABI fn takes one param, by its Rust type (#271 Slice 6f).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AbiParam {
+    /// `&T` / `Option<&T>`.
+    Shared,
+    /// `&mut T` / `Option<&mut T>`.
+    Exclusive,
+    /// A scalar, or a raw or fn pointer.
+    Plain,
+}
+
+/// Every runtime ABI fn's params by name, parsed once from the runtime's
+/// own source so the declarations follow its signatures.
+fn runtime_abi() -> &'static HashMap<String, Vec<AbiParam>> {
+    static ABI: std::sync::OnceLock<HashMap<String, Vec<AbiParam>>> = std::sync::OnceLock::new();
+    ABI.get_or_init(|| parse_abi(include_str!("../../clj-rt/src/nabi.rs")))
+}
+
+/// The `extern "C" fn name(params…)` signatures in `src`.
+fn parse_abi(src: &str) -> HashMap<String, Vec<AbiParam>> {
+    src.split("extern \"C\" fn ")
+        .skip(1)
+        .filter_map(|sig| {
+            let (name, rest) = sig.split_once('(')?;
+            let params = top_level(rest, ')').next()?;
+            let kinds = top_level(params, ',')
+                .filter(|p| !p.trim().is_empty())
+                .map(abi_param)
+                .collect();
+            Some((name.trim().to_owned(), kinds))
+        })
+        .collect()
+}
+
+/// `text` cut at each `sep` outside brackets.
+fn top_level(text: &str, sep: char) -> impl Iterator<Item = &str> {
+    let mut depth = 0i32;
+    text.split(move |c: char| {
+        depth += i32::from(matches!(c, '(' | '<' | '[')) - i32::from(matches!(c, ')' | '>' | ']'));
+        depth < 0 || (depth == 0 && c == sep)
+    })
+}
+
+/// A `name: Type` param's [`AbiParam`].
+fn abi_param(param: &str) -> AbiParam {
+    let ty = param.split_once(':').map_or("", |(_, ty)| ty.trim());
+    let ty = ty.strip_prefix("Option<").unwrap_or(ty);
+    if ty.starts_with("&mut") {
+        AbiParam::Exclusive
+    } else if ty.starts_with('&') {
+        AbiParam::Shared
+    } else {
+        AbiParam::Plain
+    }
+}
+
 /// The one-arity `fn` of `n` params (`eta0`…) whose body is `body`, kept for
 /// the whole build (a loop borrows its arity as it does a literal `fn`'s).
 fn eta_wrap(display: String, n: usize, body: Expr) -> &'static FunExpr {
@@ -10700,6 +10802,28 @@ fn expr_lite_ok(e: &Expr, scope: &LiteScope<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_abi_params_follow_their_rust_types_271() {
+        let abi = parse_abi(
+            "pub extern \"C\" fn rt_n_x(out: &mut Value, a: &Value, k: u64, o: Option<&CSlice<u8>>,\n \
+             m: Option<&mut u8>, c: Code, p: &mut [i64; 3],) -> i32 { 0 }\n\
+             pub extern \"C\" fn rt_n_none() {}",
+        );
+        use AbiParam::{Exclusive, Plain, Shared};
+        assert_eq!(
+            abi["rt_n_x"],
+            [
+                Exclusive, Shared, Plain, Shared, Exclusive, Plain, Exclusive
+            ]
+        );
+        assert!(abi["rt_n_none"].is_empty());
+        // The real table: every runtime fn the compiler names is parsed.
+        let real = runtime_abi();
+        assert_eq!(real["rt_n_drop"], [Exclusive]);
+        assert_eq!(real["rt_n_op2"], [Exclusive, Plain, Plain, Shared, Shared]);
+        assert!(real.len() >= 100, "{}", real.len());
+    }
 
     #[test]
     fn keyword_templates_need_distinct_constant_keywords() {
