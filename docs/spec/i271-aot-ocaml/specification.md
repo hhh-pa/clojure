@@ -876,6 +876,15 @@ Some programs build lookup tables at startup: `(def mask-digits (mapv (fn [m] (l
 
 Measured (macOS): the sudoku programs' startup with empty stdin falls from 3.83M to 1.90M instructions above the process floor, and every case drops by about 1.9M with identical output.
 
+### 6.65 Slice 6h: `into` takes a comprehension a chunk at a time
+
+6b made `(into to E)` over a native comprehension push every item into one vector and then call `into` with it. The lazy form `into` walked a chunk at a time, and the items it had poured into `to` were garbage, so peak memory held the target plus one chunk. Natively it held the target plus every item. The 6a–6c head-to-head showed it: `chan_hull` (`(into {} (for [[gi g] (map-indexed vector groups) p g] [p gi]))`) rose 276 KB of peak RSS on all four cases, and `bentley_ottmann`'s `(into #{} (mapcat …))` sets rose up to 320 KB, giving 7 new MEM losses.
+
+- **Sink (`Sink::Chunk`, `clj-aot/src/comprehension.rs`):** `(into to E)` with any target other than `[]` (the vector itself) pushes items into a builder, and every 32 items `to = (into to chunk)` runs through `into`'s own native (`core_own_args`). The pending items are poured before a stage's lazy general path pours its sequence, and once more at the end.
+  - `into` over a concatenation is `into` over its parts in turn, `conj` by `conj` for every target type (lists prepend the same way), so values, metadata and error messages are `into`'s.
+  - Peak memory is back to the target plus a chunk, and `chan_hull` also runs about 1.7% fewer instructions than under 6b (macOS).
+- **Verification:** corpus `comprehensions.clj`, with output identical between `run` and the native binary. It covers flush boundaries (0, 1, 31, 32, 33, 64 and 65 items), map, set and list targets, a `nil` target, a sorted-map target, a vector target with metadata, list-backed stages taking the general path, a nested mapcat into a set, and a bad map entry's error.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

@@ -50,3 +50,14 @@
 (println (vec (mapcat identity [[1] [2]])) (vec (str/split "a b" #" ")) (vec (filter odd? xs)))
 (println (vec (mapcat (fn [a] (if (odd? a) (map inc [a]) [0])) xs)))
 (println (vec (for [a xs :when (odd? a)] (if (= a 1) clojure.core/__for-keep* a))))
+;; `(into to E)` pours the items into `to` a chunk at a time (Slice 6h).
+(doseq [n [0 1 31 32 33 64 65]]
+  (let [m (into {} (for [i (range n) :when (odd? i)] [i (* i i)]))
+        s (into #{} (for [i (range n) j [0 1]] (+ i j)))
+        l (into '(:z) (for [i (range n) :let [k (inc i)] :when (< k 40)] k))]
+    (println n (count m) (get m 31) (count s) (first l) (count l))))
+(println (into nil (for [i (range 3) j (range 2)] [i j])) (into (sorted-map 9 9) (for [i [3 1 2] :when i] [i (- i)]))
+         (meta (into ^{:tag :v} [0] (for [i (range 40) :when (even? i)] i))) (into [0] (for [i (list 1 2) j (list 3)] (* i j)))
+         (into #{} (for [x (list 1 2 3) y (list 4 5) :when (odd? x)] (* x y))) (into {} (for [[k v] {1 2 3 4}] [v k])))
+(println (try (into {} (for [i (range 40)] (if (= i 35) [i] [i i]))) (catch Exception e (.getMessage e))))
+(println (into [] (for [i (range 70) :when (zero? (rem i 7))] i)) (count (into #{} (mapcat (fn [i] [i (- i)]) (range 50)))))

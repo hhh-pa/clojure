@@ -5330,16 +5330,34 @@ impl<'ctx> Lowerer<'ctx> {
         args: &[PointerValue<'ctx>],
         dest: PointerValue<'ctx>,
     ) {
-        let k = self.var_of(&call.var);
+        let (k, op) = self.own_target(call, args.len());
+        self.core_own_args(f, k, op, args, dest);
+    }
+
+    /// `call`'s var index and owned/inline op for `n` args (`u32::MAX`:
+    /// the var's native).
+    fn own_target(&mut self, call: &clj_eval::expr::DirectCall, n: usize) -> (u64, u32) {
+        let name = call.var.sym.name();
+        let op = native_abi::own_op(name, n)
+            .or_else(|| native_abi::inline_op(name, n))
+            .unwrap_or(u32::MAX);
+        (self.var_of(&call.var), op)
+    }
+
+    /// [`core_call_owned`](Self::core_call_owned) by var index and op.
+    fn core_own_args(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        k: u64,
+        op: u32,
+        args: &[PointerValue<'ctx>],
+        dest: PointerValue<'ctx>,
+    ) {
         let n = args.len();
         let (arr, elems) = self.slot_array(f, n);
         for (e, a) in elems.iter().zip(args) {
             self.move_v(f.func, *e, *a);
         }
-        let name = call.var.sym.name();
-        let op = native_abi::own_op(name, n)
-            .or_else(|| native_abi::inline_op(name, n))
-            .unwrap_or(u32::MAX);
         let aref = self.slots_ref(f, arr, n);
         let st = self
             .call(

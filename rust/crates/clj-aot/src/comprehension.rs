@@ -88,14 +88,34 @@ enum Sink<'ctx> {
         acc: PointerValue<'ctx>,
         first: Option<PointerValue<'ctx>>,
     },
+    /// `(into to E)` (Slice 6h).
+    Chunk(Chunked<'ctx>),
 }
+
+/// An `into` sink: items pushed into `acc`, which every [`CHUNK`] items
+/// `into` (var `k`, op `op`) pours into `to` (`n` counts the pending
+/// ones), so the items never all live at once.
+#[derive(Clone, Copy)]
+struct Chunked<'ctx> {
+    acc: PointerValue<'ctx>,
+    to: PointerValue<'ctx>,
+    n: PointerValue<'ctx>,
+    k: u64,
+    op: u32,
+}
+
+/// Items an `into` sink holds before pouring them into its target: a lazy
+/// comprehension's chunk.
+const CHUNK: u64 = 32;
 
 /// What consumes a comprehension.
 enum Consumer<'a> {
     /// `vec` / `into []`: the vector itself.
     Vector,
+    /// `(into to E)`, `E` poured into `to` in chunks (Slice 6h).
+    Into(&'a Expr),
     /// A consumer realizing the whole sequence in order, called over its
-    /// vector: `(into to E)` (with `to`), `count`, `sort`, `set`.
+    /// vector: `count`, `sort`, `set`, `apply`.
     Call(Option<&'a Expr>),
     /// `(reduce + [init] E)`.
     Sum(Option<&'a Expr>),
@@ -107,7 +127,7 @@ fn consumer_of(call: &DirectCall) -> Option<(Consumer<'_>, &Expr)> {
     Some(match (call.var.sym.name(), call.args.as_slice()) {
         ("vec", [e]) => (Consumer::Vector, e),
         ("into", [Expr::VecLit(items, None), e]) if items.is_empty() => (Consumer::Vector, e),
-        ("into", [to, e]) => (Consumer::Call(Some(to)), e),
+        ("into", [to, e]) => (Consumer::Into(to), e),
         ("count" | "sort" | "set", [e]) => (Consumer::Call(None), e),
         ("apply", [g, e]) if applies_whole(g) => (Consumer::Call(Some(g)), e),
         ("reduce", [p, init, e]) if plus(p) => (Consumer::Sum(Some(init)), e),
@@ -220,13 +240,18 @@ impl<'ctx> Lowerer<'ctx> {
         // A single unfiltered binding under `vec`/`into []` or `reduce +` is
         // a traversal loop already (see `hof_loop`); under the other
         // consumers it runs here too (#271 Slice 6d).
-        let single_ok = matches!(consumer, Consumer::Call(_));
+        let single_ok = matches!(consumer, Consumer::Call(_) | Consumer::Into(_));
         let named = |fe: &Expr| self.named_callable(fe, 1);
         let Some(st) = stage(e, &named).filter(|s| s.kind != Kind::Map || single_ok) else {
             return Ok(false);
         };
         let (prior, sink) = match consumer {
             Consumer::Sum(init) => self.sum_sink(f, init)?,
+            Consumer::Into(to) => {
+                let s = self.slot(f);
+                self.lower(f, to, s)?;
+                (None, self.chunk_sink(f, call, s))
+            }
             Consumer::Call(Some(to)) => {
                 let s = self.slot(f);
                 self.lower(f, to, s)?;
@@ -275,12 +300,45 @@ impl<'ctx> Lowerer<'ctx> {
                 self.move_v(f.func, dest, acc);
                 self.free_slots(f, &[acc]);
             }
+            (_, Sink::Chunk(c)) => {
+                self.flush_chunk(f, c);
+                self.move_v(f.func, dest, c.to);
+                self.free_slots(f, &[c.acc, c.to]);
+            }
         }
     }
 
-    /// A fresh vector-builder sink.
-    fn push_sink(&mut self, f: &mut FnCtx<'ctx>) -> Sink<'ctx> {
+    /// An `into` sink over target slot `to` (its value already in it).
+    fn chunk_sink(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &DirectCall,
+        to: PointerValue<'ctx>,
+    ) -> Sink<'ctx> {
         let acc = self.slot(f);
+        self.new_builder(acc);
+        let n = self.entry_alloca(f, self.i64t, "into_n");
+        self.builder
+            .build_store(n, self.i64t.const_zero())
+            .expect("store");
+        let (k, op) = self.own_target(call, 2);
+        Sink::Chunk(Chunked { acc, to, n, k, op })
+    }
+
+    /// `to = (into to pending)`, then an empty builder.
+    fn flush_chunk(&mut self, f: &mut FnCtx<'ctx>, c: Chunked<'ctx>) {
+        let items = self.slot(f);
+        self.call("rt_n_vec_done", None, &[items.into(), c.acc.into()]);
+        self.new_builder(c.acc);
+        self.core_own_args(f, c.k, c.op, &[c.to, items], c.to);
+        self.free_slots(f, &[items]);
+        self.builder
+            .build_store(c.n, self.i64t.const_zero())
+            .expect("store");
+    }
+
+    /// An empty vector builder into slot `acc`.
+    fn new_builder(&self, acc: PointerValue<'ctx>) {
         self.call(
             "rt_n_vec_new",
             None,
@@ -290,6 +348,12 @@ impl<'ctx> Lowerer<'ctx> {
                 self.i8t.const_zero().into(),
             ],
         );
+    }
+
+    /// A fresh vector-builder sink.
+    fn push_sink(&mut self, f: &mut FnCtx<'ctx>) -> Sink<'ctx> {
+        let acc = self.slot(f);
+        self.new_builder(acc);
         Sink::Push(acc)
     }
 
@@ -323,6 +387,38 @@ impl<'ctx> Lowerer<'ctx> {
         match sink {
             Sink::Push(acc) => {
                 self.call("rt_n_vec_push", None, &[acc.into(), res.into()]);
+            }
+            Sink::Chunk(c) => {
+                let (acc, n) = (c.acc, c.n);
+                self.call("rt_n_vec_push", None, &[acc.into(), res.into()]);
+                let pending = self
+                    .builder
+                    .build_load(self.i64t, n, "into_n")
+                    .expect("load")
+                    .into_int_value();
+                let next = self
+                    .builder
+                    .build_int_add(pending, self.i64t.const_int(1, false), "into_n1")
+                    .expect("add");
+                self.builder.build_store(n, next).expect("store");
+                let full = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        next,
+                        self.i64t.const_int(CHUNK, false),
+                        "full",
+                    )
+                    .expect("cmp");
+                let pour = self.ctx.append_basic_block(f.func, "into_pour");
+                let join = self.ctx.append_basic_block(f.func, "into_join");
+                self.builder
+                    .build_conditional_branch(full, pour, join)
+                    .expect("br");
+                self.builder.position_at_end(pour);
+                self.flush_chunk(f, c);
+                self.builder.build_unconditional_branch(join).expect("br");
+                self.builder.position_at_end(join);
             }
             Sink::Sum { acc, first } => {
                 let join = self.ctx.append_basic_block(f.func, "sum_join");
@@ -362,6 +458,12 @@ impl<'ctx> Lowerer<'ctx> {
     /// Every item of `seq` (taken) into `sink`.
     fn sink_all(&mut self, f: &mut FnCtx<'ctx>, sink: Sink<'ctx>, seq: PointerValue<'ctx>) {
         let status = match sink {
+            Sink::Chunk(c) => {
+                // The pending items first, then the stage's own sequence.
+                self.flush_chunk(f, c);
+                self.core_own_args(f, c.k, c.op, &[c.to, seq], c.to);
+                return;
+            }
             Sink::Push(acc) => self.call(
                 "rt_n_vec_push_all",
                 Some(self.i32t),
