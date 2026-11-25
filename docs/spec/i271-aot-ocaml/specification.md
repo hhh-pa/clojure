@@ -858,6 +858,24 @@ A native program links against the runtime archive without cross-module optimiza
 
 Measured (macOS, interleaved A/B over all 1754 cases against the same-session 6e build): median -5.4K instructions, mean -115K; ratio quantiles q05 0.985, q50 0.998, q95 1.009; `convex_hull` -12%, `segment_tree` -10%, `boyer_moore` -5.5%, the sudoku programs -5%; `edit_distance` +7 to +8% (its scalar loop now unrolls differently; it runs at 0.39x OCaml).
 
+### 6.64 Slice 6g: closed integer tables folded at build time
+
+Some programs build lookup tables at startup: `(def mask-digits (mapv (fn [m] (loop … (conj acc d) …)) (range 1024)))` in the two sudoku programs, `(mapv #(quot % 9) (range 81))`. These are the same longs every run, but on Linux they cost the sudoku programs about 3.05M of their ~3.97M instructions per case. The table's loop runs boxed because its accumulator is a persistent vector, and OCaml solves the whole case in 1.28M.
+
+- **Fold (`clj-aot/src/fold.rs`, `Lowerer::try_fold_init`):** a `def` whose init is `(mapv F (range …))` with literal long bounds, or `(mapv F table)` over an earlier folded `def` whose var is stable at the site, is evaluated at build time when the program cannot rebind core vars.
+  - `F` must be a literal one-arg `fn` or a fn by name.
+  - A bounded evaluator runs `F` per item: `let`, `if`, `do`, `loop`/`recur`, an empty `[]`, `conj` of a long onto a vector, `count`, `not`, and the core long natives, called through their own entries so values and overflow errors are the runtime's.
+  - It declines on any other form, any error, 4M evaluated expressions, more than 65536 longs, an empty range, or a result other than all longs or all rows of longs.
+  - The program then builds the value from the longs in one runtime call (`rt_n_int_table`), and a declined init runs as compiled.
+- **Identity:** at run time every empty row is the one `[]` object of the site it came from, and each non-empty row is a new vector from `conj`, so `rt_n_int_table` builds one shared empty vector and a new vector per non-empty row.
+  - A fold whose empty rows come from two `[]` sites declines.
+  - So does one whose results might be shared objects: a vector literal that is not empty, or rows returned over a folded table.
+- **Verification:** corpus `int_tables.clj`, with output identical between `run` and the native binary. It covers:
+  - Folds: flat, row, and over-a-table tables (over rows and over a flat table), negative steps, `nil` locals, empty rows and their identity, equal rows staying distinct, and appending a keyword or double to a folded row.
+  - Every decline: a program fn, a string, a double, a bool result, a boolean operand of a long op, a pooled literal, two `[]` sites, a var bound, an enclosing local, an empty range, a literal collection source, rows over a table, an overflow caught, a printing init, the step budget, the item cap, `conj` of a string, destructuring, and a non-long native.
+
+Measured (macOS): the sudoku programs' startup with empty stdin falls from 3.83M to 1.90M instructions above the process floor, and every case drops by about 1.9M with identical output.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

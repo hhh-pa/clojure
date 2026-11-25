@@ -47,6 +47,9 @@ mod scalar;
 #[path = "comprehension.rs"]
 mod comprehension;
 
+#[path = "fold.rs"]
+mod fold;
+
 /// "No index" for optional table indices (matches `clj-rt`).
 const NONE: u64 = u64::MAX;
 
@@ -270,6 +273,9 @@ pub struct Lowerer<'ctx> {
     callees: HashMap<(String, String), std::sync::Arc<[Arity]>>,
     /// The front end's eta templates ([`FrontEnd::eta`](clj_eval::aot_front::FrontEnd)).
     eta: HashMap<(String, usize), clj_eval::expr::DirectCall>,
+    /// The integer tables earlier `def`s folded at build time (#271 Slice
+    /// 6g), by var.
+    folded: fold::Known,
     /// Global holding the frozen constant table's base
     /// (`rt_n_consts_base`), stored on entry to `cljtop_0`: call
     /// operands borrow pooled constants in place (#271).
@@ -350,6 +356,7 @@ impl<'ctx> Lowerer<'ctx> {
             direct: HashMap::new(),
             callees: HashMap::new(),
             eta: HashMap::new(),
+            folded: HashMap::new(),
             consts_base: consts_base.as_pointer_value(),
             stable: HashMap::new(),
             dead: HashSet::new(),
@@ -7667,6 +7674,75 @@ impl<'ctx> Lowerer<'ctx> {
         self.const_slice(g, values.len() as u64)
     }
 
+    /// `t = init` built from the longs a build-time fold computed (#271
+    /// Slice 6g, [`fold`]): `(mapv F (range …))` over literal bounds, or
+    /// `(mapv F table)` over an earlier folded `def` whose var is stable
+    /// here, with `F` a literal one-arg `fn` or a fn by name. Only when the
+    /// program cannot rebind core vars (the fold calls their roots).
+    fn try_fold_init(
+        &mut self,
+        f: &FnCtx<'ctx>,
+        sym: &Symbol,
+        init: &Expr,
+        t: PointerValue<'ctx>,
+    ) -> bool {
+        let Some(table) = self.inline_arith.then(|| self.fold_init(f, init)).flatten() else {
+            return false;
+        };
+        let bits: Vec<u64> = table.items.iter().map(|&n| n as u64).collect();
+        let items = self.u64_array(&bits);
+        let ends = self.u64_array(&table.ends);
+        self.call(
+            "rt_n_int_table",
+            None,
+            &[t.into(), items.into(), ends.into()],
+        );
+        let ns = sym.namespace().unwrap_or("user").to_owned();
+        self.folded.insert((ns, sym.name().to_owned()), table);
+        true
+    }
+
+    /// A `def`'s value slot: its init lowered (or folded), else null.
+    fn lower_def_init(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        sym: &Symbol,
+        init: Option<&Expr>,
+    ) -> Result<PointerValue<'ctx>, Unsupported> {
+        let Some(e) = init else {
+            return Ok(self.ptr.const_null());
+        };
+        let t = self.slot(f);
+        if !self.try_fold_init(f, sym, e, t) {
+            self.lower(f, e, t)?;
+        }
+        Ok(t)
+    }
+
+    fn fold_init(&self, f: &FnCtx<'ctx>, init: &Expr) -> Option<fold::Table> {
+        let Expr::DirectNative(call) = init else {
+            return None;
+        };
+        let ("mapv", [fe, coll]) = core_call(init)? else {
+            return None;
+        };
+        let base = f.env.len();
+        let fun = match inline_fn(fe, 1) {
+            Some((_, arity)) => arity,
+            None => &self.named_fn(fe, 1, base, call.span)?.arities[0],
+        };
+        let source = match (core_call(coll), coll) {
+            (Some(("range", args)), _) => fold::Source::Range(args),
+            (_, Expr::Global(var)) if self.stable_of(var).is_some_and(|sr| self.unit > sr.unit) => {
+                let ns = var.sym.namespace().unwrap_or("user").to_owned();
+                let key = (ns, var.sym.name().to_owned());
+                fold::Source::Table(self.folded.get(&key)?)
+            }
+            _ => return None,
+        };
+        fold::fold(fun, base, source)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn lower_def(
         &mut self,
@@ -7707,14 +7783,7 @@ impl<'ctx> Lowerer<'ctx> {
         let id = self
             .call(begin, Some(self.i64t), &[self.u64c(key)])
             .expect("id");
-        let value = match init {
-            Some(e) => {
-                let t = self.slot(f);
-                self.lower(f, e, t)?;
-                t
-            }
-            None => self.ptr.const_null(),
-        };
+        let value = self.lower_def_init(f, sym, init)?;
         let mref = match meta {
             Some(pairs) => {
                 let flat: Vec<Expr> = pairs

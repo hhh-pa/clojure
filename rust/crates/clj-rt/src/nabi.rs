@@ -1180,6 +1180,31 @@ pub extern "C" fn rt_n_into_mapcat(out: &mut Value, f: &Value, coll: &mut Value)
     )
 }
 
+/// `out` = an integer table a build-time fold computed (#271 Slice 6g):
+/// the longs `items` as one vector, or cut at the cumulative `ends` into a
+/// vector of rows, each a new vector of longs, as the `conj`s that built
+/// them made, and every empty row one vector, as the one `[]` they were.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_int_table(out: &mut Value, items: &CSlice<i64>, ends: &CSlice<u64>) {
+    let items = items.get();
+    if ends.get().is_empty() {
+        *out = Value::Vector(clj_value::Vector::from_ints(items.to_vec()));
+        return;
+    }
+    let empty = Value::Vector(clj_value::Vector::from_vec(Vec::new()));
+    let mut start = 0;
+    let rows = ends.get().iter().map(|&end| {
+        let row = &items[start..end as usize];
+        start = end as usize;
+        if row.is_empty() {
+            empty.clone()
+        } else {
+            Value::Vector(clj_value::Vector::from_ints(row.to_vec()))
+        }
+    });
+    *out = Value::Vector(clj_value::Vector::from_vec(rows.collect()));
+}
+
 /// `(vec (sort ...))` over owned sort arguments.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_n_sort_vec(out: &mut Value, args: &mut CSlice<Value>) -> i32 {
@@ -1596,6 +1621,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_first_mapped,
         rt_n_into_mapcat,
         rt_n_sort_vec,
+        rt_n_int_table,
         rt_n_next_mut,
         rt_n_destructure,
         rt_n_destr_map,
