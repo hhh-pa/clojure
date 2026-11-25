@@ -820,6 +820,15 @@ Measured (macOS, per call): `(count (into {} (for [a (range 8) b (range 8) :when
 
 Measured (macOS, per iteration over a shared 6-key map): two pairs 2859 -> 2133 instructions, three pairs 3340 -> 2530.
 
+### 6.61 Slice 6d: single `map` stages and `apply` under whole-sequence consumers
+
+The traversal loops (5x) cover a single `(map F xs)` under `vec`, `into []`, `reduce +`, `dorun` and `count`/`filter`, but not under the other consumers that realize a whole sequence, and not `(apply g (map F xs))`: 32 `(apply str (map …))` sites sit in the programs with INS non-wins.
+
+- **Lowering (`clj-aot/src/comprehension.rs`):** a single unfiltered `map` stage now lowers under the whole-sequence consumers of 6b (`into` with any target, `count`, `sort`, `set`), and `(apply g E)` joins them for `g` among `str`, `max`, `min`, `+`, `*`, `merge`, `vector`, `hash-set` (`applies_whole`: their variadic arity consumes every arg in order; `concat` walks its rest args lazily and stays out): the items run natively into a vector, then the original call takes it. `vec`/`into []` and `reduce +` over a single `map` keep their traversal loops.
+- **Verification:** corpus `comprehensions.clj` (every `apply` fn, `into {}` and `into #{}` over a map, `set`, `count` with side effects in order, `sort`, lists, empty inputs, `(apply max ())`'s arity error, `apply concat` left lazy), output identical between `run` and the native binary.
+
+Measured (macOS): interleaved A/B over all 1754 cases against the same-session 6c build: median -0.4K, mean -4.2K; `value_iteration` -13%, `purged_cv` -5%, `gray_code` -4%, `jones_mueller` -3.7%; no rise above 1.5% outside the randomized quick_sort/quickselect cases.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

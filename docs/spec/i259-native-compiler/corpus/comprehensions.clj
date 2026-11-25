@@ -27,6 +27,17 @@
          (set (for [a xs b xs] (+ a b))) (into {} (for [a xs :when (odd? a)] [a (* a a)])))
 (println (into #{} (for [a xs b xs] (- a b))) (into (sorted-set) (for [a xs :let [b (* 2 a)]] b))
          (into [0] (for [a xs :when (even? a)] a)) (count (for [a [] b xs] a)))
+;; A single `map` under a whole-sequence consumer, and `apply` (Slice 6d).
+(println (apply str (map (fn [a] (str a "-")) xs)) (apply max (map (fn [a] (* a a)) xs))
+         (apply min (for [a xs :when (odd? a)] (- a))) (apply + (map inc (range 4)))
+         (apply * (map (fn [a] a) [2 3])) (apply merge (map (fn [a] {a (* 2 a)}) xs)))
+(println (apply vector (map (fn [a] [a]) xs)) (apply hash-set (map (fn [a] (rem a 2)) xs))
+         (into {} (map (fn [a] [a (inc a)]) xs)) (set (map (fn [a] (rem a 3)) (range 7)))
+         (count (map (fn [a] (println "side" a) a) [1 2])) (sort (map (fn [a] (- a)) xs)))
+(println (apply str (map (fn [a] a) (list "x" "y"))) (into #{} (map (fn [[k v]] (+ k v)) {1 2 3 4}))
+         (apply str (map (fn [a] a) [])) (apply max (map inc (list 1 5 2))))
+(println (try (apply max (map (fn [a] a) [])) (catch Exception e (.getMessage e)))
+         (apply concat (map (fn [a] [a a]) [1 2])))
 ;; `(reduce + [init] E)` folds the items as they come (Slice 6b).
 (println (reduce + (for [a xs b xs :when (< a b)] (* a b))) (reduce + 0.5 (for [a xs :when (odd? a)] a))
          (reduce + (for [a [] b xs] a)) (reduce + (for [a ["x"] :when (string? a)] a))

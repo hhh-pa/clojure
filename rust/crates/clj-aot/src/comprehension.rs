@@ -96,10 +96,20 @@ fn consumer_of(call: &DirectCall) -> Option<(Consumer<'_>, &Expr)> {
         ("into", [Expr::VecLit(items, None), e]) if items.is_empty() => (Consumer::Vector, e),
         ("into", [to, e]) => (Consumer::Call(Some(to)), e),
         ("count" | "sort" | "set", [e]) => (Consumer::Call(None), e),
+        ("apply", [g, e]) if applies_whole(g) => (Consumer::Call(Some(g)), e),
         ("reduce", [p, init, e]) if plus(p) => (Consumer::Sum(Some(init)), e),
         ("reduce", [p, e]) if plus(p) => (Consumer::Sum(None), e),
         _ => return None,
     })
+}
+
+/// `clojure.core` fns whose variadic arity consumes every arg in order, so
+/// `(apply g E)` realizes the whole sequence `E` (#271 Slice 6d) — not
+/// `concat`, which walks its rest args lazily.
+fn applies_whole(g: &Expr) -> bool {
+    ["str", "max", "min", "+", "*", "merge", "vector", "hash-set"]
+        .iter()
+        .any(|name| is_core_global(g, name))
 }
 
 /// `e` as a comprehension stage whose whole shape lowers here.
@@ -186,7 +196,11 @@ impl<'ctx> Lowerer<'ctx> {
         let Some((consumer, e)) = consumer_of(call) else {
             return Ok(false);
         };
-        let Some(st) = stage(e).filter(|s| s.kind != Kind::Map) else {
+        // A single unfiltered binding under `vec`/`into []` or `reduce +` is
+        // a traversal loop already (see `hof_loop`); under the other
+        // consumers it runs here too (#271 Slice 6d).
+        let single_ok = matches!(consumer, Consumer::Call(_));
+        let Some(st) = stage(e).filter(|s| s.kind != Kind::Map || single_ok) else {
             return Ok(false);
         };
         let (prior, sink) = match consumer {
