@@ -811,6 +811,15 @@ Measured (macOS): a nested 10x10 `(vec (for …))` 121.8K -> 52.7K instructions 
 
 Measured (macOS, per call): `(count (into {} (for [a (range 8) b (range 8) :when (< a b)] …)))` 260K -> 178K instructions, `(reduce + 0.0 (for [k (range 50) :when …] (nth w k)))` 37.3K -> 4.9K.
 
+### 6.60 Slice 6c: multi-pair `assoc` as a chain of owned updates
+
+`(assoc m k1 v1 k2 v2 …)` went through the generic core call (args borrowed and cloned, so every pair copied a shared map or vector again): on a shared 6-key map the second pair cost ~1300 instructions against ~500 for a chained `(-> m (assoc k1 v1) (assoc k2 v2))`, whose second step updates the copy the first made in place. The programs with INS non-wins have 31 multi-pair `assoc` sites in 8 files (82 across all programs).
+
+- **Lowering (`try_lower_assoc_chain`, `clj-aot/src/native.rs`):** with 5 or more args and an odd count, every arg is evaluated first, in order (a local at its last use moved into its slot, as owned calls take it), then one owned three-arg `assoc` per pair (`rt_n_assoc_own3`, after the in-place bitcode path for vectors), each over the previous result: exactly `assoc`'s definition, so values, errors (out-of-range index, non-associative target) and metadata are the call's. An even count (a missing value) keeps the general call and its message.
+- **Verification:** corpus `assoc_chain.clj` (maps, vectors, nil, repeated keys, shared originals left intact, loop accumulators moved and not moved, argument side-effect order, out-of-range and cast errors, the odd-argument error, metadata), output identical between `run` and the native binary.
+
+Measured (macOS, per iteration over a shared 6-key map): two pairs 2859 -> 2133 instructions, three pairs 3340 -> 2530.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

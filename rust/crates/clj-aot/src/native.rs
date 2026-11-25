@@ -3779,6 +3779,76 @@ impl<'ctx> Lowerer<'ctx> {
         self.lower_direct_with(f, call, None, dest)
     }
 
+    /// A specialized `assoc`: an indexed vector step, else a multi-pair chain.
+    fn try_lower_assoc_call(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if self.try_lower_assoc_nth_step(f, call, dest)? {
+            return Ok(true);
+        }
+        self.try_lower_assoc_chain(f, call, dest)
+    }
+
+    /// `(assoc m k1 v1 k2 v2 …)` as the chain `assoc` is defined as (#271
+    /// Slice 6c): every arg evaluated first, in order (a local at its last
+    /// use moved, as owned calls take it), then one owned three-arg
+    /// `assoc` per pair, so a version the first pair copies from a shared
+    /// map or vector is updated in place by the rest. (The variadic call
+    /// went through the generic core call: ~1300 instructions for the
+    /// second pair against ~500 chained.) An odd arg count keeps the
+    /// general call and its error.
+    fn try_lower_assoc_chain(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        let n = call.args.len();
+        if n < 5 || n.is_multiple_of(2) {
+            return Ok(false);
+        }
+        let k = self.var_of(&call.var);
+        let mut vals = Vec::with_capacity(n);
+        for a in &call.args {
+            let s = self.slot(f);
+            match a {
+                Expr::Local(i) if is_move(f, a) && self.slot_of(f, *i).is_some() => {
+                    let src = self.slot_of(f, *i).expect("checked");
+                    self.move_v(f.func, s, src);
+                }
+                _ => self.lower(f, a, s)?,
+            }
+            vals.push(s);
+        }
+        let acc = vals[0];
+        for pair in vals[1..].chunks(2) {
+            let (arr, elems) = self.slot_array(f, 3);
+            for (e, src) in elems.iter().zip([acc, pair[0], pair[1]]) {
+                self.move_v(f.func, *e, src);
+            }
+            let lean_done = self.try_lean_own(f, Some("assoc"), 3, acc, arr, &elems);
+            let st = self
+                .call(
+                    "rt_n_assoc_own3",
+                    Some(self.i32t),
+                    &[acc.into(), self.u64c(k), arr.into()],
+                )
+                .expect("assoc status");
+            self.check(f, st);
+            if let Some(done) = lean_done {
+                self.builder.build_unconditional_branch(done).expect("br");
+                self.builder.position_at_end(done);
+            }
+            self.free_slot_array(f, arr, elems);
+        }
+        self.move_v(f.func, dest, acc);
+        self.free_slots(f, &vals);
+        Ok(true)
+    }
+
     fn try_lower_assoc_nth_step(
         &mut self,
         f: &mut FnCtx<'ctx>,
@@ -3996,7 +4066,7 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(false);
         }
         let specialized = match call.var.sym.name() {
-            "assoc" => self.try_lower_assoc_nth_step(f, call, dest),
+            "assoc" => self.try_lower_assoc_call(f, call, dest),
             "first" => self.try_lower_first_mapped(f, call, dest),
             "into" => self.try_lower_into_mapcat(f, call, dest),
             "vec" => self.try_lower_sort_vec(f, call, dest),
