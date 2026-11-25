@@ -49,6 +49,11 @@ echo "== build $ws (blank order)"
   && cargo rustc --release --locked -p clj-rt --crate-type staticlib) > "$work/build.log" 2>&1 \
   || { tail -30 "$work/build.log" >&2; exit 1; }
 compiler=$ws/target/release/clojure-rs
+# Profiles name functions, so the workloads link with their symbols
+# (release builds strip them, #271); revisions before that flag keep
+# symbols anyway.
+keep=()
+"$compiler" build --help 2>/dev/null | grep -q -- --keep-symbols && keep=(--keep-symbols)
 
 echo "== profile the workloads"
 # Every workload links as `prog`, the object hot_text.py reads.
@@ -57,7 +62,7 @@ for w in "$here"/workloads/*.clj "$here"/aot-workloads/*.clj; do
   name=$(basename "$w" .clj)
   input=${w%.clj}.in
   [ -f "$input" ] || input=/dev/null
-  "$compiler" build "$w" -o "$work/prog" > /dev/null 2> "$work/$name.err" || {
+  "$compiler" build "${keep[@]}" "$w" -o "$work/prog" > /dev/null 2> "$work/$name.err" || {
     tail -n 5 "$work/$name.err" >&2
     echo "regen-aot: workload $name failed to compile" >&2
     exit 1
@@ -75,7 +80,7 @@ echo "== profile the compiler corpus"
 corpus=$(cd "$here/../../../docs/spec/i259-native-compiler/corpus" && pwd)
 for c in "$corpus"/*.clj; do
   name=corpus-$(basename "$c" .clj)
-  "$compiler" build "$c" -o "$work/prog" > /dev/null 2>&1 || continue
+  "$compiler" build "${keep[@]}" "$c" -o "$work/prog" > /dev/null 2>&1 || continue
   valgrind --tool=callgrind --demangle=no --dump-instr=no \
     --callgrind-out-file="$work/cg/$name.cg" "$work/prog" < /dev/null > /dev/null 2>&1 || true
 done

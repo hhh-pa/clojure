@@ -32,7 +32,9 @@ printf '%s\n' '/* Placeholder while scripts/bench/hot-text/regen-run.sh profiles
   'SECTIONS' '{' '  .text.hot :' '  {' '  }' '}' 'INSERT BEFORE .text;' > "$order"
 
 echo "== build $ws --no-default-features (blank order)"
-(cd "$ws" && cargo build --release --locked --no-default-features -p clojure-rs) > "$work/build.log" 2>&1 \
+# Profiles name functions: keep the symbols release builds strip (#271).
+(cd "$ws" && CARGO_PROFILE_RELEASE_STRIP=false \
+  cargo build --release --locked --no-default-features -p clojure-rs) > "$work/build.log" 2>&1 \
   || { tail -30 "$work/build.log" >&2; exit 1; }
 bin=$ws/target/release/clojure-rs
 

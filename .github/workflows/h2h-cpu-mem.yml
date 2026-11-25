@@ -581,6 +581,13 @@ jobs:
           cargo rustc --release --locked -p clj-rt --crate-type staticlib
           mkdir -p "$GITHUB_WORKSPACE/aot-from-bin"
           cp target/release/clojure-rs target/release/libcljrt.a "$GITHUB_WORKSPACE/aot-from-bin/"
+          # The x86-64-v3 runtime (#271), for revisions whose `build` links
+          # it on hosts that run v3 code (the runners do).
+          if target/release/clojure-rs build --help | grep -q -- --portable; then
+            CARGO_TARGET_DIR=target-v3 RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=x86-64-v3" \
+              cargo rustc --release --locked -p clj-rt --crate-type staticlib
+            cp target-v3/release/libcljrt.a "$GITHUB_WORKSPACE/aot-from-bin/libcljrt-v3.a"
+          fi
           if [ -f hot-text.ld ]; then cp hot-text.ld "$GITHUB_WORKSPACE/aot-from-bin/"; fi
           printf '(println (+ 1 2))\n' > "$RUNNER_TEMP/aot-from-smoke.clj"
           "$GITHUB_WORKSPACE/aot-from-bin/clojure-rs" build "$RUNNER_TEMP/aot-from-smoke.clj" -o "$RUNNER_TEMP/aot-from-smoke"
@@ -594,6 +601,13 @@ jobs:
           cargo rustc --release --locked -p clj-rt --crate-type staticlib
           mkdir -p "$GITHUB_WORKSPACE/aot-to-bin"
           cp target/release/clojure-rs target/release/libcljrt.a "$GITHUB_WORKSPACE/aot-to-bin/"
+          # The x86-64-v3 runtime (#271), for revisions whose `build` links
+          # it on hosts that run v3 code (the runners do).
+          if target/release/clojure-rs build --help | grep -q -- --portable; then
+            CARGO_TARGET_DIR=target-v3 RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=x86-64-v3" \
+              cargo rustc --release --locked -p clj-rt --crate-type staticlib
+            cp target-v3/release/libcljrt.a "$GITHUB_WORKSPACE/aot-to-bin/libcljrt-v3.a"
+          fi
           if [ -f hot-text.ld ]; then cp hot-text.ld "$GITHUB_WORKSPACE/aot-to-bin/"; fi
           printf '(println (+ 1 2))\n' > "$RUNNER_TEMP/aot-to-smoke.clj"
           "$GITHUB_WORKSPACE/aot-to-bin/clojure-rs" build "$RUNNER_TEMP/aot-to-smoke.clj" -o "$RUNNER_TEMP/aot-to-smoke"

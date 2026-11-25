@@ -118,6 +118,14 @@ jobs:
       # (#259: 63 MB -> 19 MB, AOT/run instructions geomean
       # 0.92 -> 0.82 locally).
       - run: cargo rustc --release --locked -p clj-rt --crate-type staticlib
+      # Linux x86-64 also ships the runtime built for x86-64-v3 (#271):
+      # `build` links it on hosts that run v3 code (`--portable` opts out).
+      - name: x86-64-v3 runtime archive
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: |
+          CARGO_TARGET_DIR=target-v3 RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=x86-64-v3" \
+            cargo rustc --release --locked -p clj-rt --crate-type staticlib
+          cp target-v3/release/libcljrt.a target/release/libcljrt-v3.a
       - name: package binary
         shell: bash
         run: |
@@ -151,6 +159,9 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then
             cp hot-text.ld target/release/hot-text.ld
             extra=(hot-text.ld)
+          fi
+          if [ -f target/release/libcljrt-v3.a ]; then
+            extra+=(libcljrt-v3.a)
           fi
           tar -czf "$asset" -C target/release "$(basename "$bin")" "$(basename "$archive")" "${extra[@]}"
           # Packaging smoke (S7D): the shipped artifact itself must

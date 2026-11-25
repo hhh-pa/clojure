@@ -22,6 +22,8 @@ fn no_link() -> LinkOptions {
         runtime_archive: None,
         exe_dir: tmp("no-such-dir"),
         linker: Some("clj-aot-definitely-not-a-linker".to_owned()),
+        keep_symbols: false,
+        portable: false,
     }
 }
 

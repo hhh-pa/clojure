@@ -47,6 +47,42 @@ pub fn archive_name(platform: Platform) -> &'static str {
     }
 }
 
+/// The runtime archive built for x86-64-v3 CPUs (#271: AVX2, BMI2,
+/// FMA, …; ~2-4% fewer instructions on Linux), shipped next to the
+/// baseline one on Linux x86-64 and linked when the host runs v3 code.
+pub const V3_ARCHIVE: &str = "libcljrt-v3.a";
+
+/// Whether the host CPU runs x86-64-v3 code: every feature the level
+/// adds (a binary linked against [`V3_ARCHIVE`] would fault on a CPU
+/// missing one).
+#[cfg(target_arch = "x86_64")]
+#[must_use]
+pub fn host_has_x86_64_v3() -> bool {
+    use std::arch::is_x86_feature_detected as has;
+    has!("cmpxchg16b")
+        && has!("popcnt")
+        && has!("sse3")
+        && has!("ssse3")
+        && has!("sse4.1")
+        && has!("sse4.2")
+        && has!("avx")
+        && has!("avx2")
+        && has!("bmi1")
+        && has!("bmi2")
+        && has!("f16c")
+        && has!("fma")
+        && has!("lzcnt")
+        && has!("movbe")
+        && has!("xsave")
+}
+
+/// Whether the host CPU runs x86-64-v3 code (never off x86-64).
+#[cfg(not(target_arch = "x86_64"))]
+#[must_use]
+pub fn host_has_x86_64_v3() -> bool {
+    false
+}
+
 /// Link failures (the CLI renders these as `build: ...`, exit 3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkError {
@@ -65,11 +101,14 @@ impl std::fmt::Display for LinkError {
 }
 
 /// Find the runtime archive: the `--runtime-archive` override file
-/// when given, else [`archive_name`] next to the executable.
+/// when given, else [`V3_ARCHIVE`] next to the executable when
+/// `prefer_v3` (the host runs v3 code and the build is not
+/// `--portable`) and it is there, else [`archive_name`] there.
 pub fn find_archive(
     exe_dir: &Path,
     override_file: Option<&Path>,
     platform: Platform,
+    prefer_v3: bool,
 ) -> Result<PathBuf, LinkError> {
     if let Some(path) = override_file {
         if path.is_file() {
@@ -79,6 +118,10 @@ pub fn find_archive(
             "runtime archive not found: {}",
             path.display()
         )));
+    }
+    let v3 = exe_dir.join(V3_ARCHIVE);
+    if prefer_v3 && v3.is_file() {
+        return Ok(v3);
     }
     let candidate = exe_dir.join(archive_name(platform));
     if candidate.is_file() {
@@ -156,6 +199,25 @@ pub fn static_args(linux: bool) -> Vec<String> {
     ]
     .map(str::to_owned)
     .to_vec()
+}
+
+/// Strip the symbol table from a linked native binary (#271: a release
+/// binary carries none; symbols are never loaded, so only the file
+/// shrinks) unless `keep` (`clojure-rs build --keep-symbols`, for
+/// profilers that name functions): `--strip-all` on Linux, local and
+/// debug symbols on macOS (`ld64` keeps the globals). Windows links
+/// keep symbols in a separate PDB, so nothing to strip.
+#[must_use]
+pub fn strip_args(linux: bool, macos: bool, keep: bool) -> Vec<String> {
+    if keep {
+        Vec::new()
+    } else if linux {
+        vec!["-Wl,--strip-all".to_owned()]
+    } else if macos {
+        vec!["-Wl,-x".to_owned(), "-Wl,-S".to_owned()]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Dead-strip unreferenced sections when linking a native binary (`--gc-sections`
@@ -417,11 +479,11 @@ mod tests {
         let file = dir.join("custom.a");
         std::fs::write(&file, b"archive").expect("tmp file");
         assert_eq!(
-            find_archive(&dir, Some(&file), Platform::Unix),
+            find_archive(&dir, Some(&file), Platform::Unix, true),
             Ok(file.clone())
         );
         assert_eq!(
-            find_archive(&dir, Some(&dir.join("missing.a")), Platform::Unix),
+            find_archive(&dir, Some(&dir.join("missing.a")), Platform::Unix, false),
             Err(LinkError::ArchiveNotFound(format!(
                 "runtime archive not found: {}",
                 dir.join("missing.a").display()
@@ -436,9 +498,24 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("tmp dir");
         let unix = dir.join("libcljrt.a");
         std::fs::write(&unix, b"archive").expect("tmp file");
-        assert_eq!(find_archive(&dir, None, Platform::Unix), Ok(unix));
         assert_eq!(
-            find_archive(&dir, None, Platform::Windows),
+            find_archive(&dir, None, Platform::Unix, false),
+            Ok(unix.clone())
+        );
+        // No v3 archive next to the binary: the baseline one.
+        assert_eq!(
+            find_archive(&dir, None, Platform::Unix, true),
+            Ok(unix.clone())
+        );
+        let v3 = dir.join(super::V3_ARCHIVE);
+        std::fs::write(&v3, b"archive").expect("tmp file");
+        assert_eq!(find_archive(&dir, None, Platform::Unix, true), Ok(v3));
+        assert_eq!(find_archive(&dir, None, Platform::Unix, false), Ok(unix));
+        // The host check answers (a v3 runner or not, the archive name
+        // stays the same).
+        let _ = super::host_has_x86_64_v3();
+        assert_eq!(
+            find_archive(&dir, None, Platform::Windows, false),
             Err(LinkError::ArchiveNotFound(format!(
                 "runtime archive not found next to the binary ({}); pass --runtime-archive",
                 dir.join("cljrt.lib").display()
@@ -447,7 +524,7 @@ mod tests {
         assert_eq!(
             format!(
                 "{}",
-                find_archive(&dir, None, Platform::Windows).expect_err("missing")
+                find_archive(&dir, None, Platform::Windows, false).expect_err("missing")
             ),
             format!(
                 "runtime archive not found next to the binary ({}); pass --runtime-archive",
@@ -455,6 +532,15 @@ mod tests {
             )
         );
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn strip_args_per_platform_unless_kept() {
+        assert_eq!(super::strip_args(true, false, false), ["-Wl,--strip-all"]);
+        assert_eq!(super::strip_args(false, true, false), ["-Wl,-x", "-Wl,-S"]);
+        assert!(super::strip_args(false, false, false).is_empty());
+        assert!(super::strip_args(true, false, true).is_empty());
+        assert!(super::strip_args(false, true, true).is_empty());
     }
 
     #[test]

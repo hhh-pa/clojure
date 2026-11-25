@@ -61,6 +61,12 @@ pub struct LinkOptions {
     pub exe_dir: PathBuf,
     /// Linker program override (default: `cc` / `link`).
     pub linker: Option<String>,
+    /// Keep the symbol table (`--keep-symbols`, for profilers); linked
+    /// binaries are stripped by default ([`link::strip_args`]).
+    pub keep_symbols: bool,
+    /// Link the baseline runtime archive even on a host that runs
+    /// x86-64-v3 code (`--portable`: a binary for other machines).
+    pub portable: bool,
 }
 
 /// Compilation failures (the CLI maps IO/link/archive to exit 3
@@ -402,8 +408,14 @@ fn finish(
     let tmp = temp_obj_path();
     target::emit_object(&machine, module, &tmp).map_err(CompileError::Emit)?;
     let platform = current_platform();
-    let archive = find_archive(&link.exe_dir, link.runtime_archive.as_deref(), platform)
-        .map_err(CompileError::Link)?;
+    let prefer_v3 = !link.portable && link::host_has_x86_64_v3();
+    let archive = find_archive(
+        &link.exe_dir,
+        link.runtime_archive.as_deref(),
+        platform,
+        prefer_v3,
+    )
+    .map_err(CompileError::Link)?;
     let linux = cfg!(target_os = "linux");
     let script_path = tmp.with_extension("ld");
     let script =
@@ -413,6 +425,11 @@ fn finish(
     cmd.args.extend(link::gc_section_args(
         cfg!(target_os = "linux"),
         cfg!(target_os = "macos"),
+    ));
+    cmd.args.extend(link::strip_args(
+        cfg!(target_os = "linux"),
+        cfg!(target_os = "macos"),
+        link.keep_symbols,
     ));
     // Linux tries the static link first (see `link::static_args`); the
     // plain command stays the fallback (and the only attempt elsewhere).

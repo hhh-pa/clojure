@@ -188,6 +188,8 @@ fn build_and_run(name: &str, source: &str) -> (String, String, i32) {
             runtime_archive: Some(ensure_archive()),
             exe_dir: dir.clone(),
             linker: None,
+            keep_symbols: false,
+            portable: false,
         },
     )
     .expect("compile");
@@ -291,6 +293,8 @@ fn build_mode_and_run(name: &str, source: &str, args: &[&str]) -> (String, Strin
             runtime_archive: Some(ensure_archive()),
             exe_dir: dir.clone(),
             linker: None,
+            keep_symbols: false,
+            portable: false,
         },
         clj_aot::BuildMode::Mixed,
     )
@@ -460,6 +464,8 @@ fn native_binary_exercises_lite_ns_stdin_and_full_cli() {
             runtime_archive: Some(ensure_archive()),
             exe_dir: dir.clone(),
             linker: None,
+            keep_symbols: false,
+            portable: false,
         },
         clj_aot::BuildMode::Mixed,
     )
@@ -796,6 +802,40 @@ fn native_nth_front_and_small_set_lookups_match_general_reads_271() {
             0
         )
     );
+}
+
+/// Release binaries ship without their symbol table; `--keep-symbols`
+/// keeps it for profilers (#271). Same program, same output.
+#[cfg(unix)]
+#[test]
+fn native_binaries_strip_symbols_unless_kept_271() {
+    let dir = tmp("strip-symbols");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let build = |keep_symbols: bool, name: &str| {
+        let out = dir.join(name);
+        clj_aot::build_str(
+            "(println (reduce + (range 10)))",
+            "f.clj",
+            &out,
+            &EmitOptions::default(),
+            &LinkOptions {
+                runtime_archive: Some(ensure_archive()),
+                exe_dir: dir.clone(),
+                linker: None,
+                keep_symbols,
+                portable: false,
+            },
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("build");
+        let ran = Command::new(&out).output().expect("run binary");
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "45\n");
+        std::fs::metadata(&out).expect("binary").len()
+    };
+    let stripped = build(false, "stripped");
+    let kept = build(true, "kept");
+    assert!(stripped < kept, "stripped {stripped} vs kept {kept}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
 }
 
 #[test]
