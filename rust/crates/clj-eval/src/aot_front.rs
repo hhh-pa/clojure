@@ -226,15 +226,27 @@ fn params_in_order(args: &[Expr], n: usize) -> bool {
 /// The `(name, params)` of every `clojure.core` fn `e` passes by name
 /// as the first argument of a traversal ([`eta_params`]).
 fn eta_wanted(e: &Expr, out: &mut BTreeSet<(String, usize)>) {
-    if let Expr::DirectNative(call) = e
-        && call.var.sym.namespace() == Some("clojure.core")
-        && let Some(n) = eta_params(call.var.sym.name(), call.args.len())
-        && let Some(Expr::Global(f)) = call.args.first()
-        && f.sym.namespace() == Some("clojure.core")
-    {
-        out.insert((f.sym.name().to_owned(), n));
+    if let Some(key) = eta_want(e) {
+        out.insert(key);
     }
     for_each_child(e, &mut |c| eta_wanted(c, out));
+}
+
+/// [`eta_wanted`] at one node (no let-chains: MSRV 1.85).
+fn eta_want(e: &Expr) -> Option<(String, usize)> {
+    let Expr::DirectNative(call) = e else {
+        return None;
+    };
+    if call.var.sym.namespace() != Some("clojure.core") {
+        return None;
+    }
+    let n = eta_params(call.var.sym.name(), call.args.len())?;
+    match call.args.first() {
+        Some(Expr::Global(f)) if f.sym.namespace() == Some("clojure.core") => {
+            Some((f.sym.name().to_owned(), n))
+        }
+        _ => None,
+    }
 }
 
 /// Read, expand, and analyze every top-level form of `text`.

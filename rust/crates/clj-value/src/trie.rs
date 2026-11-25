@@ -445,32 +445,37 @@ impl<T: Clone> FromIterator<T> for PVec<T> {
 }
 
 /// Longest flat packed run: past it packed items live in the trie.
-/// A shared update clones a flat run whole (`Arc::make_mut`), and
-/// loop-threaded vectors are shared at update time, so an unbounded
+/// A shared update clones a flat run whole (the vector's `Arc::make_mut`),
+/// and loop-threaded vectors are shared at update time, so an unbounded
 /// flat run turns `conj`/`assoc` chains quadratic (#227); at or below
 /// this a shared update copies at most 8 KB, and reads index directly.
+/// A longer flat run (built in one piece) moves into the trie at its
+/// first shared update instead ([`Packed::to_trie`]).
 pub(crate) const FLAT_MAX: usize = 1024;
 
 /// Packed scalar storage (`i64`/`char` vector items, #226): a flat
 /// run up to [`FLAT_MAX`] items (direct reads, in-place writes when
 /// unique), the trie past it (log-time shared updates, still 8 or 4
-/// bytes per item).
+/// bytes per item). The flat run lives inline in the vector's own
+/// shared data (#271: one allocation fewer per vector, one pointer
+/// fewer per read): the vector's `Arc` is its only sharing, so every
+/// write here runs on uniquely held storage.
 #[derive(Clone, Debug)]
 pub(crate) enum Packed<T> {
-    Flat(Arc<Vec<T>>),
+    Flat(Vec<T>),
     Trie(PVec<T>),
 }
 
 impl<T: Clone> Packed<T> {
     /// Flat packed storage (direct reads, unwrap on owned transient).
     pub(crate) fn flat(items: Vec<T>) -> Self {
-        Packed::Flat(Arc::new(items))
+        Packed::Flat(items)
     }
 
     /// Packed storage over `items` in order.
     pub(crate) fn from_vec(items: Vec<T>) -> Self {
         if items.len() <= FLAT_MAX {
-            Packed::Flat(Arc::new(items))
+            Packed::Flat(items)
         } else {
             Packed::Trie(PVec::from_vec(items))
         }
@@ -485,7 +490,7 @@ impl<T: Clone> Packed<T> {
 
     pub(crate) fn into_vec(self) -> Vec<T> {
         match self {
-            Packed::Flat(a) => Arc::unwrap_or_clone(a),
+            Packed::Flat(a) => a,
             Packed::Trie(t) => t.into_vec(),
         }
     }
@@ -509,7 +514,7 @@ impl<T: Clone> Packed<T> {
     /// Append (a full flat run moves into the trie first).
     pub(crate) fn push(&mut self, x: T) {
         match self {
-            Packed::Flat(a) if a.len() < FLAT_MAX => Arc::make_mut(a).push(x),
+            Packed::Flat(a) if a.len() < FLAT_MAX => a.push(x),
             Packed::Flat(a) => {
                 let mut t: PVec<T> = a.iter().cloned().collect();
                 t.push_back_mut(x);
@@ -525,10 +530,8 @@ impl<T: Clone> Packed<T> {
             return false;
         };
         if let Packed::Flat(a) = self {
-            if a.len() + src.len() <= FLAT_MAX || Arc::strong_count(a) == 1 {
-                Arc::make_mut(a).extend_from_slice(src);
-                return true;
-            }
+            a.extend_from_slice(src);
+            return true;
         }
         for x in src {
             self.push(x.clone());
@@ -536,35 +539,38 @@ impl<T: Clone> Packed<T> {
         true
     }
 
-    /// The flat run's items when this handle holds them alone (#271
-    /// lean owned updates): `None` for shared runs and the trie.
+    /// The flat run's items (#271 lean owned updates; the caller holds
+    /// the vector alone): `None` for the trie.
     #[inline(always)]
     pub(crate) fn unique_flat_mut(&mut self) -> Option<&mut Vec<T>> {
         match self {
-            Packed::Flat(a) => Arc::get_mut(a),
+            Packed::Flat(a) => Some(a),
             Packed::Trie(_) => None,
         }
+    }
+
+    /// Whether this is a flat run past [`FLAT_MAX`] (built in one
+    /// piece), which a shared update moves into the trie rather than
+    /// copying ([`to_trie`](Self::to_trie)).
+    pub(crate) fn is_long_flat(&self) -> bool {
+        matches!(self, Packed::Flat(a) if a.len() > FLAT_MAX)
+    }
+
+    /// The same items in the trie (a long flat run's first shared update).
+    pub(crate) fn to_trie(&self) -> Self {
+        Packed::Trie(self.iter().cloned().collect())
     }
 
     /// Replace the item at `i` (`false` when out of bounds).
     pub(crate) fn set(&mut self, i: usize, x: T) -> bool {
         match self {
-            Packed::Flat(a) => {
-                if Arc::strong_count(a) > 1 && a.len() > FLAT_MAX {
-                    let mut t: PVec<T> = a.iter().cloned().collect();
-                    let ok = t.set_mut(i, x);
-                    *self = Packed::Trie(t);
-                    ok
-                } else {
-                    match Arc::make_mut(a).get_mut(i) {
-                        Some(slot) => {
-                            *slot = x;
-                            true
-                        }
-                        None => false,
-                    }
+            Packed::Flat(a) => match a.get_mut(i) {
+                Some(slot) => {
+                    *slot = x;
+                    true
                 }
-            }
+                None => false,
+            },
             Packed::Trie(t) => t.set_mut(i, x),
         }
     }
@@ -573,15 +579,8 @@ impl<T: Clone> Packed<T> {
     pub(crate) fn replace(&mut self, i: usize, x: T) -> Option<T> {
         match self {
             Packed::Flat(a) => {
-                if Arc::strong_count(a) > 1 && a.len() > FLAT_MAX {
-                    let mut t: PVec<T> = a.iter().cloned().collect();
-                    let old = t.replace_mut(i, x);
-                    *self = Packed::Trie(t);
-                    old
-                } else {
-                    let slot = Arc::make_mut(a).get_mut(i)?;
-                    Some(std::mem::replace(slot, x))
-                }
+                let slot = a.get_mut(i)?;
+                Some(std::mem::replace(slot, x))
             }
             Packed::Trie(t) => t.replace_mut(i, x),
         }
@@ -590,16 +589,7 @@ impl<T: Clone> Packed<T> {
     /// Drop the last item (`false` when empty).
     pub(crate) fn pop(&mut self) -> bool {
         match self {
-            Packed::Flat(a) => {
-                if Arc::strong_count(a) > 1 && a.len() > FLAT_MAX {
-                    let mut t: PVec<T> = a.iter().cloned().collect();
-                    let ok = t.drop_last_mut();
-                    *self = Packed::Trie(t);
-                    ok
-                } else {
-                    !a.is_empty() && Arc::make_mut(a).pop().is_some()
-                }
-            }
+            Packed::Flat(a) => a.pop().is_some(),
             Packed::Trie(t) => t.drop_last_mut(),
         }
     }
@@ -855,14 +845,16 @@ mod tests {
         assert_eq!(p.get(1), Some(&20));
         assert_eq!(p.replace(10, 99), None);
 
-        // Flat shared > FLAT_MAX
+        // A flat run past FLAT_MAX moves into the trie (the vector's first
+        // shared update, #271).
         let items: Vec<i64> = (0..=FLAT_MAX).map(|x| x as i64).collect();
-        let mut p_shared = Packed::flat(items);
-        let clone = p_shared.clone();
+        let long = Packed::flat(items);
+        assert!(long.is_long_flat() && !p.is_long_flat());
+        let mut p_shared = long.to_trie();
+        assert!(matches!(p_shared, Packed::Trie(_)) && !p_shared.is_long_flat());
         assert_eq!(p_shared.replace(5, 500), Some(5));
-        assert!(matches!(p_shared, Packed::Trie(_)));
         assert_eq!(p_shared.get(5), Some(&500));
-        drop(clone);
+        assert_eq!(long.get(5), Some(&5));
 
         // Trie replace
         assert_eq!(p_shared.replace(10, 1000), Some(10));

@@ -8804,6 +8804,9 @@ fn one_hof_loop<'a>(
         1
     };
     let lf = fns.of(fe, n_params)?;
+    if lf.eta.is_some() && lazy_colls(coll, coll2) {
+        return None;
+    }
     Some(HofLoop {
         kind,
         fun: lf.fun,
@@ -8815,6 +8818,53 @@ fn one_hof_loop<'a>(
         inner: call,
         outer: None,
     })
+}
+
+/// Whether a traversal's collection is a lazy sequence a core call makes
+/// (`(map …)`, `(filter …)`, `(concat …)`, …): the runtime walks such a
+/// sequence fused with its consumer, so a traversal of a core fn by name
+/// over it keeps the plain call (#271) — the inline loop would take its
+/// general path over the realized sequence instead.
+fn lazy_colls(coll: &Expr, coll2: Option<&Expr>) -> bool {
+    let lazy = |e: &Expr| {
+        matches!(
+            core_call(e),
+            Some((
+                "map"
+                    | "filter"
+                    | "remove"
+                    | "mapcat"
+                    | "keep"
+                    | "map-indexed"
+                    | "keep-indexed"
+                    | "take"
+                    | "drop"
+                    | "take-while"
+                    | "drop-while"
+                    | "concat"
+                    | "distinct"
+                    | "interleave"
+                    | "interpose"
+                    | "partition"
+                    | "partition-all"
+                    | "rest"
+                    | "next"
+                    | "seq"
+                    | "cons"
+                    | "reverse"
+                    | "sort"
+                    | "sort-by"
+                    | "keys"
+                    | "vals"
+                    | "repeat"
+                    | "iterate"
+                    | "cycle"
+                    | "__for-keep*",
+                _
+            ))
+        )
+    };
+    lazy(coll) || coll2.is_some_and(lazy)
 }
 
 /// `(reduce + [init] (map F xs [ys]))`, or (#271) `(reduce + [init] xs)` as
@@ -8832,6 +8882,9 @@ fn sum_hof_loop<'a>(
     if let Some(mut hl) = inner_hof_loop(inner, &["map"], HofKind::Sum, outer, Some(plus), fns) {
         hl.init = init;
         return Some(hl);
+    }
+    if lazy_colls(inner, None) {
+        return None;
     }
     let lf = fns.identity(plus)?;
     Some(HofLoop {
@@ -8906,6 +8959,9 @@ fn inner_hof_loop<'a>(
         return None;
     }
     let lf = fns.of(fe, n_params)?;
+    if lf.eta.is_some() && lazy_colls(coll, coll2) {
+        return None;
+    }
     Some(HofLoop {
         kind,
         fun: lf.fun,

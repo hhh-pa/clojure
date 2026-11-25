@@ -17,6 +17,9 @@
 (println (vec (map inc v)) (into [] (filter odd? v)) (count (filter odd? v)) (reduce + (map inc v))
          (count (filter seq ["a" "" "b"])) (vec (filter seq ["" "c"])))
 (println (reduce + [1 2 3.5]) (reduce +' [Long/MAX_VALUE 1]) (reduce + [1/2 1/3]))
+;; Over a lazy sequence a core call makes, the plain call keeps the runtime's fused walk.
+(println (reduce bit-or 0 (map inc v)) (vec (map + v (map inc v))) (reduce + (map inc (map inc v)))
+         (reduce max (filter odd? v)) (mapv * v (map dec v)))
 (println (try (biggest []) (catch Exception e (.getMessage e))))
 (println (try (total [1 :a]) (catch Exception e (class e))))
 (println (try (incs [1 nil]) (catch Exception e (class e))))

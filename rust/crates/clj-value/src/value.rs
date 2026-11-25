@@ -1463,6 +1463,35 @@ impl Vector {
         Self::of(VectorInner::Ints(crate::trie::Packed::from_vec(Vec::new())))
     }
 
+    /// The vector's data for writing (`Arc::make_mut`): a shared handle
+    /// copies it first, except that a shared flat run past
+    /// [`FLAT_MAX`](crate::trie::FLAT_MAX) moves into the trie (one
+    /// pass over its items, then log-time updates: #227) instead of
+    /// being copied whole on every update of a loop-threaded vector.
+    fn data_mut(&mut self) -> &mut VectorData {
+        if Arc::strong_count(&self.0) > 1 {
+            let long = match &self.0.inner {
+                VectorInner::Generic(t) => {
+                    t.is_long_flat().then(|| VectorInner::Generic(t.to_trie()))
+                }
+                VectorInner::Ints(t) => t.is_long_flat().then(|| VectorInner::Ints(t.to_trie())),
+                VectorInner::Doubles(t) => {
+                    t.is_long_flat().then(|| VectorInner::Doubles(t.to_trie()))
+                }
+                VectorInner::Chars(t) => t.is_long_flat().then(|| VectorInner::Chars(t.to_trie())),
+                VectorInner::Strs(_) => None,
+            };
+            if let Some(inner) = long {
+                self.0 = Arc::new(VectorData {
+                    inner,
+                    meta: self.0.meta.clone(),
+                    id: self.0.id,
+                });
+            }
+        }
+        Arc::make_mut(&mut self.0)
+    }
+
     fn of(inner: VectorInner) -> Self {
         Self(Arc::new(VectorData {
             inner,
@@ -1611,7 +1640,7 @@ impl Vector {
             _ => None,
         };
         if let Some(inner) = next {
-            Arc::make_mut(&mut self.0).inner = inner;
+            self.data_mut().inner = inner;
         }
     }
 
@@ -1623,7 +1652,7 @@ impl Vector {
         // a foreign value converts typed storage once (to generic,
         // which stays generic).
         self.retype_empty(&v);
-        let data = Arc::make_mut(&mut self.0);
+        let data = self.data_mut();
         let generic = push_inner(&mut data.inner, v);
         if let Some(g) = generic {
             data.inner = VectorInner::Generic(g);
@@ -1714,7 +1743,7 @@ impl Vector {
         if index >= self.len() {
             return false;
         }
-        let data = Arc::make_mut(&mut self.0);
+        let data = self.data_mut();
         let generic = set_inner(&mut data.inner, index, v);
         if let Some(g) = generic {
             data.inner = VectorInner::Generic(g);
@@ -1742,7 +1771,7 @@ impl Vector {
     /// bounds), replacing a generic slot with `Value::Nil` so nested
     /// collections keep a refcount of 1 across `assoc-in` / `update`.
     pub fn take_nth(&mut self, index: usize) -> Option<Value> {
-        if let VectorInner::Generic(t) = &mut Arc::make_mut(&mut self.0).inner {
+        if let VectorInner::Generic(t) = &mut self.data_mut().inner {
             t.replace(index, Value::Nil)
         } else {
             self.get(index)
@@ -1769,7 +1798,7 @@ impl Vector {
     /// shared with other handles path-copy.
     #[must_use]
     pub fn drop_last_owned(mut self) -> Option<Self> {
-        let data = Arc::make_mut(&mut self.0);
+        let data = self.data_mut();
         let popped = match &mut data.inner {
             VectorInner::Generic(t) => t.pop(),
             VectorInner::Ints(t) => t.pop(),
@@ -1915,7 +1944,7 @@ impl Vector {
         if start == end {
             return Ok(self);
         }
-        let data = Arc::make_mut(&mut self.0);
+        let data = self.data_mut();
         let appended = match (&mut data.inner, &other.0.inner) {
             (VectorInner::Ints(dst), VectorInner::Ints(src)) => {
                 dst.extend_flat_window(src, start, end)
@@ -1958,7 +1987,7 @@ impl Vector {
     /// Return this vector with `meta` attached (`None` clears it).
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
-        let data = Arc::make_mut(&mut self.0);
+        let data = self.data_mut();
         data.meta = meta.map(Arc::new);
         // A new object on the JVM (`withMeta` news), so a new id.
         data.id = next_vector_id();
@@ -6629,6 +6658,42 @@ mod tests {
     }
 
     #[test]
+    fn shared_long_flat_vectors_update_through_the_trie_271() {
+        let n = crate::trie::FLAT_MAX + 1;
+        for v in [
+            Vector::from_flat_ints((0..n as i64).collect()),
+            Vector::from_flat_doubles((0..n).map(|i| i as f64).collect()),
+            Vector::from_flat_chars(vec!['a'; n]),
+            Vector::from_vec(vec![Value::Nil; n]).with_meta(None),
+        ] {
+            let flat = v.is_packed().then(|| v.clone());
+            let kept = v.clone();
+            let first = v.get(0);
+            // The shared update leaves `kept` alone and moves `next` into the
+            // trie (no flat items left to read straight).
+            let next = v.set_nth_owned(0, Value::Bool(true)).expect("in bounds");
+            assert_eq!(kept.get(0), first);
+            assert_eq!(next.get(0), Some(Value::Bool(true)));
+            assert!(next.as_flat_ints().is_none());
+            assert_eq!(next.len(), n);
+            drop(flat);
+        }
+        // Strings keep their own storage; short flat runs copy.
+        let s = Vector::from_packed_strs({
+            let mut ps = super::PackedStrings::new();
+            assert!(ps.try_push("x"));
+            ps
+        });
+        let s2 = s.clone().push_back(Value::Str("y".into()));
+        assert_eq!((s.len(), s2.len()), (1, 2));
+        let short = Vector::from_flat_ints(vec![1, 2]);
+        let kept = short.clone();
+        let next = short.set_nth_owned(1, Value::Int(5)).expect("in bounds");
+        assert_eq!(next.as_flat_ints(), Some(&[1, 5][..]));
+        assert_eq!(kept.as_flat_ints(), Some(&[1, 2][..]));
+    }
+
+    #[test]
     fn unique_vector_updates_only_touch_unshared_flat_storage_271() {
         let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
         // Longs: in place when unique, in bounds, and a long.
@@ -6644,11 +6709,11 @@ mod tests {
         assert!(!v.assoc_unique(0, &mut Value::Int(7)));
         assert!(!v.conj_unique(&mut Value::Int(7)));
         drop(shared);
+        // A new metadata view holds its own copy of the items (#271: the
+        // flat run lives in the vector's data).
         let mut meta_view = v.clone().with_meta(None);
-        assert!(
-            !meta_view.assoc_unique(0, &mut Value::Int(7)),
-            "storage shared with v"
-        );
+        assert!(meta_view.assoc_unique(0, &mut Value::Int(7)));
+        assert_eq!(meta_view.get(0), Some(Value::Int(7)));
         assert_eq!(v.get(0), Some(Value::Int(1)));
         // Doubles.
         let mut d = Vector::from_doubles(vec![0.5, 1.5]);
