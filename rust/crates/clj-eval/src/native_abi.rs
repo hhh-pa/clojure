@@ -1728,6 +1728,17 @@ pub fn vec_push(acc: &mut Value, v: Value) {
     }
 }
 
+/// Append every item of `coll` (any seqable, realized in order) to a
+/// loop's [`VecBuilder`] accumulator: a compiled comprehension's stage
+/// over a collection it cannot index (#271 Slice 6a).
+pub fn vec_push_all(eval: &mut Evaluator, acc: &mut Value, coll: Value) -> Result<(), Signal> {
+    let walked = crate::seqs::walk_seq(eval, coll, |_, item| {
+        vec_push(acc, item.clone());
+        Ok(crate::seqs::Walk::Continue)
+    });
+    walked.map_err(|e| native_throw(eval, e))
+}
+
 /// The loop's result: its [`VecBuilder`] or scalar `TransientVector` frozen
 /// into a persistent vector.
 pub fn vec_done(acc: &mut Value) -> Value {

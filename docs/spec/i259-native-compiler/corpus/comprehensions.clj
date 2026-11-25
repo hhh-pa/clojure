@@ -1,0 +1,29 @@
+;; Nested and filtered `for` comprehensions consumed by `vec` / `into []`
+;; run as native loops (#271 Slice 6a): same items, order, and effects.
+(require '[clojure.string :as str])
+(def xs [1 2 3 4])
+(println (vec (for [a xs b (range a 5)] [a b])))
+(println (vec (for [a (range 4) b (range a 4) :when (odd? (+ a b))] (* a b))))
+(println (into [] (for [a xs :let [c (* a a)] b (range 3) :when (> c b)] [c b])))
+(println (vec (for [[x y] [[1 2] [3 4] [5 6]] :when (> y 2)] (+ x y))))
+(println (vec (for [a xs :when (even? a) b [a (* 2 a)]] b)))
+(println (vec (for [a [] b xs] [a b])) (vec (for [a xs b []] [a b])))
+(println (vec (for [a (range 3) b (range 3) c (range 3) :when (= (+ a b c) 3)] [a b c])))
+(println (vec (for [a xs :when (> a 1) :when (< a 4)] a)))
+(println (vec (for [a (range 3) :let [b (* a 10)] :when (pos? b) c (list b (inc b))] c)))
+(println (vec (for [a xs :when (odd? a)] (if (> a 2) :big :small))))
+;; Collections a stage cannot index take the stage's own lazy call.
+(println (vec (for [a (list 1 2 3) b #{10} :when (odd? a)] (+ a b))))
+(println (vec (for [a xs b #{10 20} :when (odd? a)] (+ a b))))
+(println (vec (for [a xs b (list 1 2)] (* a b))))
+(println (vec (for [a [1 2] b (range 0.5 2)] (+ a b))))
+(defn pairs [n] (vec (for [i (range n) j (range (inc i) n) :when (not= i j)] [i j])))
+(println (pairs 4) (count (pairs 30)))
+(println (try (vec (for [a xs b (range a)] (/ 10 (- b 1)))) (catch ArithmeticException _ "div0")))
+(let [side (atom [])]
+  (println (vec (for [a (range 2) b (range 2)] (do (swap! side conj [a b]) b))) @side))
+;; Shapes that keep the general path.
+(println (vec (for [a xs] a)) (vec (mapcat (fn [x] [x x]) xs)) (vec (mapcat (fn [x] (inc x) (list x)) xs)))
+(println (vec (mapcat identity [[1] [2]])) (vec (str/split "a b" #" ")) (vec (filter odd? xs)))
+(println (vec (mapcat (fn [a] (if (odd? a) (map inc [a]) [0])) xs)))
+(println (vec (for [a xs :when (odd? a)] (if (= a 1) clojure.core/__for-keep* a))))

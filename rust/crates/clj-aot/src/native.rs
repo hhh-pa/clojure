@@ -44,6 +44,9 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValue, FunctionValue, IntValu
 #[path = "scalar.rs"]
 mod scalar;
 
+#[path = "comprehension.rs"]
+mod comprehension;
+
 /// "No index" for optional table indices (matches `clj-rt`).
 const NONE: u64 = u64::MAX;
 
@@ -4003,7 +4006,7 @@ impl<'ctx> Lowerer<'ctx> {
             "nth" => self.try_lower_nested_nth(f, call, dest),
             _ => Ok(false),
         };
-        if specialized? {
+        if specialized? || self.try_lower_comprehension(f, call, dest)? {
             return Ok(true);
         }
         self.try_lower_hof_loop(f, call, dest)
