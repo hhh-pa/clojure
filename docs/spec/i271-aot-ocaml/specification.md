@@ -885,6 +885,18 @@ Measured (macOS): the sudoku programs' startup with empty stdin falls from 3.83M
   - Peak memory is back to the target plus a chunk, and `chan_hull` also runs about 1.7% fewer instructions than under 6b (macOS).
 - **Verification:** corpus `comprehensions.clj`, with output identical between `run` and the native binary. It covers flush boundaries (0, 1, 31, 32, 33, 64 and 65 items), map, set and list targets, a `nil` target, a sorted-map target, a vector target with metadata, list-backed stages taking the general path, a nested mapcat into a set, and a bad map entry's error.
 
+### 6.66 Slice 6i: tests and seq steps read their locals in place
+
+A walk over a seq — `(loop [s (seq v) a 0] (if s (recur (next s) (+ a (first s))) a))` — cost ~1180 instructions per step on a vector (95 such loops in 71 programs, 48 in the programs with INS non-wins), against 64 for `(reduce + v)`. Two of its costs were copies the step never needed:
+
+- **Local tests (`lower_cond`, `clj-aot/src/native.rs`):** `(if s …)` copied `s` into a temporary to test it, then dropped the copy (a refcount bump and release for a heap value). A test that is a local's read (not its last use) now tests the local's own slot.
+- **Shared `next` (`is_direct_moving`):** `(next s)` where `s` is read again later went down the owned path, which copied `s` into the call. The copy shares the seq, so the in-place step can never apply, and the copy only costs a bump and a drop. It now takes the borrowing call. `rest` keeps the owned path: its general native costs more than the copy.
+- **Verification:** every corpus test of `if`, `when`, `and`/`or` over locals, the seq walks, and the snippet sweep are unchanged.
+
+Measured (macOS):
+- **Per step:** the vector walk 1182 -> 975 instructions, a walk with `first` taken before `next` 655 -> 550.
+- **Interleaved A/B of the local tests alone**, over all 1754 cases against 6h: median -0.4K instructions, mean -16K; `edit_distance` -1.5 to -2%, `interval_tree` -1.2%.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

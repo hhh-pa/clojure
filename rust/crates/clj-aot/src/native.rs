@@ -7186,6 +7186,18 @@ impl<'ctx> Lowerer<'ctx> {
             {
                 return Ok(());
             }
+            // A local test that is not its last use reads the local's own
+            // slot (#271 Slice 6i): no copy (a refcount bump for a heap
+            // value) to test and then drop.
+            Expr::Local(i) if !is_move(f, test) => {
+                if let Some(p) = self.slot_of(f, *i) {
+                    let cond = self.truthy(p);
+                    self.builder
+                        .build_conditional_branch(cond, then_b, else_b)
+                        .expect("br");
+                    return Ok(());
+                }
+            }
             _ => {}
         }
         let t = self.slot(f);
@@ -8747,9 +8759,16 @@ fn is_direct_moving(
     core_name: Option<&str>,
 ) -> bool {
     let n = call.args.len();
-    core_name
-        .and_then(|cname| native_abi::own_op(cname, n))
-        .is_some()
+    // `(next s)` of a local read again later: a copy would share the seq
+    // anyway, so the in-place step could never apply; the borrowing call
+    // skips the copy and its drop (#271 Slice 6i). (`rest`'s general
+    // native costs more than the owned step's copy.)
+    let shared_step = core_name == Some("next")
+        && matches!(call.args.as_slice(), [a @ Expr::Local(_)] if !is_move(f, a));
+    (!shared_step
+        && core_name
+            .and_then(|cname| native_abi::own_op(cname, n))
+            .is_some())
         || matches!(
             (core_name, call.args.as_slice()),
             (Some("swap!"), [_, fe, Expr::VecLit(ks, None), _])
