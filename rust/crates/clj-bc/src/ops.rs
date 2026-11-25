@@ -931,6 +931,21 @@ pub(crate) fn assoc_bang_fast<O: OutSlot>(
     finish_bang(out, ok, tval, keep_ret)
 }
 
+/// A borrowed element for a read chain (#271): `(nth coll i)` /
+/// `(get coll k)` as a pointer into `coll`'s own storage when the
+/// element is stored as a `Value` (generic vector storage, a small
+/// map's value), else null (the caller computes the read the general
+/// way). `get` also reads small maps; `nth` vectors only.
+#[inline]
+pub(crate) fn read_ref(coll: &Value, key: &Value, get: bool) -> *const Value {
+    let found = match coll {
+        Value::Vector(v) => index_i32(key).and_then(|i| v.get_ref(i)),
+        Value::Map(m) if get => m.get_small_scalar(key).flatten(),
+        _ => None,
+    };
+    found.map_or(std::ptr::null(), std::ptr::from_ref)
+}
+
 /// Owned `(assoc v i x)` on a uniquely held flat vector (#271 lean
 /// owned path): updates `args[0]` in place and returns `true` (the
 /// caller moves it to the result); `false` leaves `args` untouched for

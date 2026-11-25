@@ -4232,7 +4232,11 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(false);
         }
         let (helper, prefix, args) = match (inner.var.sym.name(), inner.args.as_slice()) {
-            ("nth", [source, row]) if inert_index(row) => {
+            // With bitcode, a borrowing read chain inlines both reads.
+            ("nth", [source, row])
+                if inert_index(row)
+                    && !(self.use_bitcode && self.chain_ok(f, &call.args[0], &[index])) =>
+            {
                 ("rt_n_nth2", 0, vec![source, row, index])
             }
             ("peek", [source]) => (
@@ -5139,7 +5143,8 @@ impl<'ctx> Lowerer<'ctx> {
         if bc_sym.is_none() && fast.is_none() && is_direct_moving(f, call, core_name.as_deref()) {
             return self.lower_direct_moving(f, call, k, core_name.as_deref(), dest);
         }
-        let (refs, temps, moved) = self.arg_refs(f, call.args.iter(), dest)?;
+        let (refs, temps, moved, borrowed) =
+            self.direct_arg_refs(f, core_name.as_deref(), &call.args, dest)?;
         let slow = self.ctx.append_basic_block(f.func, "native_slow");
         let done = self.ctx.append_basic_block(f.func, "native_done");
         self.emit_direct_inline(
@@ -5152,7 +5157,10 @@ impl<'ctx> Lowerer<'ctx> {
             slow,
             done,
         );
-        if core_name.as_deref() == Some("count") && n == 1 && (temps.len() + moved.len() == 1) {
+        // The owned `count` slow path takes its arg: never a read chain's
+        // pointer into another collection's storage.
+        let owned_count = core_name.as_deref() == Some("count") && n == 1 && !borrowed;
+        if owned_count && (temps.len() + moved.len() == 1) {
             self.emit_owned_slow1(f, refs[0], k, dest, slow, done);
         } else {
             self.emit_direct_slow(f, &refs, k, n, core_name.as_deref(), dest, slow, done);
@@ -5514,6 +5522,137 @@ impl<'ctx> Lowerer<'ctx> {
             }
         }
         Ok((refs, temps, moved))
+    }
+
+    /// [`arg_refs`](Self::arg_refs) for a direct core call, borrowing a
+    /// read op's collection argument through a read chain (#271): in
+    /// `(nth (nth grid r) c)` or `(count (get g :adj))` the inner read
+    /// yields a pointer into its collection's storage instead of a clone
+    /// the outer read drops right after. The flag is whether the first
+    /// pointer is such a borrow (a callee must not take it).
+    #[allow(clippy::type_complexity)]
+    fn direct_arg_refs(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        core_name: Option<&str>,
+        args: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<
+        (
+            Vec<PointerValue<'ctx>>,
+            Vec<PointerValue<'ctx>>,
+            Vec<PointerValue<'ctx>>,
+            bool,
+        ),
+        Unsupported,
+    > {
+        let reads = matches!(
+            (core_name, args.len()),
+            (Some("nth" | "get"), 2 | 3)
+                | (Some("count" | "first" | "peek"), 1)
+                | (Some("contains?"), 2)
+        );
+        let rest: Vec<&Expr> = args.iter().skip(1).collect();
+        if !(reads
+            && self.use_bitcode
+            && rest.iter().all(|a| is_trivial_arg(a))
+            && self.chain_ok(f, &args[0], &rest))
+        {
+            let (refs, temps, moved) = self.arg_refs(f, args.iter(), dest)?;
+            return Ok((refs, temps, moved, false));
+        }
+        let (p, mut temps, mut moved) = self.borrow_read(f, &args[0], &rest)?;
+        let (mut refs, rest_temps, rest_moved) = self.arg_refs(f, args[1..].iter(), dest)?;
+        refs.insert(0, p);
+        temps.extend(rest_temps);
+        moved.extend(rest_moved);
+        Ok((refs, temps, moved, true))
+    }
+
+    /// Whether `e` is a borrowable read chain link evaluated before
+    /// `rest`: `(nth|get coll key)` with a trivial key over a local no
+    /// later argument moves, a pooled constant or stable global, or
+    /// another such link (so nothing runs between the borrow and the
+    /// consuming call that could free or update the collection).
+    fn chain_ok(&self, f: &FnCtx<'ctx>, e: &Expr, rest: &[&Expr]) -> bool {
+        let Some((_, c, k)) = chain_link(e) else {
+            return false;
+        };
+        let later = chain_tail(k, rest);
+        is_trivial_arg(k)
+            && match c {
+                Expr::Local(idx) => self
+                    .borrowable_before(f, *idx, later.iter().copied())
+                    .is_some(),
+                Expr::Literal(v) | Expr::Quote(v) => is_pooled(v),
+                Expr::Global(var) => self.stable_of(var).is_some(),
+                _ => self.chain_ok(f, c, &later),
+            }
+    }
+
+    /// Emit a [`chain_ok`](Self::chain_ok) link: the element's address
+    /// from `rt_bc_ref_nth`/`rt_bc_ref_get`, or, when the element is not
+    /// stored as a value (packed items, large maps, any miss or error),
+    /// the read computed the general way into a temporary. Returns the
+    /// pointer, the temporaries to drop after the consuming call, and
+    /// the locals it borrowed at their last use.
+    #[allow(clippy::type_complexity)]
+    fn borrow_read(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        e: &Expr,
+        rest: &[&Expr],
+    ) -> Result<
+        (
+            PointerValue<'ctx>,
+            Vec<PointerValue<'ctx>>,
+            Vec<PointerValue<'ctx>>,
+        ),
+        Unsupported,
+    > {
+        let (name, c, k) = chain_link(e).expect("chain_ok checked the link");
+        let (base, mut temps, mut moved) = match c {
+            Expr::Local(idx) => {
+                let p = self.slot_of(f, *idx).expect("chain_ok: a borrowable local");
+                (
+                    p,
+                    Vec::new(),
+                    if is_move(f, c) { vec![p] } else { Vec::new() },
+                )
+            }
+            Expr::Literal(_) | Expr::Quote(_) | Expr::Global(_) => {
+                let (p, fallback) = self.borrowed(f, c)?.expect("chain_ok: pooled or stable");
+                (p, fallback.into_iter().collect(), Vec::new())
+            }
+            _ => self.borrow_read(f, c, &chain_tail(k, rest))?,
+        };
+        let (keys, key_temps, key_moved) =
+            self.arg_refs(f, std::iter::once(k), self.ptr.const_null())?;
+        temps.extend(key_temps);
+        moved.extend(key_moved);
+        let sym = if name == "nth" {
+            "rt_bc_ref_nth"
+        } else {
+            "rt_bc_ref_get"
+        };
+        let p = self.call_ptr(sym, &[base.into(), keys[0].into()]);
+        let t = self.slot(f);
+        let fast_end = self.builder.get_insert_block().expect("positioned");
+        let null = self.builder.build_is_null(p, "ref_miss").expect("is_null");
+        let slow = self.ctx.append_basic_block(f.func, "ref_slow");
+        let join = self.ctx.append_basic_block(f.func, "ref_join");
+        self.builder
+            .build_conditional_branch(null, slow, join)
+            .expect("br");
+        self.builder.position_at_end(slow);
+        self.lower(f, e, t)?;
+        let slow_end = self.builder.get_insert_block().expect("positioned");
+        self.builder.build_unconditional_branch(join).expect("br");
+        self.builder.position_at_end(join);
+        let phi = self.builder.build_phi(self.ptr, "ref").expect("phi");
+        phi.add_incoming(&[(&p, fast_end), (&t, slow_end)]);
+        temps.push(t);
+        Ok((phi.as_basic_value().into_pointer_value(), temps, moved))
     }
 
     /// A clone-free reference to `e`'s value for a call that only reads
@@ -9478,6 +9617,31 @@ fn long_vars(units: &[TopUnit]) -> HashSet<(String, String)> {
 
 /// A direct `clojure.core` native call's name and argument forms (a Lite
 /// program's core calls all analyze to direct natives).
+/// A read chain link `(nth|get coll key)` as `(name, coll, key)`.
+fn chain_link(e: &Expr) -> Option<(&str, &Expr, &Expr)> {
+    match core_call(e)? {
+        (name @ ("nth" | "get"), [c, k]) => Some((name, c, k)),
+        _ => None,
+    }
+}
+
+/// The args evaluated after a link's collection: its key, then `rest`
+/// (the nodes themselves: move checks key on node addresses).
+fn chain_tail<'e>(k: &'e Expr, rest: &[&'e Expr]) -> Vec<&'e Expr> {
+    let mut tail = vec![k];
+    tail.extend_from_slice(rest);
+    tail
+}
+
+/// An argument whose evaluation runs no user code and moves nothing a
+/// borrowed reference depends on (a local, a constant, a var root).
+fn is_trivial_arg(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::Local(_) | Expr::Literal(_) | Expr::Quote(_) | Expr::Global(_)
+    )
+}
+
 fn core_call(e: &Expr) -> Option<(&str, &[Expr])> {
     let Expr::DirectNative(call) = e else {
         return None;

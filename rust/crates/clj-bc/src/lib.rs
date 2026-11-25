@@ -339,6 +339,22 @@ bc_str_ops3! {
     rt_bc_3_get => BcOp3::Get3,
 }
 
+/// Borrowed `(nth coll i)` for a read chain (#271): a pointer into
+/// `coll`'s storage, or null (compute the read the general way).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_ref_nth(coll: &Value, key: &Value) -> *const Value {
+    ops::read_ref(coll, key, false)
+}
+
+/// Borrowed `(get coll k)` for a read chain (#271), like
+/// [`rt_bc_ref_nth`] (small maps too).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_bc_ref_get(coll: &Value, key: &Value) -> *const Value {
+    ops::read_ref(coll, key, true)
+}
+
 /// Owned `assoc` entrypoint over the moved `[coll key val]` args
 /// (#271): `1` when `args[0]` was updated in place (the caller moves
 /// it to the result), `0` (nothing touched) for `rt_n_assoc_own3`.
@@ -591,6 +607,32 @@ mod tests {
         let mut conj = [Value::Vector(grown), Value::Int(2)];
         assert!(crate::ops::conj_own2(&mut conj));
         assert!(!crate::ops::conj_own2(&mut [Value::Nil, Value::Int(2)]));
+    }
+
+    #[test]
+    fn read_refs_borrow_stored_values_only_271() {
+        let row = Value::Vector(Vector::from_ints(vec![7]));
+        let rows = Vector::from_vec(vec![row.clone()]);
+        let grid = Value::Vector(rows.clone());
+        let p = crate::ops::read_ref(&grid, &Value::Int(0), false);
+        assert!(std::ptr::eq(p, rows.get_ref(0).expect("row")), "in place");
+        assert!(crate::ops::read_ref(&grid, &Value::Int(1), false).is_null());
+        assert!(
+            crate::ops::read_ref(&row, &Value::Int(0), false).is_null(),
+            "packed longs"
+        );
+        let m = Value::Map(Map::from_kvs_last_wins(vec![(
+            Value::Keyword(Keyword::new(None, "a")),
+            row,
+        )]));
+        let a = Value::Keyword(Keyword::new(None, "a"));
+        assert!(!crate::ops::read_ref(&m, &a, true).is_null());
+        assert!(
+            crate::ops::read_ref(&m, &a, false).is_null(),
+            "nth reads vectors only"
+        );
+        assert!(crate::ops::read_ref(&m, &Value::Int(3), true).is_null());
+        assert!(crate::ops::read_ref(&Value::Nil, &a, true).is_null());
     }
 
     extern "C" fn test_str_ascii(v: &Value) -> u8 {

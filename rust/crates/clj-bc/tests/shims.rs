@@ -26,10 +26,10 @@ use clj_bc::{
     rt_bc_2_rem, rt_bc_2_shl, rt_bc_2_shr, rt_bc_2_str_ends_with, rt_bc_2_str_includes,
     rt_bc_2_str_starts_with, rt_bc_2_sub, rt_bc_2_ushr, rt_bc_3_assoc_bang, rt_bc_3_assoc_bang_fx,
     rt_bc_3_get, rt_bc_3_nth, rt_bc_assoc_own3, rt_bc_clone, rt_bc_conj_own2, rt_bc_deref,
-    rt_bc_is_pod, rt_bc_scalar_assoc, rt_bc_scalar_assoc_d, rt_bc_scalar_conj, rt_bc_scalar_conj_d,
-    rt_bc_scalar_count, rt_bc_scalar_dtvec_lock, rt_bc_scalar_dvec, rt_bc_scalar_gvec,
-    rt_bc_scalar_ivec, rt_bc_scalar_nth, rt_bc_scalar_nth2, rt_bc_scalar_pop,
-    rt_bc_scalar_same_transient, rt_bc_scalar_str, rt_bc_scalar_tvec_lock,
+    rt_bc_is_pod, rt_bc_ref_get, rt_bc_ref_nth, rt_bc_scalar_assoc, rt_bc_scalar_assoc_d,
+    rt_bc_scalar_conj, rt_bc_scalar_conj_d, rt_bc_scalar_count, rt_bc_scalar_dtvec_lock,
+    rt_bc_scalar_dvec, rt_bc_scalar_gvec, rt_bc_scalar_ivec, rt_bc_scalar_nth, rt_bc_scalar_nth2,
+    rt_bc_scalar_pop, rt_bc_scalar_same_transient, rt_bc_scalar_str, rt_bc_scalar_tvec_lock,
     rt_bc_scalar_tvec_unlock,
 };
 use clj_value::{BindCounts, FastVars, Transient, TransientKind, TransientVector, Value, Vector};
@@ -284,4 +284,17 @@ fn owned_vector_assoc_and_conj_update_unique_vectors_in_place_271() {
     assert_eq!(conj[0], Value::Vector(Vector::from_ints(vec![1, 2])));
     let mut conj_miss = [Value::Nil, Value::Int(2)];
     assert_eq!(rt_bc_conj_own2(&mut conj_miss), 0);
+}
+
+#[test]
+fn read_chain_refs_point_into_generic_storage_271() {
+    let rows = Vector::from_vec(vec![Value::Vector(Vector::from_ints(vec![1]))]);
+    let grid = Value::Vector(rows.clone());
+    assert!(std::ptr::eq(
+        rt_bc_ref_nth(&grid, &Value::Int(0)),
+        rows.get_ref(0).expect("row")
+    ));
+    assert!(rt_bc_ref_nth(&grid, &Value::Int(3)).is_null());
+    assert!(!rt_bc_ref_get(&grid, &Value::Int(0)).is_null());
+    assert!(rt_bc_ref_get(&Value::Nil, &Value::Int(0)).is_null());
 }

@@ -310,6 +310,8 @@ fn should_inline_hint(name: &str) -> bool {
                 | "rt_bc_3_assoc_bang_fx"
                 | "rt_bc_assoc_own3"
                 | "rt_bc_conj_own2"
+                | "rt_bc_ref_nth"
+                | "rt_bc_ref_get"
         )
 }
 

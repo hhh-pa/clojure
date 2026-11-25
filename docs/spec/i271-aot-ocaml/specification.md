@@ -737,6 +737,16 @@ Measuring operation costs outside the scalar loops (macOS `libinsn`, loops of 10
 
 Measured (macOS, loops of 100K): vector `assoc` ~330 -> ~130 instructions per iteration, `conj` of a long 364 -> 167, of a keyword 465 -> 298; `(reduce + 0.0 v)` on two items 1419 -> 1034. Program `__text` +0..+2 KB. Interleaved A/B over all 1754 cases: median -1.7K instructions (-0.1%), `sudoku` -8%, `dining_philosophers` -14%; projected class moves 5 loss->tie, 1 tie->win, 1 tie->loss, 1 win->tie.
 
+### 6.53 Slice 5v: borrowing read chains in compiled code
+
+A read feeding a read op cloned its result only for the outer read to drop it: `(count (nth adj u))`, `(nth (get g :adj) r)`, `(nth (nth grid r) c)` each paid a clone and a drop of the intermediate collection (two atomic refcount updates plus the boxed write and drop checks) on every evaluation.
+
+- **Chains (`clj-aot/src/native.rs`, `clj-bc/src/{ops,lib}.rs`):** for a read op (`nth`/`get` of 2-3 args, `count`/`first`/`peek`, `contains?`) whose later args are trivial (locals, constants, var roots), a collection argument `(nth|get coll key)` with a trivial key over a borrowable local, a pooled constant, a stable global, or another such link is lowered by `direct_arg_refs`/`borrow_read` to a pointer into its collection's storage: `rt_bc_ref_nth`/`rt_bc_ref_get` return the element's address when it is stored as a `Value` (generic vector storage, a small map's value), and null otherwise, in which case the read is computed the general way into a temporary. Nothing runs between the borrow and the consuming call (move checks key on the original nodes), so the collection outlives the pointer. With bitcode, `(nth (nth …))` takes the chain instead of the out-of-line `rt_n_nth2`.
+- **Ownership:** a borrowed first argument never reaches `count`'s owned slow path (`emit_owned_slow1`), which takes its argument: through a chain that would move an element out of its parent collection (a sorted-set element of `ssa_dominance`'s dominator vector, caught by the full A/B).
+- **Verification:** `clj-bc` unit tests (`read_ref` borrows in place, misses on packed items, `nth` of a map, absent keys, nil); corpus `read_chains.clj` (nested chains, defaults, misses, errors, a base local moved later in the same call or at its last use, var and literal bases, loops, `count` over sorted-set and lazy-seq elements with the parent printed after) replayed against `run`, byte-identical to the previous runtime.
+
+Measured (macOS, loops of 100K): `(count (nth grid r))` 316 -> 199 instructions per iteration, `(nth (get g :adj) r)` 478 -> 420, `(nth (nth grid r) c)` 365 -> 338. Program `__text` unchanged on the sampled programs. Interleaved A/B over all 1754 cases: median -761 instructions, mean -17.6K, `ternary_search_trie` -14%, `tarjan_lca` -9%; projected class moves 3 loss->tie, 3 win->tie, 1 tie->loss.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

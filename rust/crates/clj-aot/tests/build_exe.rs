@@ -757,6 +757,23 @@ fn native_stable_lookups_and_scalars_match_boxed_values() {
 }
 
 #[test]
+fn native_read_chains_borrow_through_nested_reads_271() {
+    let source = "(def grid [[1 2 3] [4 5 6]])
+                  (def g {:adj [[1] [0 2]] :w {:a 1}})
+                  (defn cell [r c] (nth (nth grid r) c))
+                  (defn deep [x i j k] (nth (nth (nth x i) j) k))
+                  (defn deg [v] (count (get (get g :adj) v)))
+                  (println (cell 1 2) (deep [[[1 2] [3 4]]] 0 1 0) (deg 1)
+                           (nth (nth '[[7 8] [9 10]] 1) 0) (get (get g :w) :a)
+                           (get (get g :w) :z :none) (count (nth [[1 2] [3]] 0)))";
+    let (stdout, stderr, code, _) = build_mode_and_run("read-chains", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("6 3 2 9 1 :none 2\n", "", 0)
+    );
+}
+
+#[test]
 fn native_owned_arguments_follow_destructured_parameters() {
     let source = "(defn extend [[x y] items {:keys [z]}]
                      (conj items (+ x y z)))
