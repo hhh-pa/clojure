@@ -3880,7 +3880,8 @@ impl ScalarHofKind {
     fn of(hl: &HofLoop<'_>) -> Option<Self> {
         Some(match hl.kind {
             HofKind::Collect => Self::Collect,
-            HofKind::Reduce => Self::Reduce,
+            HofKind::Reduce if hl.init.is_some() => Self::Reduce,
+            HofKind::Reduce => return None,
             HofKind::Sum => Self::Sum {
                 has_init: hl.init.is_some(),
             },

@@ -18,7 +18,7 @@
 //! evaluator. Every other unit is only analyzed: nothing like
 //! `(slurp *in*)` ever runs during `build`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use clj_reader::Span;
@@ -26,7 +26,7 @@ use clj_value::{Symbol, Value};
 
 use crate::error::span_of;
 use crate::eval::{Evaluator, SourceError, split_top_do};
-use crate::expr::{Arity, Expr, FunExpr, NsClause, Pattern};
+use crate::expr::{Arity, DirectCall, Expr, FunExpr, NsClause, Pattern};
 
 /// Core fns whose top-level calls change what later forms read or
 /// resolve (evaluated at build time as well as compiled).
@@ -68,6 +68,12 @@ pub struct FrontEnd {
     pub lib_units: usize,
     /// The namespaces those units define, in splice order.
     pub libs: Vec<&'static str>,
+    /// Eta templates (#271): for each `clojure.core` fn the program
+    /// passes by name to a traversal (`(mapv inc xs)`, `(reduce + v)`),
+    /// the direct call `(clojure.core/f a…)` over the params `Local(0)…`
+    /// of a one-arity `fn`, keyed by name and arg count, so the native
+    /// compiler can run the traversal inline as it does a literal `fn`.
+    pub eta: HashMap<(String, usize), DirectCall>,
 }
 
 /// A vendored stdlib namespace a compiled program carries as its own
@@ -154,7 +160,81 @@ const FRONT_NS: &str = "clj.aot.build";
 fn front_end_inner(eval: &mut Evaluator, text: &str) -> Result<FrontEnd, SourceError> {
     let mut front = read_units(eval, text)?;
     splice_libs(eval, &mut front)?;
+    eta_templates(eval, &mut front);
     Ok(front)
+}
+
+/// The traversals whose fn argument the native compiler can run inline,
+/// with the arg count that fn takes (`None`: decided by the call's
+/// shape) — `reduce` folds two, `map`/`mapv` over two colls take two.
+fn eta_params(name: &str, nargs: usize) -> Option<usize> {
+    match (name, nargs) {
+        ("reduce", 2 | 3) => Some(2),
+        ("map" | "mapv", 3) => Some(2),
+        ("map" | "mapv" | "filter" | "filterv" | "some" | "every?", 2) => Some(1),
+        _ => None,
+    }
+}
+
+/// Fill [`FrontEnd::eta`]: analyze `(fn* [a…] (clojure.core/f a…))` once
+/// for each `clojure.core` fn the units pass by name to a traversal
+/// ([`eta_params`]). A template whose body is not one direct call over
+/// exactly its params in order (a macro, an intercepted form, an arity
+/// the analysis rejects) is left out, and the traversal takes its
+/// general path.
+fn eta_templates(eval: &mut Evaluator, front: &mut FrontEnd) {
+    let mut wanted = BTreeSet::new();
+    for u in &front.units {
+        eta_wanted(&u.expr, &mut wanted);
+    }
+    for (name, n) in wanted {
+        let params: Vec<String> = (0..n).map(|i| format!("eta{i}")).collect();
+        let text = format!(
+            "(fn* [{ps}] (clojure.core/{name} {ps}))",
+            ps = params.join(" ")
+        );
+        let mut forms = eval.live_forms(&text);
+        let form = eval.next_live_form(&mut forms).ok().flatten();
+        let fun = form.and_then(|form| eval.analyze(&form).ok());
+        if let Some(call) = fun.as_ref().and_then(|f| eta_call(f, n)) {
+            front.eta.insert((name, n), call);
+        }
+    }
+}
+
+/// The one direct call `(f Local(0) … Local(n-1))` an eta template's
+/// single arity makes.
+fn eta_call(fun: &Expr, n: usize) -> Option<DirectCall> {
+    let Expr::Fn(f) = fun else { return None };
+    let [a] = &f.arities[..] else { return None };
+    match a.body.as_slice() {
+        [Expr::DirectNative(call)]
+            if a.rest.is_none() && a.fixed.len() == n && params_in_order(&call.args, n) =>
+        {
+            Some((**call).clone())
+        }
+        _ => None,
+    }
+}
+
+/// Whether `args` are exactly `Local(0)` … `Local(n-1)`, in order.
+fn params_in_order(args: &[Expr], n: usize) -> bool {
+    args.len() == n
+        && (args.iter().enumerate()).all(|(i, a)| matches!(a, Expr::Local(j) if *j == i))
+}
+
+/// The `(name, params)` of every `clojure.core` fn `e` passes by name
+/// as the first argument of a traversal ([`eta_params`]).
+fn eta_wanted(e: &Expr, out: &mut BTreeSet<(String, usize)>) {
+    if let Expr::DirectNative(call) = e
+        && call.var.sym.namespace() == Some("clojure.core")
+        && let Some(n) = eta_params(call.var.sym.name(), call.args.len())
+        && let Some(Expr::Global(f)) = call.args.first()
+        && f.sym.namespace() == Some("clojure.core")
+    {
+        out.insert((f.sym.name().to_owned(), n));
+    }
+    for_each_child(e, &mut |c| eta_wanted(c, out));
 }
 
 /// Read, expand, and analyze every top-level form of `text`.
@@ -573,6 +653,41 @@ mod tests {
     use super::front_end;
     use crate::eval::SourceError;
     use crate::ns::boot;
+
+    #[test]
+    fn front_end_eta_templates_cover_core_fns_traversals_name_271() {
+        let mut eval = boot();
+        let front = front_end(
+            &mut eval,
+            "(def v [1 2]) (mapv inc v) (reduce + v) (reduce max 0 v) (map + v v)
+             (filterv odd? v) (some nil? v) (every? pos? v) (mapv str v) (mapv not v)
+             (mapv vector v) (mapv hash-map v v) (mapv = v v) (mapv identity v) (map v v)
+             (mapv inst? v) (mapv clojure.string/blank? v) (reduce v)",
+            "t.clj",
+        )
+        .expect("front");
+        let mut names: Vec<_> = front.eta.keys().map(|(n, k)| format!("{n}/{k}")).collect();
+        names.sort();
+        // `inst?` is a `core.clj` fn (its call is no direct native call);
+        // non-core fns and non-traversals want no template.
+        assert_eq!(
+            names,
+            [
+                "+/2",
+                "=/2",
+                "hash-map/2",
+                "identity/1",
+                "inc/1",
+                "max/2",
+                "nil?/1",
+                "not/1",
+                "odd?/1",
+                "pos?/1",
+                "str/1",
+                "vector/1"
+            ]
+        );
+    }
 
     #[test]
     fn front_end_reports_macroexpansion_errors() {

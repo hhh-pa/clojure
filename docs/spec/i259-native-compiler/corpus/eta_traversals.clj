@@ -1,0 +1,23 @@
+;; Core fns passed by name to traversals run inline (#271 Slice 5x):
+;; `(mapv inc xs)`, `(reduce + v)`, `(reduce max v)` behave exactly as the
+;; general calls, on vectors, ranges, and (general path) other colls.
+(def v [3 1 4 1 5])
+(def d [1.5 2.5 3.0])
+(defn total [xs] (reduce + xs))
+(defn total-from [k xs] (reduce + k xs))
+(defn biggest [xs] (reduce max xs))
+(defn incs [xs] (mapv inc xs))
+(defn pairs [xs ys] (mapv + xs ys))
+(println (total v) (total []) (total [7]) (total d) (total (range 10)) (total (list 1 2 3)))
+(println (total-from 10 v) (total-from 0.5 d) (total-from 1 (range 4)) (total-from 1 #{2}))
+(println (biggest v) (biggest [9]) (biggest (range 5)) (biggest (map inc v)) (reduce min v))
+(println (reduce * (range 1 6)) (reduce * []) (reduce - v) (reduce - 100 v) (reduce conj [] v))
+(println (incs v) (incs (range 3)) (incs (list 1 2)) (pairs v v) (mapv str v) (mapv first [[1 2] [3]]))
+(println (filterv odd? v) (some nil? [1 nil]) (some even? v) (every? pos? v) (every? neg? v))
+(println (vec (map inc v)) (into [] (filter odd? v)) (count (filter odd? v)) (reduce + (map inc v))
+         (count (filter seq ["a" "" "b"])) (vec (filter seq ["" "c"])))
+(println (reduce + [1 2 3.5]) (reduce +' [Long/MAX_VALUE 1]) (reduce + [1/2 1/3]))
+(println (try (biggest []) (catch Exception e (.getMessage e))))
+(println (try (total [1 :a]) (catch Exception e (class e))))
+(println (try (incs [1 nil]) (catch Exception e (class e))))
+(let [k 2] (println (reduce + k (map (fn [x] (* x k)) v)) (reduce (fn [a b] (if (> b 3) (reduced a) (+ a b))) v)))

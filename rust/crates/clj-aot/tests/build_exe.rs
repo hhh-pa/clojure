@@ -799,6 +799,33 @@ fn native_nth_front_and_small_set_lookups_match_general_reads_271() {
 }
 
 #[test]
+fn native_core_fns_by_name_run_traversals_inline_271() {
+    let source = "(def v [3 1 4 1 5]) (def d [1.5 2.5 3.0])
+                  (defn total [xs] (reduce + xs))
+                  (defn total-from [k xs] (reduce + k xs))
+                  (defn biggest [xs] (reduce max xs))
+                  (defn incs [xs] (mapv inc xs))
+                  (println (total v) (total []) (total d) (total (range 5)) (total (list 1 2))
+                           (total-from 1 v) (total-from 0.5 d))
+                  (println (biggest v) (biggest [2]) (biggest (list 3 4)) (incs v) (incs (range 3))
+                           (mapv + v v))
+                  (println (filterv odd? v) (some even? v) (every? pos? v) (vec (map inc v))
+                           (count (filter odd? v)) (filterv seq [\"a\" \"\"]) (some nil? v)
+                           (count (filter seq [\"a\" \"\"])))
+                  (println (try (biggest []) (catch Exception _ :arity)))";
+    let (stdout, stderr, code, _) = build_mode_and_run("eta-traversals", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            "14 0 7.0 10 3 15 7.5\n5 2 4 [4 2 5 2 6] [1 2 3] [6 2 8 2 10]\n\
+             [3 1 1 5] true true [4 2 5 2 6] 4 [a] nil 1\n:arity\n",
+            "",
+            0
+        )
+    );
+}
+
+#[test]
 fn native_owned_arguments_follow_destructured_parameters() {
     let source = "(defn extend [[x y] items {:keys [z]}]
                      (conj items (+ x y z)))

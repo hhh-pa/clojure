@@ -265,6 +265,8 @@ pub struct Lowerer<'ctx> {
     direct: HashMap<(String, String), (usize, Vec<ArityCode<'ctx>>)>,
     /// Single-def top-level fn arities eligible for scalar-loop callee inlining.
     callees: HashMap<(String, String), std::sync::Arc<[Arity]>>,
+    /// The front end's eta templates ([`FrontEnd::eta`](clj_eval::aot_front::FrontEnd)).
+    eta: HashMap<(String, usize), clj_eval::expr::DirectCall>,
     /// Global holding the frozen constant table's base
     /// (`rt_n_consts_base`), stored on entry to `cljtop_0`: call
     /// operands borrow pooled constants in place (#271).
@@ -344,6 +346,7 @@ impl<'ctx> Lowerer<'ctx> {
             reserved: HashMap::new(),
             direct: HashMap::new(),
             callees: HashMap::new(),
+            eta: HashMap::new(),
             consts_base: consts_base.as_pointer_value(),
             stable: HashMap::new(),
             dead: HashSet::new(),
@@ -366,6 +369,7 @@ impl<'ctx> Lowerer<'ctx> {
             &front.units[front.lib_units..]
         };
         self.inline_arith = !units.iter().any(|u| mentions_rebinding(&u.expr));
+        self.eta = front.eta.clone();
         self.var_meta = !self.lite || program_reads_var_meta(units);
         let stable = self.lite.then(|| stable_vars(units));
         if let Some(candidates) = &stable {
@@ -4005,16 +4009,56 @@ impl<'ctx> Lowerer<'ctx> {
         self.try_lower_hof_loop(f, call, dest)
     }
 
+    /// The one-arity `fn` `(fn [a…] (clojure.core/name a…))` over params
+    /// from `base`, built from the front end's eta template (#271), or the
+    /// identity `(fn [a] a)` for `name` `""`: `None` without a template.
+    /// Traversals lower inline only for programs that cannot rebind core
+    /// vars ([`try_lower_collection_call`] runs under `inline_arith`), so
+    /// the template's direct call snapshots the root the program sees. The
+    /// call takes the traversal's `span`. Built once per traversal site and
+    /// kept for the whole build (the loop borrows its arity as it does a
+    /// literal `fn`'s).
+    fn eta_fn(
+        &self,
+        name: &str,
+        n: usize,
+        base: usize,
+        span: clj_reader::Span,
+    ) -> Option<&'static FunExpr> {
+        let body = if name.is_empty() {
+            Expr::Local(base)
+        } else {
+            let mut call = self.eta.get(&(name.to_owned(), n))?.clone();
+            call.args = (base..base + n).map(Expr::Local).collect();
+            call.span = span;
+            Expr::DirectNative(Box::new(call))
+        };
+        let arity = Arity {
+            fixed: (0..n).map(|i| Pattern::Symbol(format!("eta{i}"))).collect(),
+            rest: None,
+            body: vec![body],
+        };
+        Some(Box::leak(Box::new(FunExpr {
+            display: format!("clojure.core/{name}--eta"),
+            arities: std::sync::Arc::from(vec![arity]),
+        })))
+    }
+
     fn try_lower_hof_loop(
         &mut self,
         f: &mut FnCtx<'ctx>,
         call: &clj_eval::expr::DirectCall,
         dest: PointerValue<'ctx>,
     ) -> Result<bool, Unsupported> {
-        let Some(hl) = hof_loop(call) else {
+        let base = f.env.len();
+        let fns = LoopFns {
+            lowerer: self,
+            base,
+            span: call.span,
+        };
+        let Some(hl) = hof_loop(call, &fns) else {
             return Ok(false);
         };
-        let base = f.env.len();
         // The analysis saw the `fn` capture its free locals before the
         // collection (and init) evaluated, so it may let those move a local
         // the body still reads. Here the body runs after them, and the
@@ -4692,6 +4736,18 @@ impl<'ctx> Lowerer<'ctx> {
             .expect("br");
         self.builder.position_at_end(direct);
         let (state, state2) = self.load_hof_states(acc, coll, (kind1, plan1), coll2, plan2);
+        if hl.kind == HofKind::Reduce && hl.init.is_none() {
+            // `(reduce f xs)` over no items is `(f)`: the general path.
+            let go = self.ctx.append_basic_block(f.func, "reduce_go");
+            let empty = self
+                .builder
+                .build_int_compare(IntPredicate::SLE, state.n, self.i64t.const_zero(), "empty")
+                .expect("cmp");
+            self.builder
+                .build_conditional_branch(empty, general, go)
+                .expect("br");
+            self.builder.position_at_end(go);
+        }
         self.try_lower_scalar_hof(f, hl, base, acc, &state, state2.as_ref(), dest, done)?;
         self.init_hof_acc(f.func, hl.kind, hl.init.is_some(), acc, state.n);
         self.emit_hof_direct(f, hl, base, &state, state2.as_ref(), dest)?;
@@ -4807,6 +4863,22 @@ impl<'ctx> Lowerer<'ctx> {
             .build_int_add(i, self.i64t.const_int(1, false), "i_next")
             .expect("add");
         self.builder.build_store(i_ptr, next).expect("store");
+        if hl.kind == HofKind::Reduce && hl.init.is_none() {
+            // `(reduce f xs)` folds from the first item (#271).
+            let is_first = self
+                .builder
+                .build_int_compare(IntPredicate::EQ, i, self.i64t.const_zero(), "first")
+                .expect("cmp");
+            let first_b = self.ctx.append_basic_block(f.func, "reduce_first");
+            let fold_b = self.ctx.append_basic_block(f.func, "reduce_fold");
+            self.builder
+                .build_conditional_branch(is_first, first_b, fold_b)
+                .expect("br");
+            self.builder.position_at_end(first_b);
+            self.move_v(f.func, st.acc, item);
+            self.builder.build_unconditional_branch(head).expect("br");
+            self.builder.position_at_end(fold_b);
+        }
         let params = match hl.kind {
             HofKind::Reduce => vec![st.acc, item],
             _ => items.clone(),
@@ -5053,9 +5125,14 @@ impl<'ctx> Lowerer<'ctx> {
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
         let closure = self.slot(f);
-        self.make_closure(f, hl.fun, base, closure)?;
+        match hl.eta {
+            Some(fe) => self.lower(f, fe, closure)?,
+            None => self.make_closure(f, hl.fun, base, closure)?,
+        }
         let mut args = vec![closure];
-        if hl.kind == HofKind::Reduce {
+        let folds_items =
+            hl.kind == HofKind::Reduce || (hl.kind == HofKind::Sum && hl.outer.is_none());
+        if folds_items && hl.init.is_some() {
             args.push(acc);
         }
         args.push(coll);
@@ -8381,6 +8458,9 @@ pub(super) struct HofLoop<'a> {
     pub(super) kind: HofKind,
     fun: &'a FunExpr,
     pub(super) arity: &'a Arity,
+    /// The `clojure.core` fn the traversal names when [`fun`](Self::fun)
+    /// is its eta expansion (#271): the general path passes it as is.
+    eta: Option<&'a Expr>,
     pub(super) init: Option<&'a Expr>,
     coll: &'a Expr,
     pub(super) coll2: Option<&'a Expr>,
@@ -8616,66 +8696,177 @@ fn parse_num_arity(arity: &Arity, base: usize) -> Option<u8> {
     parse_static_num_arity(body, base)
 }
 
-/// `call` as a [`HofLoop`]: `(mapv F xs [ys])`, `(filterv F xs)`, `(some F xs)`,
-/// `(every? F xs)`, `(reduce F init xs)`, `(reduce + [init] (map F xs [ys]))`,
-/// `(dorun (map F xs [ys]))`, `(vec (map|filter F xs [ys]))`,
-/// `(into [] (map|filter F xs [ys]))`, or `(count (filter|filterv F xs))`,
-/// all `clojure.core`.
-fn hof_loop<'a>(call: &'a clj_eval::expr::DirectCall) -> Option<HofLoop<'a>> {
-    let one =
-        |kind, fe: &'a Expr, init: Option<&'a Expr>, coll: &'a Expr, coll2: Option<&'a Expr>| {
-            let n_params = if kind == HofKind::Reduce || coll2.is_some() {
-                2
-            } else {
-                1
-            };
-            let (fun, arity) = inline_fn(fe, n_params)?;
-            Some(HofLoop {
-                kind,
+/// A traversal's per-item `fn`: a literal `fn`'s one arity, or the eta
+/// expansion of a `clojure.core` fn passed by name (#271).
+#[derive(Clone, Copy)]
+struct LoopFn<'a> {
+    fun: &'a FunExpr,
+    arity: &'a Arity,
+    eta: Option<&'a Expr>,
+}
+
+/// Resolves a traversal's fn argument to its [`LoopFn`] at one param base.
+struct LoopFns<'r, 'ctx> {
+    lowerer: &'r Lowerer<'ctx>,
+    base: usize,
+    span: clj_reader::Span,
+}
+
+impl LoopFns<'_, '_> {
+    /// `fe` taking `params` args per item: a literal `fn`, or a
+    /// `clojure.core` fn with an eta template.
+    fn of<'a>(&self, fe: &'a Expr, params: usize) -> Option<LoopFn<'a>> {
+        if let Some((fun, arity)) = inline_fn(fe, params) {
+            return Some(LoopFn {
                 fun,
                 arity,
-                init,
-                coll,
-                coll2,
-                inner: call,
-                outer: None,
-            })
+                eta: None,
+            });
+        }
+        let Expr::Global(var) = fe else {
+            return None;
         };
-    match (call.var.sym.name(), call.args.as_slice()) {
-        ("mapv", [fe, coll]) => one(HofKind::Collect, fe, None, coll, None),
-        ("mapv", [fe, c1, c2]) => one(HofKind::Collect, fe, None, c1, Some(c2)),
-        ("filterv", [fe, coll]) => one(HofKind::FilterCollect, fe, None, coll, None),
-        ("some", [fe, coll]) => one(HofKind::Some, fe, None, coll, None),
-        ("every?", [fe, coll]) => one(HofKind::Every, fe, None, coll, None),
-        ("reduce", [fe, init, coll]) => one(HofKind::Reduce, fe, Some(init), coll, None)
-            .or_else(|| sum_hof_loop(fe, Some(init), coll, call)),
-        ("reduce", [fe, coll]) => sum_hof_loop(fe, None, coll, call),
-        _ => outer_hof_loop(call),
+        if var.sym.namespace() != Some("clojure.core") {
+            return None;
+        }
+        let fun = self
+            .lowerer
+            .eta_fn(var.sym.name(), params, self.base, self.span)?;
+        Some(LoopFn {
+            fun,
+            arity: &fun.arities[0],
+            eta: Some(fe),
+        })
+    }
+
+    /// The identity `fn` `(fn [x] x)` the items of `(reduce + xs)` fold
+    /// through as a sum (#271), standing for `plus` on the general path.
+    fn identity<'a>(&self, plus: &'a Expr) -> Option<LoopFn<'a>> {
+        let fun = self.lowerer.eta_fn("", 1, self.base, self.span)?;
+        Some(LoopFn {
+            fun,
+            arity: &fun.arities[0],
+            eta: Some(plus),
+        })
     }
 }
 
+/// `call` as a [`HofLoop`]: `(mapv F xs [ys])`, `(filterv F xs)`, `(some F xs)`,
+/// `(every? F xs)`, `(reduce F [init] xs)`, `(reduce + [init] (map F xs [ys]))`,
+/// `(dorun (map F xs [ys]))`, `(vec (map|filter F xs [ys]))`,
+/// `(into [] (map|filter F xs [ys]))`, or `(count (filter|filterv F xs))`,
+/// all `clojure.core`, with `F` a literal `fn` or a `clojure.core` fn by name.
+fn hof_loop<'a>(
+    call: &'a clj_eval::expr::DirectCall,
+    fns: &LoopFns<'_, '_>,
+) -> Option<HofLoop<'a>> {
+    let one = |kind, fe, coll, coll2| one_hof_loop(call, kind, fe, None, coll, coll2, fns);
+    match (call.var.sym.name(), call.args.as_slice()) {
+        ("mapv", [fe, coll]) => one(HofKind::Collect, fe, coll, None),
+        ("mapv", [fe, c1, c2]) => one(HofKind::Collect, fe, c1, Some(c2)),
+        ("filterv", [fe, coll]) => one(HofKind::FilterCollect, fe, coll, None),
+        ("some", [fe, coll]) => one(HofKind::Some, fe, coll, None),
+        ("every?", [fe, coll]) => one(HofKind::Every, fe, coll, None),
+        ("reduce", [fe, init, coll]) => reduce_hof_loop(call, fe, Some(init), coll, fns),
+        ("reduce", [fe, coll]) => reduce_hof_loop(call, fe, None, coll, fns),
+        _ => outer_hof_loop(call, fns),
+    }
+}
+
+/// `(reduce F [init] xs)`: a sum ([`sum_hof_loop`]) or a fold.
+fn reduce_hof_loop<'a>(
+    call: &'a clj_eval::expr::DirectCall,
+    fe: &'a Expr,
+    init: Option<&'a Expr>,
+    coll: &'a Expr,
+    fns: &LoopFns<'_, '_>,
+) -> Option<HofLoop<'a>> {
+    sum_hof_loop(fe, init, coll, call, fns)
+        .or_else(|| one_hof_loop(call, HofKind::Reduce, fe, init, coll, None, fns))
+}
+
+/// The traversal `call` itself of `fe` over `coll` (and `coll2`).
+fn one_hof_loop<'a>(
+    call: &'a clj_eval::expr::DirectCall,
+    kind: HofKind,
+    fe: &'a Expr,
+    init: Option<&'a Expr>,
+    coll: &'a Expr,
+    coll2: Option<&'a Expr>,
+    fns: &LoopFns<'_, '_>,
+) -> Option<HofLoop<'a>> {
+    if runtime_traversal(call.var.sym.name(), fe) {
+        return None;
+    }
+    let n_params = if kind == HofKind::Reduce || coll2.is_some() {
+        2
+    } else {
+        1
+    };
+    let lf = fns.of(fe, n_params)?;
+    Some(HofLoop {
+        kind,
+        fun: lf.fun,
+        arity: lf.arity,
+        eta: lf.eta,
+        init,
+        coll,
+        coll2,
+        inner: call,
+        outer: None,
+    })
+}
+
+/// `(reduce + [init] (map F xs [ys]))`, or (#271) `(reduce + [init] xs)` as
+/// the sum of the items through an identity `fn`.
 fn sum_hof_loop<'a>(
     plus: &'a Expr,
     init: Option<&'a Expr>,
     inner: &'a Expr,
     outer: &'a clj_eval::expr::DirectCall,
+    fns: &LoopFns<'_, '_>,
 ) -> Option<HofLoop<'a>> {
     if !is_core_global(plus, "+") {
         return None;
     }
-    let mut hl = inner_hof_loop(inner, &["map"], HofKind::Sum, outer, Some(plus))?;
-    hl.init = init;
-    Some(hl)
+    if let Some(mut hl) = inner_hof_loop(inner, &["map"], HofKind::Sum, outer, Some(plus), fns) {
+        hl.init = init;
+        return Some(hl);
+    }
+    let lf = fns.identity(plus)?;
+    Some(HofLoop {
+        kind: HofKind::Sum,
+        fun: lf.fun,
+        arity: lf.arity,
+        eta: lf.eta,
+        init,
+        coll: inner,
+        coll2: None,
+        inner: outer,
+        outer: None,
+    })
 }
 
-fn outer_hof_loop(call: &clj_eval::expr::DirectCall) -> Option<HofLoop<'_>> {
+fn outer_hof_loop<'a>(
+    call: &'a clj_eval::expr::DirectCall,
+    fns: &LoopFns<'_, '_>,
+) -> Option<HofLoop<'a>> {
     match (call.var.sym.name(), call.args.as_slice()) {
-        ("dorun", [inner]) => inner_hof_loop(inner, &["map"], HofKind::Each, call, None),
-        ("vec", [inner]) => inner_hof_loop(inner, &["map"], HofKind::Collect, call, None)
-            .or_else(|| inner_hof_loop(inner, &["filter"], HofKind::FilterCollect, call, None)),
+        ("dorun", [inner]) => inner_hof_loop(inner, &["map"], HofKind::Each, call, None, fns),
+        ("vec", [inner]) => inner_hof_loop(inner, &["map"], HofKind::Collect, call, None, fns)
+            .or_else(|| {
+                inner_hof_loop(inner, &["filter"], HofKind::FilterCollect, call, None, fns)
+            }),
         ("into", [to @ Expr::VecLit(items, None), inner]) if items.is_empty() => {
-            inner_hof_loop(inner, &["map"], HofKind::Collect, call, Some(to)).or_else(|| {
-                inner_hof_loop(inner, &["filter"], HofKind::FilterCollect, call, Some(to))
+            inner_hof_loop(inner, &["map"], HofKind::Collect, call, Some(to), fns).or_else(|| {
+                inner_hof_loop(
+                    inner,
+                    &["filter"],
+                    HofKind::FilterCollect,
+                    call,
+                    Some(to),
+                    fns,
+                )
             })
         }
         ("count", [inner]) => inner_hof_loop(
@@ -8684,19 +8875,21 @@ fn outer_hof_loop(call: &clj_eval::expr::DirectCall) -> Option<HofLoop<'_>> {
             HofKind::CountFilter,
             call,
             None,
+            fns,
         ),
         _ => None,
     }
 }
 
 /// `(map|filter|filterv F xs [ys])` (a `clojure.core` traversal of a literal
-/// `fn`) under the outer call `outer`.
+/// `fn` or a `clojure.core` fn by name) under the outer call `outer`.
 fn inner_hof_loop<'a>(
     inner: &'a Expr,
     names: &[&str],
     kind: HofKind,
     outer: &'a clj_eval::expr::DirectCall,
     prefix: Option<&'a Expr>,
+    fns: &LoopFns<'_, '_>,
 ) -> Option<HofLoop<'a>> {
     let Expr::DirectNative(m) = inner else {
         return None;
@@ -8709,17 +8902,37 @@ fn inner_hof_loop<'a>(
         [fe, c1, c2] if m.var.sym.name() == "map" => (fe, c1, Some(c2), 2),
         _ => return None,
     };
-    let (fun, arity) = inline_fn(fe, n_params)?;
+    if runtime_traversal(m.var.sym.name(), fe) {
+        return None;
+    }
+    let lf = fns.of(fe, n_params)?;
     Some(HofLoop {
         kind,
-        fun,
-        arity,
+        fun: lf.fun,
+        arity: lf.arity,
+        eta: lf.eta,
         init: None,
         coll,
         coll2,
         inner: m,
         outer: Some((outer, prefix)),
     })
+}
+
+/// Traversals of a `clojure.core` fn by name the runtime answers better
+/// than an inline loop over the items (#271): `(filter|filterv seq xs)`
+/// tests emptiness without building seqs (a split string's tokens stay
+/// unmaterialized), `(some nil? xs)` answers a packed vector without a
+/// walk, and `(mapv parse-long xs)` parses in one native loop.
+fn runtime_traversal(hof: &str, fe: &Expr) -> bool {
+    let Expr::Global(v) = fe else {
+        return false;
+    };
+    v.sym.namespace() == Some("clojure.core")
+        && matches!(
+            (hof, v.sym.name()),
+            ("filter" | "filterv", "seq") | ("some", "nil?") | ("mapv", "parse-long")
+        )
 }
 
 /// A literal `fn` whose one arity takes exactly `params` symbol params
