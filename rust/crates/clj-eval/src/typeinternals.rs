@@ -2136,6 +2136,15 @@ fn native_reset_methods(eval: &mut Evaluator, args: &[Value]) -> Result<Value, N
     Ok(Value::Nil)
 }
 
+/// A protocol method fn's cache identity: an interpreted closure's id,
+/// or a compiled fn's (AOT binaries compile `defprotocol`'s method
+/// `defn`s to native fns; both draw ids from the same counter).
+fn method_fn_id(v: &Value) -> Option<u64> {
+    crate::ext::as_closure(v)
+        .map(|c| c.id)
+        .or_else(|| crate::ext::as_native(v).map(|n| n.id))
+}
+
 fn native_protocol_method(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/__protocol_method*", args, &[3])?;
     let Value::Var(var) = &args[0] else {
@@ -2144,11 +2153,11 @@ fn native_protocol_method(eval: &mut Evaluator, args: &[Value]) -> Result<Value,
     let Value::Str(method) = &args[1] else {
         return Err(cce_err(&args[1], "java.lang.String"));
     };
-    let Some(closure) = crate::ext::as_closure(&args[2]) else {
+    let Some(id) = method_fn_id(&args[2]) else {
         return Err(cce_err(&args[2], "clojure.lang.AFunction"));
     };
     eval.registry.note_protocol_fn(
-        closure.id,
+        id,
         ProtocolFnInfo {
             var_id: var.id,
             var_sym: var.sym.clone(),
@@ -2174,10 +2183,10 @@ fn no_impl_text(info: &ProtocolFnInfo, x: &Value) -> String {
 
 fn native_cache_protocol_fn(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/-cache-protocol-fn", args, &[4])?;
-    let Some(closure) = crate::ext::as_closure(&args[0]) else {
+    let Some(id) = method_fn_id(&args[0]) else {
         return Err(cce_err(&args[0], "clojure.lang.AFunction"));
     };
-    let info = eval.registry.protocol_fn_info(closure.id).ok_or_else(|| {
+    let info = eval.registry.protocol_fn_info(id).ok_or_else(|| {
         NativeError::new(
             ThrowClass::IllegalArgumentException,
             "Not a protocol fn".to_owned(),

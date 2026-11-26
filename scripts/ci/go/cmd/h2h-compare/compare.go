@@ -826,6 +826,9 @@ func compareLegs(o options, jm, rm map[caseKey]entry, jFail, rFail, jMiss, rMiss
 
 	var problems []string
 	for _, m := range selected {
+		if o.requireAllWins && stat[m].tie > 0 {
+			problems = append(problems, fmt.Sprintf("%d %s ties", stat[m].tie, metrics[m].tag))
+		}
 		if stat[m].loss > 0 {
 			problems = append(problems, fmt.Sprintf("%d %s losses", stat[m].loss, metrics[m].tag))
 		}
@@ -836,7 +839,11 @@ func compareLegs(o options, jm, rm map[caseKey]entry, jFail, rFail, jMiss, rMiss
 	if len(drift) > 0 {
 		problems = append(problems, fmt.Sprintf("%d test-count drifts", len(drift)))
 	}
-	if len(onlyBase) > 0 || len(onlyChal) > 0 {
+	if o.allowExtraChallenger {
+		if len(onlyBase) > 0 {
+			problems = append(problems, fmt.Sprintf("leg mismatch (only-%s %d)", an, len(onlyBase)))
+		}
+	} else if len(onlyBase) > 0 || len(onlyChal) > 0 {
 		problems = append(problems, fmt.Sprintf("leg mismatch (only-%s %d, only-%s %d)",
 			an, len(onlyBase), bn, len(onlyChal)))
 	}
@@ -879,6 +886,12 @@ func compareLegs(o options, jm, rm map[caseKey]entry, jFail, rFail, jMiss, rMiss
 			"",
 			fmt.Sprintf("common cases: %d (%s shards %d, %s shards %d); both-win %d/%d",
 				n, an, len(o.jvm), bn, len(o.rs), nBothWin, n),
+		)
+		if o.allowExtraChallenger && len(onlyChal) > 0 {
+			lines = append(lines, "",
+				fmt.Sprintf("note: skipped %d %s-only case(s) not present in %s", len(onlyChal), bn, an))
+		}
+		lines = append(lines,
 			"",
 			fmt.Sprintf("| metric | %s wins | losses | ties |", bn),
 			"| --- | ---: | ---: | ---: |",

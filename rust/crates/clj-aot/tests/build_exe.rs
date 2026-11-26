@@ -68,6 +68,12 @@ impl Drop for DirLock {
 fn acquire_lock(lock_dir: &std::path::Path) -> DirLock {
     let stale = std::time::Duration::from_secs(600);
     let wait = std::time::Duration::from_millis(25);
+    // Windows refuses to create a directory whose previous instance is
+    // still pending deletion ("Access is denied", os error 5): a lock
+    // just released by another test process. That is a held lock, not a
+    // failure; a denial lasting this long is a real permission problem.
+    let denied_limit = std::time::Duration::from_secs(120);
+    let mut denied_since = None;
     loop {
         match std::fs::create_dir(lock_dir) {
             Ok(()) => return DirLock(lock_dir.to_path_buf()),
@@ -79,6 +85,15 @@ fn acquire_lock(lock_dir: &std::path::Path) -> DirLock {
                     let _ = std::fs::remove_dir(lock_dir);
                     continue;
                 }
+                std::thread::sleep(wait);
+            }
+            Err(err)
+                if err.kind() == std::io::ErrorKind::PermissionDenied
+                    && denied_since
+                        .get_or_insert_with(std::time::Instant::now)
+                        .elapsed()
+                        < denied_limit =>
+            {
                 std::thread::sleep(wait);
             }
             Err(err) => panic!("create lock {}: {err}", lock_dir.display()),
@@ -173,6 +188,8 @@ fn build_and_run(name: &str, source: &str) -> (String, String, i32) {
             runtime_archive: Some(ensure_archive()),
             exe_dir: dir.clone(),
             linker: None,
+            keep_symbols: false,
+            portable: false,
         },
     )
     .expect("compile");
@@ -276,6 +293,8 @@ fn build_mode_and_run(name: &str, source: &str, args: &[&str]) -> (String, Strin
             runtime_archive: Some(ensure_archive()),
             exe_dir: dir.clone(),
             linker: None,
+            keep_symbols: false,
+            portable: false,
         },
         clj_aot::BuildMode::Mixed,
     )
@@ -421,5 +440,441 @@ fn native_binary_preserves_nested_or_defaults_and_assoc_miss_parity() {
     assert_eq!(
         (stdout.as_str(), stderr.as_str(), code),
         ("[10 20] [[30 40] [30 40]] :err :err\n", "", 0)
+    );
+}
+
+#[test]
+fn native_binary_exercises_lite_ns_stdin_and_full_cli() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let dir = tmp("lite-stdin");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let out = dir.join(format!("prog{}", exe_suffix()));
+    let lite_src = "\
+(ns demo.app (:require [clojure.string :as s]))
+(println (read-line) (s/join \",\" *command-line-args*))
+";
+    let report = clj_aot::build_str(
+        lite_src,
+        "f.clj",
+        &out,
+        &EmitOptions::default(),
+        &LinkOptions {
+            runtime_archive: Some(ensure_archive()),
+            exe_dir: dir.clone(),
+            linker: None,
+            keep_symbols: false,
+            portable: false,
+        },
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("compile lite stdin");
+    assert!(report.starts_with("aot: native "), "{report}");
+    let mut child = Command::new(&out)
+        .args(["x", "y"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lite");
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(b"hi\n")
+        .expect("write stdin");
+    let ran = child.wait_with_output().expect("wait lite");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+    assert_eq!(
+        (
+            String::from_utf8_lossy(&ran.stdout).into_owned().as_str(),
+            String::from_utf8_lossy(&ran.stderr).into_owned().as_str(),
+            ran.status.code()
+        ),
+        ("hi x,y\n", "", Some(0))
+    );
+
+    let req_src = "\
+(require 'clojure.string '[clojure.string :as rq] '[clojure.string :refer [trim]])
+(println (trim (rq/join \",\" [(Long/parseLong \"7\") (instance? Long 1)])))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("lite-require-string", req_src, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("7,true\n", "", 0)
+    );
+
+    let caps_src = "\
+(println (deref (atom [(re-find #\"a+\" \"baa\") (re-matches #\"a+\" \"aa\") (vec (take 2 (map inc [1 2]))) (Long/parseLong \"7\")])))
+";
+    let (stdout, stderr, code, _report) =
+        build_mode_and_run("lite-caps-seq-re-host", caps_src, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[aa aa [2 3] 7]\n", "", 0)
+    );
+
+    let lite_str_src = "\
+(ns demo.str (:require [clojure.string :as s]))
+(println (s/blank? \" \") (vec *command-line-args*))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("lite-str-cli", lite_str_src, &["a"]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("true [a]\n", "", 0)
+    );
+
+    let full_src = "\
+(ns demo.full (:require [clojure.walk :as w]))
+(println (w/postwalk identity [1 2]) (vec *command-line-args*))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("full-ns-cli", full_src, &["a"]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[1 2] [a]\n", "", 0)
+    );
+
+    let full_err_src = "(println (eval '(/ 1 0)))";
+    let (stdout, stderr, code, _report) = build_mode_and_run("full-err", full_err_src, &[]);
+    assert_eq!(stdout, "");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("ArithmeticException"), "{stderr}");
+
+    let scalar_src = "\
+(defn step [x] (+ x 1))
+(defn run-scalar [s u pairs]
+  (let [t (transient [])]
+    (loop [i 0 acc 0]
+      (if (< i 20)
+        (do
+          (conj! t i)
+          (if (> i 0) (assoc! t (- i 1) (* i 2)) nil)
+          (recur (step i) (+ acc (if (= (nth s (mod i (count s))) \\a) 1 0))))
+        (do
+          (pop! t)
+          [acc
+           (count (persistent! t))
+           (loop [j 0 uacc 0]
+             (if (< j (count u))
+               (recur (+ j 1) (+ uacc (if (= (nth u j) \\é) 10 1)))
+               uacc))
+           (loop [k 0 pacc 0]
+             (if (< k (count pairs))
+               (let [[a b] (nth pairs k)]
+                 (recur (+ k 1) (+ pacc a b)))
+               pacc))
+           (loop [m 0 hi 0 lo 1000]
+             (if (< m 20)
+               (recur (+ m 1) (max hi (rem (* m 37) 101)) (min lo (rem (* m 53) 97)))
+               (+ hi lo)))])))))
+(println (run-scalar \"aba\" \"aé\" [[3 4] [5 6]]))
+";
+    let (stdout, stderr, code, _report) = build_mode_and_run("scalar-271", scalar_src, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[13 19 11 18 97]\n", "", 0)
+    );
+}
+
+#[test]
+fn native_binary_maps_packed_vectors_and_restarts_on_type_change() {
+    let source = "(def weights [4 5 6])
+                  (def offset (+ 1 1))
+                  (def ^:dynamic *weight* 1)
+                  (defn add-weights [extra]
+                    (mapv (fn [i] (+ (nth weights i) extra offset)) (range 3)))
+                  (println (mapv (fn [x] (+ x 1)) [4 5 6])
+                           (mapv (fn [x y] (+ x y)) [0.5 1.5 2.5] (range 2))
+                           (mapv (fn [x] (if (zero? x) x (> x 1))) (range 3)))
+                  (println (add-weights 3) (mapv (fn [x] (inc x)) []))
+                  (println (reduce (fn [a x] (+ a x)) 8 [])
+                           (every? (fn [x] (pos? x)) [])
+                           (count (filter (fn [x] (pos? x)) [])))
+                  (binding [*weight* 3]
+                    (println (mapv (fn [x] (+ x *weight*)) [1 2])))
+                  (letfn [(f [] 8)]
+                    (println (mapv (fn [x] (if f (inc x) x)) [2 4])))";
+    let (stdout, stderr, code, _) = build_mode_and_run("packed-mapv", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            "[5 6 7] [0.5 2.5] [0 false true]\n[9 10 11] []\n8 true 0\n[4 5]\n[3 5]\n",
+            "",
+            0
+        )
+    );
+}
+
+#[test]
+fn native_packed_character_selection_matches_general_traversal() {
+    let source = r#"
+        (let [chars (vec "éé.é.as")
+              window (subvec chars 1 6)
+              effects (atom [])]
+          (prn (count (filter #(= % \é) chars)) (vec (filter #(= \é %) window)))
+          (println (apply str (vec (remove #(= % \.) window))))
+          (println (apply str (vec (drop-while #(= % \é) chars))))
+          (println (vec (drop-while #(= % \é) (vec "éé"))))
+          (prn (vec (remove #(= \a %) (map (fn [x] (swap! effects conj x) x) [\a 1 \b]))))
+          (prn @effects)
+          (println (apply str (vec (concat (subvec chars 0 2) (repeat 2 \x) (vec "z")))))
+          (prn (vec (concat [1] (repeat 2 \a))))
+          (prn (vec (filter (fn [x] (swap! effects conj x) (= x \a)) [\a])))
+          (prn (try (vec (remove #(= % \a))) (catch Exception _ :error)))
+          (prn @effects))
+    "#;
+    let (stdout, stderr, code, _) = build_mode_and_run("packed-char-selection", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            concat!(
+                "3 [\\é \\é]\nééa\n.é.as\n[]\n[1 \\b]\n[\\a 1 \\b]\nééxxz\n[1 \\a \\a]\n",
+                "[\\a]\n:error\n[\\a 1 \\b \\a]\n",
+            ),
+            "",
+            0
+        )
+    );
+}
+
+#[test]
+fn recur_retains_an_unchanged_binding_used_by_other_operands() {
+    let source = r#"
+        (defn collect [i kept out]
+          (if (< i 3)
+            (recur (inc i) kept (conj out (conj kept i)))
+            [kept out]))
+        (println (collect 0 [1] []))
+        (println
+          (loop [i 0 a [:a] b [:b] kept [:shared]]
+            (if (< i 3)
+              (recur (inc i) b (conj a (first kept)) kept)
+              [a b kept])))
+    "#;
+    let (stdout, stderr, code, _) = build_mode_and_run("retained-recur-bindings", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            "[[1] [[1 0] [1 1] [1 2]]]\n[[:b :shared] [:a :shared :shared] [:shared]]\n",
+            "",
+            0
+        )
+    );
+}
+
+#[test]
+fn atom_nth_reads_before_index_side_effects() {
+    let source = "(let [a (atom [[11 12]]) i 0]
+                     (println (nth @a i) (nth (nth @a i) 1))
+                     (println (nth (nth @a i) (do (reset! a [[21 22]]) 1)))
+                     (println (nth @a (do (reset! a [[31 32]]) i))))";
+    let (stdout, stderr, code, _) = build_mode_and_run("atom-nth-order", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[11 12] 12\n12\n[21 22]\n", "", 0)
+    );
+}
+
+#[test]
+fn native_swap_in_keeps_value_and_effect_position_semantics() {
+    let source = "(let [a (atom {:x {:y 0}})]
+                     (swap! a assoc-in [:x :y] 1)
+                     (swap! a assoc :z 2)
+                     (swap! a identity)
+                     (println (get-in @a [:x :y]) (:z @a))
+                     (println (get-in (swap! a assoc-in [:x :y] 3) [:x :y])))";
+    let (stdout, stderr, code, _) = build_mode_and_run("swap-in-positions", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("1 2\n3\n", "", 0)
+    );
+}
+
+#[test]
+fn scalar_row_reads_keep_early_errors_and_results() {
+    let source = "(defn row-sums [rows]
+                     (loop [i 0 acc 0]
+                       (if (< i (count rows))
+                         (let [row (nth rows i)]
+                           (recur (inc i) (+ acc (nth row 0) (nth row 1))))
+                         acc)))
+                  (defn update-before-next-row [rows dst]
+                    (loop [i 0 acc 0]
+                      (if (< i 2)
+                        (let [row (nth rows i)]
+                          (assoc! dst 0 i)
+                          (recur (inc i) (+ acc (nth row 0))))
+                        acc)))
+                  (println (row-sums [[1 2] [3 4]]))
+                  (let [dst (transient [9])]
+                    (try (update-before-next-row [[1]] dst)
+                         (catch IndexOutOfBoundsException _ (println (nth dst 0)))))
+                  (defn row-with-try [rows]
+                    (loop [i 0]
+                      (if (< i 1)
+                        (let [row (nth rows i)]
+                          (if (pos? (try (nth row 0) (catch Exception _ 0)))
+                            (recur (inc i))
+                            i))
+                        i)))
+                  (defn computed-row [rows use-rows]
+                    (loop [i 0 acc 0]
+                      (if (< i 1)
+                        (let [row (nth (if use-rows rows [[3]]) i)]
+                          (recur (inc i) (+ acc (nth row 0))))
+                        acc)))
+                  (defn conditional-nth [use-nth]
+                    (loop [i 0 acc 0]
+                      (if (< i 1)
+                        (let [n (inc i)]
+                          (recur n (+ acc (if use-nth (nth n 0) n))))
+                        acc)))
+                  (println (row-with-try [[2]]) (computed-row [[5]] true)
+                           (conditional-nth false))";
+    let (stdout, stderr, code, _) = build_mode_and_run("scalar-row-errors", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("10\n0\n1 5 1\n", "", 0)
+    );
+}
+
+#[test]
+fn native_stable_lookups_and_scalars_match_boxed_values() {
+    let source = "(def table {:a 3})
+                  (def chars (zipmap \"éx\" (range)))
+                  (def allowed #{:a})
+                  (def read-label ':label)
+                  (def delta 0.5)
+                  (defn adjust [nums] (mapv (fn [x] (+ delta x)) nums))
+                  (println (table :a) (table :missing 7)
+                           (chars \\x) (allowed :a) (read-label {:label :ok}))
+                  (println (adjust [2 3]))
+                  (let [big {1N :big}
+                        sorted (sorted-map-by (fn [x y] (compare (count x) (count y)))
+                                              \"aa\" :matched)]
+                    (println (get big 1 :missing) (contains? big 1)
+                             (get sorted \"bb\" :missing) (contains? sorted \"bb\")))";
+    let (stdout, stderr, code, _) = build_mode_and_run("stable-kinds", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("3 7 1 :a :ok\n[2.5 3.5]\n:big true :matched true\n", "", 0)
+    );
+}
+
+#[test]
+fn native_read_chains_borrow_through_nested_reads_271() {
+    let source = "(def grid [[1 2 3] [4 5 6]])
+                  (def g {:adj [[1] [0 2]] :w {:a 1}})
+                  (defn cell [r c] (nth (nth grid r) c))
+                  (defn deep [x i j k] (nth (nth (nth x i) j) k))
+                  (defn deg [v] (count (get (get g :adj) v)))
+                  (println (cell 1 2) (deep [[[1 2] [3 4]]] 0 1 0) (deg 1)
+                           (nth (nth '[[7 8] [9 10]] 1) 0) (get (get g :w) :a)
+                           (get (get g :w) :z :none) (count (nth [[1 2] [3]] 0)))";
+    let (stdout, stderr, code, _) = build_mode_and_run("read-chains", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("6 3 2 9 1 :none 2\n", "", 0)
+    );
+}
+
+#[test]
+fn native_nth_front_and_small_set_lookups_match_general_reads_271() {
+    let source = "(defn at [v i] (nth v i))
+                  (defn at3 [v i d] (nth v i d))
+                  (def big (vec (range 2000)))
+                  (defn has [s k] (contains? s k))
+                  (defn getk [s k] (get s k))
+                  (println (at [1 2 3] 1) (at [1.5 2.5] 1) (at [[1] :k] 0) (at big 1500)
+                           (at \"abc\" 2) (at (transient [4 5]) 1) (at3 [1 2] 5 :d)
+                           (at3 [1 2] -1 :d) (at (subvec [1 2 3] 1) 0))
+                  (println (has #{1 :a} 1) (has #{1 :a} 2) (has #{1N} 1) (has #{1.0} 1)
+                           (has (sorted-set 3 1) 1) (has (set (range 20)) 7)
+                           (getk #{1N} 1) (getk #{:a} :b) (getk #{\\c} \\c))
+                  (println (try (at [1 2] 5) (catch Exception _ :oob)))";
+    let (stdout, stderr, code, _) = build_mode_and_run("nth-front-sets", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            "2 2.5 [1] 1500 c 5 :d :d 2\ntrue false true false true true 1N nil c\n:oob\n",
+            "",
+            0
+        )
+    );
+}
+
+/// Release binaries ship without their symbol table; `--keep-symbols`
+/// keeps it for profilers (#271). Same program, same output.
+#[cfg(unix)]
+#[test]
+fn native_binaries_strip_symbols_unless_kept_271() {
+    let dir = tmp("strip-symbols");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let build = |keep_symbols: bool, name: &str| {
+        let out = dir.join(name);
+        clj_aot::build_str(
+            "(println (reduce + (range 10)))",
+            "f.clj",
+            &out,
+            &EmitOptions::default(),
+            &LinkOptions {
+                runtime_archive: Some(ensure_archive()),
+                exe_dir: dir.clone(),
+                linker: None,
+                keep_symbols,
+                portable: false,
+            },
+            clj_aot::BuildMode::Mixed,
+        )
+        .expect("build");
+        let ran = Command::new(&out).output().expect("run binary");
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "45\n");
+        std::fs::metadata(&out).expect("binary").len()
+    };
+    let stripped = build(false, "stripped");
+    let kept = build(true, "kept");
+    assert!(stripped < kept, "stripped {stripped} vs kept {kept}");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+fn native_core_fns_by_name_run_traversals_inline_271() {
+    let source = "(def v [3 1 4 1 5]) (def d [1.5 2.5 3.0])
+                  (defn total [xs] (reduce + xs))
+                  (defn total-from [k xs] (reduce + k xs))
+                  (defn biggest [xs] (reduce max xs))
+                  (defn incs [xs] (mapv inc xs))
+                  (println (total v) (total []) (total d) (total (range 5)) (total (list 1 2))
+                           (total-from 1 v) (total-from 0.5 d))
+                  (println (biggest v) (biggest [2]) (biggest (list 3 4)) (incs v) (incs (range 3))
+                           (mapv + v v))
+                  (println (filterv odd? v) (some even? v) (every? pos? v) (vec (map inc v))
+                           (count (filter odd? v)) (filterv seq [\"a\" \"\"]) (some nil? v)
+                           (count (filter seq [\"a\" \"\"])))
+                  (println (try (biggest []) (catch Exception _ :arity)))";
+    let (stdout, stderr, code, _) = build_mode_and_run("eta-traversals", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            "14 0 7.0 10 3 15 7.5\n5 2 4 [4 2 5 2 6] [1 2 3] [6 2 8 2 10]\n\
+             [3 1 1 5] true true [4 2 5 2 6] 4 [a] nil 1\n:arity\n",
+            "",
+            0
+        )
+    );
+}
+
+#[test]
+fn native_owned_arguments_follow_destructured_parameters() {
+    let source = "(defn extend [[x y] items {:keys [z]}]
+                     (conj items (+ x y z)))
+                  (let [pair [1 2] items [4]]
+                    (println (extend pair items {:z 3}) pair items))
+                  (println (extend [1 2] [4] {:z 3}))";
+    let (stdout, stderr, code, _) = build_mode_and_run("mixed-parameters", source, &[]);
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[4 6] [1 2] [4]\n[4 6]\n", "", 0)
     );
 }

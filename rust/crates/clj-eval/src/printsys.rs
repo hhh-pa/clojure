@@ -29,7 +29,7 @@ use clj_value::{
 use crate::core::{Reduced, cce_err, is_lazy_seq_str, print_opts, str_of_one};
 use crate::error::{NativeError, Signal, jvm_class_of, map_class_of, set_class_of};
 use crate::eval::Evaluator;
-use crate::ext::{Closure, FastArith, NativeFn, NsHandle, munge};
+use crate::ext::{Closure, DisplayName, FastArith, NativeFn, NativeTarget, NsHandle, munge};
 use crate::io::{EmissionGuard, Writer, check_writer, write_to_writer};
 use crate::lazy::{PendingSeq, realize_deep};
 use crate::multi::invoke_multifn;
@@ -570,23 +570,50 @@ fn write_seq_items(
 ) -> Result<(), NativeError> {
     // Dup ignores length (like the JVM's `print-sequential`).
     let len = if opts.dup { None } else { opts.length };
-    write_to_writer(w, begin)?;
+    // The text gathers in one buffer (#271), flushed before a child
+    // that prints itself: one write per run of scalars, not one per
+    // item and separator.
+    let mut buf = String::from(begin);
     let mut first = true;
     for (i, item) in items.iter().enumerate() {
         if len.is_some_and(|max| i >= max) {
             if !first {
-                write_to_writer(w, sep)?;
+                buf.push_str(sep);
             }
-            write_to_writer(w, "...")?;
+            buf.push_str("...");
             break;
         }
         if !first {
-            write_to_writer(w, sep)?;
+            buf.push_str(sep);
         }
         first = false;
-        pr_on(eval, item, w).map_err(signal_to_native)?;
+        pr_child(eval, item, w, opts, &mut buf)?;
     }
-    write_to_writer(w, end)?;
+    buf.push_str(end);
+    write_to_writer(w, &buf)
+}
+
+/// One child of a collection printer (#271): under the booted print
+/// methods a scalar renders into `buf` from the parent's options, which
+/// is what `scalar_default` answers (no meta to prefix, `*print-dup*`
+/// off; levels and lengths never apply to a scalar). Anything else
+/// flushes `buf` and dispatches through [`pr_on`].
+fn pr_child(
+    eval: &mut Evaluator,
+    item: &Value,
+    w: &Value,
+    opts: &PrintOpts,
+    buf: &mut String,
+) -> Result<(), NativeError> {
+    if eval.print_defaults_only && !opts.dup && crate::io::is_print_scalar(item) {
+        clj_value::pr_into(item, opts, buf);
+        return Ok(());
+    }
+    if !buf.is_empty() {
+        write_to_writer(w, buf)?;
+        buf.clear();
+    }
+    pr_on(eval, item, w).map_err(signal_to_native)?;
     Ok(())
 }
 
@@ -621,11 +648,13 @@ fn write_map_pair(
     k: &Value,
     v: &Value,
     w: &Value,
+    opts: &PrintOpts,
 ) -> Result<(), NativeError> {
-    pr_on(eval, k, w).map_err(signal_to_native)?;
-    write_to_writer(w, " ")?;
-    pr_on(eval, v, w).map_err(signal_to_native)?;
-    Ok(())
+    let mut buf = String::new();
+    pr_child(eval, k, w, opts, &mut buf)?;
+    buf.push(' ');
+    pr_child(eval, v, w, opts, &mut buf)?;
+    write_to_writer(w, &buf)
 }
 
 /// One map body through the driver (`prefix{` + `k v` pairs, `", "`
@@ -648,7 +677,7 @@ fn write_map_items(
         }
         write_pair_sep(w, first)?;
         first = false;
-        write_map_pair(eval, k, v, w)?;
+        write_map_pair(eval, k, v, w, opts)?;
     }
     write_to_writer(w, "}")?;
     Ok(())
@@ -1556,14 +1585,14 @@ pub(crate) fn boot_print_system(eval: &mut Evaluator) {
 /// One booted method fn value (a `NativeFn` — invokable through
 /// `eval.call` like any method fn).
 fn method_fn_value(eval: &mut Evaluator, display: &str, f: NativeFnPtr) -> Value {
-    let func: Arc<crate::ext::NativeImpl> = Arc::new(f);
     Value::Extension(Arc::new(NativeFn {
         id: eval.next_id(),
-        display: Arc::from(display),
-        func,
+        display: DisplayName::shared(display),
+        func: NativeTarget::Ptr(f),
         owned: None,
         meta: None,
         fast: FastArith::None,
+        compiled: None,
     }))
 }
 
@@ -1624,7 +1653,7 @@ mod tests {
 
     #[test]
     fn splitvec_token_is_pvec_or_subvec() {
-        let sp = clj_value::SplitVecValue::new(Arc::from("1 2"), Arc::from([(0, 1), (2, 1)]));
+        let sp = clj_value::SplitVecValue::new(Arc::from("1 2"), Arc::new(vec![(0, 1), (2, 1)]));
         let v = Value::Extension(Arc::new(sp.clone()));
         assert_eq!(token_of(&v), Some(TOK_PVEC));
         let w = Value::Extension(Arc::new(sp.window(0, 1)));
@@ -1868,11 +1897,12 @@ mod tests {
         let func: Arc<NativeImpl> = Arc::new(|_, _| Ok(Value::Nil));
         let native = NativeFn {
             id: 2,
-            display: Arc::from("user/g"),
-            func,
+            display: DisplayName::shared("user/g"),
+            func: NativeTarget::Dyn(func),
             owned: None,
             meta: Some(with_type),
             fast: FastArith::None,
+            compiled: None,
         };
         let stripped = strip_type_meta(&Value::Extension(Arc::new(native)));
         assert!(matches!(stripped, Value::Extension(_)));

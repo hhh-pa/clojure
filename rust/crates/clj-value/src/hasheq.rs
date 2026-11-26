@@ -380,20 +380,32 @@ fn hash_code_host(h: &crate::HostVal) -> i32 {
     }
 }
 
+/// Identity `.hashCode` for id-hashed reference cells (split from
+/// [`hash_code_rest`] for the complexity budget).
+fn id_cell_code(v: &Value) -> Option<i32> {
+    let id = match v {
+        Value::Atom(a) => a.id(),
+        Value::Delay(d) => d.id(),
+        Value::Future(f) => f.id(),
+        Value::Promise(p) => p.id(),
+        Value::Agent(a) => a.id(),
+        Value::Volatile(w) => w.id(),
+        Value::Ref(r) => r.id(),
+        Value::Executor(x) => x.id(),
+        _ => return None,
+    };
+    Some(id_hash(id))
+}
+
 fn hash_code_rest(v: &Value) -> i32 {
+    if let Some(code) = id_cell_code(v) {
+        return code;
+    }
     match v {
         // Classes hash their name's `String.hashCode` (deterministic
         // stand-in — the JVM uses identity here; split from
         // `hash_code_mid` for the complexity budget).
         Value::Class(c) => str_hashcode(c.name()),
-        Value::Atom(a) => id_hash(a.id()),
-        Value::Delay(d) => id_hash(d.id()),
-        Value::Future(f) => id_hash(f.id()),
-        Value::Promise(p) => id_hash(p.id()),
-        Value::Agent(a) => id_hash(a.id()),
-        Value::Volatile(v) => id_hash(v.id()),
-        Value::Ref(r) => id_hash(r.id()),
-        Value::Executor(x) => id_hash(x.id()),
         // JVM `.hashCode`s: in-range `BigInt` uses the `Long`
         // bit mix (`BigInt.hashCode`), `BigInteger` always uses
         // `BigInteger.hashCode`, decimals use the UNstripped

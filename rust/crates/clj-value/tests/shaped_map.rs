@@ -60,6 +60,19 @@ fn seventeenth_pair_promotes() {
     assert_eq!(m.size(), 16);
 }
 
+#[test]
+fn trie_map_promotes_array_class_only_for_a_new_key() {
+    let array_class = int_map(17).with_hashy(false);
+    let updated = array_class.clone().insert(Value::Int(7), Value::Int(99));
+    assert!(!updated.is_hashy());
+    assert_eq!(updated.size(), 17);
+    assert_eq!(updated.get(&Value::Int(7)), Some(&Value::Int(99)));
+    assert_eq!(array_class.get(&Value::Int(7)), Some(&Value::Int(70)));
+    let grown = updated.insert(Value::Int(18), Value::Int(180));
+    assert!(grown.is_hashy());
+    assert_eq!(grown.size(), 18);
+}
+
 /// `get`/`contains_key` agree across the boundary, including misses.
 #[test]
 fn get_agrees_across_boundary() {
@@ -320,6 +333,9 @@ fn sorted_large_maps_keep_comparator_order() {
     assert_eq!(m.ordered_keys(), want);
     let itered: Vec<Value> = m.iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(itered, want);
+    let m = m.insert(Value::Int(7), Value::Int(70));
+    assert_eq!(m.get(&Value::Int(7)), Some(&Value::Int(70)));
+    assert_eq!(m.ordered_keys(), want);
     // `dissoc` prunes the sidecar alongside the trie.
     let m = m.without(&Value::Int(5));
     let want: Vec<Value> = (0..20).filter(|i| *i != 5).map(Value::Int).collect();

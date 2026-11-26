@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use clj_eval::{plan_mixed, plan_source};
 use inkwell::context::Context;
 
-use link::{LinkError, current_platform, find_archive, link_command, run_link};
+use link::{LinkError, current_platform, find_archive, link_command};
 
 /// Emit options: `--emit-ir` / `--emit-obj` paths (either one skips
 /// linking; both write and skip).
@@ -61,6 +61,12 @@ pub struct LinkOptions {
     pub exe_dir: PathBuf,
     /// Linker program override (default: `cc` / `link`).
     pub linker: Option<String>,
+    /// Keep the symbol table (`--keep-symbols`, for profilers); linked
+    /// binaries are stripped by default ([`link::strip_args`]).
+    pub keep_symbols: bool,
+    /// Link the baseline runtime archive even on a host that runs
+    /// x86-64-v3 code (`--portable`: a binary for other machines).
+    pub portable: bool,
 }
 
 /// Compilation failures (the CLI maps IO/link/archive to exit 3
@@ -233,8 +239,8 @@ pub(crate) fn native_module_with_helpers<'ctx>(
     let mut eval = clj_eval::boot();
     let front = clj_eval::aot_front::front_end(&mut eval, source, source_path)
         .map_err(|e| NativeFail::Program(clj_eval::script::run_diagnostic(source_path, &e)))?;
-    let defns = front
-        .units
+    // The program's own definitions (spliced library units aside, #271).
+    let defns = front.units[front.lib_units..]
         .iter()
         .filter(|u| matches!(&u.expr, clj_eval::expr::Expr::Def { init: Some(_), .. }))
         .count();
@@ -294,22 +300,56 @@ fn helper_exports_to_internalize<'ctx>(helper: &inkwell::module::Module<'ctx>) -
     names
 }
 
+fn should_inline_hint(name: &str) -> bool {
+    name.starts_with("rt_bc_scalar_")
+        || matches!(
+            name,
+            "rt_bc_is_pod"
+                | "rt_bc_deref"
+                | "rt_bc_clone"
+                | "rt_bc_1_count"
+                | "rt_bc_1_pop_bang"
+                | "rt_bc_1_pop_bang_fx"
+                | "rt_bc_2_conj_bang"
+                | "rt_bc_2_conj_bang_fx"
+                | "rt_bc_3_assoc_bang"
+                | "rt_bc_3_assoc_bang_fx"
+                | "rt_bc_assoc_own3"
+                | "rt_bc_conj_own2"
+                | "rt_bc_ref_nth"
+                | "rt_bc_ref_get"
+        )
+}
+
+/// Small fronts compiled code tries before a general helper at many call
+/// sites: one shared out-of-line copy (#271: inlined, the `nth` front
+/// added ~450 bytes of code per site, and its failed check slowed the
+/// general helper's inlined reads of strings and transients).
+fn should_not_inline(name: &str) -> bool {
+    name == "rt_bc_nth_flat"
+}
+
 fn mark_internal_inline<'ctx>(
     ctx: &'ctx Context,
     module: &inkwell::module::Module<'ctx>,
     names: &[String],
 ) {
-    let inline_kind = inkwell::attributes::Attribute::get_named_enum_kind_id("inlinehint");
-    let inline_attr = (inline_kind != 0).then(|| ctx.create_enum_attribute(inline_kind, 0));
+    let attr = |kind: &str| {
+        ctx.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id(kind),
+            0,
+        )
+    };
+    let (hint, never) = (attr("inlinehint"), attr("noinline"));
     for name in names {
         let Some(func) = module.get_function(name) else {
             continue;
         };
         func.set_linkage(inkwell::module::Linkage::Internal);
-        if name.starts_with("rt_bc_")
-            && let Some(attr) = inline_attr
-        {
-            func.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+        if should_not_inline(name) {
+            func.add_attribute(inkwell::attributes::AttributeLoc::Function, never);
+        } else if should_inline_hint(name) {
+            func.add_attribute(inkwell::attributes::AttributeLoc::Function, hint);
         }
     }
 }
@@ -368,13 +408,37 @@ fn finish(
     let tmp = temp_obj_path();
     target::emit_object(&machine, module, &tmp).map_err(CompileError::Emit)?;
     let platform = current_platform();
-    let archive = find_archive(&link.exe_dir, link.runtime_archive.as_deref(), platform)
-        .map_err(CompileError::Link)?;
+    let prefer_v3 = !link.portable && link::host_has_x86_64_v3();
+    let archive = find_archive(
+        &link.exe_dir,
+        link.runtime_archive.as_deref(),
+        platform,
+        prefer_v3,
+    )
+    .map_err(CompileError::Link)?;
+    let linux = cfg!(target_os = "linux");
+    let script_path = tmp.with_extension("ld");
+    let script =
+        link::write_layout_script(&script_path, linux).map_err(|e| io_err(&script_path, e))?;
     let mut cmd = link_command(platform, &tmp, &archive, out, link.linker.as_deref());
-    cmd.args
-        .extend(link::layout_args(&archive, cfg!(target_os = "linux")));
-    let linked = run_link(&cmd).map_err(CompileError::Link);
+    cmd.args.extend(link::layout_args(script, linux));
+    cmd.args.extend(link::gc_section_args(
+        cfg!(target_os = "linux"),
+        cfg!(target_os = "macos"),
+    ));
+    cmd.args.extend(link::strip_args(
+        cfg!(target_os = "linux"),
+        cfg!(target_os = "macos"),
+        link.keep_symbols,
+    ));
+    // Linux tries the static link first (see `link::static_args`); the
+    // plain command stays the fallback (and the only attempt elsewhere).
+    let mut attempts = vec![cmd.clone()];
+    attempts[0].args.extend(link::static_args(linux));
+    attempts.push(cmd);
+    let linked = link::run_link_first(&attempts).map_err(CompileError::Link);
     let _removed = std::fs::remove_file(&tmp);
+    let _removed = script.map(std::fs::remove_file);
     linked
 }
 
@@ -429,7 +493,7 @@ mod tests {
         let summary = helpers_summary();
         assert!(summary.contains("rustc LLVM "));
 
-        let src = "(def a \"hello\")\n(defn f [v x] (if (= a \"hello\") (conj v x) (count v)))\n(println (f [1] :k))\n";
+        let src = "(def a \"hello\")\n(defn f [v x] (if (= a \"hello\") (if (nil? x) (recur v :k) (conj v x)) (count v)))\n(println (f [1] :k))\n";
         let ctx = Context::create();
         let (out_mod, _) =
             native_module_with_helpers(&ctx, src, "t.clj", None).expect("out-of-line");

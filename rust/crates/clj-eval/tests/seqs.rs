@@ -46,6 +46,52 @@ fn compile_chain(eval: &mut Evaluator, src: &str) -> Vec<String> {
 }
 
 #[test]
+fn some_and_every_respect_truthiness_and_lookup_semantics() {
+    let mut eval = boot();
+    let cases = [
+        ("(every? {:a 0 :b false} [:a :a])", "true"),
+        ("(every? #{[1]} [[1] [2]])", "false"),
+        ("(every? #{1 false} [1 false])", "false"),
+        ("(every? [1 2] [0 1])", "true"),
+        ("(every? :ok [{:ok 0} (sorted-map :ok true)])", "true"),
+        ("(every? :ok [{:ok true} nil])", "false"),
+        ("(some {:a false :b 0} [:a :b])", "0"),
+        ("(some #{false [1]} [false [1]])", "[1]"),
+        ("(some {[1] :yes} [(subvec [0 1] 1)])", ":yes"),
+        ("(some #{[1]} [(subvec [0 2] 1)])", "nil"),
+        ("(some :ok [{:ok false} {:ok 1}])", "1"),
+        ("(some nil? [1 2])", "nil"),
+        ("(some nil? (subvec [1 2 3] 1))", "nil"),
+        ("(some nil? \"text\")", "nil"),
+        ("(some nil? [false nil true])", "true"),
+        ("(some nil? '(false nil true))", "true"),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(run_last(&mut eval, source), expected, "{source}");
+    }
+}
+
+#[test]
+fn vec_concat_preserves_order_and_mixed_numeric_types() {
+    let mut eval = boot();
+    let cases = [
+        (
+            "(vec (concat nil (subvec [0 1 2] 1) (repeat 2 5)))",
+            "[1 2 5 5]",
+        ),
+        (
+            "(vec (concat [] [1.0] (repeat 2 2.5) (repeat 0 :a)))",
+            "[1.0 2.5 2.5]",
+        ),
+        ("(vec (concat [1 2] [3.0] [4]))", "[1 2 3.0 4]"),
+        ("(vec (concat [1] (repeat 1 :x)))", "[1 :x]"),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(run_last(&mut eval, source), expected, "{source}");
+    }
+}
+
+#[test]
 fn reduced_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(reduced? (reduced 1))"), "true");

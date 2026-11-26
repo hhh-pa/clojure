@@ -75,7 +75,7 @@ pub use jvm::{jvm_class_of, map_class_of, set_class_of};
 pub use keyword::Keyword;
 pub use multifn::{MultiFn, method_for, multifn_hex, multifn_str};
 pub use print::{
-    CHAR_ESCAPES, CHAR_NAMES, class_java_debug, java_debug, java_double_string, lift_ns,
+    CHAR_ESCAPES, CHAR_NAMES, class_java_debug, java_debug, java_double_string, lift_ns, pr_into,
     pr_to_string, print, print_opts::PrintOpts, print_to_string, str_of_value,
 };
 pub use promise::{Promise, PromiseState};
@@ -97,9 +97,10 @@ pub use transient::{
     TransientSet, TransientVector,
 };
 pub use value::{
-    FxBuildHasher, List, Map, MemberSet, Set, SortSpec, Value, ValueRef, Vector, bigdec_result,
-    extension_supports_meta, extension_with_meta, intern_literal_strings, intern_string,
-    intern_string_value, map_entry, new_map, new_set, reader_conditional, tagged_literal,
+    FxBuildHasher, List, Map, MemberSet, PackedStrings, Set, SortSpec, Value, ValueRef, Vector,
+    bigdec_result, extension_supports_meta, extension_with_meta, intern_literal_strings,
+    intern_string, intern_string_value, map_entry, new_map, new_set, reader_conditional,
+    tagged_literal,
 };
 pub use volatile::Volatile;
 

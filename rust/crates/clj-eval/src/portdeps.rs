@@ -422,8 +422,7 @@ pub(crate) const PORT_NATIVES: &[(&str, NativeFnPtr)] = &[
 pub(crate) fn install_port_ns(eval: &mut Evaluator) {
     eval.registry.ensure_ns(PORT_NS);
     for (name, f) in PORT_NATIVES {
-        let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
-        eval.install_native(PORT_NS, name, func);
+        eval.install_native_ptr(PORT_NS, name, *f);
     }
 }
 

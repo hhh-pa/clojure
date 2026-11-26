@@ -121,6 +121,13 @@ pub fn pr_to_string(v: &Value, opts: &PrintOpts) -> String {
     out
 }
 
+/// [`pr_to_string`] appended to `out` (#271: `print` of a large string
+/// built one copy instead of a temporary and a second copy).
+pub fn pr_into(v: &Value, opts: &PrintOpts, out: &mut String) {
+    let level = opts.level.map(|l| i64::try_from(l).unwrap_or(i64::MAX));
+    print_into(v, opts, level, out);
+}
+
 /// Print a value human-readably (`print` semantics: strings/chars
 /// unquoted, no limits).
 #[must_use]
@@ -973,14 +980,31 @@ fn print_string(s: &str, readably: bool, out: &mut String) {
         out.push_str(s);
         return;
     }
+    out.reserve(s.len() + 2);
     out.push('"');
-    for c in s.chars() {
-        match char_table_lookup(CHAR_ESCAPES, c) {
-            Some(e) => out.push_str(e),
-            None => out.push(c),
+    // Every escape is ASCII (#271): the runs between escaped bytes go in
+    // whole (cutting at an ASCII byte keeps the UTF-8 slices whole), not
+    // a table scan per char.
+    let mut start = 0;
+    for (i, b) in s.bytes().enumerate() {
+        if let Some(e) = byte_escape(b) {
+            out.push_str(&s[start..i]);
+            out.push_str(e);
+            start = i + 1;
         }
     }
+    out.push_str(&s[start..]);
     out.push('"');
+}
+
+/// The `CHAR_ESCAPES` text for an escaped ASCII byte.
+fn byte_escape(b: u8) -> Option<&'static str> {
+    match b {
+        0x08 | b'\t' | b'\n' | 0x0c | b'\r' | b'"' | b'\\' => {
+            char_table_lookup(CHAR_ESCAPES, char::from(b))
+        }
+        _ => None,
+    }
 }
 
 fn print_char(c: char, readably: bool, out: &mut String) {

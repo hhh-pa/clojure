@@ -18,14 +18,15 @@
 //! evaluator. Every other unit is only analyzed: nothing like
 //! `(slurp *in*)` ever runs during `build`.
 
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use clj_reader::Span;
-use clj_value::Value;
+use clj_value::{Symbol, Value};
 
 use crate::error::span_of;
 use crate::eval::{Evaluator, SourceError, split_top_do};
-use crate::expr::{Arity, Expr, FunExpr, Pattern};
+use crate::expr::{Arity, DirectCall, Expr, FunExpr, NsClause, Pattern};
 
 /// Core fns whose top-level calls change what later forms read or
 /// resolve (evaluated at build time as well as compiled).
@@ -51,6 +52,9 @@ pub struct TopUnit {
     pub env_effect: bool,
     /// The unit's source span.
     pub span: Span,
+    /// Which top-level form of its source text the unit came from
+    /// (`do`-split units share it).
+    pub form: usize,
 }
 
 /// The front end's output: units in load order.
@@ -58,7 +62,65 @@ pub struct TopUnit {
 pub struct FrontEnd {
     /// Every top-level unit, `do`-split, in load order.
     pub units: Vec<TopUnit>,
+    /// How many leading units are spliced library units (#271, see
+    /// [`SPLICED_LIBS`]): a full-boot build drops them, its `require`
+    /// loading the interpreted library instead.
+    pub lib_units: usize,
+    /// The namespaces those units define, in splice order.
+    pub libs: Vec<&'static str>,
+    /// Eta templates (#271): for each `clojure.core` fn the program
+    /// passes by name to a traversal (`(mapv inc xs)`, `(reduce + v)`),
+    /// the direct call `(clojure.core/f a…)` over the params `Local(0)…`
+    /// of a one-arity `fn`, keyed by name and arg count, so the native
+    /// compiler can run the traversal inline as it does a literal `fn`.
+    pub eta: HashMap<(String, usize), DirectCall>,
 }
+
+/// A vendored stdlib namespace a compiled program carries as its own
+/// leading units when its leading `ns` form requires it (#271). The
+/// units compile like user code (so they behave exactly as the
+/// interpreted library under `run`), and the program keeps
+/// `BootMode::Lite`.
+struct SplicedLib {
+    ns: &'static str,
+    file: &'static str,
+    text: &'static str,
+    /// Predicate naming the vars already covered by a Lite native: only the
+    /// definitions the program reaches that this predicate returns `false`
+    /// for (plus their transitive dependencies) are spliced (#271 Slice 5r).
+    select: fn(&str) -> bool,
+}
+
+fn no_lite_native(_: &str) -> bool {
+    false
+}
+
+/// The [`SplicedLib`]s, in splice order.
+const SPLICED_LIBS: &[SplicedLib] = &[
+    SplicedLib {
+        ns: "clojure.set",
+        file: "clojure/set.clj",
+        text: crate::ns::STDLIB_SET_CLJ,
+        select: no_lite_native,
+    },
+    SplicedLib {
+        ns: "clojure.string",
+        file: "clojure/string.clj",
+        text: crate::ns::STDLIB_STRING_CLJ,
+        select: crate::aot_boot::is_lite_string_var,
+    },
+];
+
+/// Core fns that look vars up at runtime: a program naming one keeps
+/// every library whole (a spliced subset would show there).
+const RUNTIME_RESOLVERS: [&str; 6] = [
+    "resolve",
+    "ns-resolve",
+    "ns-publics",
+    "ns-interns",
+    "ns-map",
+    "find-var",
+];
 
 /// Run the front end over `text` (named `path` in spans) on a
 /// booted build evaluator, inside `run`'s own binding frame
@@ -96,23 +158,262 @@ pub fn front_end(eval: &mut Evaluator, text: &str, path: &str) -> Result<FrontEn
 const FRONT_NS: &str = "clj.aot.build";
 
 fn front_end_inner(eval: &mut Evaluator, text: &str) -> Result<FrontEnd, SourceError> {
+    let mut front = read_units(eval, text)?;
+    splice_libs(eval, &mut front)?;
+    eta_templates(eval, &mut front);
+    Ok(front)
+}
+
+/// The traversals whose fn argument the native compiler can run inline,
+/// with the arg count that fn takes (`None`: decided by the call's
+/// shape) — `reduce` folds two, `map`/`mapv` over two colls take two.
+fn eta_params(name: &str, nargs: usize) -> Option<usize> {
+    match (name, nargs) {
+        ("reduce", 2 | 3) => Some(2),
+        ("map" | "mapv", 3) => Some(2),
+        ("map" | "mapv" | "filter" | "filterv" | "some" | "every?", 2) => Some(1),
+        _ => None,
+    }
+}
+
+/// Fill [`FrontEnd::eta`]: analyze `(fn* [a…] (clojure.core/f a…))` once
+/// for each `clojure.core` fn the units pass by name to a traversal
+/// ([`eta_params`]). A template whose body is not one direct call over
+/// exactly its params in order (a macro, an intercepted form, an arity
+/// the analysis rejects) is left out, and the traversal takes its
+/// general path.
+fn eta_templates(eval: &mut Evaluator, front: &mut FrontEnd) {
+    let mut wanted = BTreeSet::new();
+    for u in &front.units {
+        eta_wanted(&u.expr, &mut wanted);
+    }
+    for (name, n) in wanted {
+        let params: Vec<String> = (0..n).map(|i| format!("eta{i}")).collect();
+        let text = format!(
+            "(fn* [{ps}] (clojure.core/{name} {ps}))",
+            ps = params.join(" ")
+        );
+        let mut forms = eval.live_forms(&text);
+        let form = eval.next_live_form(&mut forms).ok().flatten();
+        let fun = form.and_then(|form| eval.analyze(&form).ok());
+        if let Some(call) = fun.as_ref().and_then(|f| eta_call(f, n)) {
+            front.eta.insert((name, n), call);
+        }
+    }
+}
+
+/// The one direct call `(f Local(0) … Local(n-1))` an eta template's
+/// single arity makes.
+fn eta_call(fun: &Expr, n: usize) -> Option<DirectCall> {
+    let Expr::Fn(f) = fun else { return None };
+    let [a] = &f.arities[..] else { return None };
+    match a.body.as_slice() {
+        [Expr::DirectNative(call)]
+            if a.rest.is_none() && a.fixed.len() == n && params_in_order(&call.args, n) =>
+        {
+            Some((**call).clone())
+        }
+        _ => None,
+    }
+}
+
+/// Whether `args` are exactly `Local(0)` … `Local(n-1)`, in order.
+fn params_in_order(args: &[Expr], n: usize) -> bool {
+    args.len() == n
+        && (args.iter().enumerate()).all(|(i, a)| matches!(a, Expr::Local(j) if *j == i))
+}
+
+/// The `(name, params)` of every `clojure.core` fn `e` passes by name
+/// as the first argument of a traversal ([`eta_params`]).
+fn eta_wanted(e: &Expr, out: &mut BTreeSet<(String, usize)>) {
+    if let Some(key) = eta_want(e) {
+        out.insert(key);
+    }
+    for_each_child(e, &mut |c| eta_wanted(c, out));
+}
+
+/// [`eta_wanted`] at one node (no let-chains: MSRV 1.85).
+fn eta_want(e: &Expr) -> Option<(String, usize)> {
+    let Expr::DirectNative(call) = e else {
+        return None;
+    };
+    if call.var.sym.namespace() != Some("clojure.core") {
+        return None;
+    }
+    let n = eta_params(call.var.sym.name(), call.args.len())?;
+    match call.args.first() {
+        Some(Expr::Global(f)) if f.sym.namespace() == Some("clojure.core") => {
+            Some((f.sym.name().to_owned(), n))
+        }
+        _ => None,
+    }
+}
+
+/// Read, expand, and analyze every top-level form of `text`.
+fn read_units(eval: &mut Evaluator, text: &str) -> Result<FrontEnd, SourceError> {
     let mut front = FrontEnd::default();
     let mut forms = eval.live_forms(text);
+    let mut ix = 0;
     while let Some(form) = eval.next_live_form(&mut forms)? {
-        unit(eval, &form, &mut front)?;
+        unit(eval, &form, &mut front, ix)?;
+        ix += 1;
     }
     Ok(front)
 }
 
-/// Expand, split, analyze (and maybe evaluate) one top-level form.
-fn unit(eval: &mut Evaluator, form: &Value, front: &mut FrontEnd) -> Result<(), SourceError> {
+/// Prepend the units of every [`SPLICED_LIBS`] library the program's
+/// leading `ns` form requires (#271). They run before that form, as the
+/// interpreted library would have loaded during its `require`; the build
+/// evaluator (which already loaded the library through that `require`)
+/// re-evaluates their environment effects, the same definitions.
+fn splice_libs(eval: &mut Evaluator, front: &mut FrontEnd) -> Result<(), SourceError> {
+    let mut units = Vec::new();
+    for lib in SPLICED_LIBS {
+        if let Some(kept) = lib_units(eval, front, lib)? {
+            units.extend(kept);
+            front.libs.push(lib.ns);
+        }
+    }
+    front.lib_units = units.len();
+    units.append(&mut front.units);
+    front.units = units;
+    Ok(())
+}
+
+/// The units `lib` contributes to the program (`None`: it is not
+/// spliced — not required by the leading `ns` form, or, for a selective
+/// library, nothing to splice).
+fn lib_units(
+    eval: &mut Evaluator,
+    front: &FrontEnd,
+    lib: &SplicedLib,
+) -> Result<Option<Vec<TopUnit>>, SourceError> {
+    if !leading_ns_requires(front, lib.ns) {
+        return Ok(None);
+    }
+    let Some(needed) = needed_defs(&front.units, lib.ns, lib.select) else {
+        return Ok(None);
+    };
+    if needed.is_empty() {
+        return Ok((lib.ns == "clojure.set").then_some(Vec::new()));
+    }
+    let prev = eval.swap_source(Arc::from(lib.file));
+    let read = read_units(eval, lib.text);
+    eval.swap_source(prev);
+    let units = read?.units;
+    Ok(select_units(units, lib.ns, lib.select, needed))
+}
+
+/// The `lib` vars `units` name that no Lite native (`native`) covers —
+/// `None` when the program can look vars up at runtime.
+fn needed_defs(units: &[TopUnit], lib: &str, native: fn(&str) -> bool) -> Option<BTreeSet<String>> {
+    let mut syms = Vec::new();
+    for u in units {
+        global_syms(&u.expr, &mut syms);
+    }
+    let resolves = syms
+        .iter()
+        .any(|s| s.namespace() == Some("clojure.core") && RUNTIME_RESOLVERS.contains(&s.name()));
+    (!resolves).then(|| lib_needs(&syms, lib, native))
+}
+
+/// The names of the `lib` vars among `syms` without a Lite native.
+fn lib_needs(syms: &[Symbol], lib: &str, native: fn(&str) -> bool) -> BTreeSet<String> {
+    syms.iter()
+        .filter(|s| s.namespace() == Some(lib) && !native(s.name()))
+        .map(|s| s.name().to_owned())
+        .collect()
+}
+
+/// The vars `e` names (globals, var refs, direct natives).
+fn global_syms(e: &Expr, out: &mut Vec<Symbol>) {
+    match e {
+        Expr::Global(v) | Expr::VarRef(v) => out.push(v.sym.clone()),
+        Expr::DirectNative(call) => out.push(call.var.sym.clone()),
+        _ => {}
+    }
+    for_each_child(e, &mut |c| global_syms(c, out));
+}
+
+/// A selective library's units for `needed`: its `ns` form (clauses
+/// dropped — the build evaluator applied them, and a Lite `ns` form only
+/// switches namespaces) plus every top-level form defining a needed var
+/// or a var those forms reach (`None` when one has no definition here).
+fn select_units(
+    units: Vec<TopUnit>,
+    lib: &str,
+    native: fn(&str) -> bool,
+    needed: BTreeSet<String>,
+) -> Option<Vec<TopUnit>> {
+    let mut want: Vec<String> = needed.into_iter().collect();
+    let mut seen = BTreeSet::new();
+    let mut forms = BTreeSet::new();
+    while let Some(name) = want.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let form = units.iter().find(|u| defines(&u.expr, lib, &name))?.form;
+        forms.insert(form);
+        let mut syms = Vec::new();
+        for u in units.iter().filter(|u| u.form == form) {
+            global_syms(&u.expr, &mut syms);
+        }
+        want.extend(lib_needs(&syms, lib, native));
+    }
+    let mut kept = Vec::new();
+    for mut u in units {
+        if let Expr::Ns { clauses, .. } = &mut u.expr {
+            clauses.clear();
+            kept.push(u);
+        } else if forms.contains(&u.form) {
+            kept.push(u);
+        }
+    }
+    Some(kept)
+}
+
+/// Whether `e` defines `lib/name`.
+fn defines(e: &Expr, lib: &str, name: &str) -> bool {
+    matches!(e, Expr::Def { sym, .. } if sym.namespace() == Some(lib) && sym.name() == name)
+}
+
+/// Whether the program's first unit is an `ns` form whose `:require`
+/// names `lib`.
+fn leading_ns_requires(front: &FrontEnd, lib: &str) -> bool {
+    let Some(Expr::Ns { clauses, .. }) = front.units.first().map(|u| &u.expr) else {
+        return false;
+    };
+    clauses.iter().any(|c| match c {
+        NsClause::Require(specs) => specs.iter().any(|s| names_lib(s, lib)),
+        _ => false,
+    })
+}
+
+/// Whether a `:require` spec (`lib` or `[lib …]`) names `lib`.
+#[must_use]
+pub fn names_lib(spec: &Value, lib: &str) -> bool {
+    let head = match spec {
+        Value::Vector(items) => items.get(0),
+        other => Some(other.clone()),
+    };
+    matches!(head, Some(Value::Symbol(s)) if s.namespace().is_none() && s.name() == lib)
+}
+
+/// Expand, split, analyze (and maybe evaluate) one top-level form (the
+/// `ix`th of its text).
+fn unit(
+    eval: &mut Evaluator,
+    form: &Value,
+    front: &mut FrontEnd,
+    ix: usize,
+) -> Result<(), SourceError> {
     let source = Arc::clone(&eval.source);
     let span = span_of(form, Span::new(1, 1));
     let expanded = crate::macros::macroexpand_full(eval, form, span, &source)
         .map_err(|e| eval.compile_err(e))?;
     if let Some(elements) = split_top_do(&expanded) {
         for element in elements {
-            unit(eval, element, front)?;
+            unit(eval, element, front, ix)?;
         }
         return Ok(());
     }
@@ -127,6 +428,7 @@ fn unit(eval: &mut Evaluator, form: &Value, front: &mut FrontEnd) -> Result<(), 
         expr,
         env_effect,
         span,
+        form: ix,
     });
     Ok(())
 }
@@ -169,6 +471,15 @@ fn is_env_var(var: &clj_value::Var) -> bool {
 /// Call `f` on every direct child expression of `expr` (patterns'
 /// `:or` defaults and fn arity bodies included).
 pub fn for_each_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+    if for_each_simple_child(expr, f) || for_each_binding_child(expr, f) {
+        return;
+    }
+    for_each_scope_child(expr, f);
+}
+
+/// Leaf, linear-sequence, and direct-call forms; returns `true` when `expr`
+/// matched and was visited.
+fn for_each_simple_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) -> bool {
     match expr {
         Expr::Literal(_)
         | Expr::Global(_)
@@ -177,82 +488,116 @@ pub fn for_each_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
         | Expr::VarRef(_)
         | Expr::NewThrowable { .. }
         | Expr::Declare { .. }
-        | Expr::Ns { .. } => {}
+        | Expr::Ns { .. } => true,
         Expr::VecLit(items, _) | Expr::SetLit(items, _) | Expr::Do(items) | Expr::Recur(items) => {
             items.iter().for_each(f);
+            true
         }
-        Expr::MapLit(pairs, _) => pairs.iter().for_each(|(k, v)| {
-            f(k);
-            f(v);
-        }),
-        Expr::Def { init, meta, .. } => {
-            init.iter().for_each(|e| f(e));
-            meta.iter().flatten().for_each(|(k, v)| {
-                f(k);
-                f(v);
-            });
+        Expr::WithOutStr { body, .. }
+        | Expr::DelayStar { body, .. }
+        | Expr::Sync { body }
+        | Expr::Io { body } => {
+            body.iter().for_each(f);
+            true
+        }
+        Expr::LazySeqStar { body } => {
+            body.iter().for_each(f);
+            true
+        }
+        Expr::Throw(e) | Expr::Time { expr: e } | Expr::Set { val: e, .. } => {
+            f(e);
+            true
         }
         Expr::If { test, then, els } => {
             f(test);
             f(then);
             f(els);
+            true
+        }
+        Expr::Invoke { head, args, .. } => {
+            f(head);
+            args.iter().for_each(f);
+            true
+        }
+        Expr::DirectNative(call) => {
+            call.args.iter().for_each(f);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Binding, definition, and fn-literal forms; returns `true` when `expr`
+/// matched and was visited.
+fn for_each_binding_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) -> bool {
+    match expr {
+        Expr::MapLit(pairs, _) => {
+            visit_expr_pairs(pairs, f);
+            true
+        }
+        Expr::Def { init, meta, .. } => {
+            if let Some(e) = init.as_deref() {
+                f(e);
+            }
+            if let Some(pairs) = meta.as_deref() {
+                visit_expr_pairs(pairs, f);
+            }
+            true
         }
         Expr::Let { bindings, body } => {
-            for (pat, init) in bindings {
-                pattern_children(pat, f);
-                f(init);
-            }
-            body.iter().for_each(f);
+            visit_expr_bindings(bindings, body, f);
+            true
         }
         Expr::Loop { bindings, body } => {
-            for (pat, init) in bindings {
-                pattern_children(pat, f);
-                f(init);
-            }
-            body.iter().for_each(f);
+            visit_expr_bindings(bindings, body, f);
+            true
         }
         Expr::LetFn { fns, body } => {
-            fns.iter().for_each(|(_, fun)| fun_children(fun, f));
+            for (_, fun) in fns {
+                fun_children(fun, f);
+            }
             body.iter().for_each(f);
+            true
         }
         Expr::Fn(fun) | Expr::BoundFn { fun, .. } | Expr::DefMacro { fun, .. } => {
             fun_children(fun, f);
+            true
         }
-        Expr::Throw(e) | Expr::Time { expr: e } => f(e),
+        _ => false,
+    }
+}
+
+/// Dynamic-scope, try/catch, assert, and `case*` forms.
+fn for_each_scope_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+    match expr {
         Expr::Try {
             body,
             catches,
             finally_body,
         } => {
             body.iter().for_each(&mut *f);
-            catches.iter().for_each(|c| c.body.iter().for_each(&mut *f));
+            for catch in catches {
+                catch.body.iter().for_each(&mut *f);
+            }
             finally_body.iter().for_each(f);
         }
-        Expr::Set { val, .. } => f(val),
         Expr::Binding { pairs, body } | Expr::WithRedefs { pairs, body } => {
-            pairs.iter().for_each(|(_, e)| f(e));
+            for (_, e) in pairs {
+                f(e);
+            }
             body.iter().for_each(f);
         }
-        Expr::WithBindings { map, body } => {
+        Expr::WithBindings { map, body }
+        | Expr::WithInStr { s: map, body, .. }
+        | Expr::Locking { lockee: map, body } => {
             f(map);
             body.iter().for_each(f);
         }
         Expr::Assert { test, message, .. } => {
             f(test);
-            message.iter().for_each(|m| f(m));
-        }
-        Expr::WithOutStr { body, .. }
-        | Expr::DelayStar { body, .. }
-        | Expr::Sync { body }
-        | Expr::Io { body } => body.iter().for_each(f),
-        Expr::LazySeqStar { body } => body.iter().for_each(f),
-        Expr::WithInStr { s, body, .. } => {
-            f(s);
-            body.iter().for_each(f);
-        }
-        Expr::Locking { lockee, body } => {
-            f(lockee);
-            body.iter().for_each(f);
+            if let Some(m) = message.as_deref() {
+                f(m);
+            }
         }
         Expr::CaseStar {
             expr,
@@ -262,17 +607,32 @@ pub fn for_each_child<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
         } => {
             f(expr);
             f(default);
-            cases.iter().for_each(|(_, test, then)| {
+            for (_, test, then) in cases {
                 f(test);
                 f(then);
-            });
+            }
         }
-        Expr::Invoke { head, args, .. } => {
-            f(head);
-            args.iter().for_each(f);
-        }
-        Expr::DirectNative(call) => call.args.iter().for_each(f),
+        _ => {}
     }
+}
+
+fn visit_expr_pairs<'a>(pairs: &'a [(Expr, Expr)], f: &mut dyn FnMut(&'a Expr)) {
+    for (k, v) in pairs {
+        f(k);
+        f(v);
+    }
+}
+
+fn visit_expr_bindings<'a>(
+    bindings: &'a [(Pattern, Expr)],
+    body: &'a [Expr],
+    f: &mut dyn FnMut(&'a Expr),
+) {
+    for (pat, init) in bindings {
+        pattern_children(pat, f);
+        f(init);
+    }
+    body.iter().for_each(f);
 }
 
 fn fun_children<'a>(fun: &'a FunExpr, f: &mut dyn FnMut(&'a Expr)) {
@@ -307,6 +667,41 @@ mod tests {
     use crate::ns::boot;
 
     #[test]
+    fn front_end_eta_templates_cover_core_fns_traversals_name_271() {
+        let mut eval = boot();
+        let front = front_end(
+            &mut eval,
+            "(def v [1 2]) (mapv inc v) (reduce + v) (reduce max 0 v) (map + v v)
+             (filterv odd? v) (some nil? v) (every? pos? v) (mapv str v) (mapv not v)
+             (mapv vector v) (mapv hash-map v v) (mapv = v v) (mapv identity v) (map v v)
+             (mapv inst? v) (mapv clojure.string/blank? v) (reduce v)",
+            "t.clj",
+        )
+        .expect("front");
+        let mut names: Vec<_> = front.eta.keys().map(|(n, k)| format!("{n}/{k}")).collect();
+        names.sort();
+        // `inst?` is a `core.clj` fn (its call is no direct native call);
+        // non-core fns and non-traversals want no template.
+        assert_eq!(
+            names,
+            [
+                "+/2",
+                "=/2",
+                "hash-map/2",
+                "identity/1",
+                "inc/1",
+                "max/2",
+                "nil?/1",
+                "not/1",
+                "odd?/1",
+                "pos?/1",
+                "str/1",
+                "vector/1"
+            ]
+        );
+    }
+
+    #[test]
     fn front_end_reports_macroexpansion_errors() {
         let mut eval = boot();
         let err = front_end(
@@ -316,5 +711,103 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, SourceError::Compile(_)), "{err:?}");
+    }
+
+    #[test]
+    fn front_end_splices_libs_a_leading_ns_requires() {
+        use crate::expr::Expr;
+        use clj_value::{Symbol, Value, Vector};
+        let mut eval = boot();
+        let front = front_end(
+            &mut eval,
+            "(ns t (:require [clojure.set :as s] clojure.string)) (s/union #{1} #{2})",
+            "t.clj",
+        )
+        .expect("front");
+        assert_eq!(front.libs, ["clojure.set"]);
+        assert!(matches!(&front.units[0].expr, Expr::Ns { name, .. } if name == "clojure.set"));
+        assert!(matches!(
+            &front.units[front.lib_units].expr,
+            Expr::Ns { name, .. } if name == "t"
+        ));
+        // Only a leading `ns` form's `:require` splices.
+        for src in [
+            "",
+            "(require 'clojure.set) (ns u (:require clojure.set))",
+            "(ns v (:require [clojure.string :as str]) (:refer-clojure :exclude [get]))",
+        ] {
+            let front = front_end(&mut boot(), src, "t.clj").expect("front");
+            assert_eq!((front.lib_units, front.libs.len()), (0, 0), "{src}");
+        }
+        let lib = || Value::Symbol(Symbol::new(None, "clojure.set"));
+        assert!(super::names_lib(&lib(), "clojure.set"));
+        assert!(super::names_lib(
+            &Value::Vector(Vector::from_vec(vec![lib()])),
+            "clojure.set"
+        ));
+        assert!(!super::names_lib(
+            &Value::Vector(Vector::from_vec(Vec::new())),
+            "clojure.set"
+        ));
+        assert!(!super::names_lib(&Value::Int(1), "clojure.set"));
+        assert!(!super::names_lib(&lib(), "clojure.string"));
+    }
+
+    #[test]
+    fn front_end_splices_the_string_defs_a_program_needs() {
+        use crate::expr::Expr;
+        let defs = |src: &str| {
+            let front = front_end(&mut boot(), src, "t.clj").expect("front");
+            let names: Vec<String> = front.units[..front.lib_units]
+                .iter()
+                .filter_map(|u| match &u.expr {
+                    Expr::Def { sym, .. } => Some(sym.name().to_owned()),
+                    Expr::Ns { name, clauses, .. } => Some(format!("ns {name} {}", clauses.len())),
+                    _ => None,
+                })
+                .collect();
+            (front.libs.clone(), names)
+        };
+        // `replace-first` (no Lite native) and its private helpers splice, after
+        // the namespace's clause-free `ns` form; natives and unused defs do not.
+        let (libs, names) = defs(
+            "(ns t (:require [clojure.string :as str])) \
+             (println (str/replace-first \"a1\" #\"\\d\" \"x\") (str/join [1]))",
+        );
+        assert_eq!(libs, ["clojure.string"]);
+        assert_eq!(
+            names,
+            [
+                "ns clojure.string 0",
+                "replace-first-by",
+                "replace-first-char",
+                "replace-first-str",
+                "replace-first"
+            ]
+        );
+        // Nothing to splice: only natives, a runtime var lookup, a var the
+        // library does not define.
+        for src in [
+            "(ns t (:require [clojure.string :as str])) (println (str/join [1]) (str/replace \"a\" \"a\" \"b\"))",
+            "(ns t (:require [clojure.string :as str])) (println (resolve 'str/join) (str/replace-first \"a\" \"a\" \"b\"))",
+            "(ns t (:require [clojure.string :as str])) (in-ns 'clojure.string) (def extra 1) (in-ns 't) (println str/extra)",
+        ] {
+            assert_eq!(defs(src), (Vec::new(), Vec::new()), "{src}");
+        }
+        assert_eq!(
+            defs("(ns t (:require [clojure.set :as s])) (println 1)"),
+            (vec!["clojure.set"], Vec::new()),
+        );
+    }
+
+    #[test]
+    fn scope_child_skips_non_scope_expr() {
+        let mut visited = false;
+        super::for_each_scope_child(&clj_eval_expr_literal(), &mut |_| visited = true);
+        assert!(!visited);
+    }
+
+    fn clj_eval_expr_literal() -> crate::expr::Expr {
+        crate::expr::Expr::Literal(clj_value::Value::Nil)
     }
 }

@@ -17,14 +17,14 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 
 use clj_value::{
-    ConsValue, Keyword, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue, ThrowClass,
-    Transient, TransientError, TransientKind, TransientMap, TransientSet, TransientVector, Value,
-    Vector, new_map, new_set,
+    Array, ConsValue, Keyword, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue,
+    ThrowClass, Transient, TransientError, TransientKind, TransientMap, TransientSet,
+    TransientVector, Value, Vector, new_map, new_set,
 };
 use smallvec::SmallVec;
 
 use crate::core::{cce_err, cce_message, is_counted, jvm_compare, nth_index};
-use crate::error::{NativeError, jvm_class_of, simple_name_of};
+use crate::error::{NativeError, Signal, jvm_class_of, simple_name_of};
 use crate::eval::Evaluator;
 use crate::ext::as_native;
 use crate::lazy::{
@@ -112,11 +112,24 @@ pub(crate) fn lookup_present(
         // `f-get-*`, `e-get-*`).
         Value::Array(a) => Ok(lookup_array_slot(a, key)),
         Value::PrimitiveVector(p) => Ok(lookup_pv_slot(p, key)),
-        Value::Set(s) if s.is_sorted() => Ok(sorted_lookup_set(eval, s, key)?),
-        Value::Set(s) => Ok(s.get(key).cloned()),
+        Value::Set(s) => lookup_set_slot(eval, s, key),
         Value::Str(s) => Ok(lookup_str_slot(s, key)),
         Value::Transient(t) => transient_get(t, key),
         other => lookup_present_fallback(other, key),
+    }
+}
+
+/// A set slot (sorted sets resolve through the comparator; split from
+/// [`lookup_present`] for the complexity budget).
+fn lookup_set_slot(
+    eval: &mut Evaluator,
+    s: &Set,
+    key: &Value,
+) -> Result<Option<Value>, NativeError> {
+    if s.is_sorted() {
+        Ok(sorted_lookup_set(eval, s, key)?)
+    } else {
+        Ok(s.get(key).cloned())
     }
 }
 
@@ -475,7 +488,9 @@ fn subvector_conj(sv: &SubVectorValue, x: Value) -> Value {
         v.clone().push_back(x)
     };
     Value::Extension(Arc::new(
-        SubVectorValue::new(backing, sv.start(), sv.end() + 1).with_meta(sv.meta().cloned()),
+        SubVectorValue::new(backing, sv.start(), sv.end() + 1)
+            .with_orig_start(sv.orig_start())
+            .with_meta(sv.meta().cloned()),
     ))
 }
 
@@ -594,6 +609,8 @@ fn assoc_pv(
     ))
 }
 
+const SUBVEC_COMPACT_MAX: usize = 256;
+
 /// `assoc` on a subvector (stays a subvector; writes at the absolute
 /// index — even before the window, like the JVM).
 fn assoc_subvector(sv: &SubVectorValue, k: &Value, v: Value) -> Result<Value, NativeError> {
@@ -603,27 +620,41 @@ fn assoc_subvector(sv: &SubVectorValue, k: &Value, v: Value) -> Result<Value, Na
             "Key must be integer".to_owned(),
         ));
     };
-    let abs = sv.start() as i64 + (i as i32) as i64;
-    let end = sv.end() as i64;
-    if abs < 0 || abs > end {
+    let rel = i64::from(i as i32);
+    let len = sv.len() as i64;
+    if sv.orig_start() as i64 + rel < 0 || rel > len {
         return Err(NativeError::new(
             ThrowClass::IndexOutOfBoundsException,
             String::new(),
         ));
     }
-    if abs == end {
+    if rel == len {
         return Ok(subvector_conj(sv, v));
     }
-    let n = abs as usize;
-    // `abs < end <= backing len` on every live subvector, so this
-    // `set_nth` cannot fail.
-    let backing = sv
-        .vec()
-        .set_nth(n, v)
-        .expect("window index is below the backing length");
-    Ok(Value::Extension(Arc::new(
-        SubVectorValue::new(backing, sv.start(), sv.end()).with_meta(sv.meta().cloned()),
-    )))
+    let next = if rel < 0 {
+        sv.clone()
+    } else {
+        let idx = rel as usize;
+        if sv.len() <= SUBVEC_COMPACT_MAX && sv.vec().len() > sv.len() {
+            let backing = sv
+                .vec()
+                .slice_packed(sv.start(), sv.end())
+                .set_nth_owned(idx, v)
+                .expect("window index is below the compacted length");
+            SubVectorValue::new(backing, 0, sv.len())
+                .with_orig_start(sv.orig_start())
+                .with_meta(sv.meta().cloned())
+        } else {
+            let backing = sv
+                .vec()
+                .set_nth(sv.start() + idx, v)
+                .expect("window index is below the backing length");
+            SubVectorValue::new(backing, sv.start(), sv.end())
+                .with_orig_start(sv.orig_start())
+                .with_meta(sv.meta().cloned())
+        }
+    };
+    Ok(Value::Extension(Arc::new(next)))
 }
 
 /// `assoc` on a map-like host value (split from [`assoc3`] for
@@ -708,6 +739,14 @@ fn assoc3(eval: &mut Evaluator, coll: Value, k: &Value, v: Value) -> Result<Valu
 /// Walk a seq counting items (hangs on infinite seqs, like the JVM).
 fn walk_count(eval: &mut Evaluator, v: &Value) -> Result<usize, NativeError> {
     let mut n = 0usize;
+    let mut bump = |_: &mut Evaluator, _: Value| {
+        n += 1;
+        Ok(true)
+    };
+    if let Some(done) = crate::lazy::walk_sole_map(eval, v, &mut bump) {
+        done.map_err(signal_to_native)?;
+        return Ok(n);
+    }
     let mut cur = v.clone();
     loop {
         match step_unit(eval, &cur).map_err(signal_to_native)? {
@@ -809,8 +848,32 @@ pub(crate) fn count_of(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeErr
 /// Owned `to` (#227): the accumulator moves through [`conj_one`],
 /// so each step after the first mutates uniquely-owned storage in
 /// place instead of path-copying per step.
+fn try_into_vector(to: Vector, from: &Value) -> Result<Vector, Vector> {
+    match from {
+        Value::Vector(src) => {
+            if to.is_empty() && to.meta().is_none() {
+                return Ok(src.clone().with_meta(None));
+            }
+            to.try_extend_flat_window(src, 0, src.len())
+        }
+        Value::Extension(_) => {
+            let Some(sv) = crate::lazy::as_subvector(from) else {
+                return Err(to);
+            };
+            to.try_extend_flat_window(sv.vec(), sv.start(), sv.end())
+        }
+        _ => Err(to),
+    }
+}
+
 fn into_inner(eval: &mut Evaluator, to: Value, from: Value) -> Result<Value, NativeError> {
-    let mut acc = to;
+    let mut acc = match to {
+        Value::Vector(v) => match try_into_vector(v, &from) {
+            Ok(out) => return Ok(Value::Vector(out)),
+            Err(orig) => Value::Vector(orig),
+        },
+        other => other,
+    };
     crate::seqs::walk_seq(eval, from, |eval, head| {
         let cur = std::mem::replace(&mut acc, Value::Nil);
         acc = conj_one(eval, cur, head.clone())?;
@@ -1150,30 +1213,41 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 }
 
 fn native_disj(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_disj_owned(eval, args.iter().cloned().collect())
+}
+
+/// `disj` over an owned set (#271): a uniquely held set (a loop
+/// accumulator the AOT moves in) drops members in place instead of
+/// path-copying its index and order sidecar per call.
+pub(crate) fn native_disj_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
     if args.is_empty() {
         return Err(NativeError::arity("clojure.core/disj", 0));
     }
+    let coll = std::mem::replace(&mut args[0], Value::Nil);
     if args.len() == 1 {
-        return Ok(args[0].clone());
+        return Ok(coll);
     }
-    match &args[0] {
+    match coll {
         Value::Nil => Ok(Value::Nil),
         Value::Set(s) if s.is_sorted() => {
-            let mut out = s.clone();
+            let mut out = s;
             for k in &args[1..] {
                 out = sorted_without_set(eval, &out, k)?;
             }
             Ok(Value::Set(out))
         }
-        Value::Set(s) => {
-            let mut out = s.clone();
+        Value::Set(mut out) => {
             for k in &args[1..] {
                 let k = crate::lazy::realize_key(eval, k).map_err(signal_to_native)?;
                 out = out.without(&k);
             }
             Ok(Value::Set(out))
         }
-        v => Err(cce_err(v, "clojure.lang.IPersistentSet")),
+        v => Err(cce_err(&v, "clojure.lang.IPersistentSet")),
     }
 }
 
@@ -1367,12 +1441,20 @@ fn dissoc_record(
 }
 
 fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/dissoc", args, 1)?;
-    if args.len() == 1 {
-        return Ok(args[0].clone());
-    }
-    if matches!(args[0], Value::Nil) {
-        return Ok(Value::Nil);
+    // Borrow-path compat shim (see [`OwnedNativeImpl`]).
+    native_dissoc_owned(eval, args.iter().cloned().collect())
+}
+
+/// `dissoc` over an owned map (#271): a uniquely held map (a loop
+/// accumulator the AOT moves in) drops keys in place instead of
+/// path-copying per call.
+pub(crate) fn native_dissoc_owned(
+    eval: &mut Evaluator,
+    mut args: SmallVec<[Value; 4]>,
+) -> Result<Value, NativeError> {
+    check_min_arity("clojure.core/dissoc", &args, 1)?;
+    if args.len() == 1 || matches!(args[0], Value::Nil) {
+        return Ok(std::mem::replace(&mut args[0], Value::Nil));
     }
     if let Some(i) = crate::types::struct_inst(&args[0]) {
         return dissoc_struct(i, &args[1..]);
@@ -1384,17 +1466,16 @@ fn native_dissoc(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     if let Some(i) = crate::types::record_inst(&args[0]) {
         return dissoc_record(eval, i, &args[1..]);
     }
-    let Value::Map(m) = &args[0] else {
-        return Err(cce_err(&args[0], "clojure.lang.IPersistentMap"));
+    let mut out = match std::mem::replace(&mut args[0], Value::Nil) {
+        Value::Map(m) => m,
+        other => return Err(cce_err(&other, "clojure.lang.IPersistentMap")),
     };
-    if m.is_sorted() {
-        let mut out = m.clone();
+    if out.is_sorted() {
         for k in &args[1..] {
             out = sorted_without_map(eval, &out, k)?;
         }
         return Ok(Value::Map(out));
     }
-    let mut out = m.clone();
     for k in &args[1..] {
         let k = crate::lazy::realize_key(eval, k).map_err(signal_to_native)?;
         out = out.without(&k);
@@ -1486,31 +1567,37 @@ fn native_contains(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Native
         Value::Map(m) => contains_map(eval, m, key),
         Value::Vector(x) => Ok(Value::Bool(contains_vector(x, key))),
         // Entries contain integer keys 0 and 1 (Oracle FX2 `contains`).
-        Value::MapEntry { .. } => {
-            Ok(Value::Bool(int_key(key).is_some_and(|i| {
-                usize::try_from(i as i32).is_ok_and(|idx| idx < 2)
-            })))
-        }
+        Value::MapEntry { .. } => Ok(Value::Bool(contains_entry(key))),
         Value::Set(s) => contains_set(eval, s, key),
         Value::Str(s) => contains_str(s, coll, key),
         Value::Transient(t) => Ok(Value::Bool(transient_get(t, key)?.is_some())),
-        // Arrays: `Number` keys narrow (`intValue`) to a bounds
-        // check, anything else is unsupported (S15 oracles
-        // `b-contains`, `f-contains-*`, `e-contains-nil`).
-        Value::Array(a) => {
-            let Some(i) = crate::arrays::array_intvalue_key(key) else {
-                return Err(NativeError::new(
-                    ThrowClass::IllegalArgumentException,
-                    format!("contains? not supported on type: {}", jvm_class_of(coll)),
-                ));
-            };
-            Ok(Value::Bool(
-                usize::try_from(i).is_ok_and(|idx| idx < a.len()),
-            ))
-        }
+        Value::Array(a) => contains_array(a, coll, key),
         Value::PrimitiveVector(p) => Ok(Value::Bool(contains_pv(p, key))),
         _ => contains_fallback(coll, key),
     }
+}
+
+/// `contains?` over an entry (split from [`native_contains`] for
+/// the complexity budget): integer keys 0 and 1 (Oracle FX2
+/// `contains`).
+fn contains_entry(key: &Value) -> bool {
+    int_key(key).is_some_and(|i| usize::try_from(i as i32).is_ok_and(|idx| idx < 2))
+}
+
+/// `contains?` over an array (split from [`native_contains`] for
+/// the complexity budget): `Number` keys narrow (`intValue`) to a
+/// bounds check, anything else is unsupported (S15 oracles
+/// `b-contains`, `f-contains-*`, `e-contains-nil`).
+fn contains_array(a: &Array, coll: &Value, key: &Value) -> Result<Value, NativeError> {
+    let Some(i) = crate::arrays::array_intvalue_key(key) else {
+        return Err(NativeError::new(
+            ThrowClass::IllegalArgumentException,
+            format!("contains? not supported on type: {}", jvm_class_of(coll)),
+        ));
+    };
+    Ok(Value::Bool(
+        usize::try_from(i).is_ok_and(|idx| idx < a.len()),
+    ))
 }
 
 fn native_find(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2041,7 +2128,7 @@ pub(crate) fn native_vec_owned(
         || crate::lazy::as_splitvec(&args[0]).is_some()
         || as_subvector(&args[0]).is_some()
     {
-        return Ok(args[0].clone().with_meta(None));
+        return Ok(std::mem::replace(&mut args[0], Value::Nil).with_meta(None));
     }
     // `RT.toArray`: non-seqables fail the conversion, not the seq
     // (`:vec-num`, `:vec-trans`).
@@ -2175,21 +2262,91 @@ fn native_get_in(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
 
 fn native_zipmap(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/zipmap", args, &[2])?;
+    if let Some(map) = zipmap_chars_longs(&args[0], &args[1]) {
+        return Ok(Value::Map(map));
+    }
     let mut ks = seq_value(eval, &args[0]).map_err(signal_to_native)?;
     let mut vs = seq_value(eval, &args[1]).map_err(signal_to_native)?;
-    let mut out = new_map();
-    loop {
-        if matches!(ks, Value::Nil) || matches!(vs, Value::Nil) {
-            return Ok(Value::Map(out));
+    let mut out = ZipmapBuild::default();
+    while let Some((k, v)) = zipmap_next(eval, &mut ks, &mut vs).map_err(signal_to_native)? {
+        out.push(k, v);
+    }
+    Ok(Value::Map(out.finish()))
+}
+
+/// `(zipmap "0123456789" (range))` (most snippets) without the walk
+/// (#271): a string's chars against the core `(range)` iterate or a
+/// counted long range run no user code and memoize nothing anyone else
+/// sees, so the pairs are the walk's own, fed to the same build. `None`:
+/// anything else, or a value past the long range (the walk promotes or
+/// throws there).
+fn zipmap_chars_longs(keys: &Value, vals: &Value) -> Option<Map> {
+    let Value::Str(s) = keys else {
+        return None;
+    };
+    let (start, step, count) = crate::lazy::core_long_iterate_head(vals)
+        .map(|start| (start, 1, i64::MAX))
+        .or_else(|| crate::seqs::long_range(vals))?;
+    let mut out = ZipmapBuild::default();
+    for (i, c) in (0..count).zip(s.chars()) {
+        let v = i.checked_mul(step).and_then(|d| start.checked_add(d))?;
+        out.push(Value::Char(c), Value::Int(v));
+    }
+    Some(out.finish())
+}
+
+/// `zipmap`'s next pair, forcing like `core.clj`'s loop: both heads,
+/// then both tails (`None` once either side runs out).
+fn zipmap_next(
+    eval: &mut Evaluator,
+    ks: &mut Value,
+    vs: &mut Value,
+) -> Result<Option<(Value, Value)>, Signal> {
+    if matches!(ks, Value::Nil) || matches!(vs, Value::Nil) {
+        return Ok(None);
+    }
+    let k = first_value(eval, ks)?;
+    let v = first_value(eval, vs)?;
+    let k = crate::lazy::realize_key(eval, &k)?;
+    *ks = next_value(eval, ks)?;
+    *vs = next_value(eval, vs)?;
+    Ok(Some((k, v)))
+}
+
+/// `zipmap`'s result under construction: pairs first and one build
+/// after (the `assoc` chain's exact map — a small result interns its
+/// key shape once instead of once per key; `(zipmap "0123456789"
+/// (range))` opens most snippets), in-place inserts past
+/// [`ZIPMAP_BULK`] pairs.
+#[derive(Default)]
+struct ZipmapBuild {
+    pairs: Vec<(Value, Value)>,
+    map: Option<Map>,
+}
+
+impl ZipmapBuild {
+    fn push(&mut self, k: Value, v: Value) {
+        match &mut self.map {
+            Some(map) => map.insert_mut(k, v),
+            None if self.pairs.len() < ZIPMAP_BULK => self.pairs.push((k, v)),
+            None => {
+                let mut map = Map::from_kvs_last_wins(std::mem::take(&mut self.pairs));
+                map.insert_mut(k, v);
+                self.map = Some(map);
+            }
         }
-        let k = first_value(eval, &ks).map_err(signal_to_native)?;
-        let v = first_value(eval, &vs).map_err(signal_to_native)?;
-        let k = crate::lazy::realize_key(eval, &k).map_err(signal_to_native)?;
-        out = out.insert(k, v);
-        ks = next_value(eval, &ks).map_err(signal_to_native)?;
-        vs = next_value(eval, &vs).map_err(signal_to_native)?;
+    }
+
+    fn finish(self) -> Map {
+        self.map
+            .unwrap_or_else(|| Map::from_kvs_last_wins(self.pairs))
     }
 }
+
+/// The pairs [`ZipmapBuild`] builds in one step (the shaped-map
+/// ceiling: `from_kvs_last_wins` dedupes by scanning, fine this
+/// small); longer inputs continue with in-place inserts.
+const ZIPMAP_BULK: usize = 64;
 
 fn native_array_map(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     if args.len() % 2 == 1 {
@@ -2677,7 +2834,9 @@ fn pop_fallback(arg: &Value) -> Result<Value, NativeError> {
         // vector when `start == end`), so `end >= 1` here.
         let end = sv.end().checked_sub(1).expect("subvector is never empty");
         return Ok(Value::Extension(Arc::new(
-            SubVectorValue::new(sv.vec().clone(), sv.start(), end).with_meta(sv.meta().cloned()),
+            SubVectorValue::new(sv.vec().clone(), sv.start(), end)
+                .with_orig_start(sv.orig_start())
+                .with_meta(sv.meta().cloned()),
         )));
     }
     Err(cce_err(arg, "clojure.lang.IPersistentStack"))
@@ -2729,18 +2888,19 @@ fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeErr
     if let Some(r) = splitvec_subvec(v, start_v, end_v) {
         return r;
     }
-    let (backing, base, len) = match v {
-        Value::Vector(x) => (x.clone(), 0, x.len()),
+    let (backing, base, orig_base, len) = match v {
+        Value::Vector(x) => (x.clone(), 0, 0, x.len()),
         // `subvec` of a primitive vector is a plain subvector
         // (S15 oracle `j-subvec-cls`).
-        Value::PrimitiveVector(p) => (Vector::from_vec(p.items()), 0, p.len()),
+        Value::PrimitiveVector(p) => (Vector::from_vec(p.items()), 0, 0, p.len()),
         Value::MapEntry { key, val, .. } => (
             Vector::from_vec(vec![(**key).clone(), (**val).clone()]),
+            0,
             0,
             2,
         ),
         _ => match as_subvector(v) {
-            Some(sv) => (sv.vec().clone(), sv.start(), sv.len()),
+            Some(sv) => (sv.vec().clone(), sv.start(), sv.orig_start(), sv.len()),
             None => return Err(cce_err(v, "clojure.lang.IPersistentVector")),
         },
     };
@@ -2755,11 +2915,14 @@ fn subvec3(v: &Value, start_v: &Value, end_v: &Value) -> Result<Value, NativeErr
     if su == eu {
         return Ok(Value::Vector(Vector::from_vec(Vec::new())));
     }
-    Ok(Value::Extension(Arc::new(SubVectorValue::new(
-        backing,
-        base + su,
-        base + eu,
-    ))))
+    let win = eu - su;
+    let sv = if win <= SUBVEC_COMPACT_MAX && !backing.is_flat() {
+        let flat = backing.slice_packed(base + su, base + eu);
+        SubVectorValue::new(flat, 0, win).with_orig_start(orig_base + su)
+    } else {
+        SubVectorValue::new(backing, base + su, base + eu).with_orig_start(orig_base + su)
+    };
+    Ok(Value::Extension(Arc::new(sv)))
 }
 
 fn native_subvec(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2854,11 +3017,9 @@ fn native_distinctp(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
 /// entry-shaped inputs work, anything else fails exactly like the
 /// same `nth`. (On the JVM, non-entries fail the `Map$Entry` cast
 /// instead — the one observable edge of the missing type.)
-fn native_key(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/key", args, &[1])?;
-    // Only real entries answer (`key-vec`, `key-nil`): 2-vectors
-    // are NOT entries on the JVM.
-    match &args[0] {
+/// Extract the key from a `MapEntry`, or raise the JVM's `Map$Entry` error.
+pub(crate) fn entry_key(v: &Value) -> Result<Value, NativeError> {
+    match v {
         Value::MapEntry { key, .. } => Ok((**key).clone()),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
@@ -2868,9 +3029,9 @@ fn native_key(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     }
 }
 
-fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_arity("clojure.core/val", args, &[1])?;
-    match &args[0] {
+/// Extract the value from a `MapEntry`, or raise the JVM's `Map$Entry` error.
+pub(crate) fn entry_val(v: &Value) -> Result<Value, NativeError> {
+    match v {
         Value::MapEntry { val, .. } => Ok((**val).clone()),
         Value::Nil => Err(NativeError::new(
             ThrowClass::NullPointerException,
@@ -2878,6 +3039,18 @@ fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
         )),
         other => Err(cce_err(other, "java.util.Map$Entry")),
     }
+}
+
+fn native_key(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/key", args, &[1])?;
+    // Only real entries answer (`key-vec`, `key-nil`): 2-vectors
+    // are NOT entries on the JVM.
+    entry_key(&args[0])
+}
+
+fn native_val(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
+    check_arity("clojure.core/val", args, &[1])?;
+    entry_val(&args[0])
 }
 
 /// The S5D collection natives installed into `clojure.core` by
@@ -2912,17 +3085,21 @@ enum SortPos {
     Insert(usize),
 }
 
-fn sort_position(
+/// Binary search a sorted collection's `len` keys (`key_at`) for `k`,
+/// in place (no snapshot of the order sidecar).
+fn sort_position<'a>(
     eval: &mut Evaluator,
     spec: &SortSpec,
-    keys: &[Value],
+    len: usize,
+    key_at: impl Fn(usize) -> Option<&'a Value>,
     k: &Value,
 ) -> Result<SortPos, NativeError> {
     let mut lo = 0usize;
-    let mut hi = keys.len();
+    let mut hi = len;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        match compare_sort_keys(eval, spec, &keys[mid], k)? {
+        let key = key_at(mid).expect("sorted position in range");
+        match compare_sort_keys(eval, spec, key, k)? {
             Ordering::Less => lo = mid + 1,
             Ordering::Greater => hi = mid,
             Ordering::Equal => return Ok(SortPos::Found(mid)),
@@ -2935,32 +3112,33 @@ fn sort_position(
 /// the original key object (probe `sorted-keyobj`); a miss
 /// inserts at the sort position.
 fn sorted_assoc_map(eval: &mut Evaluator, m: &Map, k: Value, v: Value) -> Result<Map, NativeError> {
+    Ok(match map_position(eval, m, &k)? {
+        SortPos::Found(i) => m.clone().insert(map_key_at(m, i), v),
+        SortPos::Insert(i) => m.clone().insert_sorted_at(i, k, v),
+    })
+}
+
+/// `k`'s position in sorted map `m`.
+fn map_position(eval: &mut Evaluator, m: &Map, k: &Value) -> Result<SortPos, NativeError> {
     let spec = m
         .sort_spec()
         .cloned()
-        .expect("sorted assoc needs a sort order");
-    let mut entries: Vec<(Value, Value)> = m.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
-    match sort_position(eval, &spec, &m.ordered_keys(), &k)? {
-        SortPos::Found(i) => entries[i].1 = v,
-        SortPos::Insert(i) => entries.insert(i, (k, v)),
-    }
-    Ok(m.clone().with_ordered_entries(entries))
+        .expect("a sorted map has a sort order");
+    sort_position(eval, &spec, m.sorted_len(), |i| m.sorted_key(i), k)
+}
+
+/// The stored key at a found sorted position.
+fn map_key_at(m: &Map, i: usize) -> Value {
+    m.sorted_key(i).cloned().expect("found position in range")
 }
 
 /// Sorted `dissoc`: the found stored key drives the removal, so
 /// compare-0-but-unequal keys still drop.
 fn sorted_without_map(eval: &mut Evaluator, m: &Map, k: &Value) -> Result<Map, NativeError> {
-    let spec = m
-        .sort_spec()
-        .cloned()
-        .expect("sorted dissoc needs a sort order");
-    match sort_position(eval, &spec, &m.ordered_keys(), k)? {
-        SortPos::Found(i) => {
-            let found = m.ordered_keys()[i].clone();
-            Ok(m.clone().without(&found))
-        }
-        SortPos::Insert(_) => Ok(m.clone()),
-    }
+    Ok(match map_position(eval, m, k)? {
+        SortPos::Found(i) => m.clone().without(&map_key_at(m, i)),
+        SortPos::Insert(_) => m.clone(),
+    })
 }
 
 /// Sorted `get`: compare-0 search, then the stored entry.
@@ -2969,56 +3147,39 @@ fn sorted_lookup_map(
     m: &Map,
     k: &Value,
 ) -> Result<Option<Value>, NativeError> {
-    let spec = m
-        .sort_spec()
-        .cloned()
-        .expect("sorted get needs a sort order");
-    match sort_position(eval, &spec, &m.ordered_keys(), k)? {
-        SortPos::Found(i) => Ok(m.get(&m.ordered_keys()[i]).cloned()),
-        SortPos::Insert(_) => Ok(None),
-    }
+    Ok(match map_position(eval, m, k)? {
+        SortPos::Found(i) => m.get(&map_key_at(m, i)).cloned(),
+        SortPos::Insert(_) => None,
+    })
 }
 
 /// Sorted `conj`: a compare-0 hit is a no-op (the member stays).
 fn sorted_conj_set(eval: &mut Evaluator, s: &Set, v: Value) -> Result<Set, NativeError> {
+    Ok(match set_position(eval, s, &v)? {
+        SortPos::Found(_) => s.clone(),
+        SortPos::Insert(i) => s.clone().insert_sorted_at(i, v),
+    })
+}
+
+/// `v`'s position in sorted set `s`.
+fn set_position(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<SortPos, NativeError> {
     let spec = s
         .sort_spec()
         .cloned()
-        .expect("sorted conj needs a sort order");
-    match sort_position(eval, &spec, &s.ordered_members(), &v)? {
-        SortPos::Found(_) => Ok(s.clone()),
-        SortPos::Insert(i) => {
-            let mut members = s.ordered_members();
-            members.insert(i, v);
-            Ok(s.clone().with_ordered_members(members))
-        }
-    }
+        .expect("a sorted set has a sort order");
+    sort_position(eval, &spec, s.sorted_len(), |i| s.sorted_member(i), v)
 }
 
 /// Sorted `disj` / `contains?` through the stored member.
 fn sorted_without_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<Set, NativeError> {
-    let spec = s
-        .sort_spec()
-        .cloned()
-        .expect("sorted disj needs a sort order");
-    match sort_position(eval, &spec, &s.ordered_members(), v)? {
-        SortPos::Found(i) => {
-            let found = s.ordered_members()[i].clone();
-            Ok(s.clone().without(&found))
-        }
-        SortPos::Insert(_) => Ok(s.clone()),
-    }
+    Ok(match set_position(eval, s, v)? {
+        SortPos::Found(i) => s.clone().without_sorted_at(i),
+        SortPos::Insert(_) => s.clone(),
+    })
 }
 
 fn sorted_contains_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<bool, NativeError> {
-    let spec = s
-        .sort_spec()
-        .cloned()
-        .expect("sorted contains needs a sort order");
-    match sort_position(eval, &spec, &s.ordered_members(), v)? {
-        SortPos::Found(_) => Ok(true),
-        SortPos::Insert(_) => Ok(false),
-    }
+    Ok(matches!(set_position(eval, s, v)?, SortPos::Found(_)))
 }
 
 /// Sorted `get` on sets: the stored member, like `Set::get`.
@@ -3027,14 +3188,10 @@ fn sorted_lookup_set(
     s: &Set,
     v: &Value,
 ) -> Result<Option<Value>, NativeError> {
-    let spec = s
-        .sort_spec()
-        .cloned()
-        .expect("sorted set get needs a sort order");
-    match sort_position(eval, &spec, &s.ordered_members(), v)? {
-        SortPos::Found(i) => Ok(Some(s.ordered_members()[i].clone())),
-        SortPos::Insert(_) => Ok(None),
-    }
+    Ok(match set_position(eval, s, v)? {
+        SortPos::Found(i) => s.sorted_member(i).cloned(),
+        SortPos::Insert(_) => None,
+    })
 }
 
 /// The odd-argument error for map constructors (JVM `RT.map` text).
@@ -3379,6 +3536,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn zipmap_builds_small_maps_at_once_and_grows_past_the_bulk() {
+        let mut eval = crate::boot();
+        let show = |eval: &mut Evaluator, src: &str| {
+            let out = eval.eval_source(src).expect(src);
+            clj_value::pr_to_string(out.last().expect("a form"), &clj_value::PrintOpts::pr())
+        };
+        assert_eq!(
+            show(&mut eval, "(zipmap [:a :b :a] [1 2 3])"),
+            "{:a 3, :b 2}"
+        );
+        assert_eq!(show(&mut eval, "(zipmap [] [])"), "{}");
+        // Past the bulk: in-place inserts, a key repeated after it wins.
+        assert_eq!(
+            show(&mut eval, "(count (zipmap (range 100) (range)))"),
+            "100"
+        );
+        assert_eq!(
+            show(&mut eval, "((zipmap (concat (range 70) [3]) (range)) 3)"),
+            "70"
+        );
+    }
+
+    #[test]
     fn str_scan_global_cache_answers_memo_evictions() {
         // More big strings than memo slots: the first falls out of
         // the per-thread memo but stays in the global cache, which
@@ -3480,5 +3660,47 @@ mod tests {
             .last(),
             Some(&Value::Int(20))
         );
+    }
+
+    #[test]
+    fn subvec_compaction_and_assoc_orig_start() {
+        let mut eval = crate::boot();
+        let base_i = Vector::from_ints((0..1030_i64).collect());
+        let trie_v = Value::Vector(base_i.clone().push_back(Value::Int(1030)));
+        assert!(!matches!(&trie_v, Value::Vector(v) if v.is_flat()));
+        // Compacts small window of a Trie backing while preserving orig_start.
+        let win = subvec3(&trie_v, &Value::Int(500), &Value::Int(510)).expect("subvec trie");
+        let sv = as_subvector(&win).expect("subvec");
+        assert_eq!(sv.start(), 0);
+        assert_eq!(sv.end(), 10);
+        assert_eq!(sv.orig_start(), 500);
+        assert!(sv.vec().is_flat());
+        // Negative index within orig_start succeeds without changing window.
+        let neg_ok = assoc_subvector(sv, &Value::Int(-1), Value::Int(99)).expect("neg assoc");
+        assert_eq!(
+            as_subvector(&neg_ok).expect("sv").nth(0),
+            Some(Value::Int(500))
+        );
+        // Negative index before 0 throws IOOBE.
+        assert!(assoc_subvector(sv, &Value::Int(-501), Value::Int(99)).is_err());
+        // Small window of a flat vector compacts on first assoc.
+        let flat_v = Value::Vector(Vector::from_ints((0..40_i64).collect()));
+        let flat_win = subvec3(&flat_v, &Value::Int(5), &Value::Int(10)).expect("flat win");
+        let flat_sv = as_subvector(&flat_win).expect("flat sv");
+        let assoc_c = assoc_subvector(flat_sv, &Value::Int(1), Value::Int(77)).expect("compact");
+        let c_sv = as_subvector(&assoc_c).expect("compacted");
+        assert_eq!(c_sv.vec().len(), 5);
+        assert_eq!(c_sv.nth(1), Some(Value::Int(77)));
+        // Large window (> 256) updates without compacting.
+        let big_win = subvec3(&trie_v, &Value::Int(10), &Value::Int(300)).expect("big win");
+        let big_sv = as_subvector(&big_win).expect("big sv");
+        let assoc_b = assoc_subvector(big_sv, &Value::Int(0), Value::Int(88)).expect("big assoc");
+        assert_eq!(
+            as_subvector(&assoc_b).expect("sv").nth(0),
+            Some(Value::Int(88))
+        );
+        // native_vec_owned moves subvec cleanly.
+        let moved = native_vec_owned(&mut eval, smallvec::smallvec![assoc_c]).expect("vec");
+        assert!(as_subvector(&moved).is_some());
     }
 }

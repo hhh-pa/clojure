@@ -71,8 +71,7 @@ pub(crate) const JIO_NS: &str = "clojure.java.io";
 pub(crate) fn install_jio_ns(eval: &mut Evaluator) {
     eval.registry.ensure_ns(JIO_NS);
     for (name, f) in JIO_NATIVES {
-        let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
-        eval.install_native(JIO_NS, name, func);
+        eval.install_native_ptr(JIO_NS, name, *f);
     }
 }
 

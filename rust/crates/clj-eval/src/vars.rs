@@ -533,7 +533,7 @@ fn native_reset_meta(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 fn force_var_arg(eval: &mut Evaluator, v: &Value) {
     if let Value::Var(var) = v {
         eval.force_lazy(var.id);
-        crate::core_lazy::force_meta(eval, var.id);
+        eval.force_meta(var.id);
     }
 }
 

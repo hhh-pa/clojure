@@ -35,10 +35,10 @@ use clj_value::{Map, Symbol, ThrowClass, Throwable, Value, Var, Vector};
 use smallvec::SmallVec;
 
 use crate::env::{Env, SharedRegistry};
-use crate::error::Signal;
+use crate::error::{NativeError, Signal};
 use crate::eval::Evaluator;
 use crate::expr::{Arity, CaseTest, Catch, DirectCall, Expr, FunExpr, Pattern, pattern_count};
-use crate::ext::Closure;
+use crate::ext::{Closure, FastArith};
 use clj_reader::Span;
 
 /// Compiled code producing a `T` against the running frame.
@@ -71,8 +71,8 @@ impl Frame<'_> {
 }
 
 /// Where a lexical local lives at run time.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Loc {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Loc {
     Reg(usize),
     Up(usize),
     Rec(usize),
@@ -275,6 +275,32 @@ pub(crate) enum Prepared<'c> {
     Native(&'c crate::ext::NativeFn),
 }
 
+pub(crate) fn vm_call1(
+    ev: &mut Evaluator,
+    code: &VmCode,
+    arity: &CompiledArity,
+    a: Value,
+) -> Result<Value, Signal> {
+    let mut regs: SmallVec<[Value; 8]> = SmallVec::new();
+    reserve_regs(&mut regs, arity.nregs);
+    regs.push(a);
+    ev.guarded_call(|ev| run_arity(ev, code, arity, &mut regs))
+}
+
+pub(crate) fn vm_call2(
+    ev: &mut Evaluator,
+    code: &VmCode,
+    arity: &CompiledArity,
+    a: Value,
+    b: Value,
+) -> Result<Value, Signal> {
+    let mut regs: SmallVec<[Value; 8]> = SmallVec::new();
+    reserve_regs(&mut regs, arity.nregs);
+    regs.push(a);
+    regs.push(b);
+    ev.guarded_call(|ev| run_arity(ev, code, arity, &mut regs))
+}
+
 impl<'c> Prepared<'c> {
     /// `callee` prepared for `argc` args: a VM closure without
     /// conveyed bindings with a fixed arity for the count, or a
@@ -290,12 +316,26 @@ impl<'c> Prepared<'c> {
     pub(crate) fn call1(&self, ev: &mut Evaluator, a: Value) -> Result<Value, Signal> {
         match self {
             Prepared::Vm { code, arity } => {
-                let mut regs: SmallVec<[Value; 8]> = SmallVec::new();
-                reserve_regs(&mut regs, arity.nregs);
-                regs.push(a);
-                ev.guarded_call(|ev| run_arity(ev, code, arity, &mut regs))
+                let Some(hooks) = ev.lazy_hooks else {
+                    return Err(ev.throw(NativeError::new(
+                        ThrowClass::UnsupportedOperationException,
+                        "VM closure invocation requires full boot".to_owned(),
+                    )));
+                };
+                (hooks.vm_call1)(ev, code, arity, a)
             }
-            Prepared::Native(n) => call_native(ev, n, smallvec::smallvec![a]),
+            Prepared::Native(n) => {
+                // A genuine `inc`/`dec` on a long or double runs inline (#271);
+                // overflow and every other operand take the native.
+                if let Some(v) = fast_arith1(n.fast, &a) {
+                    return Ok(v);
+                }
+                let direct = n.compiled.as_ref().filter(|c| c.fixed == 1);
+                if let (Some(c), Some(call)) = (direct, crate::ext::in_place_call()) {
+                    return call(ev, c.code, &c.captured, &mut [a]).map_err(|e| ev.throw(e));
+                }
+                call_native(ev, n, smallvec::smallvec![a])
+            }
         }
     }
 
@@ -303,21 +343,59 @@ impl<'c> Prepared<'c> {
     pub(crate) fn call2(&self, ev: &mut Evaluator, a: Value, b: Value) -> Result<Value, Signal> {
         match self {
             Prepared::Vm { code, arity } => {
-                let mut regs: SmallVec<[Value; 8]> = SmallVec::new();
-                reserve_regs(&mut regs, arity.nregs);
-                regs.push(a);
-                regs.push(b);
-                ev.guarded_call(|ev| run_arity(ev, code, arity, &mut regs))
+                let Some(hooks) = ev.lazy_hooks else {
+                    return Err(ev.throw(NativeError::new(
+                        ThrowClass::UnsupportedOperationException,
+                        "VM closure invocation requires full boot".to_owned(),
+                    )));
+                };
+                (hooks.vm_call2)(ev, code, arity, a, b)
             }
             Prepared::Native(n) => {
-                if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
-                    if let Some(v) = Evaluator::fast_int2(n.fast, *x, *y) {
-                        return Ok(v);
-                    }
+                if let Some(v) = fast_arith2(n.fast, &a, &b) {
+                    return Ok(v);
+                }
+                let direct = n.compiled.as_ref().filter(|c| c.fixed == 2);
+                if let (Some(c), Some(call)) = (direct, crate::ext::in_place_call()) {
+                    return call(ev, c.code, &c.captured, &mut [a, b]).map_err(|e| ev.throw(e));
                 }
                 call_native(ev, n, smallvec::smallvec![a, b])
             }
         }
+    }
+}
+
+fn fast_arith1(op: FastArith, a: &Value) -> Option<Value> {
+    match (op, a) {
+        (FastArith::Inc, Value::Int(x)) => x.checked_add(1).map(Value::Int),
+        (FastArith::Dec, Value::Int(x)) => x.checked_sub(1).map(Value::Int),
+        (FastArith::Inc, Value::Double(x)) => Some(Value::Double(x + 1.0)),
+        (FastArith::Dec, Value::Double(x)) => Some(Value::Double(x - 1.0)),
+        _ => None,
+    }
+}
+
+fn fast_arith2(op: FastArith, a: &Value, b: &Value) -> Option<Value> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Evaluator::fast_int2(op, *x, *y),
+        (Value::Double(x), Value::Double(y)) => Evaluator::fast_double2(op, *x, *y),
+        (Value::Double(x), Value::Int(y))
+            if matches!(
+                op,
+                FastArith::Add | FastArith::Sub | FastArith::Mul | FastArith::Div
+            ) =>
+        {
+            Evaluator::fast_double2(op, *x, *y as f64)
+        }
+        (Value::Int(x), Value::Double(y))
+            if matches!(
+                op,
+                FastArith::Add | FastArith::Sub | FastArith::Mul | FastArith::Div
+            ) =>
+        {
+            Evaluator::fast_double2(op, *x as f64, *y)
+        }
+        _ => None,
     }
 }
 
@@ -329,10 +407,7 @@ fn call_native(
     n: &crate::ext::NativeFn,
     args: SmallVec<[Value; 4]>,
 ) -> Result<Value, Signal> {
-    match &n.owned {
-        Some(owned) => owned(ev, args).map_err(|e| ev.throw(e)),
-        None => (n.func)(ev, &args).map_err(|e| ev.throw(e)),
-    }
+    n.call_owned(ev, args).map_err(|e| ev.throw(e))
 }
 
 /// Run an arity over its loaded params (`regs` grows to the
@@ -707,20 +782,7 @@ fn inline_callee(root: &Value, argc: usize) -> Option<crate::vm_scalar::Callee> 
     let closure = crate::ext::as_closure(root)?;
     let code = closure.vm.as_ref().filter(|_| closure.conveyed.is_none())?;
     let fun = &code.fun;
-    let index = fun
-        .source
-        .iter()
-        .position(|a| a.rest.is_none() && a.fixed.len() == argc)?;
-    fun.source[index]
-        .fixed
-        .iter()
-        .all(|p| matches!(p, Pattern::Symbol(_)))
-        .then(|| crate::vm_scalar::Callee {
-            base: fun.base,
-            arities: Arc::clone(&fun.source),
-            index,
-            expect: Arc::clone(expect),
-        })
+    crate::vm_scalar::callee_for_arities(fun.base, &fun.source, argc, Some(Arc::clone(expect)))
 }
 
 impl Compiler {
@@ -2050,6 +2112,13 @@ pub(crate) fn and_or_shape(expr: &Expr, g: usize) -> Option<(&Expr, &Expr, bool)
     }
 }
 
+/// An `and`/`or` step at lexical slot `g` whose second arm `b` never reads `g`.
+#[must_use]
+pub fn and_or_test(expr: &Expr, g: usize) -> Option<(&Expr, &Expr, bool)> {
+    let (a, b, is_and) = and_or_shape(expr, g)?;
+    (!crate::vm_live::may_read(b, g, g + 1, g)).then_some((a, b, is_and))
+}
+
 /// One `loop` binding: the raw value's register, its init, and the
 /// destructuring unpack (none for a symbol).
 type LoopStep = (usize, Exec, Option<Exec>);
@@ -2879,7 +2948,7 @@ fn site_of(call: &DirectCall) -> Arc<DirectCall> {
     Arc::new(DirectCall {
         var: call.var.clone(),
         expect: Arc::clone(&call.expect),
-        func: Arc::clone(&call.func),
+        func: call.func.clone(),
         owned: call.owned.clone(),
         fast: call.fast,
         args: Vec::new(),
@@ -2915,8 +2984,72 @@ mod tests {
     }
 
     #[test]
+    fn prepared_inc_dec_run_inline_and_overflow_through_the_native() {
+        // `mapv` prepares its fn once: a genuine `inc`/`dec` on a long
+        // steps inline, while overflow and other numbers take the native.
+        let mut eval = crate::boot();
+        for src in [
+            "(= (mapv inc [1 2]) [2 3])",
+            "(= (mapv dec [1 2]) [0 1])",
+            "(= (mapv dec [1.5 3N]) [0.5 2N])",
+        ] {
+            let v = eval.eval_source(src).unwrap();
+            assert_eq!(v.last(), Some(&Value::Bool(true)), "{src}");
+        }
+        let overflow = eval.eval_source("(mapv dec [-9223372036854775808])");
+        assert!(overflow.is_err());
+    }
+
+    #[test]
     fn patch_jump_ignores_non_jump_step() {
         let mut steps = [super::Step::Recur(Box::default())];
         super::patch_jump(&mut steps, 0);
+    }
+
+    #[test]
+    fn and_or_test_recognizes_and_or_and_rejects_live_reads() {
+        use crate::expr::{Expr, Pattern};
+        let sym = || Pattern::Symbol("g".to_owned());
+        let g0 = || Expr::Local(0);
+        let a = Expr::Literal(Value::Bool(true));
+        let b_pure = Expr::Literal(Value::Int(7));
+        let b_reads = Expr::Local(0);
+
+        let and_pure = Expr::Let {
+            bindings: vec![(sym(), a.clone())],
+            body: vec![Expr::If {
+                test: Box::new(g0()),
+                then: Box::new(b_pure.clone()),
+                els: Box::new(g0()),
+            }],
+        };
+        assert!(matches!(
+            super::and_or_test(&and_pure, 0),
+            Some((_, _, true))
+        ));
+
+        let or_pure = Expr::Let {
+            bindings: vec![(sym(), a.clone())],
+            body: vec![Expr::If {
+                test: Box::new(g0()),
+                then: Box::new(g0()),
+                els: Box::new(b_pure),
+            }],
+        };
+        assert!(matches!(
+            super::and_or_test(&or_pure, 0),
+            Some((_, _, false))
+        ));
+
+        let reads_g = Expr::Let {
+            bindings: vec![(sym(), a)],
+            body: vec![Expr::If {
+                test: Box::new(g0()),
+                then: Box::new(b_reads),
+                els: Box::new(g0()),
+            }],
+        };
+        assert!(super::and_or_test(&reads_g, 0).is_none());
+        assert!(super::and_or_test(&Expr::Literal(Value::Nil), 0).is_none());
     }
 }

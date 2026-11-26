@@ -29,7 +29,6 @@ use clj_value::{Keyword, Symbol, Value, new_map};
 
 use crate::env::Bindings;
 use crate::eval::{Evaluator, SourceError};
-use crate::ext::NativeImpl;
 use crate::ns::{core_var, core_var_handle, ns_value};
 
 /// The source name boot evaluates under (`Evaluator::new_bare`'s
@@ -479,7 +478,8 @@ fn native_backed(ns: &str, name: &str) -> bool {
 fn install_lib_natives(eval: &mut Evaluator, ns: &str) {
     if ns == "clojure.string" {
         for &(name, f) in crate::stdlib_natives::STRING_NATIVES {
-            eval.install_native(ns, name, Arc::new(f) as Arc<NativeImpl>);
+            let owned = crate::ns::owned_entry_in(crate::aot_boot::LITE_OWNED_STRING, name);
+            eval.install_native_ptr_with_owned(ns, name, f, owned);
         }
     }
 }
@@ -489,7 +489,7 @@ fn install_lib_natives(eval: &mut Evaluator, ns: &str) {
 fn install_core_macros(eval: &mut Evaluator) {
     let macro_key = Value::Keyword(Keyword::new(None, "macro"));
     for &(name, f) in crate::core_macros::CORE_MACROS {
-        eval.install_native("clojure.core", name, Arc::new(f) as Arc<NativeImpl>);
+        eval.install_native_ptr("clojure.core", name, f);
         let id = eval
             .registry
             .intern(&Symbol::new(Some("clojure.core"), name));

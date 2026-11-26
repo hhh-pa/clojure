@@ -88,9 +88,11 @@ pub struct Namespace {
     ids: FxHashMap<Symbol, u64>,
     aliases: FxHashMap<String, (String, u64)>,
     refers: Arc<ReferTable>,
-    /// Shared copy-on-write: every namespace starts from the same
-    /// default imports (see `classemu::default_import_map`).
-    imports: Arc<FxHashMap<String, Arc<ClassVal>>>,
+    /// Shared copy-on-write, initialized lazily: every namespace starts
+    /// from the same default imports (see `classemu::default_import_map`),
+    /// deferred until imports are inspected or mutated so minimal AOT
+    /// startup skips instantiating default class descriptors.
+    imports: OnceLock<Arc<FxHashMap<String, Arc<ClassVal>>>>,
     /// This namespace's publics as a refer table, built on demand and
     /// dropped by every intern, unmap, and var state write (privacy
     /// is var meta).
@@ -144,7 +146,7 @@ impl Namespace {
             ids: FxHashMap::default(),
             aliases: FxHashMap::default(),
             refers: Arc::default(),
-            imports: crate::classemu::default_import_map(),
+            imports: OnceLock::new(),
             publics_table: None,
             meta: None,
             handle: Arc::new(NsHandle {
@@ -155,6 +157,16 @@ impl Namespace {
         }
     }
 
+    fn imports_map(&self) -> &Arc<FxHashMap<String, Arc<ClassVal>>> {
+        self.imports
+            .get_or_init(crate::classemu::default_import_map)
+    }
+
+    fn imports_mut(&mut self) -> &mut Arc<FxHashMap<String, Arc<ClassVal>>> {
+        let _ = self.imports_map();
+        self.imports.get_mut().expect("imports initialized")
+    }
+
     /// [`ReaderMaps`] for this namespace (cached until a mapping
     /// changes).
     pub fn reader_maps(&mut self) -> ReaderMaps {
@@ -162,13 +174,14 @@ impl Namespace {
             return m.clone();
         }
         let defaults = crate::classemu::default_import_map();
+        let imports = self.imports_map();
         let maps = ReaderMaps {
             aliases: Arc::new(self.alias_map()),
             refers: self.refers.clone(),
-            class_map: if Arc::ptr_eq(&self.imports, &defaults) {
+            class_map: if Arc::ptr_eq(imports, &defaults) {
                 default_class_map()
             } else {
-                Arc::new(class_map_of(&self.imports))
+                Arc::new(class_map_of(imports))
             },
         };
         self.reader_maps = Some(maps.clone());
@@ -185,6 +198,15 @@ impl Namespace {
     #[must_use]
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Look up this namespace's own `name` without building a `Symbol`
+    /// (the borrowed [`SymKey`] probe [`lookup`](Self::lookup) uses).
+    #[must_use]
+    pub fn lookup_str(&self, name: &str) -> Option<u64> {
+        self.ids
+            .get(&(Some(self.name.as_str()), name) as &dyn SymKey)
+            .copied()
     }
 
     /// Look up a var id by symbol (unqualified resolves here).
@@ -204,31 +226,34 @@ impl Namespace {
 
     /// Intern (find or create) a var in this namespace (the symbol
     /// must already name it). Creation stamps the `:ns`/`:name`
-    /// meta (JVM `Var.intern`) and drops any refer or import of the
-    /// same name (`def`/`intern` silently replace refers and imports,
-    /// like `Namespace.reference` minus its `*err*` warning, which
-    /// waits for S5D). Ids come from the registry counter.
-    pub fn intern(&mut self, sym: &Symbol, next_id: &mut u64) -> u64 {
+    /// meta (JVM `Var.intern`; `stamp` false — a program that cannot
+    /// read var metadata — leaves none) and drops any refer or import
+    /// of the same name (`def`/`intern` silently replace refers and
+    /// imports, like `Namespace.reference` minus its `*err*` warning,
+    /// which waits for S5D). Ids come from the registry counter.
+    pub fn intern(&mut self, sym: &Symbol, next_id: &mut u64, stamp: bool) -> u64 {
         if let Some(id) = self.ids.get(sym) {
             return *id;
         }
         let id = *next_id;
         *next_id += 1;
         let mut state = VarState::fresh();
-        let ns_val: Arc<dyn clj_value::ExtensionValue> = self.handle.clone();
-        static KEYS: std::sync::LazyLock<[Value; 2]> = std::sync::LazyLock::new(|| {
-            [
-                Value::Keyword(clj_value::static_keyword!("ns")),
-                Value::Keyword(clj_value::static_keyword!("name")),
-            ]
-        });
-        state.meta = Some(Map::from_distinct_keywords(
-            &*KEYS,
-            vec![
-                Value::Extension(ns_val),
-                Value::Symbol(Symbol::from_shared(None, Arc::clone(sym.name_arc()))),
-            ],
-        ));
+        if stamp {
+            let ns_val: Arc<dyn clj_value::ExtensionValue> = self.handle.clone();
+            static KEYS: std::sync::LazyLock<[Value; 2]> = std::sync::LazyLock::new(|| {
+                [
+                    Value::Keyword(clj_value::static_keyword!("ns")),
+                    Value::Keyword(clj_value::static_keyword!("name")),
+                ]
+            });
+            state.meta = Some(Map::from_distinct_keywords(
+                &*KEYS,
+                vec![
+                    Value::Extension(ns_val),
+                    Value::Symbol(Symbol::from_shared(None, Arc::clone(sym.name_arc()))),
+                ],
+            ));
+        }
         self.vars.insert(id, state);
         self.ids.insert(sym.clone(), id);
         self.publics_table = None;
@@ -314,7 +339,10 @@ impl Namespace {
         let fresh = self.ids.is_empty()
             && self.refers.is_empty()
             && !publics.shadows_default_import
-            && Arc::ptr_eq(&self.imports, &crate::classemu::default_import_map());
+            && self
+                .imports
+                .get()
+                .is_none_or(|m| Arc::ptr_eq(m, &crate::classemu::default_import_map()));
         if fresh {
             self.refers = if exclude.is_empty() {
                 Arc::clone(&publics.table)
@@ -356,25 +384,32 @@ impl Namespace {
 
     /// Install an import: simple name → class (S16 `import`).
     pub fn import_class(&mut self, simple: &str, class: Arc<ClassVal>) {
-        Arc::make_mut(&mut self.imports).insert(simple.to_owned(), class);
+        Arc::make_mut(self.imports_mut()).insert(simple.to_owned(), class);
         self.reader_maps = None;
     }
 
     /// Drop the import of a simple name (`true` when there was one),
     /// copying the shared table only then.
     fn drop_import(&mut self, name: &str) -> bool {
-        self.imports.contains_key(name) && Arc::make_mut(&mut self.imports).remove(name).is_some()
+        if let Some(m) = self.imports.get() {
+            if !m.contains_key(name) {
+                return false;
+            }
+        } else if !crate::classemu::is_default_import(name) {
+            return false;
+        }
+        Arc::make_mut(self.imports_mut()).remove(name).is_some()
     }
 
     /// The import for a simple name, if any.
     #[must_use]
     pub fn get_import(&self, simple: &str) -> Option<Arc<ClassVal>> {
-        self.imports.get(simple).cloned()
+        self.imports_map().get(simple).cloned()
     }
 
     /// Import mappings: simple name to class.
     pub fn imports(&self) -> impl Iterator<Item = (&str, &Arc<ClassVal>)> + '_ {
-        self.imports.iter().map(|(n, c)| (n.as_str(), c))
+        self.imports_map().iter().map(|(n, c)| (n.as_str(), c))
     }
 
     /// Interned mappings: qualified symbol to var id.
@@ -446,6 +481,9 @@ pub struct NamespaceRegistry {
     /// [`state`](Self::state)/[`state_mut`](Self::state_mut)
     /// answer from here when `by_id` misses.
     anon: FxHashMap<u64, VarState>,
+    /// Intern vars without the `:ns`/`:name` stamp (a Lite program
+    /// that references no var-metadata reader, #271).
+    bare_vars: bool,
 }
 
 impl NamespaceRegistry {
@@ -734,12 +772,13 @@ impl NamespaceRegistry {
             next_ns_id,
             by_id,
             current,
+            bare_vars,
             ..
         } = self;
         let ns_name = q.namespace().unwrap_or(current.as_str());
         let ns = ensure_ns_in(namespaces, next_ns_id, ns_name);
         let before = *next_id;
-        let id = ns.intern(&q, next_id);
+        let id = ns.intern(&q, next_id, !*bare_vars);
         // Only a fresh var needs its home recorded (re-interns hit).
         if *next_id != before {
             by_id.insert(id, Arc::clone(&ns.handle.name));
@@ -757,12 +796,13 @@ impl NamespaceRegistry {
             next_ns_id,
             by_id,
             current,
+            bare_vars,
             ..
         } = self;
         let ns_name = q.namespace().unwrap_or(current.as_str());
         let ns = ensure_ns_in(namespaces, next_ns_id, ns_name);
         let before = *next_id;
-        let id = ns.intern(q, next_id);
+        let id = ns.intern(q, next_id, !*bare_vars);
         if *next_id != before {
             by_id.insert(id, Arc::clone(&ns.handle.name));
         }
@@ -770,6 +810,30 @@ impl NamespaceRegistry {
             .expect("freshly interned var has state")
             .root = Some(root);
         id
+    }
+
+    /// Intern each `(symbol, root)` into `ns_name` with its root set
+    /// (boot's batched native installs: the namespace resolves once,
+    /// and the var-home table grows once).
+    pub(crate) fn intern_roots(&mut self, ns_name: &str, roots: Vec<(Symbol, Value)>) {
+        let Self {
+            namespaces,
+            next_id,
+            next_ns_id,
+            by_id,
+            bare_vars,
+            ..
+        } = self;
+        let ns = ensure_ns_in(namespaces, next_ns_id, ns_name);
+        by_id.reserve(roots.len());
+        for (sym, root) in roots {
+            let before = *next_id;
+            let id = ns.intern(&sym, next_id, !*bare_vars);
+            if *next_id != before {
+                by_id.insert(id, Arc::clone(&ns.handle.name));
+            }
+            ns.state_mut(id).expect("interned var has state").root = Some(root);
+        }
     }
 
     /// Pre-size a namespace's var tables (boot knows its native
@@ -805,12 +869,13 @@ impl NamespaceRegistry {
             removed,
             next_id,
             by_id,
+            bare_vars,
             ..
         } = self;
         let ns = namespaces
             .get_mut(ns_name)
             .or_else(|| removed.get_mut(ns_name))?;
-        let id = ns.intern(sym, next_id);
+        let id = ns.intern(sym, next_id, !*bare_vars);
         by_id.insert(id, Arc::clone(&ns.handle.name));
         Some(id)
     }
@@ -830,6 +895,7 @@ impl NamespaceRegistry {
             removed,
             next_id,
             by_id,
+            bare_vars,
             ..
         } = self;
         let ns = match namespaces.get_mut(ns_name) {
@@ -837,7 +903,7 @@ impl NamespaceRegistry {
             _ => removed.get_mut(ns_name).filter(|ns| ns.id() == expected)?,
         };
         let home = ns.id();
-        let id = ns.intern(sym, next_id);
+        let id = ns.intern(sym, next_id, !*bare_vars);
         by_id.insert(id, Arc::clone(&ns.handle.name));
         Some((id, home))
     }
@@ -990,10 +1056,9 @@ pub struct SharedRegistry {
     /// The next throwable/closure/native identity (lock-free: closure
     /// creation draws one per evaluation — #226).
     ids: Arc<AtomicU64>,
-    /// Deferred vars (see `core_lazy`): boot's `core.clj` segment,
-    /// then one per lazily loaded library — a lock-free membership
-    /// test on every analyzer resolution.
-    lazy: Arc<[OnceLock<LazyIndex>; LAZY_SEGMENTS]>,
+    /// Deferred vars (see `core_lazy`): allocated lazily on the first
+    /// deferred library install so `BootMode::Lite` pays zero allocation.
+    lazy: Arc<OnceLock<Box<[OnceLock<LazyIndex>; LAZY_SEGMENTS]>>>,
     /// Serializes lazy forcing (reentrant: a forced form may force
     /// another), so no thread observes a var mid-force as unbound.
     lazy_force: Arc<VarAlterLock>,
@@ -1108,7 +1173,7 @@ impl Default for SharedRegistry {
             })),
             epoch: Arc::new(AtomicU64::new(0)),
             ids: Arc::new(AtomicU64::new(1)),
-            lazy: Arc::new(std::array::from_fn(|_| OnceLock::new())),
+            lazy: Arc::new(OnceLock::new()),
             lazy_force: Arc::new(VarAlterLock::new()),
         }
     }
@@ -1243,6 +1308,13 @@ impl SharedRegistry {
         self.lock().registry.get(ns_name)?.lookup(sym)
     }
 
+    /// [`lookup_in_ns`](Self::lookup_in_ns) for `ns_name/name` without
+    /// building a `Symbol` (boot installs probe every core name).
+    #[must_use]
+    pub fn lookup_str(&self, ns_name: &str, name: &str) -> Option<u64> {
+        self.lock().registry.get(ns_name)?.lookup_str(name)
+    }
+
     /// Look up a var id directly in a live or removed namespace's
     /// interns (like [`ns_live_or_removed`](Self::ns_live_or_removed)
     /// + [`lookup`](Namespace::lookup), without the clone).
@@ -1315,9 +1387,13 @@ impl SharedRegistry {
         self.lock().registry.ns_for_handle(name, id).cloned()
     }
 
-    /// Drop a namespace (see [`NamespaceRegistry::remove_ns`]).
+    /// Drop a namespace (see [`NamespaceRegistry::remove_ns`]). A
+    /// mutation like any other: by-name caches keyed on the epoch
+    /// (`Evaluator::core_read`) must not outlive the namespace.
     pub fn remove_ns(&self, name: &str) -> bool {
-        self.lock().registry.remove_ns(name)
+        let mut inner = self.lock();
+        let _epoch = self.begin_mutation();
+        inner.registry.remove_ns(name)
     }
 
     /// Qualify an unqualified symbol against an explicit namespace.
@@ -1363,7 +1439,19 @@ impl SharedRegistry {
     /// Intern (find or create) a var (see
     /// [`NamespaceRegistry::intern`]).
     pub fn intern(&self, sym: &Symbol) -> u64 {
-        self.lock().registry.intern(sym)
+        let mut inner = self.lock();
+        let before = inner.registry.next_id;
+        let id = inner.registry.intern(sym);
+        self.note_new_vars(before, inner.registry.next_id);
+        id
+    }
+
+    /// A new var is a new name: end the epoch so by-name caches
+    /// (`Evaluator::core_read`, which remembers misses) see it.
+    fn note_new_vars(&self, before: u64, after: u64) {
+        if after != before {
+            drop(self.begin_mutation());
+        }
     }
 
     /// Intern a var and install its root under one lock (native
@@ -1374,10 +1462,24 @@ impl SharedRegistry {
         inner.registry.intern_with_root(sym, root)
     }
 
+    /// [`NamespaceRegistry::intern_roots`] under one lock and one
+    /// mutation epoch.
+    pub(crate) fn intern_roots(&self, ns_name: &str, roots: Vec<(Symbol, Value)>) {
+        let mut inner = self.lock();
+        let _epoch = self.begin_mutation();
+        inner.registry.intern_roots(ns_name, roots);
+    }
+
     /// Pre-size a namespace's var tables (see
     /// [`NamespaceRegistry::reserve_vars`]).
     pub(crate) fn reserve_vars(&self, ns_name: &str, additional: usize) {
         self.lock().registry.reserve_vars(ns_name, additional);
+    }
+
+    /// Intern later vars without the `:ns`/`:name` metadata stamp (see
+    /// [`Namespace::intern`]).
+    pub(crate) fn set_bare_vars(&self, bare: bool) {
+        self.lock().registry.bare_vars = bare;
     }
 
     /// Allocate an anonymous dynamic var (see
@@ -1389,13 +1491,21 @@ impl SharedRegistry {
     /// Intern a var into a live or removed namespace (see
     /// [`NamespaceRegistry::intern_in`]).
     pub fn intern_in(&self, ns_name: &str, sym: &Symbol) -> Option<u64> {
-        self.lock().registry.intern_in(ns_name, sym)
+        let mut inner = self.lock();
+        let before = inner.registry.next_id;
+        let id = inner.registry.intern_in(ns_name, sym);
+        self.note_new_vars(before, inner.registry.next_id);
+        id
     }
 
     /// Intern a `def`-family target (see
     /// [`NamespaceRegistry::intern_def_target`]).
     pub fn intern_def_target(&self, sym: &Symbol) -> u64 {
-        self.lock().registry.intern_def_target(sym)
+        let mut inner = self.lock();
+        let before = inner.registry.next_id;
+        let id = inner.registry.intern_def_target(sym);
+        self.note_new_vars(before, inner.registry.next_id);
+        id
     }
 
     /// Intern a var through a handle-pinned id (see
@@ -1406,9 +1516,11 @@ impl SharedRegistry {
         expected: u64,
         sym: &Symbol,
     ) -> Option<(u64, u64)> {
-        self.lock()
-            .registry
-            .intern_in_pinned(ns_name, expected, sym)
+        let mut inner = self.lock();
+        let before = inner.registry.next_id;
+        let pinned = inner.registry.intern_in_pinned(ns_name, expected, sym);
+        self.note_new_vars(before, inner.registry.next_id);
+        pinned
     }
 
     /// The var's state, if interned (an owned copy — mutate through
@@ -1477,14 +1589,15 @@ impl SharedRegistry {
     /// Whether `id` is an unforced deferred var (lock-free).
     pub(crate) fn is_lazy(&self, id: u64) -> bool {
         self.lazy
-            .iter()
-            .map_while(OnceLock::get)
-            .any(|ix| ix.test(id))
+            .get()
+            .is_some_and(|segs| segs.iter().map_while(OnceLock::get).any(|ix| ix.test(id)))
     }
 
     /// Whether a lazy index segment is still free.
     pub(crate) fn lazy_room(&self) -> bool {
-        self.lazy.iter().any(|seg| seg.get().is_none())
+        self.lazy
+            .get()
+            .is_none_or(|segs| segs.iter().any(|seg| seg.get().is_none()))
     }
 
     /// Install one file's deferred groups in the next free segment
@@ -1503,8 +1616,10 @@ impl SharedRegistry {
         // Under the registry lock, so concurrent loads claim
         // distinct segments.
         let index = LazyIndex::new(&ids);
-        self.lazy
-            .iter()
+        let segs = self
+            .lazy
+            .get_or_init(|| Box::new(std::array::from_fn(|_| OnceLock::new())));
+        segs.iter()
             .find(|seg| seg.get().is_none())
             .is_some_and(|seg| seg.set(index).is_ok())
     }
@@ -1561,7 +1676,8 @@ impl SharedRegistry {
 
     /// Publish a forced group: its vars stop testing lazy.
     pub(crate) fn finish_lazy(&self, group: &LazyGroup) {
-        for ix in self.lazy.iter().map_while(OnceLock::get) {
+        let segs = self.lazy.get().into_iter().flat_map(|segs| segs.iter());
+        for ix in segs.map_while(OnceLock::get) {
             for &id in &group.ids {
                 ix.clear(id);
             }
@@ -2148,6 +2264,20 @@ impl Env {
 mod tests {
     use super::*;
 
+    #[test]
+    fn interned_roots_replace_existing_roots() {
+        let mut reg = NamespaceRegistry::new();
+        let sym = Symbol::new(Some("lib"), "f");
+        reg.intern_roots("lib", vec![(sym.clone(), Value::Int(1))]);
+        let id = reg.intern(&sym);
+        reg.intern_roots("lib", vec![(sym.clone(), Value::Int(2))]);
+        assert_eq!(reg.intern(&sym), id);
+        assert_eq!(
+            reg.state(id).and_then(|st| st.root.clone()),
+            Some(Value::Int(2))
+        );
+    }
+
     fn sym(ns: Option<&str>, name: &str) -> Symbol {
         Symbol::new(ns, name)
     }
@@ -2484,5 +2614,12 @@ mod tests {
         let id = reg.intern_def_target(&sym(Some("brand.new.ns"), "v"));
         assert!(reg.ns_id("brand.new.ns").is_some());
         assert_eq!(reg.lookup(&sym(Some("brand.new.ns"), "v")), Some(id));
+        // Lazy `imports`: lowercase interns skip `default_import_map`; dropping a
+        // default import (`String`) materializes it, then initialized misses stay cheap.
+        let mut ns = Namespace::new("lazy.imports", 1);
+        assert!(!ns.drop_import("lower"));
+        assert!(ns.drop_import("String"));
+        assert!(!ns.drop_import("Missing"));
+        assert!(ns.imports().any(|(n, _)| n == "Long"));
     }
 }

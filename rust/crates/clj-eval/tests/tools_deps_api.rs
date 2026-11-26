@@ -19,7 +19,9 @@
 //! Each test boots its own `Evaluator`, so the global session var
 //! cannot leak across tests; every filesystem case uses a unique
 //! `scratch()` dir. Multi-element sets assert by in-eval `=`
-//! (order-free), never by pr-string order.
+//! (order-free), never by pr-string order. Env-controlled checks
+//! spawn this test binary via `Command::env`/`env_remove` (safe,
+//! child-only), avoiding in-process `set_var`/`remove_var`.
 
 use clj_eval::{Evaluator, SourceError, boot};
 use clj_value::{PrintOpts, Value, pr_to_string};
@@ -1502,63 +1504,43 @@ fn find_latest_version_absent() {
     );
 }
 
-// ---- find-edn-maps (SERIAL env) ----
-
-/// Save an env var's current value for later restore.
-fn save_env(name: &str) -> Option<String> {
-    std::env::var(name).ok()
-}
-
-/// Restore an env var to a saved value (or unset it).
-fn restore_env(name: &str, saved: Option<String>) {
-    match saved {
-        Some(v) => set_env(name, &v),
-        None => unset_env(name),
-    }
-}
-
-/// Set an env var (single boundary block for sets).
-fn set_env(name: &str, val: &str) {
-    // SAFETY: single-threaded within this test; every mutated var
-    // is restored before it returns.
-    unsafe { std::env::set_var(name, val) };
-}
-
-/// Unset an env var (single boundary block for unsets).
-fn unset_env(name: &str) {
-    // SAFETY: single-threaded within this test; every mutated var
-    // is restored before it returns.
-    unsafe { std::env::remove_var(name) };
-}
-
-/// Panic-safe env restore for the serial test: dropping the
-/// guard re-applies the entry saves even if an assert unwinds.
-struct EnvGuard {
-    saved: Vec<(&'static str, Option<String>)>,
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (name, value) in self.saved.drain(..) {
-            restore_env(name, value);
-        }
-    }
-}
+// ---- find-edn-maps (subprocess env) ----
 
 #[test]
 fn find_edn_maps_serial() {
-    // THE serial env test: the only test here that mutates
-    // process env, with save/restore. Deprecated `find-edn-maps`
+    // Formerly THE serial env test: deprecated `find-edn-maps`
     // remaps `create-edn-maps` keys (`:root` → `:root-edn`,
-    // etc.); `CLJ_CONFIG` pins the user source to an empty dir
-    // so the assertion is hermetic.
-    let _guard = EnvGuard {
-        saved: vec![("CLJ_CONFIG", save_env("CLJ_CONFIG"))],
-    };
+    // etc.); spawning this test binary with `Command::env` pins
+    // `CLJ_CONFIG` to an empty scratch dir hermetically without
+    // in-process `set_var`.
     let root = scratch("find-maps");
-    // SAFETY: serial test; restored by the guard on exit.
-    unsafe { std::env::set_var("CLJ_CONFIG", &root) };
     let proj = write_dep(&root, "proj-deps.edn", "{:paths [\"p\"]}");
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .arg("find_edn_maps_serial_child")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("__CLJ_TD124_API_CHILD", "1")
+        .env("__CLJ_TD124_API_ROOT", &root)
+        .env("__CLJ_TD124_API_PROJ", &proj)
+        .env("CLJ_CONFIG", &root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "child find_edn_maps_serial_child failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn find_edn_maps_serial_child() {
+    if std::env::var("__CLJ_TD124_API_CHILD").unwrap_or_default() != "1" {
+        return;
+    }
+    let root = std::path::PathBuf::from(std::env::var("__CLJ_TD124_API_ROOT").unwrap());
+    let proj = std::env::var("__CLJ_TD124_API_PROJ").unwrap();
     let mut eval = api_eval();
     // `with-dir` pins the `:standard` project source to the
     // scratch dir (no `deps.edn` there), so the 0-arity call

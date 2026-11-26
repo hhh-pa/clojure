@@ -77,6 +77,7 @@ pub enum BcOp2 {
     StrStartsWith = 24,
     StrEndsWith = 25,
     StrIncludes = 26,
+    ConjBang = 27,
 }
 
 /// Ternary bitcode opcodes.
@@ -143,6 +144,7 @@ pub(crate) const OP2_SYMBOLS: &[(&str, &str)] = &[
     ("nth", "rt_bc_2_nth"),
     ("get", "rt_bc_2_get"),
     ("contains?", "rt_bc_2_contains"),
+    ("conj!", "rt_bc_2_conj_bang"),
 ];
 
 pub(crate) const OP3_SYMBOLS: &[(&str, &str)] = &[
@@ -188,6 +190,7 @@ pub fn bc_ns_op_symbol(ns: Option<&str>, name: &str, arity: usize) -> Option<&'s
 pub fn bc_fx_symbol(name: &str, arity: usize) -> Option<&'static str> {
     match (name, arity) {
         ("pop!", 1) => Some("rt_bc_1_pop_bang_fx"),
+        ("conj!", 2) => Some("rt_bc_2_conj_bang_fx"),
         ("assoc!", 3) => Some("rt_bc_3_assoc_bang_fx"),
         _ => None,
     }
@@ -223,9 +226,34 @@ fn finish_bang<O: OutSlot>(out: &mut O, ok: bool, tval: &Value, keep_ret: bool) 
 fn write_val_ref<O: OutSlot>(out: &mut O, vr: ValueRef<'_>) -> bool {
     match vr {
         ValueRef::Int(n) => write_val(out, Value::Int(n)),
+        ValueRef::Double(d) => write_val(out, Value::Double(d)),
         ValueRef::Char(c) => write_val(out, Value::Char(c)),
+        ValueRef::Str(_) => false,
         ValueRef::Ref(v) => clone_fast(out, v),
     }
+}
+
+#[inline]
+fn subvec_val_ref(
+    backing: &clj_value::Vector,
+    start: usize,
+    end: usize,
+    i: usize,
+) -> Option<ValueRef<'_>> {
+    if i < end.saturating_sub(start) {
+        start
+            .checked_add(i)
+            .and_then(|idx| backing.get_val_ref(idx))
+    } else {
+        None
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn count_subvec(e: &dyn clj_value::ExtensionValue) -> Option<usize> {
+    e.as_subvector_parts()
+        .map(|(_, start, end)| end.saturating_sub(start))
 }
 
 #[inline]
@@ -238,6 +266,7 @@ fn coll_count(v: &Value, str_ascii: Option<StrAsciiFn>) -> Option<usize> {
         Value::Set(s) => Some(s.size()),
         Value::Str(s) if is_ascii_cached(v, s, str_ascii) => Some(s.len()),
         Value::Transient(t) => transient_vec_len(t),
+        Value::Extension(e) => count_subvec(e.as_ref()),
         _ => None,
     }
 }
@@ -358,7 +387,24 @@ fn apply1_peek<O: OutSlot>(out: &mut O, a: &Value) -> bool {
                 None => write_val(out, Value::Nil),
             }
         }
+        Value::Extension(e) => peek_subvec(out, e.as_ref()),
         _ => false,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn peek_subvec<O: OutSlot>(out: &mut O, e: &dyn clj_value::ExtensionValue) -> bool {
+    let Some((v, start, end)) = e.as_subvector_parts() else {
+        return false;
+    };
+    match end
+        .checked_sub(1)
+        .filter(|&last| last >= start)
+        .and_then(|last| v.get_val_ref(last))
+    {
+        Some(vr) => write_val_ref(out, vr),
+        None => write_val(out, Value::Nil),
     }
 }
 
@@ -379,7 +425,20 @@ fn apply1_first<O: OutSlot>(out: &mut O, a: &Value) -> bool {
             None => write_val(out, Value::Nil),
             _ => false,
         },
+        Value::Extension(e) => first_subvec(out, e.as_ref()),
         _ => false,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn first_subvec<O: OutSlot>(out: &mut O, e: &dyn clj_value::ExtensionValue) -> bool {
+    let Some((v, start, end)) = e.as_subvector_parts() else {
+        return false;
+    };
+    match subvec_val_ref(v, start, end, 0) {
+        Some(vr) => write_val_ref(out, vr),
+        None => write_val(out, Value::Nil),
     }
 }
 
@@ -392,6 +451,31 @@ pub(crate) fn pop_bang_fast<O: OutSlot>(out: &mut O, a: &Value, keep_ret: bool) 
         let mut guard = t.lock();
         if let TransientKind::Vector(tv) = &mut *guard {
             tv.pop_scalar_opt()
+        } else {
+            false
+        }
+    };
+    finish_bang(out, ok, a, keep_ret)
+}
+
+#[inline]
+pub(crate) fn conj_bang_fast<O: OutSlot>(
+    out: &mut O,
+    a: &Value,
+    b: &Value,
+    keep_ret: bool,
+) -> bool {
+    let Some(t) = is_transient_vec(a) else {
+        return false;
+    };
+    let ok = {
+        let mut guard = t.lock();
+        if let TransientKind::Vector(tv) = &mut *guard {
+            match b {
+                Value::Int(n) => tv.conj_int_no_grow(*n),
+                Value::Double(d) => tv.conj_double_no_grow(*d),
+                _ => false,
+            }
         } else {
             false
         }
@@ -428,6 +512,7 @@ pub(crate) fn apply2<O: OutSlot>(
         BcOp2::StrStartsWith | BcOp2::StrEndsWith | BcOp2::StrIncludes => {
             apply2_str_pred(out, op, a, b)
         }
+        BcOp2::ConjBang => conj_bang_fast(out, a, b, true),
     }
 }
 
@@ -542,6 +627,11 @@ fn apply2_eq<O: OutSlot>(out: &mut O, invert: bool, a: &Value, b: &Value) -> boo
         (Value::Double(x), Value::Double(y)) if !x.is_nan() && !y.is_nan() => x == y,
         (Value::Keyword(x), Value::Keyword(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
+        // Two flat long vectors compare their longs (#271 Slice 6m).
+        (Value::Vector(x), Value::Vector(y)) => match (x.as_flat_ints(), y.as_flat_ints()) {
+            (Some(xs), Some(ys)) => xs == ys,
+            _ => return false,
+        },
         (
             Value::Int(_) | Value::Char(_) | Value::Bool(_) | Value::Nil,
             Value::Nil | Value::Bool(_),
@@ -628,7 +718,49 @@ fn nth_fast<O: OutSlot>(
         },
         Value::Str(s) => nth_str_slot(out, coll, s, ok, nf, str_ascii),
         Value::Transient(t) => nth_transient(out, t, ok, nf),
+        Value::Extension(e) => nth_subvec(out, e.as_ref(), ok, nf),
         _ => false,
+    }
+}
+
+/// `(nth v i)` over flat vector storage, the front compiled code calls
+/// before the general read (#271): longs and doubles are written in
+/// place, generic items cloned; `false` (tries, strings, transients,
+/// indices out of range, non-long indices) leaves `out` untouched.
+#[inline(always)]
+pub(crate) fn nth_flat<O: OutSlot>(out: &mut O, coll: &Value, idx: &Value) -> bool {
+    let (Value::Vector(v), Value::Int(i)) = (coll, idx) else {
+        return false;
+    };
+    match usize::try_from(*i).ok().and_then(|i| v.flat_val_ref(i)) {
+        Some(ValueRef::Int(n)) => write_val(out, Value::Int(n)),
+        Some(ValueRef::Double(d)) => write_val(out, Value::Double(d)),
+        Some(ValueRef::Ref(item)) => clone_item(out, item),
+        _ => false,
+    }
+}
+
+/// [`clone_fast`] out of line: its variant switch would give the front a
+/// stack frame on every path.
+#[inline(never)]
+fn clone_item<O: OutSlot>(out: &mut O, item: &Value) -> bool {
+    clone_fast(out, item)
+}
+
+#[cold]
+#[inline(never)]
+fn nth_subvec<O: OutSlot>(
+    out: &mut O,
+    e: &dyn clj_value::ExtensionValue,
+    ok: Option<usize>,
+    nf: Option<&Value>,
+) -> bool {
+    let Some((v, start, end)) = e.as_subvector_parts() else {
+        return false;
+    };
+    match ok.and_then(|i| subvec_val_ref(v, start, end, i)) {
+        Some(vr) => write_val_ref(out, vr),
+        None => nf.is_some_and(|d| clone_fast(out, d)),
     }
 }
 
@@ -719,13 +851,57 @@ fn get_fast<O: OutSlot>(
             },
             None => false,
         },
-        Value::Map(m) => match m.get_small_scalar(key) {
+        Value::Str(s) => get_str_fast(out, coll, s, key, nf, str_ascii),
+        Value::Extension(e) => get_subvec(out, e.as_ref(), key, nf),
+        _ => match small_lookup(coll, key) {
             Some(Some(val)) => clone_fast(out, val),
             Some(None) => write_not_found(out, nf),
             None => false,
         },
-        Value::Str(s) => get_str_fast(out, coll, s, key, nf, str_ascii),
-        _ => false,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn get_subvec<O: OutSlot>(
+    out: &mut O,
+    e: &dyn clj_value::ExtensionValue,
+    key: &Value,
+    nf: Option<&Value>,
+) -> bool {
+    let Some((v, start, end)) = e.as_subvector_parts() else {
+        return false;
+    };
+    match index_i32(key) {
+        Some(i) => match subvec_val_ref(v, start, end, i) {
+            Some(vr) => write_val_ref(out, vr),
+            None => write_not_found(out, nf),
+        },
+        None => false,
+    }
+}
+
+/// A small map's value or a small set's member by a scalar key
+/// (`Some(None)`: absent; `None`: any other collection or key, which
+/// takes the runtime), shared by `get`, `contains?` and read chains
+/// (#271).
+#[inline(always)]
+fn small_lookup<'a>(coll: &'a Value, key: &Value) -> Option<Option<&'a Value>> {
+    match coll {
+        Value::Map(m) => m.get_small_scalar(key),
+        Value::Set(s) => s.get_small_scalar(key),
+        _ => None,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn contains_subvec(e: &dyn clj_value::ExtensionValue, key: &Value) -> Option<bool> {
+    match (e.as_subvector_parts(), key) {
+        (Some((_, start, end)), Value::Int(n)) => {
+            Some(usize::try_from(*n).is_ok_and(|idx| idx < end.saturating_sub(start)))
+        }
+        _ => None,
     }
 }
 
@@ -733,15 +909,18 @@ fn get_fast<O: OutSlot>(
 fn contains_fast<O: OutSlot>(out: &mut O, coll: &Value, key: &Value) -> bool {
     let ans = match coll {
         Value::Nil => false,
-        Value::Map(m) => match m.get_small_scalar(key) {
-            Some(found) => found.is_some(),
-            None => return false,
-        },
         Value::Vector(v) => match key {
             Value::Int(n) => usize::try_from(*n).is_ok_and(|idx| idx < v.len()),
             _ => return false,
         },
-        _ => return false,
+        Value::Extension(e) => match contains_subvec(e.as_ref(), key) {
+            Some(hit) => hit,
+            None => return false,
+        },
+        _ => match small_lookup(coll, key) {
+            Some(found) => found.is_some(),
+            None => return false,
+        },
     };
     write_val(out, Value::Bool(ans))
 }
@@ -776,16 +955,372 @@ pub(crate) fn assoc_bang_fast<O: OutSlot>(
     let Some(idx) = index_i32(key) else {
         return false;
     };
-    let Value::Int(n) = val else {
-        return false;
-    };
     let ok = {
         let mut guard = t.lock();
         if let TransientKind::Vector(tv) = &mut *guard {
-            tv.assoc_int_in_bounds(idx, *n)
+            match val {
+                Value::Int(n) => tv.assoc_int_in_bounds(idx, *n),
+                Value::Double(d) => tv.assoc_double_in_bounds(idx, *d),
+                Value::Bool(b) => tv.assoc_bool_in_bounds(idx, *b),
+                _ => false,
+            }
         } else {
             false
         }
     };
     finish_bang(out, ok, tval, keep_ret)
+}
+
+/// A borrowed element for a read chain (#271): `(nth coll i)` /
+/// `(get coll k)` as a pointer into `coll`'s own storage when the
+/// element is stored as a `Value` (generic vector storage, a small
+/// map's value), else null (the caller computes the read the general
+/// way). `get` also reads small maps; `nth` vectors only.
+#[inline]
+pub(crate) fn read_ref(coll: &Value, key: &Value, get: bool) -> *const Value {
+    let found = match coll {
+        Value::Vector(v) => index_i32(key).and_then(|i| v.get_ref(i)),
+        _ if get => small_lookup(coll, key).flatten(),
+        _ => None,
+    };
+    found.map_or(std::ptr::null(), std::ptr::from_ref)
+}
+
+/// Owned `(assoc v i x)` on a uniquely held flat vector (#271 lean
+/// owned path): updates `args[0]` in place and returns `true` (the
+/// caller moves it to the result); `false` leaves `args` untouched for
+/// the general owned `assoc` (see `Vector::assoc_unique`).
+#[inline]
+pub(crate) fn assoc_own3(args: &mut [Value; 3]) -> bool {
+    let [coll, key, val] = args;
+    match (coll, index_i32(key)) {
+        (Value::Vector(v), Some(i)) => v.assoc_unique(i, val),
+        _ => false,
+    }
+}
+
+/// Owned `(conj v x)` on a uniquely held flat vector (#271), like
+/// [`assoc_own3`] (see `Vector::conj_unique`).
+#[inline(always)]
+pub(crate) fn conj_own2(args: &mut [Value; 2]) -> bool {
+    let [coll, x] = args;
+    match coll {
+        Value::Vector(v) => v.conj_unique(x),
+        _ => false,
+    }
+}
+
+#[inline]
+fn scalar_val_ref(vr: ValueRef<'_>, allow_fp: bool) -> Option<(u8, i64)> {
+    match vr {
+        ValueRef::Int(n) => Some((0, n)),
+        ValueRef::Double(d) if allow_fp => Some((3, d.to_bits() as i64)),
+        ValueRef::Char(c) => Some((1, i64::from(u32::from(c)))),
+        ValueRef::Ref(Value::Int(n)) => Some((0, *n)),
+        ValueRef::Ref(Value::Char(c)) => Some((1, i64::from(u32::from(*c)))),
+        ValueRef::Ref(Value::Bool(b)) => Some((2, i64::from(*b))),
+        ValueRef::Ref(Value::Double(d)) if allow_fp => Some((3, d.to_bits() as i64)),
+        ValueRef::Double(_) | ValueRef::Str(_) | ValueRef::Ref(_) => None,
+    }
+}
+
+/// Probe `v` as an ASCII string, writing its byte pointer and byte length.
+#[inline]
+pub(crate) fn scalar_str_probe(
+    v: &Value,
+    ptr_out: &mut *const u8,
+    len_out: &mut i64,
+    str_ascii: Option<StrAsciiFn>,
+) -> bool {
+    let Value::Str(s) = v else {
+        return false;
+    };
+    if !is_ascii_cached(v, s, str_ascii) {
+        return false;
+    }
+    *ptr_out = s.as_ptr();
+    *len_out = s.len() as i64;
+    true
+}
+
+/// Unboxed `count` fast path writing `len_out`.
+#[inline]
+pub(crate) fn scalar_count(v: &Value, len_out: &mut i64, str_ascii: Option<StrAsciiFn>) -> bool {
+    let Some(n) = coll_count(v, str_ascii).and_then(|n| i64::try_from(n).ok()) else {
+        return false;
+    };
+    *len_out = n;
+    true
+}
+
+#[cold]
+#[inline(never)]
+fn scalar_nth_subvec(
+    e: &dyn clj_value::ExtensionValue,
+    i: usize,
+    allow_fp: bool,
+) -> Option<(u8, i64)> {
+    e.as_subvector_parts()
+        .and_then(|(v, start, end)| subvec_val_ref(v, start, end, i))
+        .and_then(|vr| scalar_val_ref(vr, allow_fp))
+}
+
+/// Unboxed `nth` fast path writing `(k_out, v_out)` (`0 = Int, 1 = Char, 2 = Bool`,
+/// plus `3 = Double` when `allow_fp`).
+#[inline]
+pub(crate) fn scalar_nth(
+    coll: &Value,
+    idx: i64,
+    k_out: &mut u8,
+    v_out: &mut i64,
+    str_ascii: Option<StrAsciiFn>,
+    allow_fp: bool,
+) -> bool {
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let pair = match coll {
+        Value::Vector(v) => v.get_val_ref(i).and_then(|vr| scalar_val_ref(vr, allow_fp)),
+        Value::Str(s) => nth_str_fast(coll, s, i, str_ascii)
+            .flatten()
+            .map(|c| (1, i64::from(u32::from(c)))),
+        Value::Transient(t) => scalar_nth_transient(t, i, allow_fp),
+        Value::Extension(e) => scalar_nth_subvec(e.as_ref(), i, allow_fp),
+        _ => None,
+    };
+    let Some((k, val)) = pair else {
+        return false;
+    };
+    *k_out = k;
+    *v_out = val;
+    true
+}
+
+#[inline]
+fn scalar_nth_transient(t: &clj_value::Transient, i: usize, allow_fp: bool) -> Option<(u8, i64)> {
+    let guard = t.lock();
+    let TransientKind::Vector(tv) = &*guard else {
+        return None;
+    };
+    tv.get_val_ref(i)
+        .and_then(|vr| scalar_val_ref(vr, allow_fp))
+}
+
+#[cold]
+#[inline(never)]
+fn ext_subvec_ref(e: &dyn clj_value::ExtensionValue, idx: usize) -> Option<ValueRef<'_>> {
+    e.as_subvector_parts()
+        .and_then(|(v, start, end)| subvec_val_ref(v, start, end, idx))
+}
+
+#[inline]
+fn vec_or_subvec_ref(coll: &Value, idx: usize) -> Option<ValueRef<'_>> {
+    match coll {
+        Value::Vector(v) => v.get_val_ref(idx),
+        Value::Extension(e) => ext_subvec_ref(e.as_ref(), idx),
+        _ => None,
+    }
+}
+
+/// Unboxed nested `nth` (`coll[idx][item]`) for destructured tuple vectors.
+#[inline]
+pub(crate) fn scalar_nth2(
+    coll: &Value,
+    idx: i64,
+    item: i64,
+    k_out: &mut u8,
+    v_out: &mut i64,
+    allow_fp: bool,
+) -> bool {
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let Ok(j) = usize::try_from(item) else {
+        return false;
+    };
+    let Some(ValueRef::Ref(inner)) = vec_or_subvec_ref(coll, i) else {
+        return false;
+    };
+    let Some((k, val)) = vec_or_subvec_ref(inner, j).and_then(|vr| scalar_val_ref(vr, allow_fp))
+    else {
+        return false;
+    };
+    *k_out = k;
+    *v_out = val;
+    true
+}
+
+/// Unboxed effect-position `assoc!` on a transient integer vector.
+#[inline]
+pub(crate) fn scalar_assoc(tval: &Value, idx: i64, val: i64) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.assoc_int_in_bounds(i, val)
+    } else {
+        false
+    }
+}
+
+/// Unboxed effect-position `assoc!` on a transient `Double` vector.
+#[inline]
+pub(crate) fn scalar_assoc_d(tval: &Value, idx: i64, bits: i64) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.assoc_double_in_bounds(i, f64::from_bits(bits as u64))
+    } else {
+        false
+    }
+}
+
+/// Unboxed effect-position `conj!` on a transient integer vector.
+#[inline]
+pub(crate) fn scalar_conj(tval: &Value, val: i64) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.conj_int_no_grow(val)
+    } else {
+        false
+    }
+}
+
+/// Unboxed effect-position `conj!` on a transient `Double` vector.
+#[inline]
+pub(crate) fn scalar_conj_d(tval: &Value, bits: i64) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.conj_double_no_grow(f64::from_bits(bits as u64))
+    } else {
+        false
+    }
+}
+
+#[inline]
+fn flat_window<'a, T>(
+    v: &'a Value,
+    as_flat: impl FnOnce(&'a clj_value::Vector) -> Option<&'a [T]>,
+) -> Option<&'a [T]> {
+    match v {
+        Value::Vector(vec) => as_flat(vec),
+        Value::Extension(e) => {
+            let (vec, start, end) = e.as_subvector_parts()?;
+            as_flat(vec)?.get(start..end)
+        }
+        _ => None,
+    }
+}
+
+/// Probe `v` as a flat packed integer vector (or subvector), writing its element
+/// pointer and length.
+#[inline]
+pub(crate) fn scalar_ivec_probe(v: &Value, ptr_out: &mut *const i64, len_out: &mut i64) -> bool {
+    let Some(slice) = flat_window(v, clj_value::Vector::as_flat_ints) else {
+        return false;
+    };
+    *ptr_out = slice.as_ptr();
+    *len_out = slice.len() as i64;
+    true
+}
+
+/// Probe `v` as a flat packed `f64` vector (or subvector), writing its element
+/// pointer and length.
+#[inline]
+pub(crate) fn scalar_dvec_probe(v: &Value, ptr_out: &mut *const f64, len_out: &mut i64) -> bool {
+    let Some(slice) = flat_window(v, clj_value::Vector::as_flat_doubles) else {
+        return false;
+    };
+    *ptr_out = slice.as_ptr();
+    *len_out = slice.len() as i64;
+    true
+}
+
+/// Probe `v` as a flat generic [`Value`] vector (or subvector), writing its
+/// element pointer and length.
+#[inline]
+pub(crate) fn scalar_gvec_probe(v: &Value, ptr_out: &mut *const Value, len_out: &mut i64) -> bool {
+    let Some(slice) = flat_window(v, clj_value::Vector::as_flat_values) else {
+        return false;
+    };
+    *ptr_out = slice.as_ptr();
+    *len_out = slice.len() as i64;
+    true
+}
+
+/// Whether `a` and `b` alias the same transient cell.
+#[inline]
+pub(crate) fn scalar_same_transient(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Transient(ta), Value::Transient(tb)) => ta.same_cell(tb),
+        _ => false,
+    }
+}
+
+/// Acquire a packed-`Int` transient vector lock for a scalar loop, writing its
+/// mutable element pointer and length (`false` on any other value).
+#[inline]
+pub(crate) fn scalar_tvec_lock(v: &Value, ptr_out: &mut *mut i64, len_out: &mut i64) -> bool {
+    let Some(t) = is_transient_vec(v) else {
+        return false;
+    };
+    let Some((ptr, len)) = t.lock_ints_ptr() else {
+        return false;
+    };
+    *ptr_out = ptr;
+    *len_out = len as i64;
+    true
+}
+
+/// Acquire a packed-`Double` transient vector lock for a scalar loop, writing its
+/// mutable element pointer and length (`false` on any other value).
+#[inline]
+pub(crate) fn scalar_dtvec_lock(v: &Value, ptr_out: &mut *mut f64, len_out: &mut i64) -> bool {
+    let Some(t) = is_transient_vec(v) else {
+        return false;
+    };
+    let Some((ptr, len)) = t.lock_doubles_ptr() else {
+        return false;
+    };
+    *ptr_out = ptr;
+    *len_out = len as i64;
+    true
+}
+
+/// Release a transient lock previously acquired via [`scalar_tvec_lock`] or
+/// [`scalar_dtvec_lock`].
+#[inline]
+pub(crate) fn scalar_tvec_unlock(v: &Value) {
+    if let Some(t) = is_transient_vec(v) {
+        t.unlock_raw();
+    }
+}
+
+/// Unboxed effect-position `pop!` on a transient scalar vector.
+#[inline]
+pub(crate) fn scalar_pop(tval: &Value) -> bool {
+    let Some(t) = is_transient_vec(tval) else {
+        return false;
+    };
+    let mut guard = t.lock();
+    if let TransientKind::Vector(tv) = &mut *guard {
+        tv.pop_scalar_opt()
+    } else {
+        false
+    }
 }

@@ -1,0 +1,63 @@
+;; Nested and filtered `for` comprehensions consumed by `vec` / `into []`
+;; run as native loops (#271 Slice 6a): same items, order, and effects.
+(require '[clojure.string :as str])
+(def xs [1 2 3 4])
+(println (vec (for [a xs b (range a 5)] [a b])))
+(println (vec (for [a (range 4) b (range a 4) :when (odd? (+ a b))] (* a b))))
+(println (into [] (for [a xs :let [c (* a a)] b (range 3) :when (> c b)] [c b])))
+(println (vec (for [[x y] [[1 2] [3 4] [5 6]] :when (> y 2)] (+ x y))))
+(println (vec (for [a xs :when (even? a) b [a (* 2 a)]] b)))
+(println (vec (for [a [] b xs] [a b])) (vec (for [a xs b []] [a b])))
+(println (vec (for [a (range 3) b (range 3) c (range 3) :when (= (+ a b c) 3)] [a b c])))
+(println (vec (for [a xs :when (> a 1) :when (< a 4)] a)))
+(println (vec (for [a (range 3) :let [b (* a 10)] :when (pos? b) c (list b (inc b))] c)))
+(println (vec (for [a xs :when (odd? a)] (if (> a 2) :big :small))))
+;; Collections a stage cannot index take the stage's own lazy call.
+(println (vec (for [a (list 1 2 3) b #{10} :when (odd? a)] (+ a b))))
+(println (vec (for [a xs b #{10 20} :when (odd? a)] (+ a b))))
+(println (vec (for [a xs b (list 1 2)] (* a b))))
+(println (vec (for [a [1 2] b (range 0.5 2)] (+ a b))))
+(defn pairs [n] (vec (for [i (range n) j (range (inc i) n) :when (not= i j)] [i j])))
+(println (pairs 4) (count (pairs 30)))
+(println (try (vec (for [a xs b (range a)] (/ 10 (- b 1)))) (catch ArithmeticException _ "div0")))
+(let [side (atom [])]
+  (println (vec (for [a (range 2) b (range 2)] (do (swap! side conj [a b]) b))) @side))
+;; Consumers that realize the whole sequence take its native vector (#271 Slice 6b).
+(println (count (for [a xs b xs :when (< a b)] [a b])) (sort (for [a xs b [3 1] :when (odd? b)] (* a b)))
+         (set (for [a xs b xs] (+ a b))) (into {} (for [a xs :when (odd? a)] [a (* a a)])))
+(println (into #{} (for [a xs b xs] (- a b))) (into (sorted-set) (for [a xs :let [b (* 2 a)]] b))
+         (into [0] (for [a xs :when (even? a)] a)) (count (for [a [] b xs] a)))
+;; A single `map` under a whole-sequence consumer, and `apply` (Slice 6d).
+(println (apply str (map (fn [a] (str a "-")) xs)) (apply max (map (fn [a] (* a a)) xs))
+         (apply min (for [a xs :when (odd? a)] (- a))) (apply + (map inc (range 4)))
+         (apply * (map (fn [a] a) [2 3])) (apply merge (map (fn [a] {a (* 2 a)}) xs)))
+(println (apply vector (map (fn [a] [a]) xs)) (apply hash-set (map (fn [a] (rem a 2)) xs))
+         (into {} (map (fn [a] [a (inc a)]) xs)) (set (map (fn [a] (rem a 3)) (range 7)))
+         (count (map (fn [a] (println "side" a) a) [1 2])) (sort (map (fn [a] (- a)) xs)))
+(println (apply str (map (fn [a] a) (list "x" "y"))) (into #{} (map (fn [[k v]] (+ k v)) {1 2 3 4}))
+         (apply str (map (fn [a] a) [])) (apply max (map inc (list 1 5 2))))
+(println (try (apply max (map (fn [a] a) [])) (catch Exception e (.getMessage e)))
+         (apply concat (map (fn [a] [a a]) [1 2])))
+;; `(reduce + [init] E)` folds the items as they come (Slice 6b).
+(println (reduce + (for [a xs b xs :when (< a b)] (* a b))) (reduce + 0.5 (for [a xs :when (odd? a)] a))
+         (reduce + (for [a [] b xs] a)) (reduce + (for [a ["x"] :when (string? a)] a))
+         (reduce + 10 (for [a (list 1 2) b (list 3)] (* a b))) (reduce + (for [a (list 1 2) b xs] b))
+         (reduce + (for [a [5] :when true] a)) (reduce + (for [a xs :when (odd? a)] (* 1.5 a))))
+(println (try (reduce + (for [a xs :when (odd? a)] (if (= a 3) :k a))) (catch ClassCastException _ :cast))
+         (try (reduce + 0 (for [a (list 1 :k) b [1]] a)) (catch ClassCastException _ :cast2)))
+;; Shapes that keep the general path.
+(println (vec (for [a xs] a)) (vec (mapcat (fn [x] [x x]) xs)) (vec (mapcat (fn [x] (inc x) (list x)) xs)))
+(println (vec (mapcat identity [[1] [2]])) (vec (str/split "a b" #" ")) (vec (filter odd? xs)))
+(println (vec (mapcat (fn [a] (if (odd? a) (map inc [a]) [0])) xs)))
+(println (vec (for [a xs :when (odd? a)] (if (= a 1) clojure.core/__for-keep* a))))
+;; `(into to E)` pours the items into `to` a chunk at a time (Slice 6h).
+(doseq [n [0 1 31 32 33 64 65]]
+  (let [m (into {} (for [i (range n) :when (odd? i)] [i (* i i)]))
+        s (into #{} (for [i (range n) j [0 1]] (+ i j)))
+        l (into '(:z) (for [i (range n) :let [k (inc i)] :when (< k 40)] k))]
+    (println n (count m) (get m 31) (count s) (first l) (count l))))
+(println (into nil (for [i (range 3) j (range 2)] [i j])) (into (sorted-map 9 9) (for [i [3 1 2] :when i] [i (- i)]))
+         (meta (into ^{:tag :v} [0] (for [i (range 40) :when (even? i)] i))) (into [0] (for [i (list 1 2) j (list 3)] (* i j)))
+         (into #{} (for [x (list 1 2 3) y (list 4 5) :when (odd? x)] (* x y))) (into {} (for [[k v] {1 2 3 4}] [v k])))
+(println (try (into {} (for [i (range 40)] (if (= i 35) [i] [i i]))) (catch Exception e (.getMessage e))))
+(println (into [] (for [i (range 70) :when (zero? (rem i 7))] i)) (count (into #{} (mapcat (fn [i] [i (- i)]) (range 50)))))

@@ -79,6 +79,13 @@ enum Command {
         /// Print the native-vs-embedded coverage line to stderr.
         #[arg(long)]
         report: bool,
+        /// Keep the binary's symbol table (for profilers; stripped by default).
+        #[arg(long)]
+        keep_symbols: bool,
+        /// Link the baseline runtime even when this CPU runs a faster one
+        /// (x86-64-v3), so the binary runs on other x86-64 machines too.
+        #[arg(long)]
+        portable: bool,
     },
     /// JIT-run the pure subset in-process (no binary emitted).
     Jit {
@@ -108,6 +115,8 @@ fn main() -> ExitCode {
             runtime_archive,
             strict,
             report,
+            keep_symbols,
+            portable,
         } => cmd_build(
             &file,
             &output,
@@ -117,6 +126,8 @@ fn main() -> ExitCode {
                 runtime_archive: runtime_archive.as_deref(),
                 strict,
                 report,
+                keep_symbols,
+                portable,
             },
         ),
         Command::Jit { file, args } => cmd_jit(&file, &args),
@@ -520,6 +531,8 @@ struct BuildArgs<'a> {
     runtime_archive: Option<&'a Path>,
     strict: bool,
     report: bool,
+    keep_symbols: bool,
+    portable: bool,
 }
 
 fn cmd_build(file: &Path, output: &Path, args: BuildArgs<'_>) -> ExitCode {
@@ -560,6 +573,8 @@ fn cmd_build_compile(file: &Path, source: &str, output: &Path, args: BuildArgs<'
         runtime_archive: args.runtime_archive.map(std::path::Path::to_path_buf),
         exe_dir,
         linker: None,
+        keep_symbols: args.keep_symbols,
+        portable: args.portable,
     };
     let mode = if args.strict {
         BuildMode::Strict

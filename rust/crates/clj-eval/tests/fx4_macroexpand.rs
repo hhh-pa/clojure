@@ -873,8 +873,8 @@ fn host_natives_and_rewrites() {
         "false"
     );
     assert_eq!(
-        run_last(&mut eval, "(count (set [(new Object) (new Object)]))"),
-        "2"
+        run_last(&mut eval, "(count (set (repeatedly 10 #(new Object))))"),
+        "10"
     );
     assert_eq!(
         run_last(&mut eval, "clojure.lang.PersistentArrayMap/EMPTY"),

@@ -321,4 +321,26 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(cljrt::nabi::rt_n_fast_vars().get(usize::MAX), None);
     }
+
+    #[test]
+    fn native_jit_exercises_lite_re_and_string_caps_271() {
+        let code = super::run_native_str(
+            "(require '[clojure.string :as s] 'clojure.string) \
+             (println (re-matches #\"[a-z]+\" \"abc\") (s/trim \" hi \") (clojure.string/join 0 [1 2]))",
+            "f.clj",
+            &[],
+        )
+        .expect("native lite re/string jit runs");
+        assert_eq!(code, 0);
+        let fallback_err = super::run_native_str("(println (re-matches :bad \"a\"))", "f.clj", &[])
+            .expect("native re fallback errors cleanly");
+        assert_eq!(fallback_err, 1);
+        let full_fallback_err = super::run_native_str(
+            "(require 'clojure.set) (println (clojure.set/union #{1} #{2}) (+ 1 2 3 nil))",
+            "f.clj",
+            &[],
+        )
+        .expect("full boot core_ref fallback errors cleanly");
+        assert_eq!(full_fallback_err, 1);
+    }
 }

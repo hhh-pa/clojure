@@ -49,6 +49,10 @@ rustix = { version = "1", features = ["pipe", "stdio"] }
 [profile.release]
 lto = "fat"
 codegen-units = 1
+# Ship without the symbol table (smaller binaries; no run-time effect:
+# symbols are not loaded). The hot-text regenerations, which profile
+# release builds by function name, override it (scripts/bench/hot-text).
+strip = true
 
 # Deny the `unused` lint group workspace-wide, on every platform and
 # profile: clippy's `-D warnings` only runs on Linux CI, so without

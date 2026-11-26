@@ -1,0 +1,17 @@
+;; Multi-pair assoc runs as the chain it is defined as (#271 Slice 6c): every
+;; arg first, in order, then one owned assoc per pair.
+(def m {:a 1 :b 2})
+(def v [1 2 3])
+(println (assoc m :a 10 :c 3) m (assoc m :a 1 :a 2) (assoc v 0 :x 3 :y) v (assoc nil :a 1 :b 2))
+(println (assoc {} 1 2 3 4) (assoc [] 0 :a 1 :b))
+(defn build [n] (loop [i 0 s {:i 0 :t 0}] (if (< i n) (recur (inc i) (assoc s :i i :t (+ (:t s) i))) s)))
+(println (build 10))
+(defn vbuild [n] (loop [i 0 s [0 0 0]] (if (< i n) (recur (inc i) (assoc s 0 i 2 (* 2 i))) s)))
+(println (vbuild 5))
+(let [x {:k 1} y (assoc x :k 2 :j 3)] (println x y (identical? x y)))
+(println (try (assoc v 5 :x 1 :y) (catch IndexOutOfBoundsException _ :oob)))
+(println (try (assoc '(1 2) 0 :x 1 :y) (catch ClassCastException _ :cce)))
+(println (try (assoc m :a 1 :b) (catch IllegalArgumentException e (.getMessage e))))
+(println (let [side (atom [])] [(assoc {} (do (swap! side conj 1) :a) 1 (do (swap! side conj 2) :b) 2) @side]))
+(println (reduce (fn [acc i] (assoc acc i (* i i) (+ i 100) i)) {} (range 3)))
+(println (meta (assoc (with-meta {:a 1} {:m true}) :b 2 :c 3)))

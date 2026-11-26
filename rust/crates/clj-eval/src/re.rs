@@ -66,7 +66,7 @@ pub(crate) fn compile_source(source: &str) -> Result<Arc<Regex>, NativeError> {
     if let Some(re) = COMPILED.with(|c| c.borrow().get(source).cloned()) {
         return Ok(re);
     }
-    let re = Arc::new(Regex::new(&translate_quotations(source)).map_err(pattern_syntax)?);
+    let re = Arc::new(compile_java(&translate_quotations(source))?);
     COMPILED.with(|c| {
         let mut c = c.borrow_mut();
         if c.len() >= 256 {
@@ -75,6 +75,74 @@ pub(crate) fn compile_source(source: &str) -> Result<Arc<Regex>, NativeError> {
         c.insert(source.to_owned(), Arc::clone(&re));
     });
     Ok(re)
+}
+
+/// Compile a (quotation-free) Java pattern source with the JDK's
+/// default ASCII semantics for the predefined classes (#271).
+fn compile_java(source: &str) -> Result<Regex, NativeError> {
+    Regex::new(&ascii_classes(source)).map_err(pattern_syntax)
+}
+
+/// Rewrite `\d \D \w \W \s \S \b \B` to their ASCII forms: the JDK
+/// matches them over ASCII only (without `UNICODE_CHARACTER_CLASS`),
+/// while the crate's defaults are Unicode, which also costs a large
+/// class build per compile (#271: `\w` alone ~2.7M instructions).
+/// Inside a bracket class a POSIX class (`[:digit:]`) replaces the
+/// escape; outside, a bracketed one (`[[:digit:]]`) or an ASCII
+/// boundary (`(?-u:\b)`). Other escapes pass through unchanged.
+pub(crate) fn ascii_classes(source: &str) -> std::borrow::Cow<'_, str> {
+    if !source.contains('\\') {
+        return std::borrow::Cow::Borrowed(source);
+    }
+    let mut out = String::with_capacity(source.len() + 16);
+    let mut depth = 0usize;
+    let mut chars = source.chars().peekable();
+    // True right after a class opener (`[` or `[^`): a `]` there is a
+    // literal, like the crate reads it.
+    let mut opened = false;
+    while let Some(c) = chars.next() {
+        let was_opened = std::mem::take(&mut opened);
+        match c {
+            '\\' => match chars.next() {
+                Some(e) => out.push_str(&ascii_escape(e, depth > 0)),
+                None => out.push('\\'),
+            },
+            '[' => {
+                depth += 1;
+                out.push('[');
+                if chars.peek() == Some(&'^') {
+                    out.push('^');
+                    chars.next();
+                }
+                opened = true;
+            }
+            ']' if depth > 0 && !was_opened => {
+                depth -= 1;
+                out.push(']');
+            }
+            c => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// One escape `\e` in ASCII form (see [`ascii_classes`]).
+fn ascii_escape(e: char, in_class: bool) -> String {
+    let posix = match e {
+        'd' => "digit",
+        'D' => "^digit",
+        'w' => "word",
+        'W' => "^word",
+        's' => "space",
+        'S' => "^space",
+        'b' | 'B' if !in_class => return format!("(?-u:\\{e})"),
+        _ => return format!("\\{e}"),
+    };
+    if in_class {
+        format!("[:{posix}:]")
+    } else {
+        format!("[[:{posix}:]]")
+    }
 }
 
 /// Translate `\Q...\E` quotation spans to escaped literals
@@ -159,7 +227,7 @@ fn match_text(v: &Value) -> Result<&str, NativeError> {
 /// One `re-groups`: the whole match when the pattern holds no
 /// groups, else the `[full g1 ...]` vector (nil for unmatched
 /// groups, like `Matcher.group` returning null).
-fn groups_value(caps: &regex::Captures<'_>) -> Value {
+pub(crate) fn groups_value(caps: &regex::Captures<'_>) -> Value {
     if caps.len() == 1 {
         let text = caps.get(0).map_or("", |m| m.as_str());
         return Value::Str(Arc::from(text));
@@ -172,6 +240,71 @@ fn groups_value(caps: &regex::Captures<'_>) -> Value {
         }
     }
     Value::Vector(Vector::from_vec(items))
+}
+
+fn is_plain_regex_char(c: char) -> bool {
+    !matches!(
+        c,
+        '.' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\' | '^' | '$'
+    )
+}
+
+fn single_plain_char(s: &str) -> Option<char> {
+    let mut it = s.chars();
+    let c = it.next()?;
+    (it.next().is_none() && is_plain_regex_char(c)).then_some(c)
+}
+
+fn anchored_trim_replace<'a>(
+    text: &'a str,
+    rest: &'a str,
+    replacement: &str,
+    prefix: bool,
+) -> std::borrow::Cow<'a, str> {
+    if rest.len() == text.len() {
+        std::borrow::Cow::Borrowed(text)
+    } else if replacement.is_empty() {
+        std::borrow::Cow::Borrowed(rest)
+    } else if prefix {
+        std::borrow::Cow::Owned(format!("{replacement}{rest}"))
+    } else {
+        std::borrow::Cow::Owned(format!("{rest}{replacement}"))
+    }
+}
+
+/// Fast path for `clojure.string/replace` / `Matcher.replaceAll` over
+/// simple anchored single-character repeats (`^c+`, `c+$`) when the
+/// replacement has no `$` or `\` escapes; all other patterns use the
+/// cached compiled [`Regex`].
+pub(crate) fn replace_all_fast<'a>(
+    source: &str,
+    text: &'a str,
+    replacement: &str,
+) -> Result<std::borrow::Cow<'a, str>, NativeError> {
+    if !replacement.contains('$') && !replacement.contains('\\') {
+        if let Some(c) = source
+            .strip_prefix('^')
+            .and_then(|s| s.strip_suffix('+'))
+            .and_then(single_plain_char)
+        {
+            return Ok(anchored_trim_replace(
+                text,
+                text.trim_start_matches(c),
+                replacement,
+                true,
+            ));
+        }
+        if let Some(c) = source.strip_suffix("+$").and_then(single_plain_char) {
+            return Ok(anchored_trim_replace(
+                text,
+                text.trim_end_matches(c),
+                replacement,
+                false,
+            ));
+        }
+    }
+    let re = compile_source(source)?;
+    Ok(re.replace_all(text, replacement))
 }
 
 /// Split `text` around matches of the `source` pattern (the
@@ -215,6 +348,9 @@ impl PieceVec for Vec<(usize, usize)> {
 
 impl PieceVec for Vec<(u32, u32)> {
     fn push_piece(&mut self, start: usize, end: usize) {
+        if self.len() == self.capacity() && self.capacity() >= 32 * 1024 {
+            self.reserve_exact(self.capacity() / 2);
+        }
         self.push((start as u32, (end - start) as u32));
     }
     fn pop_piece(&mut self) {
@@ -281,9 +417,15 @@ fn split_pieces(
         .then(|| pattern_pieces_vec::<Vec<(u32, u32)>>(text, source, limit))
         .transpose()?;
     match spans {
-        Some(spans) if spans.len() >= SPLIT_LAZY_MIN => Ok(Value::Extension(Arc::new(
-            SplitVecValue::new(Arc::clone(base), Arc::from(spans)),
-        ))),
+        Some(mut spans)
+            if spans.len() >= SPLIT_LAZY_MIN || (spans.len() >= 2 && text.len() >= 4096) =>
+        {
+            spans.shrink_to_fit();
+            Ok(Value::Extension(Arc::new(SplitVecValue::new(
+                Arc::clone(base),
+                Arc::new(spans),
+            ))))
+        }
         Some(spans) => Ok(Value::Vector(Vector::from_vec(materialize_spans(
             text, &spans,
         )))),
@@ -350,11 +492,10 @@ enum CutKind {
     Byte(u8),
 }
 
-fn cut_kind(text: &str, source: &str) -> Option<CutKind> {
+fn cut_kind(source: &str) -> Option<CutKind> {
     Some(match source {
-        // `\s` is Unicode in the crate: only all-ASCII text reduces
-        // to the ASCII whitespace class.
-        r"\s+" if text.is_ascii() => CutKind::Run(WS_ASCII),
+        // `\s` is the JDK's ASCII class (see [`ascii_classes`]).
+        r"\s+" => CutKind::Run(WS_ASCII),
         r"[ \t\n\r\f\x0B]+" => CutKind::Run(WS_ASCII),
         r"[ \t\n\r\f]+" => CutKind::Run(WS_TRF),
         r"[ \t\n\r]+" => CutKind::Run(WS_TR),
@@ -426,7 +567,7 @@ fn pattern_ranges(
 /// The split pieces in the caller's representation (the dispatch
 /// [`pattern_ranges`] documents).
 fn pattern_pieces_vec<V: PieceVec>(text: &str, source: &str, limit: i32) -> Result<V, NativeError> {
-    if let Some(kind) = cut_kind(text, source) {
+    if let Some(kind) = cut_kind(source) {
         let cuts = ByteCuts {
             bytes: text.as_bytes(),
             pos: 0,
@@ -671,7 +812,7 @@ fn compile_boundary_atoms(alts: &[BoundaryAlt]) -> Result<Vec<(String, Regex)>, 
     for alt in alts {
         for a in alt {
             if !atoms.iter().any(|(s, _)| s == &a.atom.src) {
-                let re = Regex::new(&format!("^(?:{})$", a.atom.src)).map_err(pattern_syntax)?;
+                let re = compile_java(&format!("^(?:{})$", a.atom.src))?;
                 atoms.push((a.atom.src.clone(), re));
             }
         }
@@ -847,25 +988,69 @@ mod tests {
         assert_eq!(shown(0, true), shown(0, false));
         assert_eq!(shown(-1, true), shown(-1, false));
         assert_eq!(shown(2, true), shown(2, false));
+        let large: Arc<str> = Arc::from("x,".repeat(SPLIT_LAZY_MIN + 4));
+        assert!(matches!(
+            split_pieces(&large, ",", 0, true).expect("large split"),
+            Value::Extension(_)
+        ));
+        let few_big: Arc<str> = Arc::from(format!("{},{}", "a".repeat(2500), "b".repeat(2500)));
+        assert!(matches!(
+            split_pieces(&few_big, ",", 0, true).expect("few big split"),
+            Value::Extension(_)
+        ));
+        let mut big_spans: Vec<(u32, u32)> = Vec::with_capacity(32 * 1024);
+        for i in 0..(32 * 1024) {
+            big_spans.push((i as u32, 1));
+        }
+        big_spans.push_piece(0, 1);
+        assert_eq!(big_spans.len(), 32 * 1024 + 1);
+        assert!(split_pieces(&base, "(", 0, true).is_err());
+    }
+
+    #[test]
+    fn ascii_classes_follow_the_jdk_defaults() {
+        let cases = [
+            (r"a+", r"a+"),
+            (r"^-?\d+(\.\d+)?$", r"^-?[[:digit:]]+(\.[[:digit:]]+)?$"),
+            (
+                r"\D\w\W\s\S",
+                r"[[:^digit:]][[:word:]][[:^word:]][[:space:]][[:^space:]]",
+            ),
+            (r"\b\B", r"(?-u:\b)(?-u:\B)"),
+            (
+                r"[\d\D\w\W\s\S\b]",
+                r"[[:digit:][:^digit:][:word:][:^word:][:space:][:^space:]\b]",
+            ),
+            (r"[^]\d]\d", r"[^][:digit:]][[:digit:]]"),
+            (r"[]\s][a[\w]]\s", r"[][:space:]][a[[:word:]]][[:space:]]"),
+            (r"\p{L}\.\\", r"\p{L}\.\\"),
+            ("a\\", "a\\"),
+        ];
+        for (src, want) in cases {
+            assert_eq!(ascii_classes(src), want, "{src}");
+        }
+        // ASCII only, like the JDK: Arabic-Indic digits are not `\d`,
+        // a no-break space is not `\s`, `é` is not `\w`.
+        let re = compile_source(r"^\d+$").expect("compiles");
+        assert!(re.is_match("0123456789") && !re.is_match("\u{663}"));
+        assert!(!compile_source(r"\s").expect("compiles").is_match("\u{a0}"));
+        assert!(!compile_source(r"\w").expect("compiles").is_match("\u{e9}"));
+        assert!(
+            compile_source(r"\bab\b")
+                .expect("compiles")
+                .is_match("x ab y")
+        );
+        assert!(compile_source("a\\").is_err());
     }
 
     #[test]
     fn cut_kind_matches_all_whitespace_char_classes() {
         assert!(matches!(
-            cut_kind("a", r"[ \t\n\r\f\x0B]+"),
+            cut_kind(r"[ \t\n\r\f\x0B]+"),
             Some(CutKind::Run(_))
         ));
-        assert!(matches!(
-            cut_kind("a", r"[ \t\n\r\f]+"),
-            Some(CutKind::Run(_))
-        ));
-        assert!(matches!(
-            cut_kind("a", r"[ \t\n\r]+"),
-            Some(CutKind::Run(_))
-        ));
-        assert!(matches!(
-            cut_kind("a", r"[\x00-\x20]+"),
-            Some(CutKind::Run(_))
-        ));
+        assert!(matches!(cut_kind(r"[ \t\n\r\f]+"), Some(CutKind::Run(_))));
+        assert!(matches!(cut_kind(r"[ \t\n\r]+"), Some(CutKind::Run(_))));
+        assert!(matches!(cut_kind(r"[\x00-\x20]+"), Some(CutKind::Run(_))));
     }
 }

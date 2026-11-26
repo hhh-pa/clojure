@@ -70,7 +70,7 @@ func TestStubGoldens(t *testing.T) {
 	}{
 		{"ok", `{"unsafe_total": 4}`, nil, nil, 0},
 		{"grew", `{"unsafe_total": 3}`, nil, nil, 1},
-		{"fell", `{"unsafe_total": 9}`, nil, nil, 0},
+		{"fell", `{"unsafe_total": 9}`, nil, nil, 1},
 		{"regen", "", nil, []string{"--regen"}, 0},
 		{"meta-fail", `{"unsafe_total": 4}`, []string{"STUB_FAIL_METADATA=1"}, nil, 2},
 		{"geiger-fail", `{"unsafe_total": 4}`, []string{"STUB_FAIL_GEIGER=alpha"}, nil, 2},

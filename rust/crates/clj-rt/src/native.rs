@@ -42,37 +42,112 @@ pub(crate) struct ArityDesc {
     pub(crate) code: Code,
 }
 
-/// A compiled fn's static description.
-#[derive(Clone)]
-pub(crate) struct FnDesc {
-    pub(crate) display: Arc<str>,
-    pub(crate) arities: Arc<[ArityDesc]>,
+/// A compiled fn's static description: spans into [`Tables::fn_names`]
+/// and [`Tables::fn_arities`] (#271: no per-fn allocation at startup).
+#[derive(Clone, Copy)]
+pub(crate) struct FnSlot {
+    pub(crate) name: (u32, u32),
+    pub(crate) arities: (u32, u32),
 }
 
-/// One declared var: its qualified name, interned on first use.
+/// One declared var: its qualified name (interned on first use) and
+/// the compiler's Lite native hint for it.
 pub(crate) struct VarSlot {
-    ns: String,
-    name: String,
+    /// The namespace and name as byte spans `(at, len)` of the
+    /// program's names text ([`Tables::names`]).
+    ns: (u32, u32),
+    name: (u32, u32),
+    hint: u32,
     var: OnceLock<Var>,
     core: OnceLock<Option<native_abi::CoreEntry>>,
+}
+
+impl VarSlot {
+    fn ns<'a>(&self, names: &'a str) -> &'a str {
+        span(names, self.ns)
+    }
+
+    fn name<'a>(&self, names: &'a str) -> &'a str {
+        span(names, self.name)
+    }
+}
+
+/// `names[at..at + len]` (empty out of range: generated code emits
+/// in-range spans on character boundaries).
+fn span(names: &str, (at, len): (u32, u32)) -> &str {
+    let at = at as usize;
+    names.get(at..at + len as usize).unwrap_or("")
+}
+
+/// A Lite program's registered capability tables, kept past boot for
+/// the natives that install on first use (`aot_boot::install_lazy`).
+#[derive(Default)]
+struct LiteSet {
+    core: Vec<clj_eval::aot_boot::LiteCoreGroup>,
+    owned: Vec<clj_eval::aot_boot::LiteOwnedSlice>,
+    libs: Vec<(&'static str, &'static [clj_eval::aot_boot::LiteNativeSlice])>,
+}
+
+impl LiteSet {
+    fn tables(&self) -> clj_eval::aot_boot::LiteTables<'_> {
+        clj_eval::aot_boot::LiteTables {
+            core_groups: &self.core,
+            owned_groups: &self.owned,
+            lib_tables: &self.libs,
+        }
+    }
 }
 
 /// Tables under construction (startup only).
 #[derive(Default)]
 struct Building {
+    /// Every declared namespace and var name, spanned by [`VarSlot`]s.
+    names: Arc<str>,
     vars: Vec<VarSlot>,
     consts: Vec<Value>,
-    fns: Vec<Option<FnDesc>>,
+    /// Every declared fn display name, spanned by [`FnSlot`]s.
+    fn_names: Arc<str>,
+    /// Every declared fn's arities, spanned by [`FnSlot`]s.
+    fn_arities: Vec<ArityDesc>,
+    fns: Vec<FnSlot>,
+    lite_core_caps: Vec<clj_eval::aot_boot::LiteCoreGroup>,
+    lite_owned_caps: Vec<clj_eval::aot_boot::LiteOwnedSlice>,
+    lite_libs: Vec<(&'static str, &'static [clj_eval::aot_boot::LiteNativeSlice])>,
+    lite_seq_helpers: bool,
+    /// Set by `rt_n_cap_var_meta`: the compiled program can observe var
+    /// metadata, so `def`s keep it (#271).
+    lite_var_meta: bool,
+    /// Set by a Lite run: freezing keeps the tables above as a [`LiteSet`].
+    lite: bool,
 }
 
 static BUILDING: Mutex<Option<Building>> = Mutex::new(None);
 
 /// The frozen program tables.
 pub(crate) struct Tables {
+    /// A Lite run's capability tables (its declared natives install on
+    /// first use); `None` under the full boot.
+    lite: Option<LiteSet>,
+    /// Every declared namespace and var name, spanned by [`VarSlot`]s.
+    names: Arc<str>,
     vars: Box<[VarSlot]>,
     consts: Box<[Value]>,
-    fns: Box<[FnDesc]>,
+    fn_names: Arc<str>,
+    fn_arities: Box<[ArityDesc]>,
+    fns: Box<[FnSlot]>,
     fast_vars: FastVars,
+}
+
+impl Tables {
+    fn fn_name(&self, k: usize) -> &str {
+        span(&self.fn_names, self.fns[k].name)
+    }
+
+    fn fn_arities(&self, k: usize) -> &[ArityDesc] {
+        let (at, len) = self.fns[k].arities;
+        let at = at as usize;
+        &self.fn_arities[at..at + len as usize]
+    }
 }
 
 /// The current program's frozen tables with their generation
@@ -168,33 +243,81 @@ pub(crate) fn settle(step: Step) -> (i32, Value) {
     }
 }
 
-/// Declare var `k` (`ns/name`).
-pub(crate) fn declare_var(k: usize, ns: String, name: String) {
-    building(|b| {
-        if b.vars.len() <= k {
-            b.vars.resize_with(k + 1, || VarSlot {
-                ns: String::new(),
-                name: String::new(),
-                var: OnceLock::new(),
-                core: OnceLock::new(),
-            });
-        }
-        b.vars[k] = VarSlot {
+/// Declare the program's vars in index order: each var's namespace and
+/// name as spans of `names` (one shared text, #271: no allocation per
+/// var) and its Lite native hint.
+pub(crate) fn declare_vars(
+    names: Arc<str>,
+    rows: impl Iterator<Item = ((u32, u32), (u32, u32), u32)>,
+) {
+    let vars = rows
+        .map(|(ns, name, hint)| VarSlot {
             ns,
             name,
+            hint,
             var: OnceLock::new(),
             core: OnceLock::new(),
-        };
+        })
+        .collect();
+    building(|b| {
+        b.names = names;
+        b.vars = vars;
     });
 }
 
-/// Declare fn descriptor `k`.
-pub(crate) fn declare_fn(k: usize, desc: FnDesc) {
+/// The compiled program can observe var metadata (`rt_n_cap_var_meta`).
+pub(crate) fn declare_lite_var_meta() {
+    building(|b| b.lite_var_meta = true);
+}
+
+/// Register one `BootMode::Lite` core native capability group.
+pub(crate) fn declare_lite_core_cap(
+    group: clj_eval::aot_boot::LiteCoreGroup,
+    owned: Option<clj_eval::aot_boot::LiteOwnedSlice>,
+    seq_helpers: bool,
+) {
     building(|b| {
-        if b.fns.len() <= k {
-            b.fns.resize(k + 1, None);
+        b.lite_core_caps.push(group);
+        if let Some(o) = owned {
+            b.lite_owned_caps.push(o);
         }
-        b.fns[k] = Some(desc);
+        b.lite_seq_helpers |= seq_helpers;
+    });
+}
+
+/// Register a `BootMode::Lite` library native capability group (e.g.
+/// `clojure.string`).
+pub(crate) fn declare_lite_lib_cap(
+    ns: &'static str,
+    caps: &'static [clj_eval::aot_boot::LiteNativeSlice],
+    owned: clj_eval::aot_boot::LiteOwnedSlice,
+) {
+    building(|b| {
+        b.lite_libs.push((ns, caps));
+        b.lite_owned_caps.push(owned);
+    });
+}
+
+/// Declare the program's compiled fns in index order and pre-size the
+/// constant table (#271: one names buffer and one arity array, zero
+/// per-fn allocation at startup).
+pub(crate) fn declare_fns(
+    names: Arc<str>,
+    rows: impl Iterator<Item = ((u32, u32), (u32, u32))>,
+    arities: impl Iterator<Item = ArityDesc>,
+    n_consts: usize,
+) {
+    let fns = rows
+        .map(|(name, arities)| FnSlot { name, arities })
+        .collect();
+    let arities = arities.collect();
+    building(|b| {
+        b.fn_names = names;
+        b.fn_arities = arities;
+        b.fns = fns;
+        if b.consts.len() < n_consts {
+            b.consts.resize(n_consts, Value::Nil);
+        }
     });
 }
 
@@ -211,16 +334,20 @@ pub(crate) fn set_const(k: usize, value: Value) {
 /// Freeze the tables (after constant construction).
 pub(crate) fn freeze(reg_epoch: Arc<AtomicU64>) {
     let b = building(std::mem::take);
-    let fns: Vec<FnDesc> = b
-        .fns
-        .into_iter()
-        .map(|d| d.expect("every declared fn index is filled"))
-        .collect();
     let fast_vars = FastVars::new(reg_epoch, native_abi::bind_counts(), b.vars.len());
+    let lite = b.lite.then_some(LiteSet {
+        core: b.lite_core_caps,
+        owned: b.lite_owned_caps,
+        libs: b.lite_libs,
+    });
     let tables: &'static Tables = Box::leak(Box::new(Tables {
+        lite,
+        names: b.names,
         vars: b.vars.into_boxed_slice(),
         consts: b.consts.into_boxed_slice(),
-        fns: fns.into_boxed_slice(),
+        fn_names: b.fn_names,
+        fn_arities: b.fn_arities.into_boxed_slice(),
+        fns: b.fns.into_boxed_slice(),
         fast_vars,
     }));
     let mut current = TABLES.lock().expect("clj-rt native tables lock");
@@ -238,11 +365,26 @@ pub(crate) fn constant(k: usize) -> &'static Value {
     &tables().consts[k]
 }
 
+/// The frozen constant table's first slot: the table never moves or
+/// changes after [`freeze`], so `base + k` is constant `k` for the rest
+/// of the run.
+pub(crate) fn consts_base() -> *const Value {
+    tables().consts.as_ptr()
+}
+
 /// Var `k`, interned on first use (in the then-current registry).
 pub(crate) fn var(k: usize) -> &'static Var {
-    let slot = &tables().vars[k];
-    slot.var
-        .get_or_init(|| with_active(|eval| native_abi::intern_var(eval, &slot.ns, &slot.name)))
+    let t = tables();
+    let slot = &t.vars[k];
+    slot.var.get_or_init(|| {
+        let (ns, name) = (slot.ns(&t.names), slot.name(&t.names));
+        with_active(|eval| {
+            if let Some(lite) = &t.lite {
+                clj_eval::aot_boot::install_lazy(eval, (ns, name, slot.hint), lite.tables());
+            }
+            native_abi::intern_var(eval, ns, name)
+        })
+    })
 }
 
 /// A var-cache validity key: (registry epoch, binding version).
@@ -286,37 +428,58 @@ pub(crate) fn root(eval: &mut Evaluator, k: usize) -> Value {
 /// A closure over compiled fn `k` with its captured values: a
 /// `NativeFn` the interpreter calls like any fn (arity dispatch and
 /// errors as for interpreted closures).
+/// A closure's captured values as its shared slice: capture-free
+/// closures (every top-level `defn`, plain lambdas) share one empty
+/// slice instead of allocating their own.
+fn captured_slice(captured: Vec<Value>) -> Arc<[Value]> {
+    static NO_CAPTURES: std::sync::LazyLock<Arc<[Value]>> =
+        std::sync::LazyLock::new(|| Arc::from(Vec::new()));
+    if captured.is_empty() {
+        Arc::clone(&NO_CAPTURES)
+    } else {
+        captured.into()
+    }
+}
+
 pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> Value {
-    let desc = tables().fns[k].clone();
-    let display = Arc::clone(&desc.display);
-    let captured: Arc<[Value]> = captured.into();
+    let t = tables();
+    let slot = &t.fns[k];
+    let display = clj_eval::DisplayName::span(Arc::clone(&t.fn_names), slot.name.0, slot.name.1);
+    let captured = captured_slice(captured);
     // The common shape — one fixed arity — calls its code straight away
     // (no arity search); anything else, wrong counts included, takes
     // the general dispatch.
-    let single = match &*desc.arities {
+    let single = match t.fn_arities(k) {
         [a] if !a.variadic => Some((a.fixed, a.code)),
         _ => None,
     };
-    let func: Arc<clj_eval::ext::NativeImpl> = match single {
-        Some((fixed, code)) => Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
-            if args.len() == fixed {
-                call_code(eval, code, &captured, args)
-            } else {
-                call_compiled(eval, &desc, &captured, args)
-            }
-            .map_err(native_abi::signal_to_native)
-        }),
-        None => Arc::new(move |eval: &mut Evaluator, args: &[Value]| {
-            call_compiled(eval, &desc, &captured, args).map_err(native_abi::signal_to_native)
-        }),
-    };
+    // One process-wide dispatch table: compiled closures allocate no
+    // per-fn `Arc<dyn Fn>` wrappers (#271).
+    clj_eval::ext::set_compiled_dispatch(clj_eval::CompiledDispatch {
+        call: call_compiled_borrow,
+        call_owned: call_compiled_owned,
+        call_in_place: call_code_in_place,
+    });
+    let owned = single.map(|_| clj_eval::OwnedTarget::Compiled {
+        desc: k,
+        captured: Arc::clone(&captured),
+    });
+    // Compiled call sites call a single fixed arity's code directly
+    // (`rt_n_enter_closure`, #271), as a `defn`'s direct call does.
+    let compiled = single.map(|(fixed, code)| clj_eval::ext::CompiledEntry {
+        code,
+        captured: Arc::clone(&captured),
+        fixed,
+    });
+    let func = clj_eval::NativeTarget::Compiled { desc: k, captured };
     let ext: Arc<dyn clj_value::ExtensionValue> = Arc::new(NativeFn {
         id: eval.next_id(),
         display,
         func,
-        owned: None,
+        owned,
         meta: None,
         fast: Default::default(),
+        compiled,
     });
     CREATED.with(|c| {
         let mut c = c.borrow_mut();
@@ -326,6 +489,38 @@ pub(crate) fn make_fn(eval: &mut Evaluator, k: usize, captured: Vec<Value>) -> V
         c[k] = Arc::as_ptr(&ext).cast::<()>() as usize;
     });
     Value::Extension(ext)
+}
+
+fn call_compiled_borrow(
+    eval: &mut Evaluator,
+    desc: usize,
+    captured: &[Value],
+    args: &[Value],
+) -> Result<Value, NativeError> {
+    let t = tables();
+    let arities = t.fn_arities(desc);
+    let out = match arities {
+        [a] if !a.variadic && args.len() == a.fixed => call_code(eval, a.code, captured, args),
+        _ => call_compiled(eval, t.fn_name(desc), arities, captured, args),
+    };
+    out.map_err(native_abi::signal_to_native)
+}
+
+fn call_compiled_owned(
+    eval: &mut Evaluator,
+    desc: usize,
+    captured: &[Value],
+    args: clj_eval::ext::OwnedArgs,
+) -> Result<Value, NativeError> {
+    let t = tables();
+    let arities = t.fn_arities(desc);
+    let out = match arities {
+        [a] if !a.variadic && args.len() == a.fixed => {
+            call_code_owned(eval, a.code, captured, args)
+        }
+        _ => call_compiled(eval, t.fn_name(desc), arities, captured, &args),
+    };
+    out.map_err(native_abi::signal_to_native)
 }
 
 thread_local! {
@@ -338,9 +533,19 @@ thread_local! {
 /// Var `k`'s native entry, resolved once (core vars of a program
 /// that cannot rebind them).
 pub(crate) fn core_entry(eval: &mut Evaluator, k: usize) -> Option<&'static native_abi::CoreEntry> {
-    let slot = &tables().vars[k];
+    let t = tables();
+    let slot = &t.vars[k];
     slot.core
-        .get_or_init(|| native_abi::core_entry(eval, var(k)))
+        .get_or_init(|| {
+            // A Lite native called directly needs no var: its entry comes
+            // from the tables and its install stays lazy (value uses and
+            // `#'f` still install it through `var`).
+            let decl = (slot.ns(&t.names), slot.name(&t.names), slot.hint);
+            t.lite
+                .as_ref()
+                .and_then(|lite| native_abi::lite_core_entry(decl, lite.tables()))
+                .or_else(|| native_abi::core_entry(eval, var(k)))
+        })
         .as_ref()
 }
 
@@ -377,20 +582,21 @@ fn is_closure_at(v: &Value, want: usize) -> bool {
 }
 
 /// Select the arity for `args` and run its code on this evaluator.
-fn call_compiled(eval: &mut Evaluator, desc: &FnDesc, captured: &[Value], args: &[Value]) -> Step {
-    let exact = desc
-        .arities
+fn call_compiled(
+    eval: &mut Evaluator,
+    display: &str,
+    arities: &[ArityDesc],
+    captured: &[Value],
+    args: &[Value],
+) -> Step {
+    let exact = arities
         .iter()
         .find(|a| !a.variadic && a.fixed == args.len());
     let arity = match exact {
         Some(a) => *a,
-        None => match desc
-            .arities
-            .iter()
-            .find(|a| a.variadic && args.len() >= a.fixed)
-        {
+        None => match arities.iter().find(|a| a.variadic && args.len() >= a.fixed) {
             Some(a) => *a,
-            None => return Err(native_abi::arity_error(eval, &desc.display, args.len())),
+            None => return Err(native_abi::arity_error(eval, display, args.len())),
         },
     };
     if !arity.variadic {
@@ -418,13 +624,85 @@ fn call_code(eval: &mut Evaluator, code: Code, captured: &[Value], argv: &[Value
     })
 }
 
-/// Run a compiled program: boot, `run`'s frame, constants, then the
-/// top-level thunks in load order inside the `load-file` frame.
-/// Returns the process exit code (0, or 1 after the diagnostic).
-pub(crate) fn run_main(path: &str, args: &[String], init: Code, tops: Vec<Code>) -> i32 {
-    // A fresh program: this thread's caches index the new tables.
+/// [`call_code`] taking the argument array over: the code may move any
+/// param it consumes out of its slot (leaving nil) instead of cloning it
+/// (`native_abi::TAKE_ARGS`); whatever it leaves drops here.
+fn call_code_owned(
+    eval: &mut Evaluator,
+    code: Code,
+    captured: &[Value],
+    mut argv: clj_eval::ext::OwnedArgs,
+) -> Step {
+    native_abi::guarded(eval, |eval| {
+        let mut ret = Value::Nil;
+        let status = {
+            let _active = ActiveScope::enter(eval);
+            let n = argv.len() | native_abi::TAKE_ARGS as usize;
+            code(
+                &mut ret,
+                argv.as_mut_ptr().cast_const(),
+                n,
+                captured.as_ptr(),
+            )
+        };
+        drop(argv);
+        if status == 0 {
+            Ok(ret)
+        } else {
+            Err(take_pending())
+        }
+    })
+}
+
+/// [`call_code_owned`] over an argument array the caller owns (#271):
+/// the code may take params from its slots, and the caller drops what is
+/// left; nothing moves through the call but the slice.
+fn call_code_in_place(
+    eval: &mut Evaluator,
+    code: Code,
+    captured: &[Value],
+    argv: &mut [Value],
+) -> Result<Value, clj_eval::error::NativeError> {
+    let n = argv.len() | native_abi::TAKE_ARGS as usize;
+    let ptr = argv.as_mut_ptr().cast_const();
+    native_abi::guarded(eval, |eval| {
+        let mut ret = Value::Nil;
+        let status = {
+            let _active = ActiveScope::enter(eval);
+            code(&mut ret, ptr, n, captured.as_ptr())
+        };
+        if status == 0 {
+            Ok(ret)
+        } else {
+            Err(take_pending())
+        }
+    })
+    .map_err(native_abi::signal_to_native)
+}
+
+fn reset_thread_caches() {
     ROOTS.with(|r| r.borrow_mut().clear());
     CREATED.with(|c| c.borrow_mut().clear());
+}
+
+fn execute_units(
+    eval: &mut Evaluator,
+    init: Code,
+    tops: &[Code],
+) -> Result<Value, clj_eval::error::Signal> {
+    run_code(eval, init)?;
+    freeze(native_abi::registry_epoch_handle(eval));
+    let mut last = Value::Nil;
+    for &top in tops {
+        last = run_code(eval, top)?;
+    }
+    Ok(last)
+}
+
+/// Run a compiled program using full Clojure boot: `boot`, `run`'s binding
+/// frame (plus `clojure.string` preload), constants, then top-level thunks.
+pub(crate) fn run_main(path: &str, args: &[String], init: Code, tops: Vec<Code>) -> i32 {
+    reset_thread_caches();
     let mut eval = clj_eval::boot();
     let file: Arc<str> = Arc::from(path);
     let tops: Arc<[Code]> = tops.into();
@@ -433,15 +711,7 @@ pub(crate) fn run_main(path: &str, args: &[String], init: Code, tops: Vec<Code>)
         "run-native",
         Arc::new(move |eval: &mut Evaluator, _: &[Value]| {
             let tops = Arc::clone(&tops);
-            clj_eval::load_native(eval, &file, move |eval| {
-                run_code(eval, init)?;
-                freeze(native_abi::registry_epoch_handle(eval));
-                let mut last = Value::Nil;
-                for top in tops.iter() {
-                    last = run_code(eval, *top)?;
-                }
-                Ok(last)
-            })
+            clj_eval::load_native(eval, &file, move |eval| execute_units(eval, init, &tops))
         }),
     );
     let script =
@@ -456,6 +726,60 @@ pub(crate) fn run_main(path: &str, args: &[String], init: Code, tops: Vec<Code>)
     eval.join_drainers();
     std::mem::forget(eval);
     let _flushed = std::io::Write::flush(&mut std::io::stdout());
+    code
+}
+
+/// Run a compiled program using `BootMode::Lite`: bootstraps only the minimal
+/// IO/print/CLI dynamics and the subset vars declared in `BUILDING.vars`,
+/// inside a direct CLI binding frame (no `eval_source` / `core_lazy` boot).
+pub(crate) fn run_main_lite(
+    path: &str,
+    args: &[String],
+    init: Code,
+    tops: &[Code],
+    need_stdin: bool,
+) -> i32 {
+    reset_thread_caches();
+    let (names, vars, core_caps, owned_caps, lib_caps, seq_helpers, var_meta) = building(|b| {
+        b.lite = true;
+        (
+            Arc::clone(&b.names),
+            std::mem::take(&mut b.vars),
+            std::mem::take(&mut b.lite_core_caps),
+            std::mem::take(&mut b.lite_owned_caps),
+            std::mem::take(&mut b.lite_libs),
+            b.lite_seq_helpers,
+            b.lite_var_meta,
+        )
+    });
+    let refs: Vec<(&str, &str)> = vars
+        .iter()
+        .map(|v| (span(&names, v.ns), span(&names, v.name)))
+        .collect();
+    let hints: Vec<u32> = vars.iter().map(|v| v.hint).collect();
+    let mut eval = clj_eval::aot_boot::boot_lite_with_caps(
+        &refs,
+        &hints,
+        need_stdin,
+        clj_eval::aot_boot::LiteTables {
+            core_groups: &core_caps,
+            owned_groups: &owned_caps,
+            lib_tables: &lib_caps,
+        },
+        seq_helpers,
+        var_meta,
+    );
+    drop(refs);
+    building(|b| {
+        b.vars = vars;
+        b.lite_core_caps = core_caps;
+        b.lite_owned_caps = owned_caps;
+        b.lite_libs = lib_caps;
+    });
+    let code = clj_eval::aot_boot::run_with_cli_frame(&mut eval, path, args, move |eval| {
+        execute_units(eval, init, tops)
+    });
+    std::mem::forget(eval);
     code
 }
 
@@ -699,10 +1023,24 @@ mod tests {
         let mut eval = clj_eval::boot();
         eval.eval_source("(def plain (fn [x] (* 2 x)))")
             .expect("def");
-        // Declaring past the end fills the gap; declaring inside it
-        // overwrites the placeholder.
-        declare_var(1, "user".to_owned(), "plain".to_owned());
-        declare_var(0, "clojure.core".to_owned(), "inc".to_owned());
+        // Index order over one names text; the repeated namespace spans
+        // the same text.
+        let none = clj_eval::aot_boot::NO_LITE_HINT;
+        let names: Arc<str> = Arc::from("clojure.coreincuserplaindec");
+        declare_vars(
+            Arc::clone(&names),
+            [
+                ((0, 12), (12, 3), none),
+                ((15, 4), (19, 5), none),
+                ((0, 12), (24, 3), none),
+            ]
+            .into_iter(),
+        );
+        building(|b| {
+            assert_eq!(b.vars[0].ns, b.vars[2].ns);
+            assert_eq!(b.vars[1].name(&b.names), "plain");
+            assert_eq!(span(&b.names, (40, 2)), "");
+        });
         extern "C" fn stub_code(_: *mut Value, _: *const Value, _: usize, _: *const Value) -> i32 {
             0
         }
@@ -710,16 +1048,17 @@ mod tests {
             stub_code(std::ptr::null_mut(), std::ptr::null(), 0, std::ptr::null()),
             0
         );
-        let desc = FnDesc {
-            display: Arc::from("stub"),
-            arities: Arc::from([ArityDesc {
+        declare_fns(
+            Arc::from("stub"),
+            [((0, 4), (0, 1)), ((0, 4), (0, 1))].into_iter(),
+            [ArityDesc {
                 fixed: 0,
                 variadic: false,
                 code: stub_code,
-            }]),
-        };
-        declare_fn(1, desc.clone());
-        declare_fn(0, desc);
+            }]
+            .into_iter(),
+            1,
+        );
         set_const(1, Value::Int(1));
         set_const(0, Value::Int(0));
         freeze(native_abi::registry_epoch_handle(&eval));

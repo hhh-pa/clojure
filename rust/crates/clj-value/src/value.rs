@@ -56,14 +56,19 @@ type RpdsList = rpds::ListSync<Value>;
 type RpdsVector = crate::trie::PVec;
 type RpdsMap = rpds::HashTrieMapSync<Value, Value, FxBuildHasher>;
 type RpdsSet = rpds::HashTrieSetSync<Value, FxBuildHasher>;
+/// A set's live members, each mapped to its slot in the order sidecar.
+type RpdsIndex = rpds::HashTrieMapSync<Value, usize, FxBuildHasher>;
+/// A set's order sidecar: one slot per member added since the last
+/// compaction; a removed member's slot is a hole (`None`).
+type SetSlots = crate::trie::PVec<Option<Value>>;
 
 /// Identity counters for `identical?` (S16): every freshly
 /// constructed [`List`]/[`Vector`]/[`Set`] mints an id from its
 /// counter (the `ATOM_ID` precedent); `Clone` preserves it, so two
 /// evaluations of the same binding compare identical while two
 /// separately built collections never do. Equality and hashing
-/// ignore the ids. [`Map`] instead identifies by its entries `Arc`
-/// (see [`Map::id`]) — no counter, no field.
+/// ignore the ids. [`Map`] instead identifies by an allocation
+/// address (see [`Map::id`]) — no counter, no field.
 static LIST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static VECTOR_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static SET_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -280,14 +285,405 @@ impl std::fmt::Debug for Vector {
     }
 }
 
+/// Flat byte buffer + end-offset table for homogeneous string vectors (#271).
+/// A run of adjacent identical strings can reference the same physical
+/// span, using an index in addition to the original end-offset table.
+#[derive(Clone, Debug, Default)]
+pub struct PackedStrings {
+    buf: String,
+    ends: Vec<u32>,
+    runs: Option<Box<StringRuns>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct StringRuns {
+    /// Each run is (physical item index, cumulative duplicate count).
+    entries: Vec<(usize, usize)>,
+    extra_bytes: usize,
+    expanded: std::sync::OnceLock<String>,
+}
+
+impl StringRuns {
+    #[inline(always)]
+    fn extra_items(&self) -> usize {
+        self.entries.last().map_or(0, |&(_, extra)| extra)
+    }
+
+    #[inline(always)]
+    fn physical_index(&self, i: usize) -> usize {
+        let after = self.entries.partition_point(|&(at, extra)| at + extra < i);
+        let skipped = after.checked_sub(1).map_or(0, |p| self.entries[p].1);
+        match self.entries.get(after) {
+            Some(&(at, _)) if i >= at + skipped => at,
+            _ => i - skipped,
+        }
+    }
+
+    fn push(&mut self, physical: usize, bytes: usize) {
+        let extra = self.extra_items() + 1;
+        match self.entries.last_mut() {
+            Some((at, count)) if *at == physical => *count = extra,
+            _ => self.entries.push((physical, extra)),
+        }
+        self.extra_bytes += bytes;
+        self.expanded.take();
+    }
+
+    fn pop(&mut self, physical: usize, bytes: usize) -> bool {
+        self.expanded.take();
+        let prev = self
+            .entries
+            .len()
+            .checked_sub(2)
+            .map_or(0, |p| self.entries[p].1);
+        let Some(last) = self.entries.last_mut().filter(|r| r.0 == physical) else {
+            return false;
+        };
+        last.1 -= 1;
+        self.extra_bytes -= bytes;
+        if last.1 == prev {
+            self.entries.pop();
+        }
+        true
+    }
+}
+
+impl PackedStrings {
+    /// An empty packed string buffer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pre-sized empty buffer for `n` items totaling `bytes` UTF-8 bytes.
+    #[must_use]
+    pub(crate) fn with_capacity(n: usize, bytes: usize) -> Self {
+        Self {
+            buf: String::with_capacity(bytes),
+            ends: Vec::with_capacity(n),
+            runs: None,
+        }
+    }
+
+    /// Number of stored strings.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.ends.len() + self.runs.as_ref().map_or(0, |r| r.extra_items())
+    }
+
+    /// Whether no strings are stored.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+
+    /// The concatenated byte buffer of all stored strings.
+    #[inline]
+    #[must_use]
+    pub fn raw_buf(&self) -> &str {
+        match &self.runs {
+            Some(runs) => runs.expanded.get_or_init(|| self.join("")),
+            None => &self.buf,
+        }
+    }
+
+    /// Borrow string `idx` (`None` past the end; panic-free for `clj-bc` bitcode).
+    #[inline]
+    #[must_use]
+    pub fn get_str(&self, idx: usize) -> Option<&str> {
+        self.physical_str(self.runs.as_ref().map_or(idx, |r| r.physical_index(idx)))
+    }
+
+    #[inline(always)]
+    fn physical_str(&self, idx: usize) -> Option<&str> {
+        let end = *self.ends.get(idx)? as usize;
+        let start = match idx.checked_sub(1) {
+            Some(prev) => *self.ends.get(prev)? as usize,
+            None => 0,
+        };
+        self.buf.get(start..end)
+    }
+
+    /// Append `s` when total bytes stay within `limit` (`false` otherwise).
+    #[inline]
+    pub(crate) fn push_bounded(&mut self, s: &str, limit: usize) -> bool {
+        let total = self.buf.len() + self.runs.as_ref().map_or(0, |r| r.extra_bytes);
+        if s.len() > limit.saturating_sub(total) {
+            return false;
+        }
+        if self.buf.len() >= 4096
+            && s.len() >= 12
+            && self.physical_str(self.ends.len() - 1) == Some(s)
+        {
+            self.runs
+                .get_or_insert_with(Box::default)
+                .push(self.ends.len() - 1, s.len());
+            return true;
+        }
+        if let Some(runs) = &mut self.runs {
+            runs.expanded.take();
+        }
+        if self.buf.capacity() >= 256 * 1024 && s.len() > self.buf.capacity() - self.buf.len() {
+            self.buf
+                .reserve_exact((self.buf.capacity() / 2).max(s.len()));
+        }
+        self.buf.push_str(s);
+        if self.ends.len() == self.ends.capacity() && self.ends.capacity() >= 64 * 1024 {
+            self.ends.reserve_exact(self.ends.capacity() / 2);
+        }
+        self.ends.push(self.buf.len() as u32);
+        true
+    }
+
+    /// Append `s` when total bytes stay within `u32::MAX`.
+    #[inline]
+    pub fn try_push(&mut self, s: &str) -> bool {
+        self.push_bounded(s, u32::MAX as usize)
+    }
+
+    /// Drop the last string (`false` when empty).
+    #[inline]
+    pub fn pop(&mut self) -> bool {
+        if self.pop_repeated() {
+            return true;
+        }
+        if self.ends.pop().is_none() {
+            return false;
+        }
+        let new_len = self.ends.last().copied().unwrap_or(0) as usize;
+        self.buf.truncate(new_len);
+        true
+    }
+
+    fn pop_repeated(&mut self) -> bool {
+        if self.runs.is_none() {
+            return false;
+        }
+        let i = self.ends.len() - 1;
+        let bytes = self.physical_str(i).expect("last stored item").len();
+        let runs = self.runs.as_mut().expect("has run index");
+        let popped = runs.pop(i, bytes);
+        if runs.entries.is_empty() {
+            self.runs = None;
+        }
+        popped
+    }
+
+    /// Release excess capacity only when more than half the buffer is slack
+    /// (avoiding a `realloc` copy-peak on freshly grown buffers before `join`).
+    pub(crate) fn shed_slack(&mut self) {
+        if self.buf.capacity() - self.buf.len() > self.buf.len().max(4096) {
+            self.buf.shrink_to_fit();
+        }
+        if self.ends.capacity() - self.ends.len() > self.ends.len().max(1024) {
+            self.ends.shrink_to_fit();
+        }
+    }
+
+    /// Join every stored string with `sep` directly from the flat buffer.
+    #[must_use]
+    pub fn join(&self, sep: &str) -> String {
+        if let Some(runs) = &self.runs {
+            let cap = self
+                .buf
+                .len()
+                .saturating_add(runs.extra_bytes)
+                .saturating_add(sep.len().saturating_mul(self.len() - 1));
+            let mut out = String::with_capacity(cap);
+            self.push_runs(&mut out, sep, runs);
+            return out;
+        }
+        let n = self.ends.len();
+        if n == 0 {
+            return String::new();
+        }
+        let cap = self
+            .buf
+            .len()
+            .saturating_add(sep.len().saturating_mul(n - 1));
+        let mut out = String::with_capacity(cap);
+        let mut start = 0usize;
+        for (i, &end) in self.ends.iter().enumerate() {
+            if i > 0 {
+                out.push_str(sep);
+            }
+            let end = end as usize;
+            out.push_str(&self.buf[start..end]);
+            start = end;
+        }
+        out
+    }
+
+    fn push_runs(&self, out: &mut String, sep: &str, runs: &StringRuns) {
+        let mut repeats = runs.entries.iter().peekable();
+        let mut extra = 0;
+        let mut start = 0;
+        for (i, &end) in self.ends.iter().enumerate() {
+            if i != 0 {
+                out.push_str(sep);
+            }
+            let end = end as usize;
+            let text = &self.buf[start..end];
+            out.push_str(text);
+            if let Some(&(_, total)) = repeats.next_if(|&&(at, _)| at == i) {
+                for _ in extra..total {
+                    out.push_str(sep);
+                    out.push_str(text);
+                }
+                extra = total;
+            }
+            start = end;
+        }
+    }
+
+    fn push_to(&self, out: &mut String) {
+        if let Some(runs) = &self.runs {
+            self.push_runs(out, "", runs);
+        } else {
+            out.push_str(&self.buf);
+        }
+    }
+
+    /// Join every stored string with `sep` in place inside `self.buf`, dropping
+    /// `self.ends` before returning so peak RSS avoids holding both the packed
+    /// strings buffer and a second output buffer simultaneously.
+    #[must_use]
+    pub fn into_joined(self, sep: &str) -> String {
+        if self.runs.is_some() {
+            return self.join(sep);
+        }
+        let n = self.ends.len();
+        if n == 0 {
+            return String::new();
+        }
+        if sep.is_empty() {
+            return self.buf;
+        }
+        let sep_bytes = sep.as_bytes();
+        let total = self
+            .buf
+            .len()
+            .saturating_add(sep_bytes.len().saturating_mul(n - 1));
+        let mut bytes = self.buf.into_bytes();
+        if total > bytes.capacity() {
+            bytes.reserve_exact(total - bytes.len());
+        }
+        bytes.resize(total, 0);
+        let mut write = total;
+        for i in (0..n).rev() {
+            let end = self.ends[i] as usize;
+            let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+            let len = end - start;
+            write -= len;
+            bytes.copy_within(start..end, write);
+            if i > 0 {
+                write -= sep_bytes.len();
+                bytes[write..write + sep_bytes.len()].copy_from_slice(sep_bytes);
+            }
+        }
+        drop(self.ends);
+        String::from_utf8(bytes).unwrap_or_default()
+    }
+
+    /// Box all items into a `Vec<Value>`.
+    #[must_use]
+    pub fn to_values(&self) -> Vec<Value> {
+        if self.runs.is_some() {
+            return (0..self.len())
+                .map(|i| Value::Str(Arc::from(self.get_str(i).expect("in bounds"))))
+                .collect();
+        }
+        let mut out = Vec::with_capacity(self.ends.len());
+        let mut start = 0usize;
+        for &end in &self.ends {
+            let end = end as usize;
+            out.push(Value::Str(Arc::from(&self.buf[start..end])));
+            start = end;
+        }
+        out
+    }
+
+    /// Up to 32 items starting at `index` (matching `Packed::chunk_from`).
+    fn chunk_from(&self, index: usize) -> Vec<Value> {
+        if index >= self.len() {
+            return Vec::new();
+        }
+        let end = ((index / 32 + 1) * 32).min(self.len());
+        let mut out = Vec::with_capacity(end - index);
+        for i in index..end {
+            out.push(Value::Str(Arc::from(self.get_str(i).expect("in bounds"))));
+        }
+        out
+    }
+
+    fn iter(&self) -> PackedStringsIter<'_> {
+        self.iter_from(0)
+    }
+
+    fn iter_from(&self, start: usize) -> PackedStringsIter<'_> {
+        let len = self.len();
+        PackedStringsIter {
+            ps: self,
+            lo: start.min(len),
+            hi: len,
+        }
+    }
+}
+
+struct PackedStringsIter<'a> {
+    ps: &'a PackedStrings,
+    lo: usize,
+    hi: usize,
+}
+
+impl Iterator for PackedStringsIter<'_> {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Value> {
+        if self.lo >= self.hi {
+            return None;
+        }
+        let s = self.ps.get_str(self.lo).expect("in bounds");
+        self.lo += 1;
+        Some(Value::Str(Arc::from(s)))
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Value> {
+        self.lo = self.lo.saturating_add(n).min(self.hi);
+        self.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.hi - self.lo;
+        (rem, Some(rem))
+    }
+}
+
+impl DoubleEndedIterator for PackedStringsIter<'_> {
+    fn next_back(&mut self) -> Option<Value> {
+        if self.lo >= self.hi {
+            return None;
+        }
+        self.hi -= 1;
+        let s = self.ps.get_str(self.hi).expect("in bounds");
+        Some(Value::Str(Arc::from(s)))
+    }
+}
+
 /// Borrowed or copy-out element reference returned by vector lookup
 /// without constructing (and dropping) an owned temporary [`Value`].
 #[derive(Clone, Copy)]
 pub enum ValueRef<'a> {
     /// Packed integer element.
     Int(i64),
+    /// Packed double element.
+    Double(f64),
     /// Packed character element.
     Char(char),
+    /// Packed string slice element.
+    Str(&'a str),
     /// Borrowed element from generic storage.
     Ref(&'a Value),
 }
@@ -301,25 +697,145 @@ impl Vector {
         match &self.0.inner {
             VectorInner::Generic(t) => t.get(index).map(ValueRef::Ref),
             VectorInner::Ints(t) => t.get(index).copied().map(ValueRef::Int),
+            VectorInner::Doubles(t) => t.get(index).copied().map(ValueRef::Double),
             VectorInner::Chars(t) => t.get(index).copied().map(ValueRef::Char),
+            VectorInner::Strs(ps) => ps.get_str(index).map(ValueRef::Str),
+        }
+    }
+
+    /// [`get_val_ref`](Self::get_val_ref) over flat long, double and
+    /// generic storage only (`None` for tries, chars, strings and
+    /// indices past the end): small enough to inline into compiled
+    /// `nth` (#271).
+    #[inline(always)]
+    #[must_use]
+    pub fn flat_val_ref(&self, index: usize) -> Option<ValueRef<'_>> {
+        match &self.0.inner {
+            VectorInner::Ints(t) => t.as_flat()?.get(index).copied().map(ValueRef::Int),
+            VectorInner::Doubles(t) => t.as_flat()?.get(index).copied().map(ValueRef::Double),
+            VectorInner::Generic(t) => t.as_flat()?.get(index).map(ValueRef::Ref),
+            _ => None,
+        }
+    }
+
+    /// Borrow the flat packed `i64` slice when this vector is backed by flat ints.
+    #[inline(always)]
+    #[must_use]
+    pub fn as_flat_ints(&self) -> Option<&[i64]> {
+        match &self.0.inner {
+            VectorInner::Ints(t) => t.as_flat(),
+            _ => None,
+        }
+    }
+
+    /// Borrow the flat packed `f64` slice when this vector is backed by flat doubles.
+    #[inline(always)]
+    #[must_use]
+    pub fn as_flat_doubles(&self) -> Option<&[f64]> {
+        match &self.0.inner {
+            VectorInner::Doubles(t) => t.as_flat(),
+            _ => None,
+        }
+    }
+
+    /// Borrow the contiguous packed Unicode scalar values.
+    #[inline]
+    #[must_use]
+    pub fn as_flat_chars(&self) -> Option<&[char]> {
+        match &self.0.inner {
+            VectorInner::Chars(items) => items.as_flat(),
+            _ => None,
+        }
+    }
+
+    /// Borrow the flat generic [`Value`] slice when this vector is backed by
+    /// flat generic storage (panic-free for `clj-bc` bitcode).
+    #[inline(always)]
+    #[must_use]
+    pub fn as_flat_values(&self) -> Option<&[Value]> {
+        match &self.0.inner {
+            VectorInner::Generic(t) => t.as_flat(),
+            _ => None,
+        }
+    }
+
+    /// Whether this vector's backing storage is a contiguous flat buffer
+    /// (so `as_flat_*` probes succeed without trie traversal).
+    #[inline]
+    #[must_use]
+    pub fn is_flat(&self) -> bool {
+        match &self.0.inner {
+            VectorInner::Ints(t) => t.as_flat().is_some(),
+            VectorInner::Doubles(t) => t.as_flat().is_some(),
+            VectorInner::Chars(t) => t.as_flat().is_some(),
+            VectorInner::Generic(t) => t.as_flat().is_some(),
+            VectorInner::Strs(_) => true,
+        }
+    }
+
+    /// Copy the window `start..end` into a fresh [`Vector`], preserving
+    /// packed scalar storage (flat when `end - start <= FLAT_MAX`).
+    #[must_use]
+    pub fn slice_packed(&self, start: usize, end: usize) -> Self {
+        let len = end - start;
+        match &self.0.inner {
+            VectorInner::Ints(t) => {
+                Self::from_ints(t.iter_from(start).take(len).copied().collect())
+            }
+            VectorInner::Doubles(t) => {
+                Self::from_doubles(t.iter_from(start).take(len).copied().collect())
+            }
+            VectorInner::Chars(t) => {
+                Self::from_chars(t.iter_from(start).take(len).copied().collect())
+            }
+            VectorInner::Strs(_) | VectorInner::Generic(_) => {
+                Self::from_vec(self.iter_from(start).take(len).collect())
+            }
+        }
+    }
+
+    /// Borrow the packed string storage when this vector holds packed strings.
+    #[inline(always)]
+    #[must_use]
+    pub fn as_packed_strs(&self) -> Option<&PackedStrings> {
+        match &self.0.inner {
+            VectorInner::Strs(ps) => Some(ps),
+            _ => None,
+        }
+    }
+
+    /// Unwrap uniquely owned packed string storage, returning `Err(self)` when
+    /// shared or backed by another vector representation.
+    pub fn into_packed_strs(self) -> Result<PackedStrings, Self> {
+        let data = Arc::try_unwrap(self.0).map_err(Self)?;
+        let VectorData { id, inner, meta } = data;
+        match inner {
+            VectorInner::Strs(ps) => match Arc::try_unwrap(ps) {
+                Ok(owned) => Ok(owned),
+                Err(shared) => Err(Self(Arc::new(VectorData {
+                    id,
+                    inner: VectorInner::Strs(shared),
+                    meta,
+                }))),
+            },
+            other => Err(Self(Arc::new(VectorData {
+                id,
+                inner: other,
+                meta,
+            }))),
         }
     }
 }
 
-/// Vector storage: the generic trie of values, or the same trie over
-/// packed `i64`s or `char`s (#226: 8 or 4 bytes per element instead
-/// of a 64-byte `Value` — a vector of a string's chars was 16x its
-/// text). Typing is decided at construction (`from_vec` scans,
-/// `from_ints`/`from_chars` and typed transients skip the scan) and by
-/// the first item into an empty vector; a foreign value converts once
-/// to generic, which then stays generic. All three are the same
-/// persistent trie, so shared updates path-copy in log time
-/// whatever the type.
+/// Vector storage: the generic trie of values, or packed `i64`, `f64`, `char`,
+/// or flat string storage (#226, #271).
 #[derive(Clone, Debug)]
 enum VectorInner {
     Generic(crate::trie::Packed<Value>),
     Ints(crate::trie::Packed<i64>),
+    Doubles(crate::trie::Packed<f64>),
     Chars(crate::trie::Packed<char>),
+    Strs(Arc<PackedStrings>),
 }
 
 /// Owned-value vector iteration (typed items box on read).
@@ -330,7 +846,9 @@ pub struct VectorIter<'a> {
 enum VectorIterInner<'a> {
     Generic(crate::trie::PackedIter<'a, Value>),
     Ints(crate::trie::PackedIter<'a, i64>),
+    Doubles(crate::trie::PackedIter<'a, f64>),
     Chars(crate::trie::PackedIter<'a, char>),
+    Strs(PackedStringsIter<'a>),
 }
 
 impl Iterator for VectorIter<'_> {
@@ -340,7 +858,21 @@ impl Iterator for VectorIter<'_> {
         match &mut self.inner {
             VectorIterInner::Generic(it) => it.next().cloned(),
             VectorIterInner::Ints(it) => it.next().map(|n| Value::Int(*n)),
+            VectorIterInner::Doubles(it) => it.next().map(|d| Value::Double(*d)),
             VectorIterInner::Chars(it) => it.next().map(|c| Value::Char(*c)),
+            VectorIterInner::Strs(it) => it.next(),
+        }
+    }
+
+    /// Skips by reference (no clone and drop per skipped item: a walk
+    /// over a `subvec` view starts mid-vector, #271).
+    fn nth(&mut self, n: usize) -> Option<Value> {
+        match &mut self.inner {
+            VectorIterInner::Generic(it) => it.nth(n).cloned(),
+            VectorIterInner::Ints(it) => it.nth(n).map(|n| Value::Int(*n)),
+            VectorIterInner::Doubles(it) => it.nth(n).map(|d| Value::Double(*d)),
+            VectorIterInner::Chars(it) => it.nth(n).map(|c| Value::Char(*c)),
+            VectorIterInner::Strs(it) => it.nth(n),
         }
     }
 
@@ -348,7 +880,9 @@ impl Iterator for VectorIter<'_> {
         match &self.inner {
             VectorIterInner::Generic(it) => it.size_hint(),
             VectorIterInner::Ints(it) => it.size_hint(),
+            VectorIterInner::Doubles(it) => it.size_hint(),
             VectorIterInner::Chars(it) => it.size_hint(),
+            VectorIterInner::Strs(it) => it.size_hint(),
         }
     }
 }
@@ -358,7 +892,9 @@ impl DoubleEndedIterator for VectorIter<'_> {
         match &mut self.inner {
             VectorIterInner::Generic(it) => it.next_back().cloned(),
             VectorIterInner::Ints(it) => it.next_back().map(|n| Value::Int(*n)),
+            VectorIterInner::Doubles(it) => it.next_back().map(|d| Value::Double(*d)),
             VectorIterInner::Chars(it) => it.next_back().map(|c| Value::Char(*c)),
+            VectorIterInner::Strs(it) => it.next_back(),
         }
     }
 }
@@ -418,6 +954,7 @@ pub(crate) const INLINE_MAP_MAX: usize = 16;
 struct MapShape {
     keys: Box<[Value]>,
     ascii_map: [u8; 128],
+    has_big_int_keys: bool,
 }
 
 fn build_ascii_map(keys: &[Value]) -> [u8; 128] {
@@ -446,6 +983,12 @@ impl MapShape {
                 return None;
             }
         }
+        // Keywords are interned and equal only to themselves (#271): an
+        // address compare per key instead of `Value::eq`'s dispatch.
+        if let Value::Keyword(kw) = k {
+            return (self.keys.iter())
+                .position(|ek| matches!(ek, Value::Keyword(e) if e.ptr_eq(kw)));
+        }
         self.keys.iter().position(|ek| ek == k)
     }
 }
@@ -453,8 +996,9 @@ impl MapShape {
 /// A small map's entries: the shared shape plus this version's
 /// values (parallel to `shape.keys`). Boxed slices, not vecs: no
 /// capacity field (a 3-pair map buckets at 256B instead of 288B)
-/// and no growth slack ever.
-#[derive(Debug)]
+/// and no growth slack ever. Inline in the map's data (#271: one
+/// allocation fewer per map version than behind its own `Arc`).
+#[derive(Clone, Debug)]
 struct SmallMap {
     shape: Arc<MapShape>,
     vals: Box<[Value]>,
@@ -558,6 +1102,9 @@ fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
         let shape = Arc::new(MapShape {
             keys: keys.to_vec().into_boxed_slice(),
             ascii_map: build_ascii_map(keys),
+            has_big_int_keys: keys
+                .iter()
+                .any(|k| matches!(k, Value::BigInt(_) | Value::BigInteger(_))),
         });
         reg.insert_shape(keys, &shape);
         if exact {
@@ -568,26 +1115,25 @@ fn intern_shape(keys: &[Value]) -> Arc<MapShape> {
     })
 }
 
-/// Shared empty shape (`Map::id` is the [`SmallMap`] `Arc`
-/// address, so every empty map still allocates a fresh
-/// [`SmallMap`] around this shared shape).
+/// Shared empty shape (every empty shaped map's entries).
 static EMPTY_MAP_SHAPE: LazyLock<Arc<MapShape>> = LazyLock::new(|| intern_shape(&[]));
 
-/// A fresh empty entries allocation (identity-fresh; the shape is
-/// the shared empty shape).
-fn fresh_empty_small() -> Arc<SmallMap> {
-    Arc::new(SmallMap {
+/// Empty entries (the shared empty shape, no values: no allocation —
+/// the map's identity is its data's address, see [`Map::id`]).
+fn fresh_empty_small() -> SmallMap {
+    SmallMap {
         shape: EMPTY_MAP_SHAPE.clone(),
         vals: Box::default(),
-    })
+    }
 }
 
 /// A map's fields, behind the handle's `Arc` so a `Map` (inline
 /// in every `Value`) stays one word (#254: `Value` shrinks to 32
 /// bytes). Writers go through `Arc::make_mut` on the handle data
-/// first — a shared handle clones the fields (entries `Arc`s
-/// shared, identities preserved) before any in-place update,
-/// exactly like the old struct copy.
+/// first — a shared handle clones the fields (a shaped map's
+/// entries included, a hash map's trie `Arc` shared) before any
+/// in-place update; [`Map::set_small`] replaces the entries
+/// without copying the old ones.
 #[derive(Clone)]
 struct MapData {
     /// The entries when `small` is `None` (`None` for shaped maps
@@ -597,9 +1143,9 @@ struct MapData {
     /// `Some` = shaped authoritative (an interned key-set plus
     /// this version's values, at most [`INLINE_MAP_MAX`] entries
     /// in iteration order); `None` = `inner` authoritative (plus
-    /// `keys` when sorted). Writers mint a fresh entries `Arc`
-    /// except uniquely-owned in-place updates (see [`Map::id`]).
-    small: Option<Arc<SmallMap>>,
+    /// `keys` when sorted). Inline: a shaped map's identity is its
+    /// data's address (see [`Map::id`]).
+    small: Option<SmallMap>,
     /// Comparator-order sidecar for sorted maps when `small` is
     /// `None` (`None` otherwise — plain hash-maps iterate the
     /// trie, never this). Writers maintain it only when sorted.
@@ -631,13 +1177,23 @@ impl std::fmt::Debug for Map {
 impl Map {
     /// Fast lookup for scalar keys (`Char`, `Keyword`, `Int`, `Bool`,
     /// `Nil`, `Str`) in inline-shaped maps without hashing or
-    /// recursive [`Value::eq`]. Returns `None` when backed by a trie
-    /// or for non-scalar keys so bitcode helpers can delegate to
-    /// `rt_n_*`.
+    /// recursive [`Value::eq`]. Returns `None` for unsupported keys
+    /// and representations so bitcode helpers can delegate to `rt_n_*`.
     #[inline]
     #[must_use]
     pub fn get_small_scalar(&self, k: &Value) -> Option<Option<&Value>> {
-        let small = self.0.small.as_deref()?;
+        if self.is_sorted() {
+            return None;
+        }
+        let small = self.0.small.as_ref()?;
+        if let Value::Keyword(kw) = k {
+            let pos = small
+                .shape
+                .keys
+                .iter()
+                .position(|ek| matches!(ek, Value::Keyword(e) if e.ptr_eq(kw)));
+            return Some(pos.and_then(|idx| small.vals.get(idx)));
+        }
         if let Value::Char(c) = k {
             return small
                 .shape
@@ -645,7 +1201,8 @@ impl Map {
                 .get(*c as usize)
                 .map(|&idx| small.vals.get(idx as usize));
         }
-        if !is_small_scalar_key(k) {
+        // Long keys can equal BigInt and BigInteger keys.
+        if !is_small_scalar_key(k) || (matches!(k, Value::Int(_)) && small.shape.has_big_int_keys) {
             return None;
         }
         let pos = small
@@ -678,12 +1235,30 @@ fn is_small_scalar_key(k: &Value) -> bool {
 #[inline]
 fn small_scalar_eq(ek: &Value, k: &Value) -> bool {
     match (ek, k) {
-        (Value::Keyword(ekw), Value::Keyword(kw)) => ekw.ptr_eq(kw),
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Nil, Value::Nil) => true,
         (Value::Str(x), Value::Str(y)) => **x == **y,
         _ => false,
+    }
+}
+
+/// `m = k` for a nil, boolean, long, char or keyword key, decided
+/// without the full `=`: only the same kind can equal such a key, except
+/// that big integers can equal a long (`None`, like any other key kind).
+#[inline(always)]
+fn scalar_member_eq(m: &Value, k: &Value) -> Option<bool> {
+    match (m, k) {
+        (Value::Int(x), Value::Int(y)) => Some(x == y),
+        (Value::Keyword(x), Value::Keyword(y)) => Some(x == y),
+        (Value::Char(x), Value::Char(y)) => Some(x == y),
+        (Value::Bool(x), Value::Bool(y)) => Some(x == y),
+        (Value::Nil, Value::Nil) => Some(true),
+        (Value::BigInt(_) | Value::BigInteger(_), Value::Int(_)) => None,
+        (_, Value::Int(_) | Value::Keyword(_) | Value::Char(_) | Value::Bool(_) | Value::Nil) => {
+            Some(false)
+        }
+        _ => None,
     }
 }
 
@@ -706,15 +1281,52 @@ pub enum SortSpec {
 /// every `Value` (#221 R1). `sort` is the FT6 sorted-set
 /// order (same contract as [`Map`]'s): `members` stays in
 /// comparator order and compare-0 duplicates collapse.
+/// Maximum member count kept inline in [`SetStorage::Small`] (mirrors
+/// [`SMALL_MAP_MAX`]): avoids `rpds` trie + sidecar allocations and
+/// `compact()` churn on small sets (#271 Slice 5q).
+const SMALL_SET_MAX: usize = 8;
+
+/// Hash-indexed persistent storage for sets past [`SMALL_SET_MAX`].
+#[derive(Clone, Debug)]
+struct LargeSet {
+    /// Live members, each mapped to its slot in `members`.
+    inner: RpdsIndex,
+    /// Insertion order (comparator order when sorted). `disj` leaves a
+    /// hole in its member's slot (O(log n), no shifting); the sidecar
+    /// compacts once holes outnumber members (amortized O(1)).
+    members: Arc<SetSlots>,
+    /// How many slots are holes, and the first slot that can be live
+    /// (every slot before it is a hole: `first`/`disj` pops stay O(1)).
+    holes: usize,
+    head: usize,
+}
+
+#[derive(Clone, Debug)]
+enum SetStorage {
+    Small(Vec<Value>),
+    Large(Box<LargeSet>),
+}
+
+impl SetStorage {
+    fn large_from_vec(members: Vec<Value>) -> Self {
+        let (inner, slots) = slots_of(members);
+        Self::Large(Box::new(LargeSet {
+            inner,
+            members: Arc::new(slots),
+            holes: 0,
+            head: 0,
+        }))
+    }
+}
+
 /// A set's fields, behind the handle's `Arc` so a `Set` (inline
 /// in every `Value`) stays one word (#254: `Value` shrinks to 32
 /// bytes). Writers go through `Arc::make_mut`, exactly like the
 /// old struct copy.
 #[derive(Clone)]
 struct SetData {
-    inner: RpdsSet,
+    storage: SetStorage,
     meta: Option<Arc<Map>>,
-    members: Arc<RpdsVector>,
     /// Boxed (like [`Map`]'s): sorted sets are rare.
     sort: Option<Box<SortSpec>>,
     id: u64,
@@ -726,12 +1338,28 @@ pub struct Set(Arc<SetData>);
 impl std::fmt::Debug for Set {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Set")
-            .field("inner", &self.0.inner)
+            .field("inner", &self.0.storage)
             .field("meta", &self.0.meta)
-            .field("members", &self.0.members)
             .field("sort", &self.0.sort)
             .field("id", &self.0.id)
             .finish()
+    }
+}
+
+enum SetIter<'a> {
+    Small(std::slice::Iter<'a, Value>),
+    Large(std::iter::Flatten<crate::trie::Iter<'a, Option<Value>>>),
+}
+
+impl<'a> Iterator for SetIter<'a> {
+    type Item = &'a Value;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            SetIter::Small(it) => it.next(),
+            SetIter::Large(it) => it.next(),
+        }
     }
 }
 
@@ -835,6 +1463,35 @@ impl Vector {
         Self::of(VectorInner::Ints(crate::trie::Packed::from_vec(Vec::new())))
     }
 
+    /// The vector's data for writing (`Arc::make_mut`): a shared handle
+    /// copies it first, except that a shared flat run past
+    /// [`FLAT_MAX`](crate::trie::FLAT_MAX) moves into the trie (one
+    /// pass over its items, then log-time updates: #227) instead of
+    /// being copied whole on every update of a loop-threaded vector.
+    fn data_mut(&mut self) -> &mut VectorData {
+        if Arc::strong_count(&self.0) > 1 {
+            let long = match &self.0.inner {
+                VectorInner::Generic(t) => {
+                    t.is_long_flat().then(|| VectorInner::Generic(t.to_trie()))
+                }
+                VectorInner::Ints(t) => t.is_long_flat().then(|| VectorInner::Ints(t.to_trie())),
+                VectorInner::Doubles(t) => {
+                    t.is_long_flat().then(|| VectorInner::Doubles(t.to_trie()))
+                }
+                VectorInner::Chars(t) => t.is_long_flat().then(|| VectorInner::Chars(t.to_trie())),
+                VectorInner::Strs(_) => None,
+            };
+            if let Some(inner) = long {
+                self.0 = Arc::new(VectorData {
+                    inner,
+                    meta: self.0.meta.clone(),
+                    id: self.0.id,
+                });
+            }
+        }
+        Arc::make_mut(&mut self.0)
+    }
+
     fn of(inner: VectorInner) -> Self {
         Self(Arc::new(VectorData {
             inner,
@@ -844,37 +1501,15 @@ impl Vector {
     }
 
     /// Build a vector from items in order (packed when every item is
-    /// an `Int`, or every item a char; empty vectors start typed for
-    /// their first `conj`).
+    /// an `Int`, every item a `Double`, or every item a char; empty
+    /// vectors start typed for their first `conj`).
     #[must_use]
     pub fn from_vec(items: Vec<Value>) -> Self {
-        let typed = match items.first() {
-            None => return Self::new_sync(),
-            Some(Value::Int(_)) => items
-                .iter()
-                .map(|v| {
-                    if let Value::Int(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Option<Vec<i64>>>()
-                .map(Self::from_ints),
-            Some(Value::Char(_)) => items
-                .iter()
-                .map(|v| {
-                    if let Value::Char(c) = v {
-                        Some(*c)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Option<Vec<char>>>()
-                .map(Self::from_chars),
-            Some(_) => None,
-        };
-        typed.unwrap_or_else(|| Self::of(VectorInner::Generic(crate::trie::Packed::flat(items))))
+        if items.is_empty() {
+            return Self::new_sync();
+        }
+        pack_typed_vec(&items)
+            .unwrap_or_else(|| Self::of(VectorInner::Generic(crate::trie::Packed::flat(items))))
     }
 
     /// Build a packed `Int` vector from `i64`s in order (no scan — for
@@ -890,6 +1525,18 @@ impl Vector {
         Self::of(VectorInner::Ints(crate::trie::Packed::flat(ints)))
     }
 
+    /// Build a packed `Double` vector from `f64`s in order (no scan).
+    #[must_use]
+    pub fn from_doubles(doubles: Vec<f64>) -> Self {
+        Self::of(VectorInner::Doubles(crate::trie::Packed::flat(doubles)))
+    }
+
+    /// Build a packed `Double` vector from `f64`s in order (no scan).
+    #[must_use]
+    pub fn from_flat_doubles(doubles: Vec<f64>) -> Self {
+        Self::of(VectorInner::Doubles(crate::trie::Packed::flat(doubles)))
+    }
+
     /// Build a packed char vector from `char`s in order (no scan).
     #[must_use]
     pub fn from_chars(chars: Vec<char>) -> Self {
@@ -902,7 +1549,13 @@ impl Vector {
         Self::of(VectorInner::Chars(crate::trie::Packed::flat(chars)))
     }
 
-    /// Whether this vector rides on packed `i64` or `char` storage.
+    /// Build a packed string vector from [`PackedStrings`] zero-copy.
+    #[must_use]
+    pub fn from_packed_strs(strs: PackedStrings) -> Self {
+        Self::of(VectorInner::Strs(Arc::new(strs)))
+    }
+
+    /// Whether this vector rides on packed storage (`i64`, `char`, or `str`).
     #[must_use]
     pub fn is_packed(&self) -> bool {
         !matches!(self.0.inner, VectorInner::Generic(_))
@@ -914,7 +1567,9 @@ impl Vector {
         match &self.0.inner {
             VectorInner::Generic(_) => None,
             VectorInner::Ints(t) => Some(TypedItems::Ints(t.iter().copied().collect())),
+            VectorInner::Doubles(t) => Some(TypedItems::Doubles(t.iter().copied().collect())),
             VectorInner::Chars(t) => Some(TypedItems::Chars(t.iter().copied().collect())),
+            VectorInner::Strs(ps) => Some(TypedItems::Strs((**ps).clone())),
         }
     }
 
@@ -929,7 +1584,9 @@ impl Vector {
                 id: data.id,
             }))),
             VectorInner::Ints(t) => Ok(TypedItems::Ints(t.into_vec())),
+            VectorInner::Doubles(t) => Ok(TypedItems::Doubles(t.into_vec())),
             VectorInner::Chars(t) => Ok(TypedItems::Chars(t.into_vec())),
+            VectorInner::Strs(ps) => Ok(TypedItems::Strs(Arc::unwrap_or_clone(ps))),
         }
     }
 
@@ -940,12 +1597,14 @@ impl Vector {
         match data.inner {
             VectorInner::Generic(pvec) => pvec.into_vec(),
             VectorInner::Ints(t) => t.into_vec().into_iter().map(Value::Int).collect(),
+            VectorInner::Doubles(t) => t.into_vec().into_iter().map(Value::Double).collect(),
             VectorInner::Chars(t) => t.into_vec().into_iter().map(Value::Char).collect(),
+            VectorInner::Strs(ps) => ps.to_values(),
         }
     }
 
-    /// If this vector is packed chars, append all chars directly to `out`
-    /// without boxing into `Value::Char`. Returns true if handled.
+    /// If this vector is packed chars or strings, append directly to `out`
+    /// without boxing items. Returns true if handled.
     pub fn push_to_string(&self, out: &mut String) -> bool {
         match &self.0.inner {
             VectorInner::Chars(packed) => {
@@ -953,6 +1612,10 @@ impl Vector {
                 for &c in packed.iter() {
                     out.push(c);
                 }
+                true
+            }
+            VectorInner::Strs(ps) => {
+                ps.push_to(out);
                 true
             }
             _ => false,
@@ -964,16 +1627,20 @@ impl Vector {
         if !self.is_packed() || !self.is_empty() {
             return;
         }
-        match (&self.0.inner, v) {
-            (VectorInner::Ints(_), Value::Char(_)) => {
-                Arc::make_mut(&mut self.0).inner =
-                    VectorInner::Chars(crate::trie::Packed::from_vec(Vec::new()));
+        let next = match (&self.0.inner, v) {
+            (VectorInner::Ints(_) | VectorInner::Doubles(_), Value::Char(_)) => Some(
+                VectorInner::Chars(crate::trie::Packed::from_vec(Vec::new())),
+            ),
+            (VectorInner::Chars(_) | VectorInner::Doubles(_), Value::Int(_)) => {
+                Some(VectorInner::Ints(crate::trie::Packed::from_vec(Vec::new())))
             }
-            (VectorInner::Chars(_), Value::Int(_)) => {
-                Arc::make_mut(&mut self.0).inner =
-                    VectorInner::Ints(crate::trie::Packed::from_vec(Vec::new()));
-            }
-            _ => {}
+            (VectorInner::Ints(_) | VectorInner::Chars(_), Value::Double(_)) => Some(
+                VectorInner::Doubles(crate::trie::Packed::from_vec(Vec::new())),
+            ),
+            _ => None,
+        };
+        if let Some(inner) = next {
+            self.data_mut().inner = inner;
         }
     }
 
@@ -985,23 +1652,8 @@ impl Vector {
         // a foreign value converts typed storage once (to generic,
         // which stays generic).
         self.retype_empty(&v);
-        let data = Arc::make_mut(&mut self.0);
-        let generic = match (&mut data.inner, v) {
-            (VectorInner::Generic(t), v) => {
-                t.push(v);
-                None
-            }
-            (VectorInner::Ints(t), Value::Int(n)) => {
-                t.push(n);
-                None
-            }
-            (VectorInner::Chars(t), Value::Char(c)) => {
-                t.push(c);
-                None
-            }
-            (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| g.push(v))),
-            (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| g.push(v))),
-        };
+        let data = self.data_mut();
+        let generic = push_inner(&mut data.inner, v);
         if let Some(g) = generic {
             data.inner = VectorInner::Generic(g);
         }
@@ -1020,6 +1672,86 @@ impl Vector {
         self.clone().set_nth_owned(index, v)
     }
 
+    /// `assoc` in place on a uniquely held flat vector (#271 lean
+    /// owned path, inlined into AOT programs as bitcode, so it runs no
+    /// drop glue and touches no runtime statics): writes `*v` at
+    /// `index` and returns `true` only when this handle and its flat
+    /// storage are unique, `index` is in bounds, and the value fits the
+    /// packing without retyping (a long into longs, a double into
+    /// doubles, anything over a scalar item of generic storage, which
+    /// takes `*v`, leaving nil). Otherwise nothing changes and the
+    /// general [`set_nth_owned`](Self::set_nth_owned) path applies. The
+    /// identity stays: no other handle can observe the old version,
+    /// like a uniquely owned map updated in place.
+    #[inline]
+    pub fn assoc_unique(&mut self, index: usize, v: &mut Value) -> bool {
+        let Some(data) = Arc::get_mut(&mut self.0) else {
+            return false;
+        };
+        match (&mut data.inner, &mut *v) {
+            (VectorInner::Ints(p), Value::Int(n)) => put_unique(p, index, *n),
+            (VectorInner::Doubles(p), Value::Double(d)) => put_unique(p, index, *d),
+            (VectorInner::Generic(p), v) => {
+                match p.unique_flat_mut().and_then(|xs| xs.get_mut(index)) {
+                    Some(slot)
+                        if matches!(
+                            slot,
+                            Value::Nil
+                                | Value::Bool(_)
+                                | Value::Int(_)
+                                | Value::Double(_)
+                                | Value::Char(_)
+                        ) =>
+                    {
+                        // A scalar needs no drop (none runs here).
+                        std::mem::forget(std::mem::replace(slot, std::mem::replace(v, Value::Nil)));
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// `conj` in place on a uniquely held, non-empty flat vector below
+    /// [`FLAT_MAX`](crate::trie::FLAT_MAX) items, within its capacity (#271 lean owned path),
+    /// under [`assoc_unique`](Self::assoc_unique)'s rules: `false`
+    /// changes nothing and leaves the general [`push_back`](Self::push_back).
+    #[inline(always)]
+    pub fn conj_unique(&mut self, v: &mut Value) -> bool {
+        let Some(data) = Arc::get_mut(&mut self.0) else {
+            return false;
+        };
+        match (&mut data.inner, &mut *v) {
+            (VectorInner::Ints(p), Value::Int(n)) => push_unique(p, *n),
+            (VectorInner::Doubles(p), Value::Double(d)) => push_unique(p, *d),
+            (VectorInner::Generic(p), v) => match pushable(p) {
+                Some(xs) => {
+                    xs.push(std::mem::replace(v, Value::Nil));
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Replace the item at `index` in place (`false` when out of bounds).
+    #[inline]
+    pub fn set_nth_mut(&mut self, index: usize, v: Value) -> bool {
+        if index >= self.len() {
+            return false;
+        }
+        let data = self.data_mut();
+        let generic = set_inner(&mut data.inner, index, v);
+        if let Some(g) = generic {
+            data.inner = VectorInner::Generic(g);
+        }
+        data.id = next_vector_id();
+        true
+    }
+
     /// Replace the item at `index` on an owned vector (`None` when
     /// out of bounds — `self` is consumed either way, so check
     /// [`len`](Self::len) first when the vector must survive).
@@ -1029,44 +1761,17 @@ impl Vector {
     /// threading one accumulator through an `assoc` chain mutates in
     /// place after the first step. A foreign value converts typed
     /// storage once, like [`push_back`](Self::push_back).
+    #[inline]
     #[must_use]
     pub fn set_nth_owned(mut self, index: usize, v: Value) -> Option<Self> {
-        if index >= self.len() {
-            return None;
-        }
-        let data = Arc::make_mut(&mut self.0);
-        let generic = match (&mut data.inner, v) {
-            (VectorInner::Generic(t), v) => {
-                t.set(index, v);
-                None
-            }
-            (VectorInner::Ints(t), Value::Int(n)) => {
-                t.set(index, n);
-                None
-            }
-            (VectorInner::Chars(t), Value::Char(c)) => {
-                t.set(index, c);
-                None
-            }
-            (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| {
-                g.set(index, v);
-            })),
-            (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| {
-                g.set(index, v);
-            })),
-        };
-        if let Some(g) = generic {
-            data.inner = VectorInner::Generic(g);
-        }
-        data.id = next_vector_id();
-        Some(self)
+        self.set_nth_mut(index, v).then_some(self)
     }
 
     /// Extract the item at `index` on an owned vector (`None` when out of
     /// bounds), replacing a generic slot with `Value::Nil` so nested
     /// collections keep a refcount of 1 across `assoc-in` / `update`.
     pub fn take_nth(&mut self, index: usize) -> Option<Value> {
-        if let VectorInner::Generic(t) = &mut Arc::make_mut(&mut self.0).inner {
+        if let VectorInner::Generic(t) = &mut self.data_mut().inner {
             t.replace(index, Value::Nil)
         } else {
             self.get(index)
@@ -1093,11 +1798,22 @@ impl Vector {
     /// shared with other handles path-copy.
     #[must_use]
     pub fn drop_last_owned(mut self) -> Option<Self> {
-        let data = Arc::make_mut(&mut self.0);
+        let data = self.data_mut();
         let popped = match &mut data.inner {
             VectorInner::Generic(t) => t.pop(),
             VectorInner::Ints(t) => t.pop(),
+            VectorInner::Doubles(t) => t.pop(),
             VectorInner::Chars(t) => t.pop(),
+            VectorInner::Strs(ps) => {
+                if Arc::strong_count(ps) > 1 && ps.len() > crate::trie::FLAT_MAX {
+                    let mut g = crate::trie::Packed::from_vec(ps.to_values());
+                    let ok = g.pop();
+                    data.inner = VectorInner::Generic(g);
+                    ok
+                } else {
+                    Arc::make_mut(ps).pop()
+                }
+            }
         };
         if !popped {
             return None;
@@ -1112,7 +1828,26 @@ impl Vector {
             inner: match &self.0.inner {
                 VectorInner::Generic(t) => VectorIterInner::Generic(t.iter()),
                 VectorInner::Ints(t) => VectorIterInner::Ints(t.iter()),
+                VectorInner::Doubles(t) => VectorIterInner::Doubles(t.iter()),
                 VectorInner::Chars(t) => VectorIterInner::Chars(t.iter()),
+                VectorInner::Strs(ps) => VectorIterInner::Strs(ps.iter()),
+            },
+        }
+    }
+
+    /// Owned-value iteration from `start` (clamped) to the back: packed
+    /// storage positions its cursor instead of walking the skipped
+    /// items, so a window deep into a large vector iterates only its
+    /// own items (#271 Slice 5m).
+    #[must_use]
+    pub fn iter_from(&self, start: usize) -> VectorIter<'_> {
+        VectorIter {
+            inner: match &self.0.inner {
+                VectorInner::Generic(t) => VectorIterInner::Generic(t.iter_from(start)),
+                VectorInner::Ints(t) => VectorIterInner::Ints(t.iter_from(start)),
+                VectorInner::Doubles(t) => VectorIterInner::Doubles(t.iter_from(start)),
+                VectorInner::Chars(t) => VectorIterInner::Chars(t.iter_from(start)),
+                VectorInner::Strs(ps) => VectorIterInner::Strs(ps.iter_from(start)),
             },
         }
     }
@@ -1125,7 +1860,9 @@ impl Vector {
         match &self.0.inner {
             VectorInner::Generic(t) => t.get(index).cloned(),
             VectorInner::Ints(t) => t.get(index).copied().map(Value::Int),
+            VectorInner::Doubles(t) => t.get(index).copied().map(Value::Double),
             VectorInner::Chars(t) => t.get(index).copied().map(Value::Char),
+            VectorInner::Strs(ps) => ps.get_str(index).map(|s| Value::Str(Arc::from(s))),
         }
     }
 
@@ -1137,7 +1874,9 @@ impl Vector {
         match &self.0.inner {
             VectorInner::Generic(t) => f(t.get(index)?),
             VectorInner::Ints(t) => f(&Value::Int(*t.get(index)?)),
+            VectorInner::Doubles(t) => f(&Value::Double(*t.get(index)?)),
             VectorInner::Chars(t) => f(&Value::Char(*t.get(index)?)),
+            VectorInner::Strs(ps) => f(&Value::Str(Arc::from(ps.get_str(index)?))),
         }
     }
 
@@ -1165,12 +1904,64 @@ impl Vector {
             VectorInner::Ints(t) => {
                 Cow::Owned(t.chunk_from(index).iter().map(|n| Value::Int(*n)).collect())
             }
+            VectorInner::Doubles(t) => Cow::Owned(
+                t.chunk_from(index)
+                    .iter()
+                    .map(|d| Value::Double(*d))
+                    .collect(),
+            ),
             VectorInner::Chars(t) => Cow::Owned(
                 t.chunk_from(index)
                     .iter()
                     .map(|c| Value::Char(*c))
                     .collect(),
             ),
+            VectorInner::Strs(ps) => Cow::Owned(ps.chunk_from(index)),
+        }
+    }
+
+    /// Whether the vector's packed representation guarantees no item is `nil`.
+    #[inline]
+    #[must_use]
+    pub fn cannot_contain_nil(&self) -> bool {
+        matches!(
+            self.0.inner,
+            VectorInner::Ints(_)
+                | VectorInner::Doubles(_)
+                | VectorInner::Chars(_)
+                | VectorInner::Strs(_)
+        )
+    }
+
+    /// Bulk-append `other[start..end]` when both sides share a flat packed
+    /// representation (`Err(self)` otherwise so the caller falls back).
+    pub fn try_extend_flat_window(
+        mut self,
+        other: &Vector,
+        start: usize,
+        end: usize,
+    ) -> Result<Self, Self> {
+        if start == end {
+            return Ok(self);
+        }
+        let data = self.data_mut();
+        let appended = match (&mut data.inner, &other.0.inner) {
+            (VectorInner::Ints(dst), VectorInner::Ints(src)) => {
+                dst.extend_flat_window(src, start, end)
+            }
+            (VectorInner::Doubles(dst), VectorInner::Doubles(src)) => {
+                dst.extend_flat_window(src, start, end)
+            }
+            (VectorInner::Generic(dst), VectorInner::Generic(src)) => {
+                dst.extend_flat_window(src, start, end)
+            }
+            _ => false,
+        };
+        if appended {
+            data.id = next_vector_id();
+            Ok(self)
+        } else {
+            Err(self)
         }
     }
 
@@ -1196,7 +1987,7 @@ impl Vector {
     /// Return this vector with `meta` attached (`None` clears it).
     #[must_use]
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
-        let data = Arc::make_mut(&mut self.0);
+        let data = self.data_mut();
         data.meta = meta.map(Arc::new);
         // A new object on the JVM (`withMeta` news), so a new id.
         data.id = next_vector_id();
@@ -1217,7 +2008,149 @@ fn vector_inner_len(inner: &VectorInner) -> usize {
     match inner {
         VectorInner::Generic(t) => t.len(),
         VectorInner::Ints(t) => t.len(),
+        VectorInner::Doubles(t) => t.len(),
         VectorInner::Chars(t) => t.len(),
+        VectorInner::Strs(ps) => ps.len(),
+    }
+}
+
+fn pack_typed_vec(items: &[Value]) -> Option<Vector> {
+    match items.first() {
+        Some(Value::Int(_)) => pack_slice(items, |v| match v {
+            Value::Int(n) => Some(*n),
+            _ => None,
+        })
+        .map(Vector::from_ints),
+        Some(Value::Double(_)) => pack_slice(items, |v| match v {
+            Value::Double(d) => Some(*d),
+            _ => None,
+        })
+        .map(Vector::from_doubles),
+        Some(Value::Char(_)) => pack_slice(items, |v| match v {
+            Value::Char(c) => Some(*c),
+            _ => None,
+        })
+        .map(Vector::from_chars),
+        _ => None,
+    }
+}
+
+fn pack_slice<T>(items: &[Value], extract: impl Fn(&Value) -> Option<T>) -> Option<Vec<T>> {
+    items.iter().map(extract).collect()
+}
+
+fn push_packed_str(ps: &mut Arc<PackedStrings>, s: Arc<str>) -> Option<crate::trie::Packed<Value>> {
+    let shared_big = Arc::strong_count(ps) > 1 && ps.len() > crate::trie::FLAT_MAX;
+    if !shared_big && Arc::make_mut(ps).try_push(&s) {
+        return None;
+    }
+    let mut g = crate::trie::Packed::from_vec(ps.to_values());
+    g.push(Value::Str(s));
+    Some(g)
+}
+
+/// Write `x` at `i` of a uniquely held flat run (see
+/// [`Vector::assoc_unique`]; `T` is a scalar, so nothing drops).
+#[inline]
+fn put_unique<T: Clone + Copy>(p: &mut crate::trie::Packed<T>, i: usize, x: T) -> bool {
+    match p.unique_flat_mut().and_then(|xs| xs.get_mut(i)) {
+        Some(slot) => {
+            *slot = x;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Append `x` to a uniquely held, non-empty flat run below
+/// [`FLAT_MAX`](crate::trie::FLAT_MAX) (see [`Vector::conj_unique`]).
+#[inline(always)]
+fn push_unique<T: Clone + Copy>(p: &mut crate::trie::Packed<T>, x: T) -> bool {
+    match pushable(p) {
+        Some(xs) => {
+            xs.push(x);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The run's items when [`Vector::conj_unique`] may append in place:
+/// within capacity too, so the append never grows the buffer (the
+/// general path grows it, keeping appends amortized O(1)) and the
+/// inlined bitcode carries no reallocation call.
+#[inline(always)]
+fn pushable<T: Clone>(p: &mut crate::trie::Packed<T>) -> Option<&mut Vec<T>> {
+    p.unique_flat_mut()
+        .filter(|xs| !xs.is_empty() && xs.len() < crate::trie::FLAT_MAX && xs.len() < xs.capacity())
+}
+
+fn push_inner(inner: &mut VectorInner, v: Value) -> Option<crate::trie::Packed<Value>> {
+    match (inner, v) {
+        (VectorInner::Generic(t), v) => {
+            t.push(v);
+            None
+        }
+        (VectorInner::Ints(t), Value::Int(n)) => {
+            t.push(n);
+            None
+        }
+        (VectorInner::Doubles(t), Value::Double(d)) => {
+            t.push(d);
+            None
+        }
+        (VectorInner::Chars(t), Value::Char(c)) => {
+            t.push(c);
+            None
+        }
+        (VectorInner::Strs(ps), Value::Str(s)) => push_packed_str(ps, s),
+        (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| g.push(v))),
+        (VectorInner::Doubles(t), v) => Some(boxed(t, Value::Double, |g| g.push(v))),
+        (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| g.push(v))),
+        (VectorInner::Strs(ps), v) => {
+            let mut g = crate::trie::Packed::from_vec(ps.to_values());
+            g.push(v);
+            Some(g)
+        }
+    }
+}
+
+fn set_inner(
+    inner: &mut VectorInner,
+    index: usize,
+    v: Value,
+) -> Option<crate::trie::Packed<Value>> {
+    match (inner, v) {
+        (VectorInner::Generic(t), v) => {
+            t.set(index, v);
+            None
+        }
+        (VectorInner::Ints(t), Value::Int(n)) => {
+            t.set(index, n);
+            None
+        }
+        (VectorInner::Doubles(t), Value::Double(d)) => {
+            t.set(index, d);
+            None
+        }
+        (VectorInner::Chars(t), Value::Char(c)) => {
+            t.set(index, c);
+            None
+        }
+        (VectorInner::Ints(t), v) => Some(boxed(t, Value::Int, |g| {
+            g.set(index, v);
+        })),
+        (VectorInner::Doubles(t), v) => Some(boxed(t, Value::Double, |g| {
+            g.set(index, v);
+        })),
+        (VectorInner::Chars(t), v) => Some(boxed(t, Value::Char, |g| {
+            g.set(index, v);
+        })),
+        (VectorInner::Strs(ps), v) => {
+            let mut g = crate::trie::Packed::from_vec(ps.to_values());
+            g.set(index, v);
+            Some(g)
+        }
     }
 }
 
@@ -1237,7 +2170,9 @@ fn boxed<T: Copy>(
 /// A typed vector's items, copied out for a transient.
 pub(crate) enum TypedItems {
     Ints(Vec<i64>),
+    Doubles(Vec<f64>),
     Chars(Vec<char>),
+    Strs(PackedStrings),
 }
 
 /// Entries in iteration order (trie order for plain hash-maps,
@@ -1340,11 +2275,32 @@ impl Map {
         )
     }
 
-    /// The handle fields, mutably: shared data clones first (the
-    /// entries `Arc`s stay shared, so aliasing/identity rules are
-    /// exactly the old struct copy's).
+    /// The handle fields, mutably: shared data clones first (a
+    /// shaped map's entries copy with it — a fresh identity, see
+    /// [`Map::id`]; a hash map's trie `Arc` stays shared).
+    #[inline]
     fn data_mut(&mut self) -> &mut MapData {
         Arc::make_mut(&mut self.0)
+    }
+
+    /// This map's data with its shaped entries replaced by `small`: a
+    /// shared map copies its other fields only (never the old entries),
+    /// a uniquely held one updates in place.
+    fn set_small(&mut self, small: SmallMap) -> &mut MapData {
+        if Arc::get_mut(&mut self.0).is_none() {
+            let d = &*self.0;
+            self.0 = Arc::new(MapData {
+                inner: None,
+                small: None,
+                keys: d.keys.clone(),
+                meta: d.meta.clone(),
+                hashy: d.hashy,
+                sort: d.sort.clone(),
+            });
+        }
+        let data = Arc::get_mut(&mut self.0).expect("unique after the copy");
+        data.small = Some(small);
+        data
     }
 
     pub fn from_kvs_checked(pairs: Vec<(Value, Value)>) -> Result<Self, Value> {
@@ -1401,15 +2357,43 @@ impl Map {
         debug_assert!(keys.iter().all(|k| matches!(k, Value::Keyword(_))));
         Self(Arc::new(MapData {
             inner: None,
-            small: Some(Arc::new(SmallMap {
+            small: Some(SmallMap {
                 shape: intern_shape(keys),
                 vals: vals.into_boxed_slice(),
-            })),
+            }),
             keys: None,
             meta: None,
             hashy: false,
             sort: None,
         }))
+    }
+
+    /// A map with `template`'s keys over `vals`, paired in the template's
+    /// iteration order (#271: keyword map literals). A shaped, unsorted
+    /// template lends its interned shape: no shape probe, dedupe scan or
+    /// pair vector, just the values. Any other template (or a count
+    /// mismatch) builds through [`Map::from_kvs_last_wins`].
+    #[must_use]
+    pub fn with_vals(template: &Map, vals: Vec<Value>) -> Self {
+        if let Some(small) = template
+            .0
+            .small
+            .as_ref()
+            .filter(|s| s.shape.keys.len() == vals.len() && template.0.sort.is_none())
+        {
+            return Self(Arc::new(MapData {
+                inner: None,
+                small: Some(SmallMap {
+                    shape: Arc::clone(&small.shape),
+                    vals: vals.into_boxed_slice(),
+                }),
+                keys: None,
+                meta: None,
+                hashy: template.0.hashy,
+                sort: None,
+            }));
+        }
+        Map::from_kvs_last_wins(template.iter().map(|(k, _)| k.clone()).zip(vals).collect())
     }
 
     /// Build from deduped parallel keys/vals (big maps take the
@@ -1436,10 +2420,10 @@ impl Map {
         }
         Self(Arc::new(MapData {
             inner: None,
-            small: Some(Arc::new(SmallMap {
+            small: Some(SmallMap {
                 shape: intern_shape(&keys),
                 vals: vals.into_boxed_slice(),
-            })),
+            }),
             keys: None,
             meta: None,
             hashy,
@@ -1464,22 +2448,24 @@ impl Map {
     /// the `frequencies`/`group-by` walk closures — so they skip
     /// the `mem::replace` dummy map per item).
     ///
-    /// Uniquely-owned storage mutates with no fresh entries or
-    /// sidecar `Arc` (same [`id`](Self::id) — unobservable: the
-    /// in-place arms run only with no live alias, and the consumed
-    /// input is dead); shared storage mints fresh `Arc`s exactly
-    /// as before, so live aliases keep their versions and
-    /// identities.
+    /// Uniquely-owned storage mutates in place (same
+    /// [`id`](Self::id) — unobservable: the in-place arms run only
+    /// with no live alias, and the consumed input is dead); shared
+    /// storage copies into fresh allocations, so live aliases keep
+    /// their versions and identities.
     pub fn insert_mut(&mut self, k: Value, v: Value) {
-        if let Some(small) = self.data_mut().small.take() {
-            return self.insert_shaped_mut(small, k, v);
+        if self.0.small.is_some() {
+            return self.insert_shaped_mut(k, v);
         }
         // Owned `self`: mutate the trie in place (same rationale as
         // `Vector::push_back` — rpds still path-copies nodes shared
         // with *other* versions, so persistence is preserved).
         // `trie_mut` mints fresh identity exactly when shared (see
-        // [`Map::id`]), so the same-key early return needs no
-        // identity bookkeeping of its own.
+        // [`Map::id`]). For an unordered trie, whether the size
+        // grew also tells us whether the insert can promote its class.
+        if self.0.keys.is_none() {
+            return self.insert_unordered_trie(k, v);
+        }
         if self.trie().get(&k).is_some() {
             self.trie_mut().insert_mut(k, v);
             return;
@@ -1487,16 +2473,28 @@ impl Map {
         let size = self.trie().size();
         let promote =
             !self.0.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
-        if let Some(keys) = &mut self.data_mut().keys {
-            // Sorted maps keep the comparator-order sidecar
-            // alongside (plain maps iterate the trie, never the
-            // sidecar). In-repo sorted writes position through
-            // `with_ordered_entries`, so this arm only fires for
-            // direct out-of-crate writes.
-            Arc::make_mut(keys).push_back_mut(k.clone());
-        }
+        // Sorted maps keep the comparator-order sidecar alongside.
+        // The Clojure sorted-map path normally computes the position
+        // first. Direct callers can append through this method.
+        let keys = self
+            .data_mut()
+            .keys
+            .as_mut()
+            .expect("ordered trie has keys");
+        Arc::make_mut(keys).push_back_mut(k.clone());
         self.trie_mut().insert_mut(k, v);
         self.data_mut().hashy |= promote;
+    }
+
+    fn insert_unordered_trie(&mut self, k: Value, v: Value) {
+        let size = self.trie().size();
+        let promote =
+            !self.0.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
+        let trie = self.trie_mut();
+        trie.insert_mut(k, v);
+        if promote && trie.size() > size {
+            self.data_mut().hashy = true;
+        }
     }
 
     /// The shaped arm of [`Map::insert_mut`] (linear scan — the `==`
@@ -1506,29 +2504,19 @@ impl Map {
     /// assocs allocate only the values vec (the shape `Arc` is
     /// shared); new keys intern the extended key-set (hits
     /// allocate nothing past values).
-    fn insert_shaped_mut(&mut self, mut small: Arc<SmallMap>, k: Value, v: Value) {
+    fn insert_shaped_mut(&mut self, k: Value, v: Value) {
+        let small = self.0.small.as_ref().expect("shaped checked above");
         if let Some(idx) = small.shape.find_key(&k) {
-            // `get_mut` succeeds only with no live alias (not even
-            // the consumed input survives), so the write is
-            // invisible and the entries `Arc` (see [`Map::id`])
-            // stays put.
-            if let Some(entries) = Arc::get_mut(&mut small) {
-                entries.vals[idx] = v;
-                self.data_mut().small = Some(small);
-                return;
-            }
-            let mut vals = small.vals.clone();
-            vals[idx] = v;
-            self.data_mut().small = Some(Arc::new(SmallMap {
-                shape: Arc::clone(&small.shape),
-                vals,
-            }));
+            // A shared map copies its data (values included) once; a
+            // uniquely held one writes in place, its identity (see
+            // [`Map::id`]) unobservable: no live alias.
+            let data = self.data_mut();
+            data.small.as_mut().expect("shaped checked above").vals[idx] = v;
             return;
         }
         let size = small.vals.len();
         let promote =
             !self.0.hashy && (size >= 64 || (size >= 8 && !matches!(k, Value::Keyword(_))));
-        self.data_mut().hashy |= promote;
         if size < INLINE_MAP_MAX {
             // Exact-size: the new version is frozen, so no growth
             // slack (see [`SmallMap`]).
@@ -1538,13 +2526,69 @@ impl Map {
             let mut vals = Vec::with_capacity(size + 1);
             vals.extend(small.vals.iter().cloned());
             vals.push(v);
-            self.data_mut().small = Some(Arc::new(SmallMap {
+            let next = SmallMap {
                 shape: intern_shape(&keys),
                 vals: vals.into_boxed_slice(),
-            }));
+            };
+            self.set_small(next).hashy |= promote;
             return;
         }
+        let data = self.data_mut();
+        data.hashy |= promote;
+        let small = data.small.take().expect("shaped checked above");
         self.promote_with_mut(&small, k, v);
+    }
+
+    /// Update an existing key's value in place (one lookup, one `Arc::make_mut`,
+    /// and one `Arc::get_mut` on shaped maps), returning `true` when updated
+    /// and `false` when the key is missing or `f` returns `Err(orig)`.
+    pub fn update_existing_mut(
+        &mut self,
+        k: &Value,
+        f: impl FnOnce(Value) -> Result<Value, Value>,
+    ) -> bool {
+        if let Some(found) = self.0.small.as_ref().map(|s| s.shape.find_key(k)) {
+            let Some(idx) = found else {
+                return false;
+            };
+            if let Some(data) = Arc::get_mut(&mut self.0) {
+                let vals = &mut data.small.as_mut().expect("shaped checked above").vals;
+                let old = std::mem::replace(&mut vals[idx], Value::Nil);
+                match f(old) {
+                    Ok(new) => {
+                        vals[idx] = new;
+                        return true;
+                    }
+                    Err(orig) => {
+                        vals[idx] = orig;
+                        return false;
+                    }
+                }
+            }
+            let current = self.0.small.as_ref().expect("shaped checked above").vals[idx].clone();
+            let Ok(new) = f(current) else {
+                return false;
+            };
+            self.data_mut()
+                .small
+                .as_mut()
+                .expect("shaped checked above")
+                .vals[idx] = new;
+            return true;
+        }
+        let Some(slot) = self.trie_mut().get_mut(k) else {
+            return false;
+        };
+        match f(std::mem::replace(slot, Value::Nil)) {
+            Ok(new) => {
+                *slot = new;
+                true
+            }
+            Err(original) => {
+                *slot = original;
+                false
+            }
+        }
     }
 
     /// Convert a shaped map to the hash trie, then insert the
@@ -1581,17 +2625,17 @@ impl Map {
     /// otherwise the entries drop it (and the comparator-order
     /// sidecar when sorted). The class never demotes (a shrunk
     /// hash-map stays a hash-map); neither does the
-    /// representation (a shrunk hash-map stays hashed). Always
-    /// mints fresh identity on a hit (`dissoc` news on the JVM).
+    /// representation (a shrunk hash-map stays hashed). A hit on a
+    /// shared map mints fresh identity (`dissoc` news on the JVM); a
+    /// miss returns the map itself.
     #[must_use]
     pub fn without(mut self, k: &Value) -> Self {
-        if let Some(small) = self.data_mut().small.take() {
+        if let Some(small) = &self.0.small {
             let Some(idx) = small.shape.find_key(k) else {
-                self.data_mut().small = Some(small);
                 return self;
             };
             if small.vals.len() == 1 {
-                self.data_mut().small = Some(fresh_empty_small());
+                self.set_small(fresh_empty_small());
                 return self;
             }
             let mut keys = Vec::with_capacity(small.vals.len() - 1);
@@ -1611,10 +2655,10 @@ impl Map {
                     .enumerate()
                     .filter_map(|(i, ev)| if i == idx { None } else { Some(ev.clone()) }),
             );
-            self.data_mut().small = Some(Arc::new(SmallMap {
+            self.set_small(SmallMap {
                 shape: intern_shape(&keys),
                 vals: vals.into_boxed_slice(),
-            }));
+            });
             return self;
         }
         if self.trie().get(k).is_none() {
@@ -1703,6 +2747,54 @@ impl Map {
         }
     }
 
+    /// How many keys a sorted map's binary search spans.
+    #[must_use]
+    pub fn sorted_len(&self) -> usize {
+        match &self.0.small {
+            Some(small) => small.vals.len(),
+            None => self.sorted_keys().len(),
+        }
+    }
+
+    /// A sorted map's key at sorted position `i` (0 = first).
+    #[must_use]
+    pub fn sorted_key(&self, i: usize) -> Option<&Value> {
+        match &self.0.small {
+            Some(small) => small.shape.keys.get(i),
+            None => self.sorted_keys().get(i),
+        }
+    }
+
+    /// A sorted map's comparator-order key sidecar (trie arm).
+    fn sorted_keys(&self) -> &RpdsVector {
+        self.0
+            .keys
+            .as_deref()
+            .expect("a sorted map keeps its key order")
+    }
+
+    /// Assoc a new key at sorted position `pos` (the caller's binary
+    /// search found no compare-0 key): shaped maps rebuild (at most
+    /// [`INLINE_MAP_MAX`] entries); larger ones insert into the trie
+    /// (O(log n)) and rebuild only the key sidecar.
+    #[must_use]
+    pub fn insert_sorted_at(mut self, pos: usize, k: Value, v: Value) -> Self {
+        if self.0.small.is_some() {
+            let mut entries: Vec<(Value, Value)> =
+                self.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
+            entries.insert(pos, (k, v));
+            return self.with_ordered_entries(entries);
+        }
+        let keys = self.sorted_keys();
+        let mut ordered = Vec::with_capacity(keys.len() + 1);
+        ordered.extend(keys.iter().take(pos).cloned());
+        ordered.push(k.clone());
+        ordered.extend(keys.iter_from(pos).cloned());
+        self.data_mut().keys = Some(Arc::new(RpdsVector::from_vec(ordered)));
+        self.trie_mut().insert_mut(k, v);
+        self
+    }
+
     /// Rebuild from explicitly ordered entries, preserving metadata
     /// and the sort order (sorted `assoc` positions through here).
     /// The given order sticks for shaped and sorted maps; plain
@@ -1731,10 +2823,10 @@ impl Map {
             }
             return Self(Arc::new(MapData {
                 inner: None,
-                small: Some(Arc::new(SmallMap {
+                small: Some(SmallMap {
                     shape: intern_shape(&keys),
                     vals: vals.into_boxed_slice(),
-                })),
+                }),
                 keys: None,
                 meta: self.0.meta.clone(),
                 hashy: self.0.hashy,
@@ -1775,13 +2867,14 @@ impl Map {
     /// shaped map (replacing the slot with `Value::Nil`) so nested collections
     /// keep a refcount of 1 across `assoc-in` / `update`.
     pub fn take_value(&mut self, k: &Value) -> Option<Value> {
-        if self.0.small.is_some() {
-            let data = self.data_mut();
-            let small = data.small.as_mut().expect("shaped checked above");
+        if let Some(small) = &self.0.small {
             let idx = small.shape.find_key(k)?;
-            return Some(match Arc::get_mut(small) {
-                Some(entries) => std::mem::replace(&mut entries.vals[idx], Value::Nil),
-                None => small.vals[idx].clone(),
+            return Some(match Arc::get_mut(&mut self.0) {
+                Some(data) => std::mem::replace(
+                    &mut data.small.as_mut().expect("shaped checked above").vals[idx],
+                    Value::Nil,
+                ),
+                None => self.0.small.as_ref().expect("shaped checked above").vals[idx].clone(),
             });
         }
         self.trie().get(k).cloned()
@@ -1844,22 +2937,19 @@ impl Map {
     pub fn with_meta(mut self, meta: Option<Map>) -> Self {
         let data = self.data_mut();
         data.meta = meta.map(Arc::new);
-        // A new object on the JVM (`withMeta` news), so fresh
-        // entries (identity rides the entries `Arc`).
-        if let Some(small) = data.small.take() {
-            data.small = Some(Arc::new(SmallMap {
-                shape: Arc::clone(&small.shape),
-                vals: small.vals.clone(),
-            }));
-        } else {
+        // A new object on the JVM (`withMeta` news): a shared shaped
+        // map's data just copied (its identity, see [`Map::id`]); a
+        // hash map mints a fresh trie `Arc`.
+        if data.small.is_none() {
             let inner = data.inner.take().expect("map has small or trie");
             data.inner = Some(Arc::new((*inner).clone()));
         }
         self
     }
 
-    /// The allocation identity for `identical?` (S16): the entries
-    /// `Arc` address (shaped) or the trie `Arc` address (hash).
+    /// The allocation identity for `identical?` (S16): the data's
+    /// `Arc` address (shaped: the entries live inline, #271) or the
+    /// trie `Arc` address (hash).
     /// Writers mint a fresh `Arc` except uniquely-owned in-place
     /// updates (#227 — same address, unobservable: no live alias
     /// shares it), `Clone` shares it, and no-ops return `self` —
@@ -1870,7 +2960,7 @@ impl Map {
     #[must_use]
     pub fn id(&self) -> u64 {
         match &self.0.small {
-            Some(small) => Arc::as_ptr(small).addr() as u64,
+            Some(_) => Arc::as_ptr(&self.0).addr() as u64,
             None => {
                 Arc::as_ptr(self.0.inner.as_ref().expect("hash map holds a trie")).addr() as u64
             }
@@ -1902,95 +2992,148 @@ impl Set {
         if let Some(dup) = find_set_dup(&items) {
             return Err(dup.clone());
         }
-        let mut set = new_set();
-        for v in items {
-            set = set.insert(v);
-        }
-        Ok(set)
+        let storage = if items.len() <= SMALL_SET_MAX {
+            SetStorage::Small(items)
+        } else {
+            SetStorage::large_from_vec(items)
+        };
+        Ok(Self(Arc::new(SetData {
+            storage,
+            meta: None,
+            sort: None,
+            id: next_set_id(),
+        })))
     }
 
     /// Add a value. A new member appends to the insertion order;
     /// a present member is a no-op (keeps the original object).
     #[must_use]
     pub fn insert(mut self, v: Value) -> Self {
-        if self.0.inner.contains(&v) {
-            self
-        } else {
-            let mut members = self.0.members.clone();
-            Arc::make_mut(&mut members).push_back_mut(v.clone());
-            let data = Arc::make_mut(&mut self.0);
-            data.inner.insert_mut(v);
-            Self(Arc::new(SetData {
-                inner: data.inner.clone(),
-                meta: data.meta.clone(),
-                members,
-                sort: data.sort.clone(),
-                id: next_set_id(),
-            }))
+        if self.contains(&v) {
+            return self;
         }
+        let data = Arc::make_mut(&mut self.0);
+        match &mut data.storage {
+            SetStorage::Small(items) if items.len() < SMALL_SET_MAX => {
+                items.push(v);
+            }
+            SetStorage::Small(items) => {
+                let mut all = std::mem::take(items);
+                all.push(v);
+                data.storage = SetStorage::large_from_vec(all);
+            }
+            SetStorage::Large(ls) => {
+                let slot = ls.members.len();
+                Arc::make_mut(&mut ls.members).push_back_mut(Some(v.clone()));
+                ls.inner.insert_mut(v, slot);
+            }
+        }
+        data.id = next_set_id();
+        self
     }
 
     /// Whether a value is present.
+    #[inline]
     #[must_use]
     pub fn contains(&self, v: &Value) -> bool {
-        if self.0.members.len() <= 4 {
-            return self.0.members.iter().any(|m| m == v);
+        match &self.0.storage {
+            SetStorage::Small(items) => items.iter().any(|m| m == v),
+            SetStorage::Large(ls) => ls.inner.contains_key(v),
         }
-        self.0.inner.contains(v)
+    }
+
+    /// [`get`](Self::get) on a small unsorted set by a nil, boolean,
+    /// long, char or keyword key, member by member without the full `=`
+    /// (#271: inlined into compiled code). `Some(None)`: absent; `None`:
+    /// a hashed or sorted set, another key kind, or a big-integer member
+    /// that may equal a long key.
+    #[inline]
+    #[must_use]
+    pub fn get_small_scalar(&self, k: &Value) -> Option<Option<&Value>> {
+        let SetStorage::Small(items) = &self.0.storage else {
+            return None;
+        };
+        if self.is_sorted() {
+            return None;
+        }
+        for m in items {
+            if scalar_member_eq(m, k)? {
+                return Some(Some(m));
+            }
+        }
+        Some(None)
     }
 
     /// The stored member equal to `v`, if present (`get` on a set
     /// returns the member, not the key).
+    #[inline]
     #[must_use]
     pub fn get(&self, v: &Value) -> Option<&Value> {
-        if !self.0.inner.contains(v) {
-            return None;
+        match &self.0.storage {
+            SetStorage::Small(items) => items.iter().find(|m| *m == v),
+            SetStorage::Large(ls) => ls.inner.get_key_value(v).map(|(member, _)| member),
         }
-        self.0.members.iter().find(|m| *m == v)
     }
 
     /// Remove a value (`disj` one item). A missing value is a no-op;
-    /// otherwise both the entries and the insertion-order sidecar
-    /// drop it, and later positions shift down.
+    /// otherwise small sets shift in place and large sets leave a hole
+    /// in the insertion-order sidecar (preserving member order).
     #[must_use]
     pub fn without(mut self, v: &Value) -> Self {
-        if !self.0.inner.contains(v) {
-            return self;
-        }
-        let mut members = RpdsVector::new_sync();
-        for m in self.0.members.iter() {
-            if m != v {
-                members.push_back_mut(m.clone());
-            }
-        }
+        let slot = match &self.0.storage {
+            SetStorage::Small(items) => match items.iter().position(|m| m == v) {
+                Some(pos) => pos,
+                None => return self,
+            },
+            SetStorage::Large(ls) => match ls.inner.get(v) {
+                Some(_) if self.0.sort.is_some() => {
+                    // Sorted sidecars keep no slots (positional inserts would
+                    // shift them): find the member's sorted position.
+                    let pos = self
+                        .iter()
+                        .position(|m| m == v)
+                        .expect("a member sits in the sidecar");
+                    return self.without_sorted_at(pos);
+                }
+                Some(&slot) => slot,
+                None => return self,
+            },
+        };
         let data = Arc::make_mut(&mut self.0);
-        data.inner.remove_mut(v);
-        Self(Arc::new(SetData {
-            inner: data.inner.clone(),
-            meta: data.meta.clone(),
-            members: Arc::new(members),
-            sort: data.sort.clone(),
-            id: next_set_id(),
-        }))
+        match &mut data.storage {
+            SetStorage::Small(items) => {
+                items.remove(slot);
+            }
+            SetStorage::Large(ls) => ls.remove_unsorted_slot(v, slot),
+        }
+        data.id = next_set_id();
+        self
     }
 
     /// The element count.
     #[inline]
     #[must_use]
     pub fn size(&self) -> usize {
-        self.0.inner.size()
+        match &self.0.storage {
+            SetStorage::Small(items) => items.len(),
+            SetStorage::Large(ls) => ls.inner.size(),
+        }
     }
 
     /// Whether the set is empty.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.inner.size() == 0
+        self.size() == 0
     }
 
     /// Iterate members in insertion order (the JVM small-set seq
     /// order; see the `members` sidecar).
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
-        self.0.members.iter()
+        match &self.0.storage {
+            SetStorage::Small(items) => SetIter::Small(items.iter()),
+            SetStorage::Large(ls) => SetIter::Large(ls.members.iter_from(ls.head).flatten()),
+        }
     }
 
     /// Whether this is a sorted set (FT6 `sorted-set` family).
@@ -2018,24 +3161,88 @@ impl Set {
     /// linear) snapshot the persistent sidecar.
     #[must_use]
     pub fn ordered_members(&self) -> Vec<Value> {
-        self.0.members.iter().cloned().collect()
+        self.iter().cloned().collect()
+    }
+
+    /// How many members a sorted set's binary search spans (its
+    /// sidecar past `head`, where a sorted sidecar has no holes).
+    #[must_use]
+    pub fn sorted_len(&self) -> usize {
+        match &self.0.storage {
+            SetStorage::Small(items) => items.len(),
+            SetStorage::Large(ls) => ls.members.len() - ls.head,
+        }
+    }
+
+    /// A sorted set's member at sorted position `i` (0 = first).
+    #[must_use]
+    pub fn sorted_member(&self, i: usize) -> Option<&Value> {
+        match &self.0.storage {
+            SetStorage::Small(items) => items.get(i),
+            SetStorage::Large(ls) => ls.members.get(ls.head + i).and_then(Option::as_ref),
+        }
+    }
+
+    /// Insert `v` at sorted position `pos` (the caller's binary search
+    /// found no compare-0 member): small sets insert directly into the
+    /// flat slice; large sets update the index in O(log n) and rebuild
+    /// only the sidecar.
+    #[must_use]
+    pub fn insert_sorted_at(mut self, pos: usize, v: Value) -> Self {
+        let data = Arc::make_mut(&mut self.0);
+        match &mut data.storage {
+            SetStorage::Small(items) if items.len() < SMALL_SET_MAX => {
+                items.insert(pos, v);
+            }
+            SetStorage::Small(items) => {
+                let mut all = std::mem::take(items);
+                all.insert(pos, v);
+                data.storage = SetStorage::large_from_vec(all);
+            }
+            SetStorage::Large(ls) => {
+                let start = ls.head;
+                let mut members = Vec::with_capacity(ls.members.len() - start + 1);
+                members.extend(ls.members.iter_from(start).take(pos).cloned());
+                members.push(Some(v.clone()));
+                members.extend(ls.members.iter_from(start + pos).cloned());
+                ls.members = Arc::new(SetSlots::from_vec(members));
+                ls.inner.insert_mut(v, 0);
+                ls.holes = 0;
+                ls.head = 0;
+            }
+        }
+        data.id = next_set_id();
+        self
+    }
+
+    /// Remove the member at sorted position `pos` (0 = first): small sets
+    /// remove directly; large sets pop position 0 in O(1) and rebuild only
+    /// the sidecar for interior removals.
+    #[must_use]
+    pub fn without_sorted_at(mut self, pos: usize) -> Self {
+        let data = Arc::make_mut(&mut self.0);
+        match &mut data.storage {
+            SetStorage::Small(items) => {
+                items.remove(pos);
+            }
+            SetStorage::Large(ls) => ls.remove_sorted_at(pos),
+        }
+        data.id = next_set_id();
+        self
     }
 
     /// Rebuild from explicitly ordered members, preserving metadata
-    /// and the sort order (sorted `conj` positions through here).
+    /// and the sort order.
     #[must_use]
     pub fn with_ordered_members(self, members: Vec<Value>) -> Self {
-        let mut inner = RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default());
-        let mut kept = RpdsVector::new_sync();
-        for v in &members {
-            kept.push_back_mut(v.clone());
-            inner.insert_mut(v.clone());
-        }
-        let members = Arc::new(kept);
+        let storage = if members.len() <= SMALL_SET_MAX {
+            SetStorage::Small(members)
+        } else {
+            SetStorage::large_from_vec(members)
+        };
         Self(Arc::new(SetData {
-            inner,
+            storage,
             meta: self.0.meta.clone(),
-            members,
             sort: self.0.sort.clone(),
             id: next_set_id(),
         }))
@@ -2086,24 +3293,55 @@ impl Hash for List {
 
 impl PartialEq for Vector {
     fn eq(&self, other: &Self) -> bool {
-        self.iter().eq(other.iter())
+        vector_eq(self, other)
     }
 }
 
 impl Eq for Vector {}
 
+#[inline]
+fn packed_for_each<T: Clone>(p: &crate::trie::Packed<T>, mut f: impl FnMut(&T)) {
+    if let Some(xs) = p.as_flat() {
+        for x in xs {
+            f(x);
+        }
+    } else {
+        for x in p.iter() {
+            f(x);
+        }
+    }
+}
+
 impl Hash for Vector {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_usize(self.len());
-        for v in self.iter() {
-            v.hash(state);
+        match &self.0.inner {
+            VectorInner::Generic(t) => packed_for_each(t, |v| v.hash(state)),
+            VectorInner::Ints(t) => packed_for_each(t, |&i| {
+                state.write_u8(2);
+                state.write_i64(i);
+            }),
+            VectorInner::Doubles(t) => packed_for_each(t, |&d| {
+                state.write_u8(3);
+                state.write_u64(double_hash_bits(d));
+            }),
+            VectorInner::Chars(t) => packed_for_each(t, |&c| {
+                state.write_u8(5);
+                c.hash(state);
+            }),
+            VectorInner::Strs(ps) => {
+                for i in 0..ps.len() {
+                    state.write_u8(4);
+                    ps.get_str(i).unwrap_or("").hash(state);
+                }
+            }
         }
     }
 }
 
 impl PartialEq for Map {
     fn eq(&self, other: &Self) -> bool {
-        self.size() == other.size() && self.iter().all(|(k, v)| other.get(k) == Some(v))
+        map_value_eq(self, other)
     }
 }
 
@@ -2122,7 +3360,7 @@ impl Hash for Map {
 
 impl PartialEq for Set {
     fn eq(&self, other: &Self) -> bool {
-        self.size() == other.size() && self.iter().all(|v| other.contains(v))
+        set_value_eq(self, other)
     }
 }
 
@@ -2157,12 +3395,82 @@ pub fn new_map() -> Map {
 #[must_use]
 pub fn new_set() -> Set {
     Set(Arc::new(SetData {
-        inner: RpdsSet::new_with_hasher_with_ptr_kind(FxBuildHasher::default()),
+        storage: SetStorage::Small(Vec::new()),
         meta: None,
-        members: Arc::new(RpdsVector::new_sync()),
         sort: None,
         id: next_set_id(),
     }))
+}
+
+/// A hole-free index and order sidecar over `members` (in order).
+fn slots_of(members: Vec<Value>) -> (RpdsIndex, SetSlots) {
+    let mut inner = RpdsIndex::new_with_hasher_and_ptr_kind(FxBuildHasher::default());
+    let mut slots = SetSlots::new_sync();
+    for v in members {
+        inner.insert_mut(v.clone(), slots.len());
+        slots.push_back_mut(Some(v));
+    }
+    (inner, slots)
+}
+
+impl LargeSet {
+    fn remove_unsorted_slot(&mut self, v: &Value, slot: usize) {
+        self.inner.remove_mut(v);
+        let members = Arc::make_mut(&mut self.members);
+        members.set_mut(slot, None);
+        self.holes += 1;
+        while members.get(self.head).is_some_and(Option::is_none) {
+            self.head += 1;
+        }
+        if self.holes * 2 > members.len() {
+            self.compact(false);
+        }
+    }
+
+    fn remove_sorted_at(&mut self, pos: usize) {
+        let slot = self.head + pos;
+        let member = self
+            .members
+            .get(slot)
+            .cloned()
+            .flatten()
+            .expect("sorted position in range");
+        self.inner.remove_mut(&member);
+        if pos == 0 {
+            Arc::make_mut(&mut self.members).set_mut(slot, None);
+            self.holes += 1;
+            self.head += 1;
+            if self.holes * 2 > self.members.len() {
+                self.compact(true);
+            }
+        } else {
+            let kept = self.members.iter_from(self.head).enumerate();
+            let kept = kept.filter(|&(i, _)| i != pos).map(|(_, m)| m.clone());
+            self.members = Arc::new(kept.collect());
+            self.holes = 0;
+            self.head = 0;
+        }
+    }
+
+    /// Drop the order sidecar's holes (the members keep their order).
+    fn compact(&mut self, sorted: bool) {
+        let live: Vec<Value> = self
+            .members
+            .iter_from(self.head)
+            .flatten()
+            .cloned()
+            .collect();
+        if sorted {
+            // Sorted sets keep no slots: only the sidecar rebuilds.
+            self.members = Arc::new(live.into_iter().map(Some).collect());
+        } else {
+            let (inner, members) = slots_of(live);
+            self.inner = inner;
+            self.members = Arc::new(members);
+        }
+        self.holes = 0;
+        self.head = 0;
+    }
 }
 
 /// A map entry from a key and a value (FX2: `find`, map seqs, and
@@ -2425,6 +3733,22 @@ pub fn extension_with_meta(
 }
 
 impl Value {
+    /// `*self = v`, without the out-of-line drop-glue call when `self`
+    /// holds a plain scalar (nothing to free): the common case for the
+    /// runtime shims, which write slots compiled code has just dropped
+    /// (#271).
+    #[inline(always)]
+    pub fn assign(&mut self, v: Value) {
+        if matches!(
+            self,
+            Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Double(_) | Value::Char(_)
+        ) {
+            std::mem::forget(std::mem::replace(self, v));
+        } else {
+            *self = v;
+        }
+    }
+
     /// Clojure truthiness: only `nil` and `false` are false.
     #[must_use]
     pub fn is_truthy(&self) -> bool {
@@ -2547,32 +3871,78 @@ fn cell_meta_eq(same_cell: bool, a: Option<Map>, b: Option<Map>) -> bool {
 }
 
 impl PartialEq for Value {
+    /// Longs and keywords (the common lookup keys) compare without a
+    /// stack frame; every other pair takes [`value_eq_full`] (#271:
+    /// its frame cost more than the compare in set and map probes).
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Value::Nil, Value::Nil) => true,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
-            // `=` on doubles is `==` (`0.0` ≡ `-0.0`, NaN never).
-            // Mixed `Int`/`Double` is never `=` (`Numbers.equal`
-            // requires one category; `(== 1 1.0)` is the value
-            // comparison, arriving with numerics in S4).
-            (Value::Double(a), Value::Double(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::Char(a), Value::Char(b)) => a == b,
-            (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::Keyword(a), Value::Keyword(b)) => a == b,
-            // Sequential equality crosses List/Vector.
-            (Value::List(a), Value::List(b)) => a.iter().eq(b.iter()),
-            (Value::Vector(a), Value::Vector(b)) => a.iter().eq(b.iter()),
-            (Value::List(a), Value::Vector(b)) | (Value::Vector(b), Value::List(a)) => {
-                list_vector_eq(a, b)
-            }
-            // Realized seqs compare sequentially against
-            // List/Vector/realized seqs (never maps, sets, or
-            // pending seqs, which `=` realizes first).
-            (a, b) if either_seq(a, b) => seq_items_eq(a, b),
-            pair => value_eq_mid(pair.0, pair.1),
+            _ => value_eq_full(self, other),
         }
+    }
+}
+
+#[inline(never)]
+fn value_eq_full(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Nil, Value::Nil) => true,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        // `=` on doubles is `==` (`0.0` ≡ `-0.0`, NaN never).
+        // Mixed `Int`/`Double` is never `=` (`Numbers.equal`
+        // requires one category; `(== 1 1.0)` is the value
+        // comparison, arriving with numerics in S4).
+        (Value::Double(a), Value::Double(b)) => a == b,
+        (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Char(a), Value::Char(b)) => a == b,
+        (Value::Symbol(a), Value::Symbol(b)) => a == b,
+        // Sequential equality crosses List/Vector.
+        (Value::List(a), Value::List(b)) => list_eq(a, b),
+        (Value::Vector(a), Value::Vector(b)) => vector_eq(a, b),
+        (Value::List(a), Value::Vector(b)) | (Value::Vector(b), Value::List(a)) => {
+            list_vector_eq(a, b)
+        }
+        // Realized seqs compare sequentially against
+        // List/Vector/realized seqs (never maps, sets, or
+        // pending seqs, which `=` realizes first).
+        (a, b) if either_seq(a, b) => seq_items_eq(a, b),
+        pair => value_eq_mid(pair.0, pair.1),
+    }
+}
+
+/// List equality: the same list without a walk, as the JVM's
+/// `Util.equiv` answers `k1 == k2` first (#271: an atom's `swap!`
+/// compares its value with itself on every publish), else item by item.
+fn list_eq(a: &List, b: &List) -> bool {
+    Arc::ptr_eq(&a.0, &b.0) || a.iter().eq(b.iter())
+}
+
+#[inline]
+fn packed_eq<T: Clone + PartialEq>(x: &crate::trie::Packed<T>, y: &crate::trie::Packed<T>) -> bool {
+    if let (Some(xs), Some(ys)) = (x.as_flat(), y.as_flat()) {
+        return xs == ys;
+    }
+    x.iter().eq(y.iter())
+}
+
+/// Vector equality: the same vector without a walk (see [`list_eq`]), then
+/// zero-clone slice comparisons for matching packed/flat representations.
+fn vector_eq(a: &Vector, b: &Vector) -> bool {
+    if Arc::ptr_eq(&a.0, &b.0) {
+        return true;
+    }
+    if a.len() != b.len() {
+        return false;
+    }
+    match (&a.0.inner, &b.0.inner) {
+        (VectorInner::Ints(x), VectorInner::Ints(y)) => packed_eq(x, y),
+        (VectorInner::Doubles(x), VectorInner::Doubles(y)) => packed_eq(x, y),
+        (VectorInner::Chars(x), VectorInner::Chars(y)) => packed_eq(x, y),
+        (VectorInner::Generic(x), VectorInner::Generic(y)) => packed_eq(x, y),
+        (VectorInner::Strs(x), VectorInner::Strs(y)) => {
+            (0..x.len()).all(|i| x.get_str(i) == y.get_str(i))
+        }
+        _ => a.iter().eq(b.iter()),
     }
 }
 
@@ -2701,12 +4071,15 @@ fn tower_equiv(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Map equality: the same map without a walk (the JVM's `Util.equiv`
+/// identity check; see [`Value`]'s `PartialEq`), else entry by entry.
 fn map_value_eq(a: &Map, b: &Map) -> bool {
-    a.size() == b.size() && a.iter().all(|(k, v)| b.get(k) == Some(v))
+    Arc::ptr_eq(&a.0, &b.0) || (a.size() == b.size() && a.iter().all(|(k, v)| b.get(k) == Some(v)))
 }
 
+/// Set equality: the same set without a walk, else member by member.
 fn set_value_eq(a: &Set, b: &Set) -> bool {
-    a.size() == b.size() && a.iter().all(|v| b.contains(v))
+    Arc::ptr_eq(&a.0, &b.0) || (a.size() == b.size() && a.iter().all(|v| b.contains(v)))
 }
 
 fn tagged_literal_eq(t1: &Symbol, f1: &Value, t2: &Symbol, f2: &Value) -> bool {
@@ -2769,44 +4142,55 @@ fn hash_tower_value<H: Hasher>(v: &Value, state: &mut H) {
 }
 
 impl Hash for Value {
+    /// Nil and longs (the common hashed keys) hash inline into the
+    /// trie probe; every other value takes [`hash_value_full`] (#271:
+    /// its frame cost several times the two hasher writes).
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Family markers keep unequal types apart (`Int` and
-        // `Double` hash separately — they are never `=`).
         match self {
-            Value::Nil => state.write_u8(0),
-            Value::Bool(b) => {
-                state.write_u8(1);
-                state.write_u8(u8::from(*b));
-            }
             Value::Int(i) => {
                 state.write_u8(2);
                 state.write_i64(*i);
             }
-            Value::Double(d) => {
-                state.write_u8(3);
-                state.write_u64(double_hash_bits(*d));
-            }
-            Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
-                hash_tower_value(self, state);
-            }
-            Value::Str(s) => {
-                state.write_u8(4);
-                s.hash(state);
-            }
-            Value::Char(c) => {
-                state.write_u8(5);
-                c.hash(state);
-            }
-            Value::Symbol(s) => {
-                state.write_u8(6);
-                s.hash(state);
-            }
-            Value::Keyword(k) => {
-                state.write_u8(7);
-                k.hash(state);
-            }
-            other => hash_value_mid(other, state),
+            Value::Nil => state.write_u8(0),
+            other => hash_value_full(other, state),
         }
+    }
+}
+
+#[inline(never)]
+fn hash_value_full<H: Hasher>(v: &Value, state: &mut H) {
+    // Family markers keep unequal types apart (`Int` and
+    // `Double` hash separately — they are never `=`).
+    match v {
+        Value::Bool(b) => {
+            state.write_u8(1);
+            state.write_u8(u8::from(*b));
+        }
+        Value::Double(d) => {
+            state.write_u8(3);
+            state.write_u64(double_hash_bits(*d));
+        }
+        Value::BigInt(_) | Value::BigInteger(_) | Value::BigDec(_) | Value::Ratio(_) => {
+            hash_tower_value(v, state);
+        }
+        Value::Str(s) => {
+            state.write_u8(4);
+            s.hash(state);
+        }
+        Value::Char(c) => {
+            state.write_u8(5);
+            c.hash(state);
+        }
+        Value::Symbol(s) => {
+            state.write_u8(6);
+            s.hash(state);
+        }
+        Value::Keyword(k) => {
+            state.write_u8(7);
+            k.hash(state);
+        }
+        other => hash_value_mid(other, state),
     }
 }
 
@@ -2816,6 +4200,16 @@ fn hash_bigint_bytes<H: Hasher>(n: &num_bigint::BigInt, state: &mut H) {
     let bytes = n.to_signed_bytes_be();
     state.write_usize(bytes.len());
     state.write(&bytes);
+}
+
+/// A primitive vector hashes exactly like its item vector (split
+/// from [`hash_value_mid`] for the complexity budget).
+fn hash_pv<H: Hasher>(p: &crate::PrimitiveVector, state: &mut H) {
+    state.write_u8(8);
+    state.write_usize(p.len());
+    for v in p.iter() {
+        v.hash(state);
+    }
 }
 
 fn hash_value_mid<H: Hasher>(v: &Value, state: &mut H) {
@@ -2831,13 +4225,7 @@ fn hash_value_mid<H: Hasher>(v: &Value, state: &mut H) {
         }
         // Primitive vectors hash exactly like their item vector
         // (they are `=` to it).
-        Value::PrimitiveVector(p) => {
-            state.write_u8(8);
-            state.write_usize(p.len());
-            for v in p.iter() {
-                v.hash(state);
-            }
-        }
+        Value::PrimitiveVector(p) => hash_pv(p, state),
         // A map entry hashes exactly like its 2-vector (they
         // are `=`, so the `Eq`/`Hash` contract requires it;
         // Oracle FX2 `hash-eq`, `distinct`, `frequencies`).
@@ -2881,25 +4269,23 @@ fn hash_value_mid<H: Hasher>(v: &Value, state: &mut H) {
             state.write_u8(15);
             state.write_u64(u.var_id);
         }
-        Value::Throwable(t) => {
-            state.write_u8(16);
-            state.write_u64(t.id);
-        }
-        Value::Transient(t) => {
-            state.write_u8(17);
-            state.write_u64(t.id());
-        }
+        // Throwables and transients are id-hashed cells (tags
+        // 16/17 live in `id_cell_tag`, reached via
+        // `hash_value_rest`).
         other => hash_value_rest(other, state),
     }
 }
 
-/// The tag byte plus minted id for id-hashed cells (atoms,
-/// delays, futures, promises, agents, volatiles, refs — each
-/// hashes its tag plus its id), or `None` for every other
-/// variant (split from [`hash_value_rest`] for the complexity
-/// budget, like [`hash_value_scalars`]).
+/// The tag byte plus minted id for id-hashed cells (throwables,
+/// transients, atoms, delays, futures, promises, agents,
+/// volatiles, refs, executors — each hashes its tag plus its id),
+/// or `None` for every other variant (split from
+/// [`hash_value_rest`] for the complexity budget, like
+/// [`hash_value_scalars`]).
 fn id_cell_tag(v: &Value) -> Option<(u8, u64)> {
     match v {
+        Value::Throwable(t) => Some((16, t.id)),
+        Value::Transient(t) => Some((17, t.id())),
         Value::Atom(a) => Some((18, a.id())),
         Value::Delay(d) => Some((19, d.id())),
         Value::Future(f) => Some((20, f.id())),
@@ -3403,7 +4789,84 @@ mod tests {
         Value, bigdec_result, find_map_dup, find_set_dup, intern_literal_strings, intern_string,
         new_map, new_set, plain_equals,
     };
-    use crate::{HostDef, HostInst, HostKind, HostVal, Keyword, Symbol};
+    use crate::{HostDef, HostInst, HostKind, HostVal, Keyword, Symbol, Vector};
+
+    #[test]
+    fn vector_iter_nth_skips_flat_and_trie_vectors() {
+        // Flat storage (constructed), then trie storage (pushed past
+        // `trie::FLAT_MAX`), for every packing.
+        let generic: Vec<Value> = (0..10)
+            .map(|i| Value::Str(Arc::from(i.to_string())))
+            .collect();
+        let generic = super::Vector::from_vec(generic);
+        let mut it = generic.iter();
+        assert_eq!(it.nth(3), Some(Value::Str(Arc::from("3"))));
+        assert_eq!(it.next(), Some(Value::Str(Arc::from("4"))));
+        let ints = super::Vector::from_ints((0..10).collect());
+        assert_eq!(ints.iter().nth(9), Some(Value::Int(9)));
+        assert_eq!(ints.iter().nth(10), None);
+        let chars = super::Vector::from_chars(vec!['a', 'b', 'c', 'd']);
+        assert_eq!(chars.iter().nth(3), Some(Value::Char('d')));
+        let (mut big_ints, mut big_chars) = (
+            super::Vector::from_ints(Vec::new()),
+            super::Vector::from_chars(Vec::new()),
+        );
+        let mut big = super::Vector::from_vec(Vec::new());
+        for i in 0..2_000i64 {
+            big_ints = big_ints.push_back(Value::Int(i));
+            big_chars = big_chars.push_back(Value::Char(if i % 2 == 0 { 'a' } else { 'b' }));
+            big = big.push_back(Value::Str(Arc::from(i.to_string())));
+        }
+        assert_eq!(big_ints.iter().nth(1_500), Some(Value::Int(1_500)));
+        assert_eq!(big_chars.iter().nth(1_501), Some(Value::Char('b')));
+        assert_eq!(big.iter().nth(1_999), Some(Value::Str(Arc::from("1999"))));
+    }
+
+    /// Seeking iteration (#271 Slice 5m): `iter_from` starts at the
+    /// index for every packing (flat and trie), so a window deep into a
+    /// large vector never walks the items before it.
+    #[test]
+    fn vector_iter_from_seeks_every_packing() {
+        let collect =
+            |v: &super::Vector, from: usize| v.iter_from(from).take(3).collect::<Vec<Value>>();
+        let generic = super::Vector::from_vec((0..2_000).map(Value::Int).collect());
+        let mut ints = super::Vector::from_ints(Vec::new());
+        let mut doubles = super::Vector::from_doubles(Vec::new());
+        let mut chars = super::Vector::from_chars(Vec::new());
+        for i in 0..2_000i64 {
+            ints = ints.push_back(Value::Int(i));
+            doubles = doubles.push_back(Value::Double(i as f64 / 2.0));
+            chars = chars.push_back(Value::Char('a'));
+        }
+        let strs = super::Vector::from_vec(
+            (0..2_000)
+                .map(|i| Value::Str(Arc::from(i.to_string())))
+                .collect(),
+        );
+        assert_eq!(
+            collect(&generic, 1_500),
+            (1_500..1_503).map(Value::Int).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            collect(&ints, 1_024),
+            (1_024..1_027).map(Value::Int).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            collect(&doubles, 31),
+            (31..34)
+                .map(|i| Value::Double(i as f64 / 2.0))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(collect(&chars, 40), vec![Value::Char('a'); 3]);
+        assert_eq!(collect(&strs, 1_999), vec![Value::Str(Arc::from("1999"))]);
+        // A seek past the end is empty, for flat and trie storage.
+        assert_eq!(generic.iter_from(2_000).next(), None);
+        assert_eq!(ints.iter_from(9_999).next(), None);
+        assert_eq!(
+            super::Vector::from_vec(Vec::new()).iter_from(3).next(),
+            None
+        );
+    }
 
     /// The layout natively compiled code relies on (issue #259).
     #[test]
@@ -3415,6 +4878,9 @@ mod tests {
             unsafe { std::mem::transmute_copy::<Value, [u8; 32]>(v) }
         }
         assert_eq!(std::mem::size_of::<Value>(), 32);
+        // A set's order sidecar slot (`None` = a `disj` hole) costs no
+        // more than the member itself.
+        assert_eq!(std::mem::size_of::<Option<Value>>(), 32);
         assert_eq!(std::mem::align_of::<Value>(), 8);
         assert_eq!(bytes(&Value::Nil)[0], 0);
         let t = bytes(&Value::Bool(true));
@@ -3430,6 +4896,13 @@ mod tests {
         assert_eq!(c[0], 9);
         // The AOT compiler reads a char's code point at offset 4 (#259).
         assert_eq!(u32::from_ne_bytes(c[4..8].try_into().expect("4")), 0x1F600);
+        // ... and tests for a vector before its flat `nth` front (#271).
+        assert_eq!(bytes(&Value::Vector(Vector::from_ints(vec![1])))[0], 13);
+        // ... and for a list before converting a map pattern's source.
+        assert_eq!(
+            bytes(&Value::List(crate::List::from_vec(vec![Value::Int(1)])))[0],
+            12
+        );
     }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -4080,6 +5553,98 @@ mod tests {
     }
 
     #[test]
+    fn set_disj_holes_keep_insertion_order() {
+        let ints = |s: &super::Set| s.iter().cloned().collect::<Vec<_>>();
+        let mut s = super::new_set();
+        for i in 0..10 {
+            s = s.insert(Value::Int(i));
+        }
+        // Front pops advance past the holes; inner holes keep order.
+        let popped = s.clone().without(&Value::Int(0)).without(&Value::Int(1));
+        assert_eq!(popped.size(), 8);
+        assert_eq!(ints(&popped)[0], Value::Int(2));
+        let holed = s.clone().without(&Value::Int(4)).without(&Value::Int(6));
+        assert_eq!(
+            ints(&holed),
+            [0, 1, 2, 3, 5, 7, 8, 9].map(Value::Int).to_vec()
+        );
+        // A re-added member goes to the back; `get` answers the stored
+        // member, a removed one nothing.
+        let back = holed.clone().insert(Value::Int(4));
+        assert_eq!(ints(&back).last(), Some(&Value::Int(4)));
+        assert_eq!(back.get(&Value::Int(4)), Some(&Value::Int(4)));
+        assert_eq!(holed.get(&Value::Int(4)), None);
+        assert!(!holed.contains(&Value::Int(6)));
+        // Removing most members compacts (order kept); the original is
+        // untouched.
+        let few = (0..8).fold(s.clone(), |acc, i| acc.without(&Value::Int(i * 7 % 10)));
+        assert_eq!(ints(&few), [3, 6].map(Value::Int).to_vec());
+        assert_eq!(ints(&s), (0..10).map(Value::Int).collect::<Vec<_>>());
+        let gone = (0..10).fold(s.clone(), |acc, i| acc.without(&Value::Int(i)));
+        assert!(gone.is_empty());
+        assert_eq!(ints(&gone.insert(Value::Int(3))), [Value::Int(3)]);
+        // Small sets scan their slots, holes included.
+        let small = super::new_set()
+            .insert(Value::Int(1))
+            .insert(Value::Int(2))
+            .without(&Value::Int(1));
+        assert!(small.contains(&Value::Int(2)) && !small.contains(&Value::Int(1)));
+    }
+
+    #[test]
+    fn sorted_positional_set_and_map_updates() {
+        let ints = |s: &super::Set| s.iter().cloned().collect::<Vec<_>>();
+        let sorted = || super::new_set().with_sort(Some(super::SortSpec::Natural));
+        // Positional inserts keep the order; lookups read in place.
+        let mut s = sorted();
+        for (pos, v) in [(0, 5), (0, 1), (1, 3), (3, 9), (3, 7)] {
+            s = s.insert_sorted_at(pos, Value::Int(v));
+        }
+        assert_eq!(ints(&s), [1, 3, 5, 7, 9].map(Value::Int).to_vec());
+        assert_eq!(
+            (s.sorted_len(), s.sorted_member(2)),
+            (5, Some(&Value::Int(5)))
+        );
+        // Front pops leave holes before `head` (then compact); any
+        // other removal rebuilds; the generic `without` finds the
+        // member's position.
+        let popped = s.clone().without_sorted_at(0).without_sorted_at(0);
+        assert_eq!(ints(&popped), [5, 7, 9].map(Value::Int).to_vec());
+        assert_eq!(popped.sorted_member(0), Some(&Value::Int(5)));
+        let drained = popped.clone().without_sorted_at(0).without_sorted_at(0);
+        assert_eq!(
+            (ints(&drained), drained.sorted_len()),
+            (vec![Value::Int(9)], 1)
+        );
+        let mid = s.clone().without_sorted_at(2);
+        assert_eq!(ints(&mid), [1, 3, 7, 9].map(Value::Int).to_vec());
+        let generic = popped
+            .clone()
+            .without(&Value::Int(7))
+            .without(&Value::Int(99));
+        assert_eq!(ints(&generic), [5, 9].map(Value::Int).to_vec());
+        assert!(!generic.contains(&Value::Int(7)) && generic.contains(&Value::Int(9)));
+        assert_eq!(ints(&s), [1, 3, 5, 7, 9].map(Value::Int).to_vec());
+        // Maps: shaped inserts rebuild, trie-backed ones keep the trie.
+        let mut m = super::new_map().with_sort(Some(super::SortSpec::Natural));
+        for i in 0..12 {
+            m = m.insert_sorted_at(0, Value::Int(11 - i), Value::Int(i));
+            assert_eq!(m.sorted_len(), usize::try_from(i + 1).expect("small"));
+        }
+        assert_eq!(m.sorted_key(0), Some(&Value::Int(0)));
+        assert_eq!(m.sorted_key(11), Some(&Value::Int(11)));
+        assert_eq!(m.get(&Value::Int(11)), Some(&Value::Int(0)));
+        let small = super::new_map()
+            .with_sort(Some(super::SortSpec::Natural))
+            .insert_sorted_at(0, Value::Int(2), Value::Int(20))
+            .insert_sorted_at(0, Value::Int(1), Value::Int(10));
+        assert_eq!(
+            (small.sorted_len(), small.sorted_key(1)),
+            (2, Some(&Value::Int(2)))
+        );
+    }
+
+    #[test]
     fn sorted_and_plain_large_map_sidecar() {
         let mut sm = super::new_map().with_sort(Some(super::SortSpec::Natural));
         for i in 0..18 {
@@ -4496,12 +6061,125 @@ mod tests {
     }
 
     #[test]
+    fn identical_collections_are_equal_without_a_walk() {
+        // The same collection is equal to itself even holding a NaN (the
+        // JVM's `Util.equiv` identity check); equal copies still walk.
+        use super::{List, Map, Set, Vector};
+        let nan = Value::Double(f64::NAN);
+        let m = Value::Map(Map::from_kvs_last_wins(vec![(Value::Int(1), nan.clone())]));
+        let v = Value::Vector(Vector::from_vec(vec![nan.clone()]));
+        let l = Value::List(List::from_vec(vec![nan.clone()]));
+        for x in [&m, &v, &l] {
+            assert_eq!(x, &x.clone());
+        }
+        let s = Set::from_items_checked(vec![Value::Int(1)]).expect("distinct");
+        assert_eq!(s, s.clone());
+        let other = Value::Vector(Vector::from_vec(vec![nan]));
+        assert_ne!(v, other);
+        assert_eq!(
+            Value::Vector(Vector::from_vec(vec![Value::Int(1)])),
+            Value::Vector(Vector::from_vec(vec![Value::Int(1)]))
+        );
+    }
+
+    #[test]
+    fn map_with_vals_shares_the_template_shape() {
+        use super::Map;
+        let kw = |n: &str| Value::Keyword(crate::Keyword::new(None, n));
+        let template = Map::from_kvs_last_wins(vec![(kw("x"), Value::Nil), (kw("y"), Value::Nil)]);
+        let built = Map::with_vals(&template, vec![Value::Int(1), Value::Int(2)]);
+        let literal =
+            Map::from_kvs_last_wins(vec![(kw("x"), Value::Int(1)), (kw("y"), Value::Int(2))]);
+        assert_eq!(built, literal);
+        let order: Vec<Value> = built.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(order, vec![kw("x"), kw("y")]);
+        assert!(Arc::ptr_eq(
+            &built.0.small.as_ref().expect("shaped").shape,
+            &template.0.small.as_ref().expect("shaped").shape
+        ));
+        // A count mismatch (or an unshaped template) builds by pairs.
+        let short = Map::with_vals(&template, vec![Value::Int(5)]);
+        assert_eq!(
+            short,
+            Map::from_kvs_last_wins(vec![(kw("x"), Value::Int(5))])
+        );
+        let big: Vec<(Value, Value)> = (0..20).map(|i| (Value::Int(i), Value::Nil)).collect();
+        let big = Map::from_kvs_last_wins(big);
+        // The values pair with the template's keys in its iteration order.
+        let vals: Vec<Value> = (100..120).map(Value::Int).collect();
+        let rebuilt = Map::with_vals(&big, vals.clone());
+        for (i, (k, _)) in big.iter().enumerate() {
+            assert_eq!(rebuilt.get(k), Some(&vals[i]));
+        }
+    }
+
+    #[test]
+    fn bulk_append_preserves_shared_vectors_and_uses_flat_windows() {
+        use super::Vector;
+
+        for items in [
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+            vec![Value::Double(1.0), Value::Double(2.0), Value::Double(3.0)],
+            vec![Value::Nil, Value::Bool(true), Value::Bool(false)],
+        ] {
+            let v = Vector::from_vec(items.clone());
+            assert_eq!(v.cannot_contain_nil(), !items.contains(&Value::Nil));
+            let mut want = items.clone();
+            want.extend_from_slice(&items[1..]);
+            let merged = v.clone().try_extend_flat_window(&v, 1, 3).unwrap();
+            assert_eq!(merged.iter().collect::<Vec<_>>(), want);
+            assert_eq!(v.iter().collect::<Vec<_>>(), items);
+            assert!(v.clone().try_extend_flat_window(&v, 1, 4).is_err());
+            assert_eq!(v.clone().try_extend_flat_window(&v, 2, 2).unwrap().len(), 3);
+        }
+
+        let v = Vector::from_flat_ints((0..2048).collect());
+        let merged = v.clone().try_extend_flat_window(&v, 0, v.len()).unwrap();
+        assert_eq!(merged.len(), 4096);
+        assert_eq!(merged.get(2048), Some(Value::Int(0)));
+        let other = Vector::from_doubles(vec![1.0]);
+        assert!(v.clone().try_extend_flat_window(&other, 0, 1).is_err());
+        let merged = merged.try_extend_flat_window(&v, 0, 1).unwrap();
+        assert_eq!(merged.get(4096), Some(Value::Int(0)));
+        assert_eq!(v.len(), 2048);
+    }
+
+    #[test]
+    fn update_existing_map_value_preserves_sharing_and_rolls_back_on_miss() {
+        use super::Map;
+
+        for size in [1, 20] {
+            let key = Value::Int(0);
+            let mut map = Map::from_kvs_last_wins(
+                (0..size).map(|i| (Value::Int(i), Value::Int(i))).collect(),
+            );
+            assert!(!map.update_existing_mut(&key, Err));
+            assert_eq!(map.get(&key), Some(&key));
+            let original = map.clone();
+            assert!(map.update_existing_mut(&key, |old| {
+                assert_eq!(old, key);
+                Ok(Value::Int(41))
+            }));
+            assert_eq!(map.get(&key), Some(&Value::Int(41)));
+            assert_eq!(original.get(&key), Some(&key));
+            assert!(!map.update_existing_mut(&Value::Int(-1), |_| panic!("missing key")));
+        }
+    }
+
+    #[test]
     fn value_ref_and_small_map_scalar_lookup() {
         use super::{Map, ValueRef, Vector};
         let vi = Vector::from_ints(vec![11]);
         let vc = Vector::from_chars(vec!['q']);
         let vg = Vector::from_vec(vec![Value::Bool(true)]);
         assert!(matches!(vi.get_val_ref(0), Some(ValueRef::Int(11))));
+        assert_eq!(vi.as_flat_ints(), Some(&[11][..]));
+        assert!(vc.as_flat_ints().is_none());
+        assert!(vg.as_flat_ints().is_none());
+        let mut vt = Vector::from_ints((0..1025).collect());
+        let _shared = vt.clone();
+        vt = vt.push_back(Value::Int(1025));
+        assert!(vt.as_flat_ints().is_none());
         assert!(vi.get_val_ref(1).is_none());
         assert!(matches!(vc.get_val_ref(0), Some(ValueRef::Char('q'))));
         assert!(matches!(
@@ -4541,6 +6219,16 @@ mod tests {
         );
         assert_eq!(small.get_small_scalar(&s), Some(Some(&Value::Int(6))));
         assert_eq!(small.get_small_scalar(&Value::Vector(vi)), None);
+        let big_key = Value::BigInt(Arc::new(7.into()));
+        let big = Map::from_kvs_last_wins(vec![(big_key, Value::Int(3))]);
+        assert_eq!(big.get_small_scalar(&Value::Int(7)), None);
+        assert_eq!(big.get(&Value::Int(7)), Some(&Value::Int(3)));
+        assert_eq!(
+            small
+                .with_sort(Some(super::SortSpec::Natural))
+                .get_small_scalar(&kw),
+            None
+        );
 
         let large = Map::from_kvs_last_wins(
             (0..20)
@@ -4549,5 +6237,661 @@ mod tests {
         );
         assert_eq!(large.len_opt(), Some(20));
         assert_eq!(large.get_small_scalar(&Value::Int(0)), None);
+    }
+
+    #[test]
+    fn packed_strings_preserve_order_and_bounds_across_repeated_runs() {
+        use super::{PackedStrings, Vector};
+
+        let prefix = "é".repeat(2048);
+        let first = "first repeated string";
+        let second = "another repeated string";
+        let mut items = vec![
+            prefix.as_str(),
+            first,
+            first,
+            "",
+            second,
+            second,
+            second,
+            "last",
+        ];
+        let mut packed = PackedStrings::new();
+        for text in &items {
+            assert!(packed.try_push(text));
+        }
+        assert_eq!(packed.runs.as_ref().unwrap().entries.len(), 2);
+        assert_eq!(packed.ends.len(), 5);
+        assert_eq!(packed.len(), items.len());
+        assert_eq!(
+            packed.to_values(),
+            items
+                .iter()
+                .map(|s| Value::Str(Arc::from(*s)))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(packed.get_str(items.len()), None);
+        assert_eq!(packed.raw_buf(), items.concat());
+        assert_eq!(packed.clone().into_joined("·"), items.join("·"));
+        let vector = Vector::from_packed_strs(packed.clone());
+        let tail: Vec<_> = vector.iter_from(6).collect();
+        assert_eq!(
+            tail,
+            [Value::Str(Arc::from(second)), Value::Str(Arc::from("last"))]
+        );
+        assert!(vector.iter_from(items.len()).next().is_none());
+        let mut text = String::new();
+        assert!(vector.push_to_string(&mut text));
+        assert_eq!(text, items.concat());
+
+        let len = text.len();
+        assert!(!packed.push_bounded(first, len));
+        assert!(packed.try_push("after"));
+        assert_ne!(packed.raw_buf(), text);
+        assert!(packed.pop());
+        while items.len() > 1 {
+            assert_eq!(packed.raw_buf(), items.concat());
+            assert!(packed.pop());
+            items.pop();
+        }
+        assert!(packed.runs.is_none());
+        assert_eq!(packed.raw_buf(), prefix);
+    }
+
+    #[test]
+    fn packed_strings_vector_operations_and_bounds() {
+        use super::{PackedStrings, ValueRef, Vector};
+        let mut ps = PackedStrings::new();
+        assert!(ps.is_empty());
+        assert_eq!(ps.join(","), "");
+        assert!(!ps.pop());
+        assert!(!ps.push_bounded("abcd", 2));
+        assert!(ps.try_push("aa"));
+        assert!(ps.try_push("bbb"));
+        assert!(ps.try_push("c"));
+        assert_eq!(ps.len(), 3);
+        assert!(!ps.is_empty());
+        assert_eq!(ps.raw_buf(), "aabbbc");
+        assert_eq!(ps.get_str(0), Some("aa"));
+        assert_eq!(ps.get_str(1), Some("bbb"));
+        assert_eq!(ps.get_str(3), None);
+        assert_eq!(ps.join("-"), "aa-bbb-c");
+        assert!(ps.pop());
+        assert_eq!(ps.join("-"), "aa-bbb");
+
+        let mut big_ps = PackedStrings::with_capacity(3000, 12000);
+        for i in 0..1030 {
+            assert!(big_ps.try_push(&i.to_string()));
+        }
+        big_ps.shed_slack();
+        let mut grown = PackedStrings::with_capacity(2, 256 * 1024);
+        let block = "a".repeat(256 * 1024);
+        assert!(grown.try_push(&block));
+        assert!(grown.try_push("b"));
+        grown.shed_slack();
+        let vs = Vector::from_packed_strs(big_ps);
+        assert!(vs.is_packed());
+        assert!(vs.as_packed_strs().is_some());
+        assert!(vs.as_flat_ints().is_none());
+        assert!(matches!(vs.get_val_ref(0), Some(ValueRef::Str("0"))));
+        assert_eq!(vs.get(1), Some(Value::Str(Arc::from("1"))));
+        assert_eq!(
+            vs.read_at(2, |v| Some(v.clone())),
+            Some(Value::Str(Arc::from("2")))
+        );
+        assert!(vs.get_ref(0).is_none());
+        assert_eq!(vs.chunk_from(0).len(), 32);
+        assert!(vs.chunk_from(2000).is_empty());
+        let mut joined = String::new();
+        assert!(vs.push_to_string(&mut joined));
+        assert!(joined.starts_with("0123"));
+
+        // Iter: next, nth, size_hint, next_back, exhausted
+        let mut it = vs.iter();
+        assert_eq!(it.size_hint(), (1030, Some(1030)));
+        assert_eq!(it.next(), Some(Value::Str(Arc::from("0"))));
+        assert_eq!(it.nth(1), Some(Value::Str(Arc::from("2"))));
+        assert_eq!(it.next_back(), Some(Value::Str(Arc::from("1029"))));
+        assert_eq!(it.nth(2000), None);
+        assert_eq!(it.next_back(), None);
+
+        // Shared > FLAT_MAX push_back and drop_last convert to generic
+        let shared = vs.clone();
+        let pushed_shared = vs.clone().push_back(Value::Str(Arc::from("extra")));
+        assert!(!pushed_shared.is_packed());
+        assert_eq!(pushed_shared.len(), 1031);
+        let popped_shared = vs.clone().drop_last_owned().expect("popped");
+        assert!(!popped_shared.is_packed());
+        assert_eq!(popped_shared.len(), 1029);
+        drop(shared);
+
+        // Unique push_back (str + non-str), set_nth, drop_last, into_vec
+        let mut small = PackedStrings::new();
+        assert!(small.try_push("x"));
+        let v1 = Vector::from_packed_strs(small);
+        assert!(v1.typed_items().is_some());
+        let v2 = v1.push_back(Value::Str(Arc::from("y")));
+        assert!(v2.is_packed());
+        assert_eq!(v2.len(), 2);
+        let v3 = v2.clone().drop_last_owned().expect("pop");
+        assert!(v3.is_packed());
+        assert_eq!(v3.len(), 1);
+        let v4 = v2.clone().set_nth_owned(0, Value::Int(7)).expect("set");
+        assert!(!v4.is_packed());
+        assert_eq!(v4.get(0), Some(Value::Int(7)));
+        let v5 = v2.clone().push_back(Value::Int(9));
+        assert!(!v5.is_packed());
+        assert_eq!(v2.clone().into_vec().len(), 2);
+        assert!(v2.into_typed_items().is_ok());
+
+        let empty_v = Vector::from_packed_strs(PackedStrings::new());
+        assert!(empty_v.as_flat_values().is_none());
+        assert!(empty_v.drop_last_owned().is_none());
+
+        // as_flat_values / as_flat_doubles: generic flat vs packed ints/doubles/chars/strs
+        let fv = Vector::from_vec(vec![Value::Double(1.5), Value::Int(2)]);
+        assert_eq!(fv.as_flat_values().map(<[Value]>::len), Some(2));
+        assert!(fv.as_flat_doubles().is_none());
+        let dv = Vector::from_vec(vec![Value::Double(1.5), Value::Double(2.5)]);
+        assert_eq!(dv.as_flat_doubles(), Some([1.5, 2.5].as_slice()));
+        assert!(dv.as_flat_values().is_none());
+        assert!(Vector::from_ints(vec![1, 2]).as_flat_values().is_none());
+        assert!(Vector::from_chars(vec!['a']).as_flat_values().is_none());
+
+        // ends 1.5x growth past 64K entries
+        let mut many_ends = PackedStrings::new();
+        for _ in 0..=65_536 {
+            assert!(many_ends.try_push("a"));
+        }
+        assert_eq!(many_ends.len(), 65_537);
+
+        // into_joined: empty, empty sep, in-place (fits in cap), fallback (exceeds cap)
+        assert_eq!(PackedStrings::new().into_joined(","), "");
+        let mut p_empty_sep = PackedStrings::with_capacity(2, 8);
+        assert!(p_empty_sep.try_push("hi"));
+        assert!(p_empty_sep.try_push("lo"));
+        assert_eq!(p_empty_sep.into_joined(""), "hilo");
+
+        let mut p_inplace = PackedStrings::with_capacity(3, 16);
+        assert!(p_inplace.try_push("aa"));
+        assert!(p_inplace.try_push("bbb"));
+        assert!(p_inplace.try_push("c"));
+        assert_eq!(p_inplace.into_joined("-"), "aa-bbb-c");
+
+        let mut p_grow = PackedStrings::with_capacity(2, 2);
+        assert!(p_grow.try_push("a"));
+        assert!(p_grow.try_push("b"));
+        assert_eq!(p_grow.into_joined("--------"), "a--------b");
+
+        // Vector::into_packed_strs: unique Ok, shared outer Err, shared inner via with_meta Err, non-Strs Err
+        let mut ps_u = PackedStrings::new();
+        assert!(ps_u.try_push("ok"));
+        let vu = Vector::from_packed_strs(ps_u);
+        assert_eq!(vu.into_packed_strs().expect("unique").join(","), "ok");
+
+        let mut ps_s = PackedStrings::new();
+        assert!(ps_s.try_push("s"));
+        let vs_outer = Vector::from_packed_strs(ps_s);
+        let vs_clone = vs_outer.clone();
+        let vs_back = vs_outer.into_packed_strs().expect_err("shared outer");
+        assert_eq!(vs_back.len(), 1);
+        let vs_meta = vs_clone
+            .clone()
+            .with_meta(Some(crate::Map::from_kvs_last_wins(vec![])));
+        let vs_meta_back = vs_meta.into_packed_strs().expect_err("shared inner");
+        assert_eq!(vs_meta_back.len(), 1);
+        drop(vs_clone);
+
+        let non_strs = Vector::from_ints(vec![1, 2]);
+        assert!(non_strs.into_packed_strs().is_err());
+    }
+
+    #[test]
+    fn packed_doubles_vector_and_fast_eq_hash() {
+        use super::{List, PackedStrings, TypedItems, Value, ValueRef, Vector};
+
+        // Empty push retypes into Doubles; push/set preserve or widen cleanly.
+        let d0 = Vector::new_sync().push_back(Value::Double(1.25));
+        assert_eq!(d0.as_flat_doubles(), Some([1.25].as_slice()));
+        let d1 = d0.push_back(Value::Double(2.5));
+        assert_eq!(d1.as_flat_doubles(), Some([1.25, 2.5].as_slice()));
+        assert_eq!(d1.get(1), Some(Value::Double(2.5)));
+        assert_eq!(d1.get(9), None);
+        assert!(matches!(d1.get_val_ref(0), Some(ValueRef::Double(x)) if x == 1.25));
+        assert_eq!(d1.read_at(1, |v| Some(v.clone())), Some(Value::Double(2.5)));
+        assert_eq!(d1.read_at(9, |_| Some(Value::Nil)), None);
+        assert_eq!(
+            d1.chunk_from(0),
+            vec![Value::Double(1.25), Value::Double(2.5)]
+        );
+        assert!(matches!(d1.typed_items(), Some(TypedItems::Doubles(_))));
+
+        // Double-ended iterator + size_hint + nth on Doubles
+        let mut it = d1.iter();
+        assert_eq!(it.size_hint(), (2, Some(2)));
+        assert_eq!(it.next_back(), Some(Value::Double(2.5)));
+        assert_eq!(it.next(), Some(Value::Double(1.25)));
+        assert_eq!(it.next(), None);
+        assert_eq!(d1.iter().nth(1), Some(Value::Double(2.5)));
+
+        // set_nth_owned: same-type keeps Doubles, foreign widens to Generic
+        let d2 = d1
+            .clone()
+            .set_nth_owned(0, Value::Double(3.75))
+            .expect("set");
+        assert_eq!(d2.as_flat_doubles(), Some([3.75, 2.5].as_slice()));
+        let g_set = d1
+            .clone()
+            .set_nth_owned(0, Value::Int(7))
+            .expect("widen set");
+        assert!(g_set.as_flat_values().is_some());
+        let g_push = d1.clone().push_back(Value::Int(9));
+        assert!(g_push.as_flat_values().is_some());
+
+        // Ints/Chars widening via set_inner / push_inner
+        let i_widen = Vector::from_ints(vec![1])
+            .set_nth_owned(0, Value::Double(1.0))
+            .expect("i");
+        assert!(i_widen.as_flat_values().is_some());
+        let c_widen = Vector::from_chars(vec!['a'])
+            .set_nth_owned(0, Value::Double(1.0))
+            .expect("c");
+        assert!(c_widen.as_flat_values().is_some());
+
+        // drop_last_owned, into_vec (unique and shared), into_typed_items (unique and shared)
+        let d_popped = d1.clone().drop_last_owned().expect("pop");
+        assert_eq!(d_popped.as_flat_doubles(), Some([1.25].as_slice()));
+        let empty_d = d_popped.drop_last_owned().expect("pop to empty");
+        assert!(empty_d.drop_last_owned().is_none());
+        let d_shared = d1.clone();
+        assert_eq!(d1.clone().into_vec().len(), 2);
+        assert!(matches!(d1.into_typed_items(), Ok(TypedItems::Doubles(_))));
+        assert_eq!(d_shared.clone().into_vec().len(), 2);
+        assert!(matches!(
+            d_shared.into_typed_items(),
+            Ok(TypedItems::Doubles(_))
+        ));
+
+        // Shared push past FLAT_MAX = 1024 promotes to Trie (exercises non-flat as_flat_doubles, eq, hash)
+        let base_d = Vector::from_doubles((0..1025).map(f64::from).collect());
+        let big_d1 = base_d.clone().push_back(Value::Double(1025.0));
+        let big_d2 = Vector::from_flat_doubles((0..1026).map(f64::from).collect());
+        assert!(big_d1.as_flat_doubles().is_none());
+        assert_eq!(big_d1, big_d2);
+        assert_eq!(
+            hash_of(&Value::Vector(big_d1)),
+            hash_of(&Value::Vector(big_d2))
+        );
+        drop(base_d);
+
+        let base_i = Vector::from_ints((0..1025_i64).collect());
+        let big_i1 = base_i.clone().push_back(Value::Int(1025));
+        let big_i2 = Vector::from_ints((0..1026_i64).collect());
+        assert_eq!(big_i1, big_i2);
+        assert_eq!(
+            hash_of(&Value::Vector(big_i1)),
+            hash_of(&Value::Vector(big_i2))
+        );
+        drop(base_i);
+
+        // Fast eq & hash consistency across all 5 VectorInner variants + mismatched kinds/lengths
+        let v_int = Vector::from_ints(vec![1, 2]);
+        let v_dbl = Vector::from_doubles(vec![1.0, 2.0]);
+        let v_chr = Vector::from_chars(vec!['a', 'b']);
+        let v_gen = Vector::from_vec(vec![Value::Int(1), Value::Double(2.0)]);
+        let mut ps = PackedStrings::new();
+        assert!(ps.try_push("a"));
+        assert!(ps.try_push("b"));
+        let v_str = Vector::from_packed_strs(ps);
+        let mut ps2 = PackedStrings::new();
+        assert!(ps2.try_push("a"));
+        assert!(ps2.try_push("b"));
+        let v_str2 = Vector::from_packed_strs(ps2);
+
+        assert_eq!(v_int, Vector::from_ints(vec![1, 2]));
+        assert_eq!(v_dbl, Vector::from_doubles(vec![1.0, 2.0]));
+        assert_eq!(v_chr, Vector::from_chars(vec!['a', 'b']));
+        assert!(v_int.is_flat());
+        assert!(v_dbl.is_flat());
+        assert!(v_chr.is_flat());
+        assert!(v_gen.is_flat());
+        assert!(v_str.is_flat());
+        assert_eq!(v_int.slice_packed(0, 1).as_flat_ints(), Some(&[1][..]));
+        assert_eq!(v_dbl.slice_packed(1, 2).as_flat_doubles(), Some(&[2.0][..]));
+        assert_eq!(v_chr.slice_packed(1, 2), Vector::from_chars(vec!['b']));
+        assert_eq!(
+            v_gen.slice_packed(0, 1),
+            Vector::from_vec(vec![Value::Int(1)])
+        );
+        assert_eq!(
+            v_str.slice_packed(1, 2),
+            Vector::from_vec(vec![Value::Str(Arc::from("b"))])
+        );
+        let mut mut_v = v_int.clone();
+        assert!(mut_v.set_nth_mut(1, Value::Int(9)));
+        assert!(!mut_v.set_nth_mut(9, Value::Int(0)));
+        assert_eq!(mut_v.as_flat_ints(), Some(&[1, 9][..]));
+        assert_eq!(
+            v_gen,
+            Vector::from_vec(vec![Value::Int(1), Value::Double(2.0)])
+        );
+        assert_eq!(v_str, v_str2);
+        assert_ne!(v_int, Vector::from_ints(vec![1]));
+        assert_ne!(v_int, v_dbl);
+
+        assert_eq!(
+            hash_of(&Value::Vector(v_int)),
+            hash_of(&Value::List(List::from_vec(vec![
+                Value::Int(1),
+                Value::Int(2)
+            ])))
+        );
+        assert_eq!(
+            hash_of(&Value::Vector(v_dbl)),
+            hash_of(&Value::List(List::from_vec(vec![
+                Value::Double(1.0),
+                Value::Double(2.0)
+            ])))
+        );
+        assert_eq!(
+            hash_of(&Value::Vector(v_chr)),
+            hash_of(&Value::List(List::from_vec(vec![
+                Value::Char('a'),
+                Value::Char('b')
+            ])))
+        );
+        assert_eq!(
+            hash_of(&Value::Vector(v_gen)),
+            hash_of(&Value::List(List::from_vec(vec![
+                Value::Int(1),
+                Value::Double(2.0)
+            ])))
+        );
+        assert_eq!(
+            hash_of(&Value::Vector(v_str)),
+            hash_of(&Value::List(List::from_vec(vec![
+                Value::Str(Arc::from("a")),
+                Value::Str(Arc::from("b")),
+            ])))
+        );
+    }
+
+    #[test]
+    fn assign_frees_a_heap_slot_and_overwrites_a_scalar_one_271() {
+        let held = Arc::<str>::from("held");
+        let mut slot = Value::Str(Arc::clone(&held));
+        slot.assign(Value::Int(1));
+        assert_eq!(Arc::strong_count(&held), 1, "the old string was dropped");
+        slot.assign(Value::Bool(true));
+        assert!(matches!(slot, Value::Bool(true)));
+    }
+
+    #[test]
+    fn small_set_scalar_lookups_match_full_equality_271() {
+        use super::{Set, SortSpec};
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        let s = Set::from_items_checked(vec![
+            Value::Int(1),
+            kw("a"),
+            Value::Char('x'),
+            Value::Bool(true),
+            Value::Nil,
+            Value::Str("s".into()),
+        ])
+        .unwrap();
+        // Hits return the stored member, each scalar kind alone.
+        for k in [
+            Value::Int(1),
+            kw("a"),
+            Value::Char('x'),
+            Value::Bool(true),
+            Value::Nil,
+        ] {
+            assert_eq!(s.get_small_scalar(&k), Some(s.get(&k)));
+            assert!(s.get(&k).is_some());
+        }
+        // Misses: no other kind equals such a key.
+        for k in [Value::Int(2), kw("b"), Value::Char('y'), Value::Bool(false)] {
+            assert_eq!(s.get_small_scalar(&k), Some(None));
+        }
+        // Other key kinds take the full `=`.
+        assert_eq!(s.get_small_scalar(&Value::Str("s".into())), None);
+        // A big integer may equal a long key.
+        let big = Set::from_items_checked(vec![Value::BigInt(Arc::new(7.into()))]).unwrap();
+        assert_eq!(big.get_small_scalar(&Value::Int(7)), None);
+        assert!(big.contains(&Value::Int(7)));
+        // Sorted and hashed sets keep their own lookups.
+        let sorted = s.clone().with_sort(Some(SortSpec::Natural));
+        assert_eq!(sorted.get_small_scalar(&Value::Int(1)), None);
+        let large = Set::from_items_checked((0..20).map(Value::Int).collect()).unwrap();
+        assert_eq!(large.get_small_scalar(&Value::Int(1)), None);
+        assert!(large.contains(&Value::Int(19)));
+    }
+
+    #[test]
+    fn shaped_map_identity_follows_its_data_271() {
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        let pairs = |kv: &[(&str, i64)]| {
+            super::Map::from_kvs_checked(kv.iter().map(|(k, v)| (kw(k), Value::Int(*v))).collect())
+                .expect("distinct keys")
+        };
+        let m = pairs(&[("a", 1), ("b", 2)]);
+        assert_eq!(m.clone().id(), m.id());
+        // A miss returns the map itself.
+        assert_eq!(m.clone().without(&kw("z")).id(), m.id());
+        // Shared writes mint fresh identity and leave the original intact.
+        let next = m.clone().insert(kw("a"), Value::Int(9));
+        assert_ne!(next.id(), m.id());
+        assert_eq!(m.get(&kw("a")), Some(&Value::Int(1)));
+        let grown = m.clone().insert(kw("c"), Value::Int(3));
+        assert_ne!(grown.id(), m.id());
+        assert_eq!((grown.size(), m.size()), (3, 2));
+        let shrunk = m.clone().without(&kw("a"));
+        assert_ne!(shrunk.id(), m.id());
+        assert_eq!(shrunk.size(), 1);
+        assert_ne!(m.clone().with_meta(None).id(), m.id());
+        // A shared map's value clones out; a unique one's moves out.
+        let mut shared = m.clone();
+        assert_eq!(shared.take_value(&kw("b")), Some(Value::Int(2)));
+        assert_eq!(m.get(&kw("b")), Some(&Value::Int(2)));
+        let mut own = pairs(&[("x", 5)]);
+        assert_eq!(own.take_value(&kw("x")), Some(Value::Int(5)));
+        assert_eq!(own.get(&kw("x")), Some(&Value::Nil));
+        // Updates of a shared map copy once; a refused one changes nothing.
+        let mut upd = m.clone();
+        assert!(upd.update_existing_mut(&kw("a"), |_| Ok(Value::Int(11))));
+        assert_eq!(upd.get(&kw("a")), Some(&Value::Int(11)));
+        assert_eq!(m.get(&kw("a")), Some(&Value::Int(1)));
+        let mut refused = m.clone();
+        assert!(!refused.update_existing_mut(&kw("a"), Err));
+        assert_eq!(refused.id(), m.id());
+        assert!(!refused.update_existing_mut(&kw("z"), Err));
+        // Dissoc of the last key leaves an empty shaped map (shared or not).
+        let one = pairs(&[("x", 5)]);
+        let kept = one.clone();
+        assert!(one.without(&kw("x")).is_empty());
+        assert_eq!(kept.size(), 1);
+        assert!(kept.without(&kw("x")).is_empty());
+    }
+
+    #[test]
+    fn shared_long_flat_vectors_update_through_the_trie_271() {
+        let n = crate::trie::FLAT_MAX + 1;
+        for v in [
+            Vector::from_flat_ints((0..n as i64).collect()),
+            Vector::from_flat_doubles((0..n).map(|i| i as f64).collect()),
+            Vector::from_flat_chars(vec!['a'; n]),
+            Vector::from_vec(vec![Value::Nil; n]).with_meta(None),
+        ] {
+            let flat = v.is_packed().then(|| v.clone());
+            let kept = v.clone();
+            let first = v.get(0);
+            // The shared update leaves `kept` alone and moves `next` into the
+            // trie (no flat items left to read straight).
+            let next = v.set_nth_owned(0, Value::Bool(true)).expect("in bounds");
+            assert_eq!(kept.get(0), first);
+            assert_eq!(next.get(0), Some(Value::Bool(true)));
+            assert!(next.as_flat_ints().is_none());
+            assert_eq!(next.len(), n);
+            drop(flat);
+        }
+        // Strings keep their own storage; short flat runs copy.
+        let s = Vector::from_packed_strs({
+            let mut ps = super::PackedStrings::new();
+            assert!(ps.try_push("x"));
+            ps
+        });
+        let s2 = s.clone().push_back(Value::Str("y".into()));
+        assert_eq!((s.len(), s2.len()), (1, 2));
+        let short = Vector::from_flat_ints(vec![1, 2]);
+        let kept = short.clone();
+        let next = short.set_nth_owned(1, Value::Int(5)).expect("in bounds");
+        assert_eq!(next.as_flat_ints(), Some(&[1, 5][..]));
+        assert_eq!(kept.as_flat_ints(), Some(&[1, 2][..]));
+    }
+
+    #[test]
+    fn unique_vector_updates_only_touch_unshared_flat_storage_271() {
+        let kw = |n: &str| Value::Keyword(Keyword::new(None, n));
+        // Longs: in place when unique, in bounds, and a long.
+        let mut v = Vector::from_ints(vec![1, 2, 3]);
+        let id = v.id();
+        assert!(v.assoc_unique(1, &mut Value::Int(9)));
+        assert_eq!(v.id(), id, "the identity stays");
+        assert!(!v.assoc_unique(3, &mut Value::Int(9)), "past the end");
+        assert!(!v.assoc_unique(0, &mut Value::Double(1.5)), "would retype");
+        assert_eq!(v.iter().collect::<Vec<_>>(), [1, 9, 3].map(Value::Int));
+        // A second handle or shared storage: nothing changes.
+        let shared = v.clone();
+        assert!(!v.assoc_unique(0, &mut Value::Int(7)));
+        assert!(!v.conj_unique(&mut Value::Int(7)));
+        drop(shared);
+        // A new metadata view holds its own copy of the items (#271: the
+        // flat run lives in the vector's data).
+        let mut meta_view = v.clone().with_meta(None);
+        assert!(meta_view.assoc_unique(0, &mut Value::Int(7)));
+        assert_eq!(meta_view.get(0), Some(Value::Int(7)));
+        assert_eq!(v.get(0), Some(Value::Int(1)));
+        // Doubles.
+        let mut d = Vector::from_doubles(vec![0.5, 1.5]);
+        assert!(d.assoc_unique(0, &mut Value::Double(2.5)));
+        assert!(!d.assoc_unique(0, &mut Value::Int(2)));
+        assert_eq!(d.get(0), Some(Value::Double(2.5)));
+        // Generic: replaces scalar items only, taking the value.
+        let mut g = Vector::from_vec(vec![kw("a"), Value::Nil]);
+        let mut x = kw("b");
+        assert!(g.assoc_unique(1, &mut x));
+        assert_eq!(x, Value::Nil, "the value moved in");
+        assert!(
+            !g.assoc_unique(0, &mut Value::Int(1)),
+            "a heap item would drop"
+        );
+        assert!(!g.assoc_unique(5, &mut Value::Int(1)));
+        assert_eq!(g.get(1), Some(kw("b")));
+        // Other storages and the trie decline.
+        let mut c = Vector::from_chars(vec!['a']);
+        assert!(!c.assoc_unique(0, &mut Value::Char('b')));
+        assert!(!c.conj_unique(&mut Value::Char('b')));
+        let mut big = Vector::from_ints(vec![0; 1024]).push_back(Value::Int(0));
+        assert!(!big.assoc_unique(0, &mut Value::Int(1)));
+        // conj: within capacity only, never on empty vectors.
+        let mut e = Vector::from_ints(Vec::new());
+        assert!(!e.conj_unique(&mut Value::Int(1)));
+        let mut p = Vector::from_ints(Vec::with_capacity(4));
+        p = p.push_back(Value::Int(1));
+        assert!(p.conj_unique(&mut Value::Int(2)));
+        assert!(!p.conj_unique(&mut Value::Double(2.0)));
+        let mut pd = Vector::from_doubles(Vec::with_capacity(4)).push_back(Value::Double(1.0));
+        assert!(pd.conj_unique(&mut Value::Double(2.0)));
+        let mut full = Vector::from_ints(vec![1]);
+        while full.conj_unique(&mut Value::Int(0)) {}
+        let at_cap = full.len();
+        full = full.push_back(Value::Int(0));
+        assert_eq!(full.len(), at_cap + 1, "the general path grows it");
+        let mut pg = Vector::from_vec(Vec::with_capacity(4)).push_back(kw("a"));
+        let mut y = kw("c");
+        assert!(pg.conj_unique(&mut y));
+        assert_eq!(y, Value::Nil);
+        let mut z = kw("z");
+        while pg.conj_unique(&mut z) {
+            z = kw("z");
+        }
+        assert_eq!(z, kw("z"), "a full generic run keeps the value");
+        assert_eq!(p.iter().collect::<Vec<_>>(), [1, 2].map(Value::Int));
+        let mut flat_max = Vector::from_ints(vec![0; 1023]).push_back(Value::Int(0));
+        assert!(
+            !flat_max.conj_unique(&mut Value::Int(1)),
+            "a full flat run moves to the trie"
+        );
+    }
+
+    #[test]
+    fn small_and_large_set_storage_paths_271() {
+        use super::{PackedStrings, Set, SortSpec, Vector};
+        // Small set: from_items_checked, insert, dup insert, get, contains, without, iter
+        let s = Set::from_items_checked(vec![Value::Int(1), Value::Int(2)]).unwrap();
+        assert_eq!(s.size(), 2);
+        assert!(!s.is_empty());
+        assert!(s.contains(&Value::Int(1)));
+        assert_eq!(s.get(&Value::Int(2)), Some(&Value::Int(2)));
+        assert_eq!(s.get(&Value::Int(9)), None);
+        let s_dup = s.clone().insert(Value::Int(2));
+        assert_eq!(s_dup.id(), s.id());
+        let s_miss = s.clone().without(&Value::Int(99));
+        assert_eq!(s_miss.id(), s.id());
+        let s_rem = s.clone().without(&Value::Int(1));
+        assert_eq!(s_rem.size(), 1);
+        assert!(Set::from_items_checked(vec![Value::Int(1), Value::Int(1)]).is_err());
+
+        // Promotion > SMALL_SET_MAX via insert and via from_items_checked
+        let mut big = new_set();
+        for i in 0..10 {
+            big = big.insert(Value::Int(i));
+        }
+        assert_eq!(big.size(), 10);
+        assert_eq!(big.get(&Value::Int(9)), Some(&Value::Int(9)));
+        assert_eq!(big.iter().count(), 10);
+        assert_eq!(big.clone().without(&Value::Int(99)).id(), big.id());
+        let mut shrunk = big.clone();
+        for i in 0..7 {
+            shrunk = shrunk.without(&Value::Int(i));
+        }
+        assert_eq!(shrunk.size(), 3);
+        let big2 = Set::from_items_checked((0..10).map(Value::Int).collect()).unwrap();
+        assert_eq!(big, big2);
+
+        // Small & promoted sorted sets
+        let mut ss = new_set().with_sort(Some(SortSpec::Natural));
+        for i in 0..10 {
+            ss = ss.insert_sorted_at(i, Value::Int(i as i64));
+        }
+        assert_eq!(ss.sorted_len(), 10);
+        assert_eq!(ss.sorted_member(0), Some(&Value::Int(0)));
+        let ss_sm = new_set()
+            .with_sort(Some(SortSpec::Natural))
+            .with_ordered_members(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        assert_eq!(ss_sm.sorted_len(), 3);
+        assert_eq!(ss_sm.sorted_member(1), Some(&Value::Int(2)));
+        let ss_sm2 = ss_sm.without_sorted_at(1);
+        assert_eq!(ss_sm2.sorted_len(), 2);
+        let mut ss_lg = ss;
+        for i in 0..7 {
+            ss_lg = ss_lg.without(&Value::Int(i));
+        }
+        ss_lg = ss_lg.without(&Value::Int(8));
+        assert_eq!(ss_lg.sorted_len(), 2);
+        let ss_rebuilt = new_set().with_ordered_members((0..10).map(Value::Int).collect());
+        assert_eq!(ss_rebuilt.size(), 10);
+
+        // String-packed Vector::iter_from and PackedStrings::into_joined reserve path
+        let mut ps = PackedStrings::new();
+        assert!(ps.try_push("a"));
+        assert!(ps.try_push("b"));
+        assert!(ps.try_push("c"));
+        assert_eq!(ps.join("--"), "a--b--c");
+        let ps_grow = ps.clone();
+        assert_eq!(ps_grow.into_joined("----"), "a----b----c");
+        let sv = Vector::from_packed_strs(ps);
+        assert_eq!(sv.iter_from(1).count(), 2);
     }
 }

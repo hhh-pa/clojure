@@ -1271,8 +1271,7 @@ pub(crate) const ASYNC_NATIVES: &[(&str, NativeFnPtr)] = &[
 pub(crate) fn install_async_ns(eval: &mut Evaluator) {
     eval.registry.ensure_ns(ASYNC_NS);
     for (name, f) in ASYNC_NATIVES {
-        let func: Arc<crate::ext::NativeImpl> = Arc::new(*f);
-        eval.install_native(ASYNC_NS, name, func);
+        eval.install_native_ptr(ASYNC_NS, name, *f);
     }
     for name in ["go", "go-loop", "alt!", "alt!!"] {
         let q = Symbol::new(Some(ASYNC_NS), name);

@@ -1,0 +1,21 @@
+;; unchecked arithmetic, deref, char and compare as inline ops (#271): longs,
+;; atoms, volatiles and code points answer inline; every other operand
+;; reaches the native, errors included.
+(def a (atom 5))
+(def v (volatile! 7))
+(def d (delay 9))
+(def r (ref 11))
+(defn lcg [s] (unchecked-add (unchecked-multiply s 6364136223846793005) 1442695040888963407))
+(println (take 5 (iterate lcg 42)))
+(println (unchecked-add Long/MAX_VALUE 1) (unchecked-subtract Long/MIN_VALUE 1) (unchecked-multiply Long/MAX_VALUE 2))
+(println (unchecked-inc Long/MAX_VALUE) (unchecked-dec Long/MIN_VALUE) (unchecked-negate Long/MIN_VALUE))
+(println (unchecked-add 1.5 2) (unchecked-multiply 2 2.5) (unchecked-inc 1.5) (unchecked-negate 2.5) (unchecked-subtract 1 0.5))
+(swap! a inc)
+(vswap! v inc)
+(println @a (deref a) @v @d @r (deref d))
+(println (try @nil (catch Exception e :npe)) (try (deref 5) (catch Exception e :cce)))
+(println (char 97) (char 955) (map char [72 105]) (char 65.7) (char \z))
+(println (try (char -1) (catch Exception e :range)) (try (char 55296) (catch Exception e :surrogate)) (try (char 1114112) (catch Exception e :big)))
+(println (compare 1 2) (compare 2.5 2) (compare 3 3.0) (compare ##NaN 1) (compare -0.0 0) (compare Long/MAX_VALUE 9.223372036854776E18))
+(println (compare "a" "c") (compare :a :b) (compare nil 1) (compare [1 2] [1 3]) (try (compare 1 "a") (catch Exception e :cce)))
+(println (sort compare [3 1.5 2 -1]) (sort-by - [1 3 2]) (reduce (fn [acc x] (+ acc (compare x 5))) 0 (range 10)))

@@ -147,7 +147,7 @@ func TestStubGoldens(t *testing.T) {
 		{"ok-full", baseFull, nil, nil, 0},
 		{"worsened", baseWorse, nil, nil, 1},
 		{"improved", baseBetter, nil, nil, 0},
-		{"stale", baseStale, nil, nil, 0},
+		{"stale", baseStale, nil, nil, 1},
 		{"zero", baseFull, []string{"STUB_EMPTY=1"}, nil, 1},
 		{"regen", "", nil, []string{"--regen"}, 0},
 		{"rca-fail", baseFull, []string{"STUB_RCA_FAIL=1"}, nil, 2},
