@@ -57,6 +57,7 @@ const NONE: u64 = u64::MAX;
 const TAG_INT: u64 = 2;
 const TAG_CHAR: u64 = 9;
 const TAG_VECTOR: u64 = 13;
+const TAG_LIST: u64 = 12;
 
 /// Why a program cannot (yet) be lowered natively.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1688,14 +1689,19 @@ impl<'ctx> Lowerer<'ctx> {
         src: PointerValue<'ctx>,
     ) -> Result<Vec<PointerValue<'ctx>>, Unsupported> {
         let conv = self.slot(f);
-        let st = self
-            .call(
-                "rt_n_destr_map",
-                Some(self.i32t),
-                &[conv.into(), src.into()],
-            )
-            .expect("st");
-        self.check(f, st);
+        let source = if m.as_sym.is_some() {
+            let st = self
+                .call(
+                    "rt_n_destr_map",
+                    Some(self.i32t),
+                    &[conv.into(), src.into()],
+                )
+                .expect("st");
+            self.check(f, st);
+            conv
+        } else {
+            self.destr_source(f, src, conv)
+        };
         let mut defaults = Vec::with_capacity(m.or.len());
         for (_, default) in &m.or {
             let d = self.slot(f);
@@ -1710,14 +1716,14 @@ impl<'ctx> Lowerer<'ctx> {
             };
             let default = or_default(m, name.as_ref(), or_key).map(|i| defaults[i]);
             let item = self.slot(f);
-            self.emit_destr_get(item, conv, key, default)?;
+            self.emit_destr_get(item, source, key, default)?;
             self.bind_owned_slot(f, local, item, &mut out)?;
         }
         for binding in &m.keys {
             let name = Value::Symbol(Symbol::new(None, &binding.local));
             let default = or_default(m, Some(&name), &binding.key).map(|i| defaults[i]);
             let item = self.slot(f);
-            self.emit_destr_get(item, conv, &binding.key, default)?;
+            self.emit_destr_get(item, source, &binding.key, default)?;
             f.env.push(Some(LocalRef::Slot(item)));
             out.push(item);
         }
@@ -1729,6 +1735,46 @@ impl<'ctx> Lowerer<'ctx> {
             self.free_slots(f, &[conv]);
         }
         Ok(out)
+    }
+
+    /// The source a map pattern without `:as` reads its keys from (#271
+    /// Slice 6j): a list converted into `conv` (its map), anything else
+    /// read in place, as the conversion would only have copied it.
+    fn destr_source(
+        &mut self,
+        f: &FnCtx<'ctx>,
+        src: PointerValue<'ctx>,
+        conv: PointerValue<'ctx>,
+    ) -> PointerValue<'ctx> {
+        let is_list = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                self.tag(src),
+                self.i8t.const_int(TAG_LIST, false),
+                "is_list",
+            )
+            .expect("cmp");
+        let convert = self.ctx.append_basic_block(f.func, "destr_list");
+        let join = self.ctx.append_basic_block(f.func, "destr_src");
+        self.builder
+            .build_conditional_branch(is_list, convert, join)
+            .expect("br");
+        self.builder.position_at_end(convert);
+        let st = self
+            .call(
+                "rt_n_destr_map",
+                Some(self.i32t),
+                &[conv.into(), src.into()],
+            )
+            .expect("st");
+        self.check(f, st);
+        self.builder.build_unconditional_branch(join).expect("br");
+        self.builder.position_at_end(join);
+        self.builder
+            .build_select(is_list, conv, src, "destr_from")
+            .expect("select")
+            .into_pointer_value()
     }
 
     /// `item =` the binding of `key` in the converted source `conv`

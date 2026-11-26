@@ -4898,6 +4898,11 @@ mod tests {
         assert_eq!(u32::from_ne_bytes(c[4..8].try_into().expect("4")), 0x1F600);
         // ... and tests for a vector before its flat `nth` front (#271).
         assert_eq!(bytes(&Value::Vector(Vector::from_ints(vec![1])))[0], 13);
+        // ... and for a list before converting a map pattern's source.
+        assert_eq!(
+            bytes(&Value::List(crate::List::from_vec(vec![Value::Int(1)])))[0],
+            12
+        );
     }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

@@ -897,6 +897,16 @@ Measured (macOS):
 - **Per step:** the vector walk 1182 -> 975 instructions, a walk with `first` taken before `next` 655 -> 550.
 - **Interleaved A/B of the local tests alone**, over all 1754 cases against 6h: median -0.4K instructions, mean -16K; `edit_distance` -1.5 to -2%, `interval_tree` -1.2%.
 
+### 6.67 Slice 6j: map patterns read their source in place
+
+A plain map pattern (`{:keys [a b]}`, `{a :a}`, `:strs`, `:syms`, `:or`) converted its source first (`rt_n_destr_map`: a list becomes its map, as the interpreter's `seq?` test does), and that conversion copied every other source into a temporary (a refcount bump and release for a map), read the keys from the copy, then dropped it: ~580 instructions per two-key bind.
+
+- **Lowering (`Lowerer::destr_source`, `clj-aot/src/native.rs`):** without `:as`, the source's tag is tested inline. A list still converts into its map, and any other value is read in place (a `select` between the two). With `:as` the converted source is bound, as before.
+  - `TAG_LIST` (12) is pinned by `value_layout_abi` beside the other tags the compiler tests.
+- **Verification:** corpus `destructure_sources.clj`, with output identical between `run` and the native binary. It covers maps, lists, `nil`, vectors, sorted maps, strings, `:or` with and without a present `nil`, `:strs`/`:syms`, `:as`, nested patterns, an odd-length list, and a loop over mixed sources.
+
+Measured (macOS): a two-key `{:keys [a b]}` bind in a loop 580 -> 472 instructions per iteration.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
