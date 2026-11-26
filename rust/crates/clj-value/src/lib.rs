@@ -83,7 +83,7 @@ pub use pvec::{Elem8, PrimitiveVector};
 pub use ref_kind::{Ref, RefState};
 pub use scalar::{Instant, Uri, UriError, Uuid};
 pub use seq::{
-    CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, RangeNum, RangeValue,
+    CHUNK_SIZE, ConsValue, CycleValue, IterateValue, KeySeqValue, QueueValue, RangeNum, RangeValue,
     RealizedSeq, RepeatValue, Seq, SeqKind, SplitVecValue, SubVectorValue, ValSeqValue,
     piece_value, seq_vec,
 };

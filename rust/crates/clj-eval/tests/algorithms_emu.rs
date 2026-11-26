@@ -995,7 +995,14 @@ fn throwable_ctors() {
 #[test]
 fn static_field_calls() {
     let mut eval = boot();
-    assert_eq!(run(&mut eval, "(clojure.lang.PersistentQueue/EMPTY)"), "[]");
+    // #277: the JVM's queue prints its `#object` form (the identity
+    // hash is arbitrary; `@1` is the empty queue's `hashCode`).
+    let empty_queue = run(&mut eval, "(clojure.lang.PersistentQueue/EMPTY)");
+    assert!(
+        empty_queue.starts_with("#object[clojure.lang.PersistentQueue 0x")
+            && empty_queue.ends_with(" \"clojure.lang.PersistentQueue@1\"]"),
+        "{empty_queue}"
+    );
     assert_eq!(run(&mut eval, "(Math/PI)"), "3.141592653589793");
     assert_eq!(run(&mut eval, "(Long/MAX_VALUE)"), "9223372036854775807");
     // Methods still win over the field path.

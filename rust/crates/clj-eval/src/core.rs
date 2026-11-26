@@ -1720,6 +1720,7 @@ fn is_coll(v: &Value) -> bool {
             | Value::Set(_)
             | Value::PrimitiveVector(_)
     ) || as_subvector(v).is_some()
+        || crate::coll::as_queue(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)
@@ -1729,6 +1730,7 @@ fn is_sequential(v: &Value) -> bool {
         v,
         Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
     ) || as_subvector(v).is_some()
+        || crate::coll::as_queue(v).is_some()
         || is_seq_value(v)
 }
 fn is_associative(v: &Value) -> bool {
@@ -1750,6 +1752,7 @@ pub(crate) fn is_counted(v: &Value) -> bool {
             | Value::PrimitiveVector(_)
     ) || crate::coll::is_transient(v)
         || as_subvector(v).is_some()
+        || crate::coll::as_queue(v).is_some()
         || is_counted_seq(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)
@@ -1806,6 +1809,7 @@ fn is_seqable(v: &Value) -> bool {
             | Value::Array(_)
             | Value::PrimitiveVector(_)
     ) || as_subvector(v).is_some()
+        || crate::coll::as_queue(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)

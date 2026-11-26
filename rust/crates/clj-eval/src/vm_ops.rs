@@ -1593,6 +1593,18 @@ impl Upd for Conj {
             Value::Vector(v) => Some(Value::Vector(v.push_back(take(x)))),
             Value::List(l) => Some(Value::List(l.push_front(take(x)))),
             Value::Nil => Some(Value::List(clj_value::List::from_vec(vec![take(x)]))),
+            // A uniquely held queue (#277) grows in place; a shared
+            // one takes the persistent native.
+            Value::Extension(mut e) => match crate::coll::queue_mut(&mut e) {
+                Some(q) => {
+                    q.push_mut(take(x));
+                    Some(Value::Extension(e))
+                }
+                None => {
+                    *coll = Value::Extension(e);
+                    None
+                }
+            },
             Value::Set(s) if !s.is_sorted() && crate::vm_intrinsics::is_scalar_key(x) => {
                 Some(Value::Set(s.insert(take(x))))
             }
@@ -2343,6 +2355,17 @@ impl Upd for Pop {
             Value::Vector(x) if !x.is_empty() && x.meta().is_none() => {
                 x.drop_last_owned().map(Value::Vector)
             }
+            // A uniquely held queue (#277) drops its front in place.
+            Value::Extension(mut e) => match crate::coll::queue_mut(&mut e) {
+                Some(q) => {
+                    q.pop_mut();
+                    Some(Value::Extension(e))
+                }
+                None => {
+                    *coll = Value::Extension(e);
+                    None
+                }
+            },
             other => {
                 *coll = other;
                 None

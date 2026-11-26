@@ -890,6 +890,194 @@ impl crate::ExtensionValue for SubVectorValue {
     }
 }
 
+/// A `clojure.lang.PersistentQueue` (#277): a FIFO window
+/// `items[start..]` over a persistent vector. `conj` pushes onto the
+/// vector's end (persistent, so cheap even while an older version
+/// shares it), `pop` advances the window in O(1), and a pop that
+/// leaves the dead prefix longer than the live window compacts it, so
+/// popping is O(1) amortized and the prefix never holds more than the
+/// live items. The JVM's queue, not a vector: `class`, `vector?`,
+/// `get`, `contains?` and printing follow `PersistentQueue`; `=` and
+/// `hash` follow its `Sequential` contract.
+#[derive(Clone, Debug)]
+pub struct QueueValue {
+    items: Vector,
+    start: usize,
+    meta: Option<Map>,
+}
+
+impl QueueValue {
+    /// `PersistentQueue/EMPTY`.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            items: Vector::new_sync(),
+            start: 0,
+            meta: None,
+        }
+    }
+
+    /// The element count.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.items.len() - self.start
+    }
+
+    /// Whether the queue is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// `peek`: the front item (nil when empty).
+    #[must_use]
+    pub fn peek(&self) -> Value {
+        self.items.get(self.start).unwrap_or(Value::Nil)
+    }
+
+    /// `pop`: without the front item (an empty queue pops to itself,
+    /// like the JVM's). Compacts once the dead prefix would outgrow
+    /// the live window.
+    #[must_use]
+    pub fn pop(&self) -> Self {
+        if self.is_empty() {
+            return self.clone();
+        }
+        let start = self.start + 1;
+        if start > self.items.len() - start {
+            return Self {
+                items: Vector::from_vec(self.items.iter_from(start).collect()),
+                start: 0,
+                meta: self.meta.clone(),
+            };
+        }
+        Self {
+            items: self.items.clone(),
+            start,
+            meta: self.meta.clone(),
+        }
+    }
+
+    /// `conj`: `x` at the back (the vector's own `push_back`, so a
+    /// uniquely held queue grows in place).
+    #[must_use]
+    pub fn conj(self, x: Value) -> Self {
+        Self {
+            items: self.items.push_back(x),
+            start: self.start,
+            meta: self.meta,
+        }
+    }
+
+    /// In-place `pop` (a uniquely held queue, #277).
+    pub fn pop_mut(&mut self) {
+        *self = self.pop();
+    }
+
+    /// In-place `conj` (a uniquely held queue: the vector grows in
+    /// place when nothing else shares it).
+    pub fn push_mut(&mut self, x: Value) {
+        let items = std::mem::replace(&mut self.items, Vector::new_sync());
+        self.items = items.push_back(x);
+    }
+
+    /// The items front to back.
+    pub fn iter(&self) -> impl Iterator<Item = Value> + '_ {
+        self.items.iter_from(self.start)
+    }
+
+    /// The items front to back, collected.
+    #[must_use]
+    pub fn items(&self) -> Vec<Value> {
+        self.iter().collect()
+    }
+
+    /// The metadata map.
+    #[must_use]
+    pub fn meta(&self) -> Option<&Map> {
+        self.meta.as_ref()
+    }
+
+    /// The same queue with `meta`.
+    #[must_use]
+    pub fn with_meta(mut self, meta: Option<Map>) -> Self {
+        self.meta = meta;
+        self
+    }
+
+    /// Java `hashCode` (`List` semantics over the items).
+    #[must_use]
+    pub fn hash_code(&self) -> i32 {
+        self.iter().fold(1i32, |h, v| {
+            h.wrapping_mul(31).wrapping_add(crate::hash_code(&v))
+        })
+    }
+
+    /// The JVM's `Object.toString`: `clojure.lang.PersistentQueue@<hashCode hex>`.
+    fn java_name(&self) -> String {
+        format!("clojure.lang.PersistentQueue@{:x}", self.hash_code())
+    }
+}
+
+impl crate::ExtensionValue for QueueValue {
+    fn class_name(&self) -> String {
+        "clojure.lang.PersistentQueue".to_owned()
+    }
+
+    /// `#object[clojure.lang.PersistentQueue 0x<id> "…@<hash>"]`, the
+    /// JVM's form (it has no print-method of its own).
+    fn print(&self) -> String {
+        format!(
+            "#object[clojure.lang.PersistentQueue 0x{:x} \"{}\"]",
+            self as *const Self as usize,
+            self.java_name()
+        )
+    }
+
+    /// Not readably, the string goes in unquoted.
+    fn print_str(&self) -> Option<String> {
+        Some(format!(
+            "#object[clojure.lang.PersistentQueue 0x{:x} {}]",
+            self as *const Self as usize,
+            self.java_name()
+        ))
+    }
+
+    /// `str`: `Object.toString`.
+    fn java_str(&self) -> Option<String> {
+        Some(self.java_name())
+    }
+
+    fn dyn_eq(&self, other: &dyn crate::ExtensionValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|o| self.len() == o.len() && self.iter().eq(o.iter()))
+    }
+
+    fn dyn_hash(&self, state: &mut dyn std::hash::Hasher) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        // Fallback (`Value::hash` writes the sequential family
+        // directly): digest through a fresh state, like subvectors.
+        let mut h = DefaultHasher::new();
+        8u8.hash(&mut h);
+        self.len().hash(&mut h);
+        for item in self.iter() {
+            item.hash(&mut h);
+        }
+        state.write_u64(h.finish());
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+}
+
 /// The pieces of one string split, held as byte spans into the
 /// shared input instead of one allocation per piece: token-heavy
 /// splits (the tokenize-then-parse shape) then cost one span pair
@@ -2029,6 +2217,48 @@ mod tests {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
+
+    /// #277: the queue window's own contract (the oracle suite in
+    /// `clj-eval/tests/persistent_queue_277.rs` covers the language
+    /// surface): FIFO order, O(1) pops that compact once the dead prefix
+    /// outgrows the live window, in-place ops, and identity-free
+    /// equality and hashing among queues.
+    #[test]
+    fn queue_window_fifo_compaction_and_equality_277() {
+        use super::QueueValue;
+        let mut q = QueueValue::empty();
+        for i in 0..5 {
+            q.push_mut(int(i));
+        }
+        assert_eq!(q.len(), 5);
+        assert_eq!(q.peek(), int(0));
+        // Two pops keep the prefix (2 <= 3 live); the third compacts.
+        q.pop_mut();
+        q.pop_mut();
+        assert_eq!((q.start, q.items.len()), (2, 5));
+        q.pop_mut();
+        assert_eq!((q.start, q.items.len()), (0, 2));
+        assert_eq!(q.items(), vec![int(3), int(4)]);
+        // Same items, different windows: equal, same digest.
+        let other = QueueValue::empty().conj(int(3)).conj(int(4));
+        assert!(q.dyn_eq(&other));
+        assert!(!q.dyn_eq(&QueueValue::empty()));
+        assert!(!q.dyn_eq(&SubVectorValue::new(
+            Vector::from_vec(vec![int(3), int(4)]),
+            0,
+            2
+        )));
+        let digest = |x: &QueueValue| {
+            let mut h = DefaultHasher::new();
+            x.dyn_hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(digest(&q), digest(&other));
+        // Popping empty is a no-op.
+        let mut e = QueueValue::empty();
+        e.pop_mut();
+        assert!(e.is_empty() && e.peek() == Value::Nil);
+    }
 
     fn int(i: i64) -> Value {
         Value::Int(i)

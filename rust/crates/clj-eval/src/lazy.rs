@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 
 use clj_value::{
     Array, CHUNK_SIZE, ConsValue, CycleValue, ExtensionValue, IterateValue, KeySeqValue, List, Map,
-    PrimitiveVector, RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set,
+    PrimitiveVector, QueueValue, RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set,
     SplitVecValue, SubVectorValue, ThrowClass, TransientVector, ValSeqValue, Value, Vector,
 };
 
@@ -729,6 +729,7 @@ pub(crate) fn is_seqable(v: &Value) -> bool {
                 || any.downcast_ref::<ConsValue>().is_some()
                 || any.downcast_ref::<KeySeqValue>().is_some()
                 || any.downcast_ref::<ValSeqValue>().is_some()
+                || any.downcast_ref::<QueueValue>().is_some()
                 || crate::emucoll::as_list(v).is_some()
         }
         _ => false,
@@ -835,9 +836,9 @@ fn step_unit_extension_tail(eval: &mut Evaluator, v: &Value) -> Result<StepUnit,
         let s = crate::collmisc::seq_iteration(eval, it)?;
         return step_unit(eval, &s);
     }
-    // #205: walking an `ArrayList` steps its snapshot seq (same
-    // hook as `seq`).
-    if let Some(items) = crate::emucoll::list_snapshot(v) {
+    // #205: walking an `ArrayList` (or a #277 queue) steps its
+    // snapshot seq (same hook as `seq`).
+    if let Some(items) = extension_snapshot(v) {
         let s = realized_value(items, false, true, false, clj_value::SeqKind::Array);
         return step_unit(eval, &s);
     }
@@ -3934,9 +3935,9 @@ fn seq_value_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal>
     if let Some(it) = crate::collmisc::as_iteration(v) {
         return crate::collmisc::seq_iteration(eval, it);
     }
-    // #205: `ArrayList` seqs snapshot the slots (empties answer
-    // nil — `realized_value` holds that shape).
-    if let Some(items) = crate::emucoll::list_snapshot(v) {
+    // #205: `ArrayList` seqs snapshot the slots, and #277 queues their
+    // window (empties answer nil — `realized_value` holds that shape).
+    if let Some(items) = extension_snapshot(v) {
         return Ok(realized_value(
             items,
             false,
@@ -4111,9 +4112,18 @@ fn seq_maplike(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
     }
 }
 
+/// The items of an extension collection that seqs by snapshot: an
+/// `ArrayList`'s slots or a queue's window (#277).
+fn extension_snapshot(v: &Value) -> Option<Vec<Value>> {
+    crate::emucoll::list_snapshot(v).or_else(|| crate::coll::as_queue(v).map(QueueValue::items))
+}
+
 /// The first item of an extension collection (the subvector
-/// head, else the `ArrayList` snapshot head).
+/// head, a queue's front, else the `ArrayList` snapshot head).
 fn first_direct_extension(v: &Value) -> Option<Value> {
+    if let Some(q) = crate::coll::as_queue(v) {
+        return Some(q.peek());
+    }
     if let Some(sp) = as_splitvec(v) {
         return Some(sp.nth(0).unwrap_or(Value::Nil));
     }

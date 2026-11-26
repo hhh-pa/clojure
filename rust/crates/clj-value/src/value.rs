@@ -3684,6 +3684,10 @@ fn seq_ext_meta(e: &Arc<dyn ExtensionValue>) -> Option<&Map> {
             any.downcast_ref::<crate::SplitVecValue>()
                 .and_then(crate::SplitVecValue::meta)
         })
+        .or_else(|| {
+            any.downcast_ref::<crate::QueueValue>()
+                .and_then(crate::QueueValue::meta)
+        })
 }
 
 /// Rebuild a sequence extension value with new metadata (`None`
@@ -3711,6 +3715,7 @@ fn seq_ext_with_meta(
     retag!(crate::ValSeqValue);
     retag!(crate::SubVectorValue);
     retag!(crate::SplitVecValue);
+    retag!(crate::QueueValue);
     None
 }
 
@@ -4400,6 +4405,12 @@ fn hash_extension<H: Hasher>(e: &Arc<dyn ExtensionValue>, state: &mut H) {
         for item in sv.iter() {
             item.hash(state);
         }
+    } else if let Some(q) = e.as_any().downcast_ref::<crate::QueueValue>() {
+        state.write_u8(8);
+        q.len().hash(state);
+        for item in q.iter() {
+            item.hash(state);
+        }
     } else if let Some(sp) = e.as_any().downcast_ref::<crate::SplitVecValue>() {
         state.write_u8(8);
         sp.len().hash(state);
@@ -4674,6 +4685,9 @@ fn seq_items(v: &Value) -> Option<Vec<Value>> {
             }
             if let Some(sp) = e.as_any().downcast_ref::<crate::SplitVecValue>() {
                 return Some(sp.items());
+            }
+            if let Some(q) = e.as_any().downcast_ref::<crate::QueueValue>() {
+                return Some(q.items());
             }
             None
         }

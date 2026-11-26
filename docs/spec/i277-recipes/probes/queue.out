@@ -1,0 +1,40 @@
+q1 pr => #object[clojure.lang.PersistentQueue 0x3a7704c "clojure.lang.PersistentQueue@7861"]
+q2 str => "clojure.lang.PersistentQueue@7861"
+q3 print => "#object[clojure.lang.PersistentQueue 0x3a7704c clojure.lang.PersistentQueue@7861]"
+q4 seq => (1 2 3)
+q5 empty-seq => nil
+q6 count => 3
+q7 peek => 1
+q8 pop => #object[clojure.lang.PersistentQueue 0x5f577419 "clojure.lang.PersistentQueue@402"]
+q9 pop-empty => #object[clojure.lang.PersistentQueue 0x11963225 "clojure.lang.PersistentQueue@1"]
+q10 peek-empty => nil
+q11 empty? => [true false]
+q12 = vec => [true true true]
+q13 = queue => true
+q14 class => clojure.lang.PersistentQueue
+q15 vector? => [false false true true true]
+q16 into => #object[clojure.lang.PersistentQueue 0x6e5bfdfc "clojure.lang.PersistentQueue@442"]
+q17 into-vec => [1 2 3]
+q18 nth => 2
+q19 first/rest => [1 (2 3) (2 3)]
+q20 conj order => (2 3 4)
+q21 reduce => 6
+q22 map => (2 3 4)
+q23 empty => #object[clojure.lang.PersistentQueue 0x11963225 "clojure.lang.PersistentQueue@1"]
+q24 meta => {:a 1}
+q25 hash= => true
+q26 get => nil
+q27 contains? => java.lang.IllegalArgumentException: contains? not supported on type: clojure.lang.PersistentQueue
+q28 apply => 6
+q29 vec => [1 2 3]
+q30 sort => (1 2 3)
+q31 bfs => [0 1 2 3 4 5]
+q32 pr-nested => [#object[clojure.lang.PersistentQueue 0x3a7704c "clojure.lang.PersistentQueue@7861"] {:q #object[clojure.lang.PersistentQueue 0x3a7704c "clojure.lang.PersistentQueue@7861"]}]
+q33 empty-pr => #object[clojure.lang.PersistentQueue 0x11963225 "clojure.lang.PersistentQueue@1"]
+q34 last => 3
+q35 stack fns => [nil 0]
+q36 shared pop => [(2) (1 2)]
+q37 shared conj => [(1 2) (1)]
+q38 long bfs => 4001
+q39 hashCode => 30817
+q40 set member => true
