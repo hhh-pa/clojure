@@ -1286,6 +1286,16 @@ pub enum SortSpec {
 /// `compact()` churn on small sets (#271 Slice 5q).
 const SMALL_SET_MAX: usize = 8;
 
+/// Maximum member count a SORTED set keeps in [`SetStorage::Small`]
+/// (#277): sorted sets find positions by comparator binary search, never
+/// through the hash index, so the flat sorted slice serves them better
+/// than [`LargeSet`], whose insert re-clones every member into a new
+/// sidecar and updates the `rpds` index (a 64-member priority queue
+/// paid both on every `conj`/`disj`). A uniquely held set inserts with
+/// one `memmove`. Bounded because the generic hash paths
+/// ([`Set::contains`], set equality) scan small storage linearly.
+const SORTED_SMALL_SET_MAX: usize = 512;
+
 /// Hash-indexed persistent storage for sets past [`SMALL_SET_MAX`].
 #[derive(Clone, Debug)]
 struct LargeSet {
@@ -3191,7 +3201,7 @@ impl Set {
     pub fn insert_sorted_at(mut self, pos: usize, v: Value) -> Self {
         let data = Arc::make_mut(&mut self.0);
         match &mut data.storage {
-            SetStorage::Small(items) if items.len() < SMALL_SET_MAX => {
+            SetStorage::Small(items) if items.len() < SORTED_SMALL_SET_MAX => {
                 items.insert(pos, v);
             }
             SetStorage::Small(items) => {
@@ -3235,7 +3245,12 @@ impl Set {
     /// and the sort order.
     #[must_use]
     pub fn with_ordered_members(self, members: Vec<Value>) -> Self {
-        let storage = if members.len() <= SMALL_SET_MAX {
+        let small_max = if self.0.sort.is_some() {
+            SORTED_SMALL_SET_MAX
+        } else {
+            SMALL_SET_MAX
+        };
+        let storage = if members.len() <= small_max {
             SetStorage::Small(members)
         } else {
             SetStorage::large_from_vec(members)
@@ -6841,7 +6856,7 @@ mod tests {
 
     #[test]
     fn small_and_large_set_storage_paths_271() {
-        use super::{PackedStrings, Set, SortSpec, Vector};
+        use super::{PackedStrings, SORTED_SMALL_SET_MAX, Set, SetStorage, SortSpec, Vector};
         // Small set: from_items_checked, insert, dup insert, get, contains, without, iter
         let s = Set::from_items_checked(vec![Value::Int(1), Value::Int(2)]).unwrap();
         assert_eq!(s.size(), 2);
@@ -6874,13 +6889,24 @@ mod tests {
         let big2 = Set::from_items_checked((0..10).map(Value::Int).collect()).unwrap();
         assert_eq!(big, big2);
 
-        // Small & promoted sorted sets
+        // Small & promoted sorted sets: sorted sets stay flat up to
+        // SORTED_SMALL_SET_MAX (#277), promote past it, and insert into
+        // the promoted storage after.
+        let n = SORTED_SMALL_SET_MAX + 8;
         let mut ss = new_set().with_sort(Some(SortSpec::Natural));
-        for i in 0..10 {
+        for i in 0..n {
             ss = ss.insert_sorted_at(i, Value::Int(i as i64));
+            let flat = matches!(ss.0.storage, SetStorage::Small(_));
+            assert_eq!(flat, i < SORTED_SMALL_SET_MAX, "size {}", i + 1);
         }
-        assert_eq!(ss.sorted_len(), 10);
+        assert_eq!(ss.sorted_len(), n);
         assert_eq!(ss.sorted_member(0), Some(&Value::Int(0)));
+        assert_eq!(ss.sorted_member(n - 1), Some(&Value::Int((n - 1) as i64)));
+        let rebuilt = new_set()
+            .with_sort(Some(SortSpec::Natural))
+            .with_ordered_members((0..n).map(|i| Value::Int(i as i64)).collect());
+        assert!(matches!(rebuilt.0.storage, SetStorage::Large(_)));
+        assert_eq!(rebuilt, ss);
         let ss_sm = new_set()
             .with_sort(Some(SortSpec::Natural))
             .with_ordered_members(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
@@ -6893,7 +6919,7 @@ mod tests {
             ss_lg = ss_lg.without(&Value::Int(i));
         }
         ss_lg = ss_lg.without(&Value::Int(8));
-        assert_eq!(ss_lg.sorted_len(), 2);
+        assert_eq!(ss_lg.sorted_len(), n - 8);
         let ss_rebuilt = new_set().with_ordered_members((0..10).map(Value::Int).collect());
         assert_eq!(ss_rebuilt.size(), 10);
 

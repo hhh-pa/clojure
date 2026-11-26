@@ -531,7 +531,7 @@ fn conj_one(eval: &mut Evaluator, coll: Value, x: Value) -> Result<Value, Native
             let coll = Value::HostType(h);
             conj_maplike(eval, coll, &x)
         }
-        Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, &s, x)?)),
+        Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, s, x)?)),
         Value::Set(s) => {
             let x = crate::lazy::realize_key(eval, &x).map_err(signal_to_native)?;
             Ok(Value::Set(s.insert(x)))
@@ -1100,6 +1100,25 @@ fn update_in_up(
     }
 }
 
+/// `assoc-in` over an evaluated key path (#277: the VM's literal-path
+/// op, so no path vector is built or stepped): each level takes its
+/// child out of an owned parent, so uniquely held nests update in place.
+pub(crate) fn assoc_in_keys(
+    eval: &mut Evaluator,
+    mut m: Value,
+    keys: &[Value],
+    v: Value,
+) -> Result<Value, NativeError> {
+    // The op passes 1-4 keys (an empty path stays with the native).
+    let (k, rest) = keys.split_first().expect("a non-empty literal path");
+    if rest.is_empty() {
+        return assoc3(eval, m, k, v);
+    }
+    let inner = take_lookup(eval, &mut m, k)?.unwrap_or(Value::Nil);
+    let updated = assoc_in_keys(eval, inner, rest, v)?;
+    assoc3(eval, m, k, updated)
+}
+
 /// The `assoc-in` recursion (`ks` already stepped once).
 fn assoc_in_up(
     eval: &mut Evaluator,
@@ -1247,7 +1266,7 @@ pub(crate) fn native_disj_owned(
         Value::Set(s) if s.is_sorted() => {
             let mut out = s;
             for k in &args[1..] {
-                out = sorted_without_set(eval, &out, k)?;
+                out = sorted_without_set(eval, out, k)?;
             }
             Ok(Value::Set(out))
         }
@@ -3157,10 +3176,13 @@ fn sorted_lookup_map(
 }
 
 /// Sorted `conj`: a compare-0 hit is a no-op (the member stays).
-fn sorted_conj_set(eval: &mut Evaluator, s: &Set, v: Value) -> Result<Set, NativeError> {
-    Ok(match set_position(eval, s, &v)? {
-        SortPos::Found(_) => s.clone(),
-        SortPos::Insert(i) => s.clone().insert_sorted_at(i, v),
+/// Sorted `conj` over an owned set (#277: a uniquely held set, such as
+/// a moved loop accumulator, inserts in place; the borrowed version
+/// cloned it first, so every insert copied every member).
+fn sorted_conj_set(eval: &mut Evaluator, s: Set, v: Value) -> Result<Set, NativeError> {
+    Ok(match set_position(eval, &s, &v)? {
+        SortPos::Found(_) => s,
+        SortPos::Insert(i) => s.insert_sorted_at(i, v),
     })
 }
 
@@ -3173,11 +3195,12 @@ fn set_position(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<SortPos, Nat
     sort_position(eval, &spec, s.sorted_len(), |i| s.sorted_member(i), v)
 }
 
-/// Sorted `disj` / `contains?` through the stored member.
-fn sorted_without_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<Set, NativeError> {
-    Ok(match set_position(eval, s, v)? {
-        SortPos::Found(i) => s.clone().without_sorted_at(i),
-        SortPos::Insert(_) => s.clone(),
+/// Sorted `disj` over an owned set (in place when uniquely held, like
+/// [`sorted_conj_set`]).
+fn sorted_without_set(eval: &mut Evaluator, s: Set, v: &Value) -> Result<Set, NativeError> {
+    Ok(match set_position(eval, &s, v)? {
+        SortPos::Found(i) => s.without_sorted_at(i),
+        SortPos::Insert(_) => s,
     })
 }
 
@@ -3231,7 +3254,7 @@ fn sorted_set_from(
 ) -> Result<Value, NativeError> {
     let mut out = new_set().with_sort(Some(spec));
     for v in members {
-        out = sorted_conj_set(eval, &out, v.clone())?;
+        out = sorted_conj_set(eval, out, v.clone())?;
     }
     Ok(Value::Set(out))
 }

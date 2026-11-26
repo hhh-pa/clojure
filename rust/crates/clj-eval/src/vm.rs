@@ -1856,6 +1856,12 @@ impl Compiler {
     }
 
     fn compile_direct_plain(&mut self, call: &DirectCall) -> Exec {
+        if let Some(code) = self.try_get_in_literal(call) {
+            return code;
+        }
+        if let Some(code) = self.try_assoc_in_literal(call) {
+            return code;
+        }
         if let Some(ctor) = crate::vm_ops::value_ctor(call) {
             let ops = self.in_place_operands(call);
             return ctor.code(site_of(call), ops);
@@ -1867,6 +1873,49 @@ impl Compiler {
         }
         let ops: Vec<Operand> = call.args.iter().map(|a| self.operand(a, true)).collect();
         direct_general(site, ops)
+    }
+
+    /// A core `get-in` over a short vector-literal path (#277, see
+    /// [`crate::vm_ops::get_in_literal`]).
+    fn try_get_in_literal(&mut self, call: &DirectCall) -> Option<Exec> {
+        if crate::vm_ops::core_name(call)? != "get-in" {
+            return None;
+        }
+        let (coll, path, nf) = match call.args.as_slice() {
+            [coll, Expr::VecLit(path, None)] => (coll, path, None),
+            [coll, Expr::VecLit(path, None), nf] => (coll, path, Some(nf)),
+            _ => return None,
+        };
+        if path.is_empty() || path.len() > 4 {
+            return None;
+        }
+        let coll = self.compile(coll);
+        let keys = self.compile_all(path);
+        let nf = nf.map(|e| self.compile(e));
+        Some(crate::vm_ops::get_in_literal(site_of(call), coll, keys, nf))
+    }
+
+    /// A core `assoc-in` over a short vector-literal path (#277, see
+    /// [`crate::vm_ops::assoc_in_literal`]).
+    fn try_assoc_in_literal(&mut self, call: &DirectCall) -> Option<Exec> {
+        if crate::vm_ops::core_name(call)? != "assoc-in" {
+            return None;
+        }
+        let [coll, Expr::VecLit(path, None), val] = call.args.as_slice() else {
+            return None;
+        };
+        if path.is_empty() || path.len() > 4 {
+            return None;
+        }
+        let coll = self.operand(coll, true);
+        let keys = self.compile_all(path);
+        let val = self.compile(val);
+        Some(crate::vm_ops::assoc_in_literal(
+            site_of(call),
+            coll,
+            keys,
+            val,
+        ))
     }
 
     fn compile_vec(&mut self, elems: &[Expr], meta: Option<Map>) -> Exec {

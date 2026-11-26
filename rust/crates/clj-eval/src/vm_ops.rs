@@ -1117,6 +1117,84 @@ fn upd_native(c: Site, coll: Coll, rest: Vec<Operand>) -> Exec {
     })
 }
 
+/// `(get-in coll [k ...])` / `(get-in coll [k ...] not-found)` over a
+/// vector-literal path (#277): the keys evaluate as operands (in the
+/// JVM's order: collection, keys, not-found) and the lookups nest, so no
+/// path vector is built or stepped per call. A redefined `get-in` (an
+/// invalid site) gets its vector and is called through the var.
+pub(crate) fn get_in_literal(
+    call: Arc<DirectCall>,
+    coll: Exec,
+    keys: Vec<Exec>,
+    nf: Option<Exec>,
+) -> Exec {
+    let c = Site::new(call);
+    Box::new(move |ev, f| {
+        let mut cur = coll(ev, f)?;
+        let mut ks: SmallVec<[Value; 4]> = SmallVec::with_capacity(keys.len());
+        for k in &keys {
+            ks.push(k(ev, f)?);
+        }
+        let nf = match &nf {
+            Some(e) => Some(e(ev, f)?),
+            None => None,
+        };
+        if !ev.site_direct_valid(c.sid, &c.call) {
+            let path = Value::Vector(clj_value::Vector::from_vec(ks.into_vec()));
+            let mut args: SmallVec<[Value; 4]> = smallvec![cur, path];
+            args.extend(nf);
+            return native(ev, &c, args);
+        }
+        for k in &ks {
+            match crate::coll::lookup_present(ev, &cur, k).map_err(|e| ev.throw(e))? {
+                Some(v) => cur = v,
+                None => return Ok(nf.unwrap_or(Value::Nil)),
+            }
+        }
+        Ok(cur)
+    })
+}
+
+/// `(assoc-in coll [k ...] v)` over a vector-literal path (#277): like
+/// the update ops (a last-use collection register moves out, so unique
+/// nests update in place), with the keys as operands, so no path vector
+/// is built or stepped per call. A redefined `assoc-in` (an invalid site)
+/// gets its vector and is called through the var.
+pub(crate) fn assoc_in_literal(
+    call: Arc<DirectCall>,
+    coll: Operand,
+    keys: Vec<Exec>,
+    val: Exec,
+) -> Exec {
+    let c = Site::new(call);
+    let coll = match coll {
+        Operand::Loc(Loc::Reg(r), true) => Coll::Take(r),
+        Operand::Exec(e) => Coll::Exec(e),
+        other => Coll::Read(other),
+    };
+    Box::new(move |ev, f| {
+        let mut m = match &coll {
+            Coll::Exec(e) => e(ev, f)?,
+            _ => Value::Nil,
+        };
+        let mut ks: SmallVec<[Value; 4]> = SmallVec::with_capacity(keys.len());
+        for k in &keys {
+            ks.push(k(ev, f)?);
+        }
+        let v = val(ev, f)?;
+        match &coll {
+            Coll::Take(r) => m = std::mem::replace(&mut f.regs[*r], Value::Nil),
+            Coll::Read(o) => m = o.eval(ev, f)?,
+            Coll::Exec(_) => {}
+        }
+        if !ev.site_direct_valid(c.sid, &c.call) {
+            let path = Value::Vector(clj_value::Vector::from_vec(ks.into_vec()));
+            return native(ev, &c, smallvec![m, path, v]);
+        }
+        crate::coll::assoc_in_keys(ev, m, &ks, v).map_err(|e| ev.throw(e))
+    })
+}
+
 /// The update ops by core name and arg count.
 /// An update-op table row: core name, arg count, code constructor.
 type UpdRow = (&'static str, usize, UpdCtor);

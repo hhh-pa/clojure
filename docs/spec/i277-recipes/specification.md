@@ -37,3 +37,30 @@ Result (Linux, perf):
 | `tree_diameter` tc7 | 168 s (Pin timeout) | 3.92G (4.3×) | 906M |
 
 The remaining gap there is persistent-data overhead, which later slices address.
+
+### R2: sorted sets insert in place
+
+Two costs hit every `conj`/`disj` on a sorted set used as a priority queue.
+
+- **Storage:** past 8 members a sorted set used the hash-indexed large storage. Each insert re-cloned every member into a new sorted sidecar and updated the `rpds` index, which sorted sets never read: they find positions by comparator binary search. Sorted sets now keep the flat sorted slice up to 512 members (`SORTED_SMALL_SET_MAX`).
+- **Ownership:** the sorted `conj`/`disj` helpers borrowed the set and cloned it before inserting, so even a uniquely held set (a moved loop accumulator) copied every member. They now take the set by value. A uniquely held set inserts or removes with one `memmove`.
+
+Effect (Linux perf vs CPython's h2h count):
+
+| case | before | after |
+| --- | --- | --- |
+| `k_way_merge` tc6 | 2.55× | 0.99× |
+| `k_way_merge` tc7 | 4.46× | 1.31× |
+| `makespan` tc7 | 4.38× | 1.52× |
+
+### R3: literal-path `get-in` / `assoc-in` in the VM
+
+`(get-in m [i j])` and `(assoc-in m [i j] v)` built the path vector on every call and stepped it generically. Matrix code calls them in its inner loops. The VM now compiles a vector-literal path of 1-4 keys into the keys as operands:
+
+- **`get-in`** nests `lookup_present` steps, equivalent to the JVM's `get-in` for vector paths (`(get nil k nf)` is `nf`), not-found included.
+- **`assoc-in`** is an update op: a last-use collection register moves out, and each level takes its child out of an owned parent, so a uniquely held nest updates in place.
+- **Redefinition:** a redefined var (an invalid site) builds the vector and calls through the var, like every direct call here.
+
+Effect: `rational_chebyshev` 2.0-6.8× → 1.16-3.4×, `lup` tc7 4.4× → 2.8×, `motion_planning` tc6 3.7× → 3.0×.
+
+Pinned by `crates/clj-eval/tests/literal_paths_277.rs`: 29 JVM-oracle rows from `probes/literal_paths.clj`, covering every operand shape and the sorted-set cases, plus the redefinition behavior.
