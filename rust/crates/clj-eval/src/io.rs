@@ -1233,7 +1233,6 @@ mod tests {
     #[test]
     fn print_plain_str_and_try_print_join_paths() {
         let mut eval = crate::boot();
-        eval.print_defaults_only = true;
         // print_scalars single-string fast path (`print`/`println`) vs `pr`/`prn`/multi-arg
         let res = eval
             .eval_source(
@@ -1355,7 +1354,8 @@ mod tests {
         eval.pop_bindings(depth);
         assert!(!hit);
 
-        eval.print_defaults_only = false;
+        eval.eval_source("(defmethod print-method String [s w] (.write w s))")
+            .unwrap();
         let (hit, _) = run_stream(&mut eval, &comma, &sp, 3);
         assert!(!hit);
     }

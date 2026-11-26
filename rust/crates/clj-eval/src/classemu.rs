@@ -5885,9 +5885,11 @@ fn surface_gated(
 ) -> Option<Result<Value, NativeError>> {
     // Split by family for the complexity budget (arms are disjoint,
     // so order is irrelevant).
-    surface_gated_coll(eval, meth, target, rest)
+    // Deques and priority queues can answer isEmpty directly, before the
+    // generic collection handler walks the Java class hierarchy.
+    surface_gated_jcoll(eval, meth, target, rest)
+        .or_else(|| surface_gated_coll(eval, meth, target, rest))
         .or_else(|| surface_gated_misc(eval, meth, target, rest))
-        .or_else(|| surface_gated_jcoll(eval, meth, target, rest))
         .or_else(|| surface_gated_str(meth, target, rest))
         .or_else(|| surface_gated_builder(eval, meth, target, rest))
         .or_else(|| surface_gated_regex(meth, target, rest))

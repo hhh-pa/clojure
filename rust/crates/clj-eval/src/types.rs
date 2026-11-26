@@ -959,9 +959,11 @@ pub(crate) fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value,
     if args.len() < 2 {
         return Err(NativeError::arity("clojure.core/__meth*", args.len()));
     }
-    let method = match &args[0] {
-        Value::Str(s) => s.to_string(),
-        Value::Symbol(s) => s.name().to_owned(),
+    // Borrowed: a loop's interop calls must not allocate the
+    // method name on every call.
+    let method: &str = match &args[0] {
+        Value::Str(s) => s,
+        Value::Symbol(s) => s.name(),
         _ => return Err(cce_err(&args[0], "java.lang.String")),
     };
     let target = &args[1];
@@ -969,7 +971,7 @@ pub(crate) fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value,
     if matches!(target, Value::Nil) {
         return Err(npe_target());
     }
-    if let Some(hit) = crate::classemu::surface_meth(eval, &method, target, rest) {
+    if let Some(hit) = crate::classemu::surface_meth(eval, method, target, rest) {
         return hit;
     }
     // The descriptor plus the witness that the target is host (so
@@ -982,10 +984,10 @@ pub(crate) fn native_meth(eval: &mut Evaluator, args: &[Value]) -> Result<Value,
         _ => None,
     };
     match host {
-        Some((d, h)) => meth_on_def(eval, &d, h, target.clone(), &method, rest),
+        Some((d, h)) => meth_on_def(eval, &d, h, target.clone(), method, rest),
         None => {
             let class = jvm_class_of(target);
-            meth_miss(&method, rest, &class)
+            meth_miss(method, rest, &class)
         }
     }
 }

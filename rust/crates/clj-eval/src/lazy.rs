@@ -5027,14 +5027,87 @@ fn map_or_struct_content(v: &Value) -> Option<&Map> {
     }
 }
 
-/// `Util.equiv`: sequential pairs walk pairwise (early exit);
+/// A vector-like value under `=` (a plain vector or a subvector,
+/// the JVM's `APersistentVector` kinds): a window `off..off + len`
+/// over a backing vector.
+#[derive(Clone, Copy)]
+struct VectorWindow<'a> {
+    vec: &'a Vector,
+    off: usize,
+    len: usize,
+}
+
+impl<'a> VectorWindow<'a> {
+    /// The vector-like behind `v` (`None` for anything else).
+    fn of(v: &'a Value) -> Option<Self> {
+        match v {
+            Value::Vector(x) => Some(Self {
+                vec: x,
+                off: 0,
+                len: x.len(),
+            }),
+            Value::Extension(_) => as_subvector(v).map(|sv| Self {
+                vec: sv.vec(),
+                off: sv.start(),
+                len: sv.end() - sv.start(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The window as a flat `i64` slice (packed integer storage).
+    fn int_slice(&self) -> Option<&[i64]> {
+        self.vec
+            .as_flat_ints()
+            .map(|all| &all[self.off..self.off + self.len])
+    }
+}
+
+/// `APersistentVector.equiv`: two vector-likes compare by count
+/// first, then itemwise (the pairwise walk's step cells, buffer
+/// allocations and clones were most of a comparison's cost once a
+/// loop compares small vectors or subvectors — #277).
+fn equiv_vectors(
+    eval: &mut Evaluator,
+    a: VectorWindow<'_>,
+    b: VectorWindow<'_>,
+) -> Result<bool, Signal> {
+    if a.len != b.len {
+        return Ok(false);
+    }
+    if let (Some(xs), Some(ys)) = (a.int_slice(), b.int_slice()) {
+        return Ok(xs == ys);
+    }
+    for (x, y) in a
+        .vec
+        .iter_from(a.off)
+        .zip(b.vec.iter_from(b.off))
+        .take(a.len)
+    {
+        let same = match (&x, &y) {
+            (Value::Int(p), Value::Int(q)) => p == q,
+            _ => equiv_vals(eval, &x, &y)?,
+        };
+        if !same {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `Util.equiv`: vector-likes compare by count, then itemwise
+/// ([`equiv_vectors`]); the other sequential pairs walk pairwise
+/// (early exit);
 /// maps compare by size plus per-key recursion (missing keys fail
 /// even for nil values, like the JVM's sentinel lookup) — struct
 /// instances equiv as their content map, to plain maps and across
 /// bases (S12 oracles `sm-eq-map`, `sm-cross-basis`);
-/// unhashable-infinite members throw like `hasheq` does during
-/// the JVM's hash lookups; anything else falls back to `==`.
+/// unhashable-infinite members throw like `hasheq` does during the
+/// JVM's hash lookups; anything else falls back to `==`.
 pub(crate) fn equiv_vals(eval: &mut Evaluator, a: &Value, b: &Value) -> Result<bool, Signal> {
+    if let (Some(x), Some(y)) = (VectorWindow::of(a), VectorWindow::of(b)) {
+        return equiv_vectors(eval, x, y);
+    }
     if is_sequential(a) && is_sequential(b) {
         return equiv_seq(eval, a, b);
     }

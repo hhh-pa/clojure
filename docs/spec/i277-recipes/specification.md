@@ -77,3 +77,11 @@ The print snapshot now carries `defaults_only`: true in `BootMode::Lite` as befo
 Effect (Linux perf vs CPython's h2h count): `hanoi` tc6 6.55× → 3.13×, tc5 2.07× → 1.06×.
 
 Pinned by `crates/clj-eval/tests/print_fast_277.rs`: 25 JVM-oracle rows from `probes/print_fast.clj`, 16 of them while the multis are pristine and the rest after its `defmethod`s.
+
+### R5 and R6. Vector equality and emulated collection dispatch
+
+Vector and subvector equality checks lengths before comparing elements. Two packed integer windows compare their slices directly. Other vector elements use recursive Clojure equivalence, including its lazy realization order. The 100 rows in `probes/vector_equiv.clj` are checked against the JVM in the evaluator tests.
+
+Java method dispatch borrows the method name. Deques and priority queues handle collection methods through their concrete types before the generic collection handler walks the Java class hierarchy.
+
+In the workstation measurements, the vector change reduced instructions on `address_translation` tc7 from 4.69G to 2.04G. The collection dispatch change reduced `sliding_window_max` tc7 from 4.20 to 2.59 times the saved CPython instruction count. These are Linux perf measurements, with Pin remaining the CI gate.
