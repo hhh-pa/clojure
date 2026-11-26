@@ -104,6 +104,39 @@ func TestParseCanonical(t *testing.T) {
 	}
 }
 
+func TestParseCount(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want uint64
+		ok   bool
+	}{
+		{"7", 7, true},
+		{"9223372036854775807", 9223372036854775807, true}, // 2^63-1 parses
+		{"9223372036854775808", clamp, true},               // 2^63: past 63 bits, the clamp
+		{"18446744073709551615", clamp, true},              // llvm's 2^64-1 marker
+		{"99999999999999999999", clamp, true},              // past 64 bits too
+		{"-1", 0, false},
+		{"x", 0, false},
+	} {
+		got, ok := parseCount(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("parseCount(%q) = %d, %v; want %d, %v", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestParseCanonicalReadsTheUnreachableMarkerAsZero(t *testing.T) {
+	raw := "SF:/repo/rust/src/a.rs\n" +
+		"DA:1,18446744073709551615\n" +
+		"DA:2,5\n" +
+		"end_of_record\n"
+	got := parseCanonical(raw, "/repo")
+	want := map[string]map[int]int64{"/repo/rust/src/a.rs": {1: 0, 2: 5}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseCanonical = %v, want %v", got, want)
+	}
+}
+
 func TestParseCanonicalSkipsMalformedDA(t *testing.T) {
 	raw := "SF:/repo/rust/src/a.rs\n" +
 		"DA:1\n" +
