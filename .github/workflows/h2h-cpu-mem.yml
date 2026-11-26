@@ -69,10 +69,13 @@
 # inputs override either pin for bisection, mirroring the
 # clojure_rs_sha pattern of the snippet repos.
 #
-# REQUIRED SECRET: RESOURCES_PASSPHRASE (the snippet resource-bundle
-# passphrase), granted to this repo. Every leg decrypts its
-# suite's tests/resources.tar.xz.asc with it and fails loud
-# without it.
+# REQUIRED SECRET: RESOURCES_IMAGE_PASSPHRASE, the organization
+# secret the snippet repos share. The case bundle ships in the
+# RESOURCES_IMAGE Docker Hub image (/tests/resources.tar.xz.asc,
+# since clojure-code-snippet#71); every shard decrypts it with that
+# secret and fails loud without it. DOCKERHUB_USERNAME /
+# DOCKERHUB_TOKEN are optional (an authenticated pull avoids Docker
+# Hub's anonymous rate limit).
 
 name: h2h-cpu-mem
 
@@ -129,6 +132,9 @@ env:
   SNIPPETS_SHA_DEFAULT: master
   PYTHON_SNIPPETS_SHA_DEFAULT: master
   OCAML_SNIPPETS_SHA_DEFAULT: master
+  # The suites' shared case bundle (the same tag the snippet repos'
+  # own CI pulls; bump it with theirs after a resource refresh).
+  RESOURCES_IMAGE: hhhpa/snippet-resources:t1263
   # Pinned (not floating "3.11"): interpreter micro versions move
   # cpu numbers and the sweep must stay comparable run to run.
   # Bump deliberately.
@@ -433,47 +439,46 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Decrypt and extract clojure resources
+      # The three suites share one encrypted case bundle (the recipes
+      # superproject's resource/shared), shipped since the snippet repos'
+      # T1263 merges (clojure-code-snippet#71) in the RESOURCES_IMAGE
+      # Docker Hub image instead of each repo's tests/: pull it, decrypt
+      # it once with the RESOURCES_IMAGE_PASSPHRASE organization secret,
+      # and give every suite its tests/resources (hard links).
+      - name: Log in to Docker Hub (best effort)
+        continue-on-error: true
         env:
-          RESOURCES_PASSPHRASE: ${{ secrets.RESOURCES_PASSPHRASE }}
-        working-directory: snippets
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          if [ -z "$RESOURCES_PASSPHRASE" ]; then
-            echo "error: the RESOURCES_PASSPHRASE secret (granted to ${{ github.repository }}) is not configured." >&2
-            exit 1
-          fi
-          mkdir -p tests/resources
-          gpg --batch --yes --pinentry-mode loopback \
-            --passphrase "$RESOURCES_PASSPHRASE" \
-            -d tests/resources.tar.xz.asc | tar -xJ -C tests/resources --strip-components=1
+          [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ] || exit 0
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin docker.io
 
-      - name: Decrypt and extract python resources
-        env:
-          RESOURCES_PASSPHRASE: ${{ secrets.RESOURCES_PASSPHRASE }}
-        working-directory: pysnippets
+      - name: Pull test-resource image
         run: |
-          if [ -z "$RESOURCES_PASSPHRASE" ]; then
-            echo "error: the RESOURCES_PASSPHRASE secret (granted to ${{ github.repository }}) is not configured." >&2
-            exit 1
-          fi
-          mkdir -p tests/resources
-          gpg --batch --yes --pinentry-mode loopback \
-            --passphrase "$RESOURCES_PASSPHRASE" \
-            -d tests/resources.tar.xz.asc | tar -xJ -C tests/resources --strip-components=1
+          docker pull "$RESOURCES_IMAGE"
+          cid=$(docker create "$RESOURCES_IMAGE" /bin/true)
+          mkdir -p "$RUNNER_TEMP/bundle"
+          docker cp "$cid:/tests/resources.tar.xz.asc" "$RUNNER_TEMP/bundle/"
+          docker rm "$cid"
 
-      - name: Decrypt and extract ocaml resources
+      - name: Decrypt and extract resources
         env:
-          RESOURCES_PASSPHRASE: ${{ secrets.RESOURCES_PASSPHRASE }}
-        working-directory: ocamlsnippets
+          RESOURCES_IMAGE_PASSPHRASE: ${{ secrets.RESOURCES_IMAGE_PASSPHRASE }}
         run: |
-          if [ -z "$RESOURCES_PASSPHRASE" ]; then
-            echo "error: the RESOURCES_PASSPHRASE secret (granted to ${{ github.repository }}) is not configured." >&2
+          if [ -z "$RESOURCES_IMAGE_PASSPHRASE" ]; then
+            echo "error: the RESOURCES_IMAGE_PASSPHRASE organization secret is not available to ${{ github.repository }}." >&2
             exit 1
           fi
-          mkdir -p tests/resources
+          mkdir -p snippets/tests/resources
           gpg --batch --yes --pinentry-mode loopback \
-            --passphrase "$RESOURCES_PASSPHRASE" \
-            -d tests/resources.tar.xz.asc | tar -xJ -C tests/resources --strip-components=1
+            --passphrase "$RESOURCES_IMAGE_PASSPHRASE" \
+            -d "$RUNNER_TEMP/bundle/resources.tar.xz.asc" \
+            | tar -xJ -C snippets/tests/resources --strip-components=1
+          for suite in pysnippets ocamlsnippets; do
+            mkdir -p "$suite/tests"
+            cp -al snippets/tests/resources "$suite/tests/resources"
+          done
 
       - name: Install GNU time
         run: |
