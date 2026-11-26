@@ -33,67 +33,24 @@ fn outcome(eval: &mut Evaluator, expr: &str) -> String {
 fn probe_eval() -> Evaluator {
     let mut eval = boot();
     let setup: Vec<&str> = PROBES.lines().filter(|l| !l.starts_with("(t ")).collect();
-    eval.eval_source(&setup.join("\n")).expect("the probe definitions load");
+    eval.eval_source(&setup.join("\n"))
+        .expect("the probe definitions load");
     eval
 }
 
 /// `(label, expression, JVM answer)`.
 const ORACLE: &[(&str, &str, &str)] = &[
-    (
-        "g1 found",
-        r##"(f1 m)"##,
-        r##"1"##,
-    ),
-    (
-        "g2 missing nf",
-        r##"(f2 m :x)"##,
-        r##":nf"##,
-    ),
-    (
-        "g3 present nil val",
-        r##"(f2 m :n)"##,
-        r##"nil"##,
-    ),
-    (
-        "g4 vector index",
-        r##"(f3 m 1 0)"##,
-        r##"3"##,
-    ),
-    (
-        "g5 out of range",
-        r##"(f3 m 5 0)"##,
-        r##"nil"##,
-    ),
-    (
-        "g6 nil intermediate nf",
-        r##"(f4 m)"##,
-        r##":nf"##,
-    ),
-    (
-        "g7 non-literal path",
-        r##"(f5 m [:a :b])"##,
-        r##"1"##,
-    ),
-    (
-        "g8 five keys",
-        r##"(f6 m)"##,
-        r##"nil"##,
-    ),
-    (
-        "g9 nil coll",
-        r##"(f1 nil)"##,
-        r##"nil"##,
-    ),
-    (
-        "g10 string coll",
-        r##"(get-in "abc" [1])"##,
-        r##"\b"##,
-    ),
-    (
-        "g12 one key",
-        r##"(get-in m [:v])"##,
-        r##"[[1 2] [3 4]]"##,
-    ),
+    ("g1 found", r##"(f1 m)"##, r##"1"##),
+    ("g2 missing nf", r##"(f2 m :x)"##, r##":nf"##),
+    ("g3 present nil val", r##"(f2 m :n)"##, r##"nil"##),
+    ("g4 vector index", r##"(f3 m 1 0)"##, r##"3"##),
+    ("g5 out of range", r##"(f3 m 5 0)"##, r##"nil"##),
+    ("g6 nil intermediate nf", r##"(f4 m)"##, r##":nf"##),
+    ("g7 non-literal path", r##"(f5 m [:a :b])"##, r##"1"##),
+    ("g8 five keys", r##"(f6 m)"##, r##"nil"##),
+    ("g9 nil coll", r##"(f1 nil)"##, r##"nil"##),
+    ("g10 string coll", r##"(get-in "abc" [1])"##, r##"\b"##),
+    ("g12 one key", r##"(get-in m [:v])"##, r##"[[1 2] [3 4]]"##),
     (
         "g13 order",
         r##"(let [log (atom [])] (get-in (do (swap! log conj :coll) m) [(do (swap! log conj :k1) :a) (do (swap! log conj :k2) :b)] (do (swap! log conj :nf) 0)) @log)"##,
@@ -139,11 +96,7 @@ const ORACLE: &[(&str, &str, &str)] = &[
         r##"(assoc-in nil [:a :b] 1)"##,
         r##"{:a {:b 1}}"##,
     ),
-    (
-        "a9 one key",
-        r##"(assoc-in {} [:k] 1)"##,
-        r##"{:k 1}"##,
-    ),
+    ("a9 one key", r##"(assoc-in {} [:k] 1)"##, r##"{:k 1}"##),
     (
         "a11 string key on vector",
         r##"(assoc-in [[1]] [0 :x] 1)"##,
@@ -207,11 +160,17 @@ fn literal_path_ops_follow_a_redefined_var_277() {
     // build the path vector and call the redefinition.
     let mut eval = probe_eval();
     assert_eq!(
-        outcome(&mut eval, "(with-redefs [get-in (fn [c p & nf] [:get p nf])] [(f1 m) (f2 m :x)])"),
+        outcome(
+            &mut eval,
+            "(with-redefs [get-in (fn [c p & nf] [:get p nf])] [(f1 m) (f2 m :x)])"
+        ),
         "[[:get [:a :b] nil] [:get [:a :x] (:nf)]]"
     );
     assert_eq!(
-        outcome(&mut eval, "(with-redefs [assoc-in (fn [c p v] [:assoc p v])] (a1 m 7))"),
+        outcome(
+            &mut eval,
+            "(with-redefs [assoc-in (fn [c p v] [:assoc p v])] (a1 m 7))"
+        ),
         "[:assoc [:a :b] 7]"
     );
 }

@@ -64,3 +64,16 @@ Effect (Linux perf vs CPython's h2h count):
 Effect: `rational_chebyshev` 2.0-6.8× → 1.16-3.4×, `lup` tc7 4.4× → 2.8×, `motion_planning` tc6 3.7× → 3.0×.
 
 Pinned by `crates/clj-eval/tests/literal_paths_277.rs`: 29 JVM-oracle rows from `probes/literal_paths.clj`, covering every operand shape and the sorted-set cases, plus the redefinition behavior.
+
+### R4: the full boot prints scalars through the booted defaults
+
+`(println "x" 1)` with scalar arguments took the generic path in the full boot: every value went through the `print-method` multimethod (dispatch, method lookup, an interpreted method call), where `BootMode::Lite` rendered the scalars directly. Programs that print per line paid that on each one; `hanoi` test 6 was 6.6× CPython with `native_print` and `core_read` its top self symbols.
+
+The print snapshot now carries `defaults_only`: true in `BootMode::Lite` as before, and in the full boot while `print-method` and `print-dup` still hold the booted multis.
+
+- **Guard:** the boot keeps both roots (`Evaluator::pristine_print`, shared by forks like the other registry-global baselines). The snapshot compares them with the live roots by `Arc::ptr_eq` on each refresh. Multis are immutable snapshots here (`defmethod`, `remove-method`, `prefer-method` install a new root), so the first `defmethod` ends the fast path for good, as does a replaced root.
+- **Unchanged answers:** the fast path renders what the booted default methods render (`*print-readably*`, `*print-meta*`, `*print-length*`, `*print-level*`, `*print-dup*` and a custom `*out*` writer included). A `*print-dup*` snapshot takes the generic path, as in `BootMode::Lite`.
+
+Effect (Linux perf vs CPython's h2h count): `hanoi` tc6 6.55× → 3.13×, tc5 2.07× → 1.06×.
+
+Pinned by `crates/clj-eval/tests/print_fast_277.rs`: 25 JVM-oracle rows from `probes/print_fast.clj`, 16 of them while the multis are pristine and the rest after its `defmethod`s.

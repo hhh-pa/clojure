@@ -3029,6 +3029,10 @@ pub fn boot() -> Evaluator {
     // The load's macroexpansions consume `gensym` numbers; the
     // user-visible counter restarts from 1 (S5C pins `G__1` first).
     eval.reset_gensym();
+    eval.pristine_print = Some((
+        deref_core(&eval, "print-method"),
+        deref_core(&eval, "print-dup"),
+    ));
     eval
 }
 

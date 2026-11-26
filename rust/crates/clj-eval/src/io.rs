@@ -573,7 +573,7 @@ fn print_scalars(
     ln: bool,
 ) -> Result<bool, NativeError> {
     let plain = !args.is_empty() && args.iter().all(is_print_scalar);
-    if !plain || !eval.print_defaults_only || snap.dup {
+    if !plain || !snap.defaults_only || snap.dup {
         return Ok(false);
     }
     check_writer(&snap.out)?;
@@ -786,7 +786,7 @@ pub(crate) fn try_print_join(
         return Ok(false);
     };
     let snap = eval.print_snap_mut()?;
-    if !eval.print_defaults_only || snap.dup {
+    if !snap.defaults_only || snap.dup {
         return Ok(false);
     }
     check_writer(&snap.out)?;
