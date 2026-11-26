@@ -916,6 +916,16 @@ A trace of the generic core calls the near-line programs make (cases at 1.0–1.
 
 Measured (macOS): `var_es` 23.99M -> 23.54M instructions on its first case, identical output.
 
+### 6.69 Slice 6l: stable maps, sets and keywords passed by name
+
+The token parsers many programs share call `(every? digit-values digits)`, passing a map-valued var as the predicate. 6e resolves a program fn passed by name only when it is a `defn` with a compiled arity, so these traversals took the generic core call.
+
+- **Resolution (`Lowerer::named_callable`, `clj-aot/src/native.rs`):** a stable var whose root is a map, set or keyword (`StableKind::Lookup`), used after its `def` has run and called with one or two args, now resolves as well. Its eta `fn`'s call `(v x)` lowers as the stable lookup (`try_lower_stable_lookup`, `rt_n_lookup_call`).
+  - The traversal calls `(pred x)` on the root it read, and a stable root cannot change, so the eta is the same call.
+- **Verification:** corpus `named_fns.clj`, with output identical between `run` and the native binary. It covers `every?`, `mapv`, `filterv`, `some`, `reduce`, `count`/`filter` and `apply str`/`map` over a `zipmap` map, a set literal and a keyword var, including missing keys and the two-arg lookup with a default.
+
+Measured (macOS, interleaved A/B of 6k and 6l over all 1754 cases against 6j): median -1.2K instructions, mean -3.1K; `var_es` -6 to -7% (6k).
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

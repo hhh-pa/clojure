@@ -4288,8 +4288,14 @@ impl<'ctx> Lowerer<'ctx> {
         if var.sym.namespace() == Some("clojure.core") {
             return self.eta.contains_key(&(var.sym.name().to_owned(), n));
         }
-        self.stable_of(var).is_some_and(|sr| self.unit >= sr.unit)
-            && self.direct_target(fe, n).is_some()
+        // A stable map, set or keyword (#271 Slice 6l) calls as its
+        // lookup once its `def` has run (`try_lower_stable_lookup`).
+        let lookup = |sr: StableRoot<'ctx>| {
+            matches!(sr.kind, StableKind::Lookup) && self.stable_unchecked(sr) && n <= 2
+        };
+        self.stable_of(var).is_some_and(|sr| {
+            self.unit >= sr.unit && (self.direct_target(fe, n).is_some() || lookup(sr))
+        })
     }
 
     /// `fe`, a fn passed by name, as the one-arity `fn` calling it with `n`

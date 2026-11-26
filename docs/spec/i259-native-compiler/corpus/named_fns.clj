@@ -51,3 +51,12 @@
 ;; A var the program redefines keeps the plain call, which reads its root once.
 (defn shifting [x] (def shifting (fn [y] (* 100 y))) (inc x))
 (println (mapv shifting [1 2 3]) (mapv shifting [1 2]))
+
+;; A stable map, set or keyword passed by name calls as its lookup (Slice 6l).
+(def digit-vals (zipmap "0123456789" (range 10)))
+(def vowels #{\a \e \i \o \u})
+(def kw-a :a)
+(defn all-digits? [s] (every? digit-vals (vec s)))
+(println (all-digits? "0451") (all-digits? "04x1") (mapv digit-vals [\3 \9 \x]) (filterv vowels (vec "education"))
+         (mapv kw-a [{:a 1} {:b 2} {:a 3}]) (some vowels (vec "rhythm")) (some vowels (vec "sky blue"))
+         (reduce digit-vals 0 [\5 \x]) (count (filter vowels "aeiou")) (apply str (map digit-vals "12")))
