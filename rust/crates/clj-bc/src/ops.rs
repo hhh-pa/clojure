@@ -627,6 +627,11 @@ fn apply2_eq<O: OutSlot>(out: &mut O, invert: bool, a: &Value, b: &Value) -> boo
         (Value::Double(x), Value::Double(y)) if !x.is_nan() && !y.is_nan() => x == y,
         (Value::Keyword(x), Value::Keyword(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
+        // Two flat long vectors compare their longs (#271 Slice 6m).
+        (Value::Vector(x), Value::Vector(y)) => match (x.as_flat_ints(), y.as_flat_ints()) {
+            (Some(xs), Some(ys)) => xs == ys,
+            _ => return false,
+        },
         (
             Value::Int(_) | Value::Char(_) | Value::Bool(_) | Value::Nil,
             Value::Nil | Value::Bool(_),

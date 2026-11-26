@@ -619,6 +619,20 @@ mod tests {
     }
 
     #[test]
+    fn flat_long_vectors_compare_inline_271() {
+        let eq = |a: &Value, b: &Value| {
+            let mut out = None;
+            apply2(&mut out, crate::ops::BcOp2::Eq, a, b, None).then(|| out.unwrap())
+        };
+        let v = |xs: &[i64]| Value::Vector(Vector::from_ints(xs.to_vec()));
+        assert_eq!(eq(&v(&[0, 1]), &v(&[0, 1])), Some(Value::Bool(true)));
+        assert_eq!(eq(&v(&[0, 1]), &v(&[1, 0])), Some(Value::Bool(false)));
+        assert_eq!(eq(&v(&[0]), &v(&[0, 0])), Some(Value::Bool(false)));
+        let items = Value::Vector(Vector::from_vec(vec![Value::Str("a".into())]));
+        assert_eq!(eq(&v(&[0]), &items), None);
+    }
+
+    #[test]
     fn nth_flat_reads_flat_vectors_only_271() {
         let read = |coll: &Value, idx: Value| {
             let mut out = None;
@@ -1011,14 +1025,17 @@ mod tests {
             run2(BcOp2::Eq, &Value::Int(1), &Value::Nil),
             Some(Value::Bool(false))
         );
+        // Flat long vectors (empty ones included) compare inline (#271).
         assert_eq!(
             run2(
                 BcOp2::Eq,
                 &Value::Vector(Vector::new_sync()),
                 &Value::Vector(Vector::new_sync())
             ),
-            None
+            Some(Value::Bool(true))
         );
+        let empty_map = Value::Map(Map::from_kvs_last_wins(Vec::new()));
+        assert_eq!(run2(BcOp2::Eq, &empty_map, &empty_map), None);
 
         for op in [
             BcOp2::Quot,

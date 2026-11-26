@@ -228,6 +228,8 @@ pub(crate) fn scalar_eq(a: &Value, b: &Value) -> Option<bool> {
         (Value::Nil, Value::Nil) => true,
         (Value::Keyword(x), Value::Keyword(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
+        // Two flat long vectors compare their longs (#271 Slice 6m).
+        (Value::Vector(x), Value::Vector(y)) => x.as_flat_ints()? == y.as_flat_ints()?,
         _ => return None,
     })
 }
@@ -239,6 +241,15 @@ mod tests {
         Array, ArrayDesc, ArrayStore, BaseType, Keyword, Transient, TransientKind, TransientVector,
         Vector,
     };
+
+    #[test]
+    fn flat_long_vectors_compare_inline_271() {
+        let v = |xs: &[i64]| Value::Vector(Vector::from_ints(xs.to_vec()));
+        assert_eq!(scalar_eq(&v(&[0, 0]), &v(&[0, 0])), Some(true));
+        assert_eq!(scalar_eq(&v(&[0, 0]), &v(&[0, 1])), Some(false));
+        let items = Value::Vector(Vector::from_vec(vec![Value::Nil]));
+        assert_eq!(scalar_eq(&v(&[0]), &items), None);
+    }
 
     #[test]
     fn tuple_and_double_keys_look_up_inline_271() {

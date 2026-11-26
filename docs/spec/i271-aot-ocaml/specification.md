@@ -926,6 +926,17 @@ The token parsers many programs share call `(every? digit-values digits)`, passi
 
 Measured (macOS, interleaved A/B of 6k and 6l over all 1754 cases against 6j): median -1.2K instructions, mean -3.1K; `var_es` -6 to -7% (6k).
 
+### 6.70 Slice 6m: `=` of flat long vectors inline
+
+The same trace found `=` as the next generic call. `var_es`'s `(count (filter #(= % [0 0]) tr))` compares each pair with a vector literal about 96 times per case, and neither the bitcode `=` (`rt_bc_2_eq`) nor the runtime's inline op (`scalar_eq`) knew vectors, so every comparison took the general native.
+
+- **Equality (`clj-bc/src/ops.rs` `apply2_eq`, `clj-eval/src/vm_intrinsics.rs` `scalar_eq`):** two vectors whose storage is flat packed longs compare their long slices. Any other vector pair still takes the general native, with its sequential, numeric-category and nested semantics.
+- **Verification:**
+  - Unit tests `flat_long_vectors_compare_inline_271` (clj-bc and clj-eval): equal, unequal, different lengths, and a non-long vector declining.
+  - Corpus `vector_equality.clj`, with output identical between `run` and the native binary: the filter tallies, vector against list, nested vectors, a double against a long, empty vectors, 2000-long vectors, `not=`, and a subvector.
+
+Measured (macOS): `var_es` 23.48M -> 23.22M instructions on its first case (with 6k, 23.99M -> 23.22M), identical output.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
