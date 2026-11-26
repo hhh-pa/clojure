@@ -907,6 +907,15 @@ A plain map pattern (`{:keys [a b]}`, `{a :a}`, `:strs`, `:syms`, `:or`) convert
 
 Measured (macOS): a two-key `{:keys [a b]}` bind in a loop 580 -> 472 instructions per iteration.
 
+### 6.68 Slice 6k: variadic `conj` as a chain of owned updates
+
+A trace of the generic core calls the near-line programs make (cases at 1.0–1.4x OCaml, a temporary local probe counting `core_fallback`/`call_core_var` by var) showed about 170 generic calls per run. Of those, 2002 of 4402 were `conj`, and 2000 of them came from one site in `var_es`, `(conj out z0 z1)`. Only the two-arg `conj` has an owned op, so the variadic call took the general native every time, about 1000 times per case.
+
+- **Lowering (`try_lower_conj_chain`, `clj-aot/src/native.rs`):** `(conj coll x1 x2 …)` with two or more items evaluates every arg first, in order, with a local at its last use moved. It then runs one owned two-arg `conj` per item (the lean in-place bitcode path first), each over the previous result. That is `conj`'s own definition, so values, metadata and errors are the call's. `assoc` and `conj` now share one dispatcher (`try_lower_update_call`).
+- **Verification:** corpus `conj_chain.clj`, with output identical between `run` and the native binary. It covers vectors, lists, `nil`, sets, map entries and maps, sorted sets, metadata, `nil` items, subvectors, a 40-item vector, argument side effects in order, a loop accumulator, a shared original left intact, and the pair, string and number errors.
+
+Measured (macOS): `var_es` 23.99M -> 23.54M instructions on its first case, identical output.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.

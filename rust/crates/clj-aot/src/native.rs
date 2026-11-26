@@ -3878,6 +3878,20 @@ impl<'ctx> Lowerer<'ctx> {
         self.lower_direct_with(f, call, None, dest)
     }
 
+    /// A specialized `assoc` or `conj`: their variadic chains, and the
+    /// indexed vector step.
+    fn try_lower_update_call(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if call.var.sym.name() == "conj" {
+            return self.try_lower_conj_chain(f, call, dest);
+        }
+        self.try_lower_assoc_call(f, call, dest)
+    }
+
     /// A specialized `assoc`: an indexed vector step, else a multi-pair chain.
     fn try_lower_assoc_call(
         &mut self,
@@ -3936,6 +3950,65 @@ impl<'ctx> Lowerer<'ctx> {
                     &[acc.into(), self.u64c(k), arr.into()],
                 )
                 .expect("assoc status");
+            self.check(f, st);
+            if let Some(done) = lean_done {
+                self.builder.build_unconditional_branch(done).expect("br");
+                self.builder.position_at_end(done);
+            }
+            self.free_slot_array(f, arr, elems);
+        }
+        self.move_v(f.func, dest, acc);
+        self.free_slots(f, &vals);
+        Ok(true)
+    }
+
+    /// `(conj coll x1 x2 …)` as the chain `conj` is defined as (#271 Slice
+    /// 6k): every arg evaluated first, in order (a local at its last use
+    /// moved), then one owned two-arg `conj` per item, so the collection
+    /// the first item copies (or a moved accumulator) grows in place. The
+    /// variadic call went through the generic core call per use.
+    fn try_lower_conj_chain(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        call: &clj_eval::expr::DirectCall,
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if call.args.len() < 3 {
+            return Ok(false);
+        }
+        let mut vals = Vec::with_capacity(call.args.len());
+        for a in &call.args {
+            let s = self.slot(f);
+            match a {
+                Expr::Local(i) if is_move(f, a) && self.slot_of(f, *i).is_some() => {
+                    let src = self.slot_of(f, *i).expect("checked");
+                    self.move_v(f.func, s, src);
+                }
+                _ => self.lower(f, a, s)?,
+            }
+            vals.push(s);
+        }
+        let (k, op) = self.own_target(call, 2);
+        let acc = vals[0];
+        for &item in &vals[1..] {
+            let (arr, elems) = self.slot_array(f, 2);
+            for (e, src) in elems.iter().zip([acc, item]) {
+                self.move_v(f.func, *e, src);
+            }
+            let lean_done = self.try_lean_own(f, Some("conj"), 2, acc, arr, &elems);
+            let aref = self.slots_ref(f, arr, 2);
+            let st = self
+                .call(
+                    "rt_n_core_own",
+                    Some(self.i32t),
+                    &[
+                        acc.into(),
+                        self.i32t.const_int(u64::from(op), false).into(),
+                        self.u64c(k),
+                        aref.into(),
+                    ],
+                )
+                .expect("conj status");
             self.check(f, st);
             if let Some(done) = lean_done {
                 self.builder.build_unconditional_branch(done).expect("br");
@@ -4165,7 +4238,7 @@ impl<'ctx> Lowerer<'ctx> {
             return Ok(false);
         }
         let specialized = match call.var.sym.name() {
-            "assoc" => self.try_lower_assoc_call(f, call, dest),
+            "assoc" | "conj" => self.try_lower_update_call(f, call, dest),
             "first" => self.try_lower_first_mapped(f, call, dest),
             "into" => self.try_lower_into_mapcat(f, call, dest),
             "vec" => self.try_lower_sort_vec(f, call, dest),
