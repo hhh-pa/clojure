@@ -8,7 +8,7 @@
 # regenerates it for every build it ships or measures (rust-release.yml,
 # the `hot-text` job of h2h-cpu-mem.yml).
 #
-# Training set: this directory's workloads/*.clj (26 generic programs,
+# Training set: this directory's workloads/*.clj (27 generic programs,
 # empty stdin) run under `clojure-rs run` with callgrind, never the
 # benchmark snippets or their inputs.
 #
