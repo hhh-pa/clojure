@@ -615,6 +615,7 @@ pub(crate) const APPLY1: &[(&str, Apply1)] = &[
     ("unchecked-negate", <UncheckedNegate as Op1>::apply),
     ("deref", <DerefCell as Op1>::apply),
     ("char", <CharOf as Op1>::apply),
+    ("second", <Second as Op1>::apply),
 ];
 
 pub(crate) const APPLY2: &[(&str, Apply2)] = &[
@@ -820,6 +821,7 @@ const UNARY: &[Row1] = &[
     ("unchecked-negate", shape1::<UncheckedNegate, AsValue>, None),
     ("deref", shape1::<DerefCell, AsValue>, None),
     ("char", shape1::<CharOf, AsValue>, None),
+    ("second", shape1::<Second, AsValue>, None),
 ];
 
 /// The analyzed native's `clojure.core` name (its display).
@@ -2357,6 +2359,21 @@ impl Op1 for First {
     #[inline(always)]
     fn apply(a: &Value) -> Option<Value> {
         crate::lazy::first_fast(a)
+    }
+}
+
+/// `(second coll)` of a vector or nil (#271 Slice 6n): the item at 1, else
+/// nil; other colls take the native.
+pub(crate) struct Second;
+
+impl Op1 for Second {
+    #[inline(always)]
+    fn apply(a: &Value) -> Option<Value> {
+        match a {
+            Value::Vector(v) => Some(v.get(1).unwrap_or(Value::Nil)),
+            Value::Nil => Some(Value::Nil),
+            _ => None,
+        }
     }
 }
 

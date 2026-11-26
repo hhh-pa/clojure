@@ -937,6 +937,15 @@ The same trace found `=` as the next generic call. `var_es`'s `(count (filter #(
 
 Measured (macOS): `var_es` 23.48M -> 23.22M instructions on its first case (with 6k, 23.99M -> 23.22M), identical output.
 
+### 6.71 Slice 6n: `second` of a vector inline
+
+The generic-call trace counted 95 `(second node)` calls in `pratt_parser`, which reads its AST nodes as vectors (`[:num 5]`). `second` had no inline op, so every call took the general native through the var table.
+
+- **Op (`Second`, `clj-eval/src/vm_ops.rs`, appended to the one-arg inline table so no other op's index moves):** a vector gives its item at 1, or `nil` when it is shorter, and `nil` gives `nil`. Every other collection (lists, strings, maps, seqs, subvectors, sets) takes the native. The VM and the native runtime share the table.
+- **Verification:** corpus `second_inline.clj`, with output identical between `run` and the native binary. It covers vectors with fewer than two items, `nil` items, lists, strings, maps, ranges, subvectors and sets.
+
+Measured (macOS): `pratt_parser` -23K and -85K instructions on its first two cases.
+
 ## 7. Acceptance Checklist (Issue #271)
 
 - [ ] `h2h-compare` `--allow-extra-challenger` implemented and covered by Go tests.
