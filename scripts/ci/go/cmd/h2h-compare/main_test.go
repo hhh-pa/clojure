@@ -361,3 +361,90 @@ func TestAllowExtraChallengerDirect(t *testing.T) {
 		t.Fatalf("in-process missing-base exit = %d, want 1", code)
 	}
 }
+
+// writePinReport writes one leg whose cases carry a Pin count, or, for a
+// nil count, the measure harness's Pin skip (null pin_instructions plus a
+// pin_skipped reason, unless reason is "" for malformed data) (#277).
+func writePinReport(t *testing.T, path string, cases [][4]any, reason string) {
+	t.Helper()
+	results := make([]map[string]any, 0, len(cases))
+	for _, c := range cases {
+		row := map[string]any{
+			"label": c[0], "stem": "solution", "script": "src/" + c[0].(string) + "/solution.clj",
+			"case": c[1], "ok": true, "error": nil,
+			"runs": []map[string]any{{"wall_s": 0.1}},
+			"summary": map[string]any{
+				"maxrss_kb":        map[string]any{"min": c[2], "median": c[2], "max": c[2]},
+				"pin_instructions": nil,
+			},
+		}
+		if c[3] != nil {
+			row["summary"].(map[string]any)["pin_instructions"] = map[string]any{"min": c[3], "median": c[3], "max": c[3]}
+		} else if reason != "" {
+			row["pin_skipped"] = reason
+		}
+		results = append(results, row)
+	}
+	doc := map[string]any{"failures": []string{}, "missing": []string{},
+		"config": map[string]any{"shard": "0/1", "repeat": 1}, "results": results}
+	data, err := json.MarshalIndent(doc, "", " ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPinSkipped(t *testing.T) {
+	work := t.TempDir()
+	base := filepath.Join(work, "base.json")
+	chal := filepath.Join(work, "chal.json")
+	args := func(extra ...string) []string {
+		return append([]string{"--label", "recipes", "--base-name", "PY", "--challenger-name", "RS",
+			"--jvm", base, "--rs", chal, "--metrics", "mem,ins", "--margin", "0.15"}, extra...)
+	}
+	const timeout = "TIMEOUT (>1500s)"
+
+	// Skipped on both sides: INS compares nothing (reported), MEM still does.
+	writePinReport(t, base, [][4]any{{"tree/diameter", "case_7", 1000, nil}, {"sort/quick", "case_0", 1000, 500}}, timeout)
+	writePinReport(t, chal, [][4]any{{"tree/diameter", "case_7", 900, nil}, {"sort/quick", "case_0", 900, 400}}, timeout)
+	bin := cmdtest.Build(t, ".")
+	stdout, code := cmdtest.Run(t, bin, ".", args()...)
+	if code != 0 || !strings.Contains(stdout, "INS (median): RS wins 1, losses 0, ties 0, pin-skipped 1") ||
+		!strings.Contains(stdout, "--- PIN-SKIPPED (1) ---") ||
+		!strings.Contains(stdout, "tree/diameter/case_7 PY="+timeout+" RS="+timeout) ||
+		!strings.Contains(stdout, "MEM (median): RS wins 2") {
+		t.Fatalf("both-skipped: code=%d\n%s", code, stdout)
+	}
+	if code := run(args()); code != 0 {
+		t.Fatalf("in-process both-skipped exit = %d, want 0", code)
+	}
+
+	// Skipped on the challenger alone: an INS loss (the base fit the Pin budget).
+	writePinReport(t, base, [][4]any{{"tree/diameter", "case_7", 1000, 700}}, timeout)
+	writePinReport(t, chal, [][4]any{{"tree/diameter", "case_7", 900, nil}}, timeout)
+	if code := run(args()); code != 1 {
+		t.Fatalf("challenger-skipped exit = %d, want 1", code)
+	}
+	stdout, code = cmdtest.Run(t, bin, ".", args()...)
+	if code != 1 || !strings.Contains(stdout, "1 INS losses") ||
+		!strings.Contains(stdout, "infx tree/diameter/case_7 PY=counted RS=pin-skipped") ||
+		!strings.Contains(stdout, "worst RS ins ratio: infx (tree/diameter/case_7)") {
+		t.Fatalf("challenger-skipped: code=%d\n%s", code, stdout)
+	}
+
+	// Skipped on the base alone: the challenger wins.
+	writePinReport(t, base, [][4]any{{"tree/diameter", "case_7", 1000, nil}}, timeout)
+	writePinReport(t, chal, [][4]any{{"tree/diameter", "case_7", 900, 700}}, timeout)
+	if code := run(args()); code != 0 {
+		t.Fatalf("base-skipped exit = %d, want 0", code)
+	}
+
+	// A null count without a skip reason is malformed data: exit 2.
+	writePinReport(t, base, [][4]any{{"tree/diameter", "case_7", 1000, 700}}, "")
+	writePinReport(t, chal, [][4]any{{"tree/diameter", "case_7", 900, nil}}, "")
+	if code := run(args()); code != 2 {
+		t.Fatalf("malformed exit = %d, want 2", code)
+	}
+}

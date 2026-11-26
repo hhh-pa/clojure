@@ -147,6 +147,12 @@ func (e entry) runsLen() int {
 }
 
 // summaryMap is the summary object, or nil when absent/not an object.
+// pinSkipped is the measure harness's reason for not counting a case
+// under Pin (e.g. "TIMEOUT (>1500s)"); "" when it counted it.
+func (e entry) pinSkipped() string {
+	return strOf(e.raw["pin_skipped"], "")
+}
+
 func (e entry) summaryMap() map[string]any {
 	if s, ok := e.raw["summary"].(map[string]any); ok {
 		return s
@@ -457,11 +463,43 @@ type lossRow struct {
 	chal  float64
 }
 
-// metricStat accumulates one metric's verdicts.
+// metricStat accumulates one metric's verdicts (skip: cases Pin could
+// count on neither side, which INS does not compare).
 type metricStat struct {
-	win, loss, tie int
-	losses         []lossRow
-	worst          *lossRow // ratio+name only
+	win, loss, tie, skip int
+	losses               []lossRow
+	worst                *lossRow // ratio+name only
+}
+
+// pinSkipVerdict settles an INS comparison the measure harness could
+// not count under Pin on one side or both (a case past the Pin timeout,
+// #277): both skipped compares nothing, a side skipped alone loses to
+// the side that fit the budget. Every such case is reported in rows.
+func pinSkipVerdict(a, b entry, name string, s *metricStat, rows *[][3]string) (string, bool) {
+	as, bs := a.pinSkipped(), b.pinSkipped()
+	if as == "" && bs == "" {
+		return "", false
+	}
+	counted := func(reason string) string {
+		if reason == "" {
+			return "counted"
+		}
+		return reason
+	}
+	*rows = append(*rows, [3]string{name, counted(as), counted(bs)})
+	switch {
+	case as != "" && bs != "":
+		s.skip++
+		return "skip", true
+	case bs != "":
+		s.loss++
+		s.losses = append(s.losses, lossRow{ratio: math.Inf(1), name: name})
+		s.worst = &lossRow{ratio: math.Inf(1), name: name}
+		return "loss", true
+	default:
+		s.win++
+		return "win", true
+	}
 }
 
 // medianOf extracts one summary median; the ins metric prefers
@@ -630,7 +668,8 @@ func compareLegs(o options, jm, rm map[caseKey]entry, jFail, rFail, jMiss, rMiss
 	nBothWin := 0
 	var notOK [][3]string // name, base err, chal err
 	var skipped [][3]string
-	var drift [][3]string // name, base counts, chal counts
+	var drift [][3]string    // name, base counts, chal counts
+	var pinSkips [][3]string // name, base reason, chal reason
 	inSelected := func(m string) bool {
 		for _, s := range selected {
 			if s == m {
@@ -669,6 +708,12 @@ func compareLegs(o options, jm, rm map[caseKey]entry, jFail, rFail, jMiss, rMiss
 		verdicts := map[string]string{}
 		for _, m := range selected {
 			mm := metrics[m]
+			if mm.tag == "INS" {
+				if v, ok := pinSkipVerdict(a, b, name, stat[m], &pinSkips); ok {
+					verdicts[m] = v
+					continue
+				}
+			}
 			jmed, err := medianOf(a, mm, name)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -736,12 +781,16 @@ func compareLegs(o options, jm, rm map[caseKey]entry, jFail, rFail, jMiss, rMiss
 		}
 	}
 
-	n := stat[selected[0]].win + stat[selected[0]].loss + stat[selected[0]].tie
+	n := stat[selected[0]].win + stat[selected[0]].loss + stat[selected[0]].tie + stat[selected[0]].skip
 	fmt.Fprintf(&out, "compared ok-cases: %d\n", n)
 	for _, m := range selected {
 		s := stat[m]
-		fmt.Fprintf(&out, "%s (median): %s wins %d, losses %d, ties %d\n",
-			metrics[m].tag, bn, s.win, s.loss, s.tie)
+		skipped := ""
+		if s.skip > 0 {
+			skipped = fmt.Sprintf(", pin-skipped %d", s.skip)
+		}
+		fmt.Fprintf(&out, "%s (median): %s wins %d, losses %d, ties %d%s\n",
+			metrics[m].tag, bn, s.win, s.loss, s.tie, skipped)
 	}
 	fmt.Fprintf(&out, "both-win cases: %d/%d\n", nBothWin, n)
 	for _, m := range selected {
@@ -775,9 +824,22 @@ func compareLegs(o options, jm, rm map[caseKey]entry, jFail, rFail, jMiss, rMiss
 			if i >= 50 {
 				break
 			}
+			if math.IsInf(l.ratio, 1) {
+				fmt.Fprintf(&out, "  %sx %s %s=counted %s=pin-skipped\n", fmt3(l.ratio), l.name, an, bn)
+				continue
+			}
 			fmt.Fprintf(&out, "  %sx %s %s=%s%s %s=%s%s\n",
 				fmt3(l.ratio), l.name, an, mm.format(l.base), mm.unit,
 				bn, mm.format(l.chal), mm.unit)
+		}
+	}
+	if len(pinSkips) > 0 {
+		fmt.Fprintf(&out, "--- PIN-SKIPPED (%d) ---\n", len(pinSkips))
+		for i, p := range pinSkips {
+			if i >= 20 {
+				break
+			}
+			fmt.Fprintf(&out, "  %s %s=%s %s=%s\n", p[0], an, p[1], bn, p[2])
 		}
 	}
 	if len(skipped) > 0 {
