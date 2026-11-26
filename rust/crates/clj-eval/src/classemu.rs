@@ -3101,6 +3101,7 @@ fn static_member_arities_rest(fqn: &str, member: &str) -> Option<&'static [usize
         "java.util.Collections" => static_arities_collections(member),
         "java.security.MessageDigest" => static_arities_digest(member),
         "java.util.regex.Pattern" => static_arities_pattern(member),
+        "java.util.regex.Matcher" => static_arities_matcher(member),
         "java.io.File" => static_arities_file(member),
         "java.net.URLEncoder" => static_arities_urlencoder(member),
         "java.lang.String" => static_arities_string(member),
@@ -3313,6 +3314,7 @@ fn native_static_mid(
         "java.util.Collections" => static_call_collections(member, rest),
         "java.security.MessageDigest" => static_call_digest(eval, member, rest),
         "java.util.regex.Pattern" => static_call_pattern(member, rest),
+        "java.util.regex.Matcher" => static_call_matcher(member, rest),
         "java.io.File" => static_call_file(eval, member, rest),
         _ => native_static_tail(eval, fqn, member, rest),
     }
@@ -3563,6 +3565,29 @@ fn static_call_pattern(member: &str, rest: &[Value]) -> Result<Value, NativeErro
     match member {
         "quote" => static_pattern_quote(rest),
         _ => static_field_or_miss("java.util.regex.Pattern", member, rest),
+    }
+}
+
+fn static_arities_matcher(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "quoteReplacement" => Some(&[1]),
+        _ => None,
+    }
+}
+
+/// `Matcher/quoteReplacement` (#273: `string.clj`'s `replace-by` and
+/// `re-quote-replacement` call it): `\` and `$` quoted; nil is its
+/// NPE, anything else fails the `String` parameter cast.
+fn static_call_matcher(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match (member, rest) {
+        ("quoteReplacement", [s]) => {
+            let s = crate::jdkmatch::replacement_string(s)?;
+            Ok(Value::Str(match crate::jdkmatch::quote_replacement(&s) {
+                std::borrow::Cow::Borrowed(_) => s,
+                std::borrow::Cow::Owned(q) => Arc::from(q.as_str()),
+            }))
+        }
+        _ => static_field_or_miss("java.util.regex.Matcher", member, rest),
     }
 }
 
@@ -6062,6 +6087,67 @@ fn surface_gated_matcher(
         ("group", 1) => Some(str_int_arg(&rest[0]).and_then(|i| h.group_n(i))),
         ("start", 0) => Some(h.last_span().map(|(s, _)| Value::Int(s as i64))),
         ("end", 0) => Some(h.last_span().map(|(_, e)| Value::Int(e as i64))),
+        _ => surface_gated_matcher_append(meth, target, h, rest),
+    }
+}
+
+/// The `Matcher` replacement members (#273): `replaceFirst`,
+/// `appendReplacement`, `appendTail` (arguments of other types miss
+/// through to the uniform error, like the JVM's reflector).
+fn surface_gated_matcher_append(
+    meth: &str,
+    target: &Value,
+    h: &crate::collmisc::MatcherHandle,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("replaceFirst", 1) => gated_matcher_replace_first(h, &rest[0]),
+        ("appendReplacement", 2) => gated_matcher_append_replacement(target, h, rest),
+        ("appendTail", 1) => {
+            let sb = builder_arg(&rest[0])?;
+            Some(h.append_tail(sb).map(|()| rest[0].clone()))
+        }
+        _ => None,
+    }
+}
+
+/// `Matcher.replaceFirst(String)` (nil is `Objects.requireNonNull`'s
+/// message-less NPE).
+fn gated_matcher_replace_first(
+    h: &crate::collmisc::MatcherHandle,
+    rep: &Value,
+) -> Option<Result<Value, NativeError>> {
+    match rep {
+        Value::Str(r) => Some(h.replace(r, 1).map(|s| Value::Str(Arc::from(s.as_str())))),
+        Value::Nil => Some(Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            String::new(),
+        ))),
+        _ => None,
+    }
+}
+
+/// `Matcher.appendReplacement(sb, replacement)`: the matcher back.
+fn gated_matcher_append_replacement(
+    target: &Value,
+    h: &crate::collmisc::MatcherHandle,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let sb = builder_arg(&rest[0])?;
+    let rep = match &rest[1] {
+        Value::Str(r) => Some(r.as_ref()),
+        Value::Nil => None,
+        _ => return None,
+    };
+    Some(h.append_replacement(sb, rep).map(|()| target.clone()))
+}
+
+/// A `StringBuffer`/`StringBuilder` parameter: `Some(None)` for nil,
+/// `None` for anything that is not a buffer.
+fn builder_arg(v: &Value) -> Option<Option<&StringBuilder>> {
+    match v {
+        Value::Nil => Some(None),
+        Value::Extension(e) => e.as_any().downcast_ref::<StringBuilder>().map(Some),
         _ => None,
     }
 }
@@ -6074,7 +6160,10 @@ fn surface_gated_matcher(
 fn gated_matcher_replace_all(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
     let h = crate::collmisc::as_matcher(target)?;
     match &rest[0] {
-        Value::Str(r) => Some(Ok(Value::Str(Arc::from(h.replace_all(r).as_str())))),
+        Value::Str(r) => Some(
+            h.replace(r, usize::MAX)
+                .map(|s| Value::Str(Arc::from(s.as_str()))),
+        ),
         Value::Nil => Some(Err(NativeError::new(
             ThrowClass::IllegalArgumentException,
             "More than one matching method found: replaceAll".to_owned(),
@@ -7458,13 +7547,16 @@ fn gated_bigdec_conv(meth: &str, target: &Value) -> Option<Result<Value, NativeE
     }))
 }
 
-/// A `java.lang.StringBuilder` (issue #201 S5): a growable
-/// buffer behind the `Extension` facade. Identity is the
-/// sequence `id` (like `Writer`); `str`/`toString` render the
-/// buffer via `print_str`, `print` keeps the `#object[…]` form.
+/// A `java.lang.StringBuilder` (issue #201 S5) or, with the same
+/// members, a `java.lang.StringBuffer` (#273: `string.clj`'s
+/// `replace-by` builds one): a growable buffer behind the
+/// `Extension` facade. Identity is the sequence `id` (like
+/// `Writer`); `str`/`toString` render the buffer via `print_str`,
+/// `print` keeps the `#object[…]` form.
 #[derive(Debug)]
 pub(crate) struct StringBuilder {
     id: u64,
+    class: &'static str,
     buf: Mutex<String>,
 }
 
@@ -7485,14 +7577,29 @@ pub(crate) fn char_sequence_text(v: &Value) -> Option<Arc<str>> {
 
 impl StringBuilder {
     pub(crate) fn fresh(content: String) -> Self {
+        Self::of_class("java.lang.StringBuilder", content)
+    }
+
+    /// A `java.lang.StringBuffer` (#273).
+    pub(crate) fn fresh_buffer(content: String) -> Self {
+        Self::of_class("java.lang.StringBuffer", content)
+    }
+
+    fn of_class(class: &'static str, content: String) -> Self {
         Self {
             id: NEXT_BUILDER.fetch_add(1, Ordering::Relaxed),
+            class,
             buf: Mutex::new(content),
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, String> {
         self.buf.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Run `f` over the buffer (the `Matcher` append members, #273).
+    pub(crate) fn with_buf<R>(&self, f: impl FnOnce(&mut String) -> R) -> R {
+        f(&mut self.lock())
     }
 }
 
@@ -7656,7 +7763,7 @@ impl ExtensionValue for UriHandle {
 
 impl ExtensionValue for StringBuilder {
     fn class_name(&self) -> String {
-        "java.lang.StringBuilder".to_owned()
+        self.class.to_owned()
     }
 
     /// `print-object`: the `toString` (the buffer) printed
@@ -7664,7 +7771,8 @@ impl ExtensionValue for StringBuilder {
     fn print(&self) -> String {
         let text = Value::Str(Arc::from(self.lock().as_str()));
         format!(
-            "#object[java.lang.StringBuilder 0x{:x} {}]",
+            "#object[{} 0x{:x} {}]",
+            self.class,
             self.id,
             clj_value::pr_to_string(&text, &clj_value::PrintOpts::pr())
         )
@@ -7673,7 +7781,8 @@ impl ExtensionValue for StringBuilder {
     /// Not readably, the buffer goes in unquoted.
     fn print_str(&self) -> Option<String> {
         Some(format!(
-            "#object[java.lang.StringBuilder 0x{:x} {}]",
+            "#object[{} 0x{:x} {}]",
+            self.class,
             self.id,
             self.lock()
         ))

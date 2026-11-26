@@ -202,6 +202,7 @@ dependencies = [
  "psm",
  "rand",
  "regex",
+ "regex-syntax",
  "smallvec",
  "stacker",
 ]

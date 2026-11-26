@@ -756,6 +756,9 @@ fn new_via_class_core(
     if name == "java.lang.StringBuilder" {
         return Some(crate::ctor::build_string_builder(args));
     }
+    if name == "java.lang.StringBuffer" {
+        return Some(crate::ctor::build_string_buffer(args));
+    }
     if name == "java.util.Random" {
         return Some(crate::emurand::build_random(args));
     }
