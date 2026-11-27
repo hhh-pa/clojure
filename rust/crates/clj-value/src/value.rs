@@ -1281,10 +1281,9 @@ pub enum SortSpec {
 /// every `Value` (#221 R1). `sort` is the FT6 sorted-set
 /// order (same contract as [`Map`]'s): `members` stays in
 /// comparator order and compare-0 duplicates collapse.
-/// Maximum member count kept inline in [`SetStorage::Small`] (mirrors
-/// [`SMALL_MAP_MAX`]): avoids `rpds` trie + sidecar allocations and
-/// `compact()` churn on small sets (#271 Slice 5q).
-const SMALL_SET_MAX: usize = 8;
+/// Maximum member count kept flat in [`SetStorage::Small`], avoiding
+/// trie and sidecar allocations while copying small sets (#277).
+const SMALL_SET_MAX: usize = 16;
 
 /// Maximum member count a SORTED set keeps in [`SetStorage::Small`]
 /// (#277): sorted sets find positions by comparator binary search, never
@@ -6876,7 +6875,9 @@ mod tests {
 
     #[test]
     fn small_and_large_set_storage_paths_271() {
-        use super::{PackedStrings, SORTED_SMALL_SET_MAX, Set, SetStorage, SortSpec, Vector};
+        use super::{
+            PackedStrings, SMALL_SET_MAX, SORTED_SMALL_SET_MAX, Set, SetStorage, SortSpec, Vector,
+        };
         // Small set: from_items_checked, insert, dup insert, get, contains, without, iter
         let s = Set::from_items_checked(vec![Value::Int(1), Value::Int(2)]).unwrap();
         assert_eq!(s.size(), 2);
@@ -6893,20 +6894,28 @@ mod tests {
         assert!(Set::from_items_checked(vec![Value::Int(1), Value::Int(1)]).is_err());
 
         // Promotion > SMALL_SET_MAX via insert and via from_items_checked
+        let limit = SMALL_SET_MAX as i64;
         let mut big = new_set();
-        for i in 0..10 {
+        for i in 0..limit {
             big = big.insert(Value::Int(i));
         }
-        assert_eq!(big.size(), 10);
-        assert_eq!(big.get(&Value::Int(9)), Some(&Value::Int(9)));
-        assert_eq!(big.iter().count(), 10);
+        assert!(matches!(big.0.storage, SetStorage::Small(_)));
+        big = big.insert(Value::Int(limit));
+        assert!(matches!(big.0.storage, SetStorage::Large(_)));
+        assert_eq!(big.size(), SMALL_SET_MAX + 1);
+        assert_eq!(big.get(&Value::Int(limit)), Some(&Value::Int(limit)));
+        assert_eq!(
+            big.iter().cloned().collect::<Vec<_>>(),
+            (0..=limit).map(Value::Int).collect::<Vec<_>>()
+        );
         assert_eq!(big.clone().without(&Value::Int(99)).id(), big.id());
         let mut shrunk = big.clone();
-        for i in 0..7 {
+        for i in 0..(limit - 2) {
             shrunk = shrunk.without(&Value::Int(i));
         }
         assert_eq!(shrunk.size(), 3);
-        let big2 = Set::from_items_checked((0..10).map(Value::Int).collect()).unwrap();
+        let big2 = Set::from_items_checked((0..=limit).map(Value::Int).collect()).unwrap();
+        assert!(matches!(big2.0.storage, SetStorage::Large(_)));
         assert_eq!(big, big2);
 
         // Small & promoted sorted sets: sorted sets stay flat up to

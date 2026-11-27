@@ -39,6 +39,28 @@ fn outcome(eval: &mut Evaluator, expr: &str) -> String {
     }
 }
 
+#[test]
+fn variadic_queue_conj_preserves_the_shared_prefix_and_metadata() {
+    let mut eval = boot();
+    assert_eq!(
+        outcome(
+            &mut eval,
+            "(let [q (with-meta (conj clojure.lang.PersistentQueue/EMPTY :a) {:tag true})
+                   grown (conj q nil :b :c)]
+               [(vec q) (vec grown) (peek (pop grown)) (meta grown)])"
+        ),
+        "[[:a] [:a nil :b :c] nil {:tag true}]"
+    );
+}
+
+#[test]
+fn variadic_conj_still_extends_a_subvector() {
+    assert_eq!(
+        outcome(&mut boot(), "(conj (subvec [0 1] 1) 2 3)"),
+        "[1 2 3]"
+    );
+}
+
 /// `(label, expression, JVM answer)`.
 const ORACLE: &[(&str, &str, &str)] = &[
     (

@@ -543,9 +543,15 @@ fn conj_one(eval: &mut Evaluator, coll: Value, x: Value) -> Result<Value, Native
 /// Conj onto anything else (split from [`conj_one`] for the
 /// complexity budget): subvectors conj through their window, seqs
 /// `cons`, and anything else takes the collection cast.
-fn conj_other(other: Value, x: Value) -> Result<Value, NativeError> {
-    if let Some(q) = as_queue(&other) {
-        return Ok(Value::Extension(Arc::new(q.clone().conj(x))));
+fn conj_other(mut other: Value, x: Value) -> Result<Value, NativeError> {
+    if let Value::Extension(e) = &mut other {
+        if let Some(queue) = queue_mut(e) {
+            queue.push_mut(x);
+            return Ok(other);
+        }
+        if let Some(queue) = e.as_any().downcast_ref::<QueueValue>() {
+            return Ok(Value::Extension(Arc::new(queue.clone().conj(x))));
+        }
     }
     if let Some(sv) = as_subvector(&other) {
         return Ok(subvector_conj(sv, x));
