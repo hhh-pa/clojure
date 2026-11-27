@@ -115,3 +115,7 @@ The AOT constant pool resolves the canonical `PersistentQueue/EMPTY` by static f
 A fresh concat stores its inputs in the memo cell. Once traversal starts, it can use a cursor and a resume stack to remember its position. The VM borrows the collection and keys for a two-key `get-in` when all three operands can be read in place. It continues to construct the path for a redefined var.
 
 On the Linux workstation, all 3,315 interpreter outputs matched the reference files. The largest `rational_chebyshev` cases used 24% fewer retired instructions, and `hanoi` tc6 peak RSS fell from 26,884 to 21,224 KiB.
+
+### AOT ownership for `assoc`
+
+When a three-argument `assoc` is a local collection's last use, the compiler evaluates the key and value before moving the collection. They can read it directly, and the update can reuse its storage when it is uniquely held. With LLVM 23 on the workstation, `wildcard_matching` tc5 fell from 45.6 billion retired instructions to 923 million, with the same output and peak RSS.

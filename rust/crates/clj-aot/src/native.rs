@@ -2037,6 +2037,13 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(())
     }
 
+    fn moved_local_slot(&self, f: &FnCtx<'ctx>, expr: &Expr) -> Option<PointerValue<'ctx>> {
+        match expr {
+            Expr::Local(i) if is_move(f, expr) => self.slot_of(f, *i),
+            _ => None,
+        }
+    }
+
     /// The raw slot holding local `idx` (a cell local yields the cell).
     fn local_slot(&self, f: &FnCtx<'ctx>, idx: usize) -> Option<PointerValue<'ctx>> {
         match f.env.get(idx).copied().flatten()? {
@@ -5795,16 +5802,21 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> Result<(), Unsupported> {
         let n = arg_ptrs.len();
         let (arr, elems) = self.slot_array(f, n);
-        for (&a, e) in arg_ptrs.iter().zip(&elems) {
-            let moved = match a {
-                Expr::Local(i) if is_move(f, a) => self.slot_of(f, *i),
-                _ => None,
-            };
-            if let Some(src) = moved {
+        let deferred = if op_name == Some("assoc") && n == 3 {
+            self.moved_local_slot(f, arg_ptrs[0])
+        } else {
+            None
+        };
+        let skip = usize::from(deferred.is_some());
+        for (&a, e) in arg_ptrs.iter().zip(&elems).skip(skip) {
+            if let Some(src) = self.moved_local_slot(f, a) {
                 self.move_v(f.func, *e, src);
             } else {
                 self.lower(f, a, *e)?;
             }
+        }
+        if let Some(src) = deferred {
+            self.move_v(f.func, elems[0], src);
         }
         let lean_done = self.try_lean_own(f, op_name, n, dest, arr, &elems);
         let st = if op_name == Some("assoc") && n == 3 {
@@ -5893,7 +5905,17 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> Result<(), Unsupported> {
         let k = self.var_of(&call.var);
         let n = call.args.len();
-        let arr = self.lower_args(f, &call.args)?;
+        let arr = match assoc_local(call).and_then(|a| self.moved_local_slot(f, a)) {
+            Some(src) => {
+                let (arr, elems) = self.slot_array(f, n);
+                for (arg, &slot) in call.args.iter().zip(&elems).skip(1) {
+                    self.lower(f, arg, slot)?;
+                }
+                self.move_v(f.func, elems[0], src);
+                arr
+            }
+            None => self.lower_args(f, &call.args)?,
+        };
         let aref = self.slots_ref(f, arr, n);
         let st = self
             .call(
@@ -9929,11 +9951,29 @@ fn walk_children_moves(
     later: &mut BTreeSet<usize>,
     out: &mut Vec<(usize, usize)>,
 ) {
+    if let Expr::DirectNative(call) = e
+        && let Some(coll) = assoc_local(call)
+    {
+        // The RHS can still read the collection before the update takes it.
+        walk_moves(coll, slots, min_slot, later, out);
+        for arg in call.args[1..].iter().rev() {
+            walk_moves(arg, slots, min_slot, later, out);
+        }
+        return;
+    }
     let mut kids = Vec::new();
     for_each_child(e, &mut |c| kids.push(c));
     for c in kids.into_iter().rev() {
         walk_moves(c, slots, min_slot, later, out);
     }
+}
+
+fn assoc_local(call: &clj_eval::expr::DirectCall) -> Option<&Expr> {
+    let [coll @ Expr::Local(_), _, _] = call.args.as_slice() else {
+        return None;
+    };
+    (call.var.sym.namespace() == Some("clojure.core") && call.var.sym.name() == "assoc")
+        .then_some(coll)
 }
 
 fn walk_case_moves(
@@ -10474,13 +10514,13 @@ fn mapped_str_join(call: &clj_eval::expr::DirectCall) -> Option<(&str, &Expr)> {
         .then_some((sep.as_ref(), input))
 }
 
-/// Match a vector update and indexed read of the same locals. The read
-/// must be the collection's last use so the update can take its slot.
+/// Match a vector update and indexed read of the same locals. The update
+/// can take the slot when the collection is dead after the call.
 fn assoc_nth_step_args(
     call: &clj_eval::expr::DirectCall,
     f: &FnCtx<'_>,
 ) -> Option<(usize, usize, i64)> {
-    let [Expr::Local(coll), Expr::Local(idx), op] = call.args.as_slice() else {
+    let [owner @ Expr::Local(coll), Expr::Local(idx), op] = call.args.as_slice() else {
         return None;
     };
     let (name, [item]) = core_call(op)? else {
@@ -10494,7 +10534,8 @@ fn assoc_nth_step_args(
     let ("nth", [source @ Expr::Local(c), Expr::Local(i)]) = core_call(item)? else {
         return None;
     };
-    (*coll == *c && *idx == *i && is_move(f, source)).then_some((*coll, *idx, step))
+    (*coll == *c && *idx == *i && (is_move(f, owner) || is_move(f, source)))
+        .then_some((*coll, *idx, step))
 }
 
 fn scaled_long_args(call: &clj_eval::expr::DirectCall) -> Option<[&Expr; 3]> {

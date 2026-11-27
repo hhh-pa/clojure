@@ -377,6 +377,63 @@ fn native_binary_resolves_persistent_queue_empty() {
 }
 
 #[test]
+fn native_assoc_reads_the_collection_before_consuming_it() {
+    let source = "\
+(defn fill [v]
+  (loop [i 1 out v]
+    (if (= i (count out)) out
+        (recur (inc i)
+               (assoc out i (if (nth out (dec i)) false true))))))
+(let [base [true true true true]]
+  (println [(fill base) base]))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("assoc-last-read", source, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[[true false true false] [true true true true]]\n", "", 0)
+    );
+
+    let rebound = source.replace(
+        "(fill base)",
+        "(with-redefs [assoc (fn [v _ _] v)] (fill base))",
+    );
+    let (stdout, stderr, code, report) = build_mode_and_run("assoc-redefined", &rebound, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[[true true true true] [true true true true]]\n", "", 0)
+    );
+}
+
+#[test]
+fn native_assoc_still_fuses_an_indexed_increment() {
+    let source = "\
+(defn bump [v]
+  (loop [i 0 out v]
+    (if (= i (count out)) out
+        (recur (inc i) (assoc out i (inc (nth out i)))))))
+(let [base [0 5 7]]
+  (println [(bump base) base]))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("assoc-indexed-inc", source, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}",
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[[1 6 8] [0 5 7]]\n", "", 0),
+    );
+}
+
+#[test]
 fn native_binary_runs_assoc_conj_and_fx_259() {
     let source = "\
 (let [t (transient [[1] [2]])
