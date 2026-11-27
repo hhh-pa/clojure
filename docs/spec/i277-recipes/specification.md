@@ -99,3 +99,9 @@ All 60 outputs matched the saved reference files in a macOS release comparison. 
 A concat stores its remaining inputs in a single shared slice. When a collector owns the concat, it releases the root before traversal and moves past unused inputs. Nested concat tails keep their resume order. Literal two-key reads of vectors of vectors borrow the intermediate row, including when the final cell holds nil. Other lookup types and wrapped indexes continue through the ordinary lookup path.
 
 The macOS release comparison matched all 60 retry outputs. Peak RSS fell 16% for `hanoi` tc6, and the eight `rational_chebyshev` cases used 9–13% fewer instructions.
+
+### Array reads in scalar VM loops
+
+The interpreter's scalar loop tier reads invariant arrays through the existing locked `aget` accessor. The loop uses the normal boxed path for invalid indexes, unsupported values, and redefined vars. AOT continues to lower array reads through its general interop path.
+
+In a macOS release A/B, `lfsr` tc4–tc7 used about 29% fewer retired instructions. The final interpreter matched the reference output on all 3,315 cases.

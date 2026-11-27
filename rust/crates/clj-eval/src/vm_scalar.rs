@@ -208,13 +208,19 @@ pub enum Calc {
     Op1(IntOp1, IExpr),
     Op2(IntOp2, IExpr, IExpr),
     Fp(FpCalc),
-    /// `(nth coll i)` over an invariant collection.
-    Nth(Loc, IExpr),
+    /// Read a scalar at an index in an invariant collection.
+    Index(Loc, IExpr, IndexRead),
     /// `(count coll)` over an invariant collection.
     Count(Loc),
     /// Item `j` of the vector at `coll[i]` (destructured `(let [[a b …] (nth coll i)] …)`
     /// or nested `(nth (nth coll i) j)`).
     Nth2(Loc, IExpr, IExpr),
+}
+
+#[derive(Clone, Copy)]
+pub enum IndexRead {
+    Nth,
+    Aget,
 }
 
 /// Floating-point, math, and numeric cast operations.
@@ -359,6 +365,7 @@ enum FpStep {
 #[derive(Clone, Copy)]
 enum Co {
     Nth(Sl, u16, Sl),
+    Aget(Sl, u16, Sl),
     Count(Sl, u16),
     /// Result, collection index, outer index slot, inner index slot.
     Nth2(Sl, u16, Sl, Sl),
@@ -409,7 +416,7 @@ impl Ins {
                     | FpStep::Cast(_, d, _),
                 ),
             )
-            | Ins::Co(Co::Nth(d, ..) | Co::Count(d, _) | Co::Nth2(d, ..)) => d,
+            | Ins::Co(Co::Nth(d, ..) | Co::Aget(d, ..) | Co::Count(d, _) | Co::Nth2(d, ..)) => d,
             _ => return false,
         };
         let hit = *d == from;
@@ -562,6 +569,7 @@ enum Coll<'v> {
     Str(&'v std::sync::Arc<str>),
     Vec(&'v clj_value::Vector),
     Trans(&'v clj_value::Transient),
+    Array(&'v clj_value::Array),
     Other,
 }
 
@@ -571,6 +579,7 @@ fn coll_of(v: &Value) -> Coll<'_> {
         Value::Str(s) => Coll::Str(s),
         Value::Vector(v) => Coll::Vec(v),
         Value::Transient(t) => Coll::Trans(t),
+        Value::Array(a) => Coll::Array(a),
         _ => Coll::Other,
     }
 }
@@ -593,8 +602,16 @@ fn nth(coll: &Coll<'_>, i: Sv) -> Option<Sv> {
             TransientKind::Vector(tv) => tv.read_at(idx, Sv::of),
             _ => None,
         },
-        Coll::Other => None,
+        Coll::Array(_) | Coll::Other => None,
     }
+}
+
+fn aget(coll: &Coll<'_>, i: Sv) -> Option<Sv> {
+    let Coll::Array(array) = coll else {
+        return None;
+    };
+    let index = usize::try_from(i.int_of()?).ok()?;
+    Sv::of(&crate::arrays::aget_fast(array, index)?)
 }
 
 /// The scalar item `j` of the vector at `coll[i]` (a destructured
@@ -624,7 +641,7 @@ fn count(coll: &Coll<'_>) -> Option<Sv> {
             TransientKind::Vector(tv) => tv.len().ok()?,
             _ => return None,
         },
-        Coll::Other => return None,
+        Coll::Array(_) | Coll::Other => return None,
     };
     i64::try_from(n).ok().map(Sv::int)
 }
@@ -946,6 +963,7 @@ fn step_fp(fp: FpStep, s: &[Sv]) -> Option<(Sl, Sv)> {
 fn co_step(co: Co, s: &mut [Sv], colls: &[Coll<'_>]) -> Option<()> {
     let (d, v) = match co {
         Co::Nth(d, c, i) => (d, nth(&colls[usize::from(c)], s[usize::from(i)])?),
+        Co::Aget(d, c, i) => (d, aget(&colls[usize::from(c)], s[usize::from(i)])?),
         Co::Nth2(d, c, i, j) => (
             d,
             nth2(&colls[usize::from(c)], s[usize::from(i)], s[usize::from(j)])?,
@@ -1299,9 +1317,14 @@ impl Lower<'_> {
                 Ins::Do(Step::Op2(*op, self.sl(), a, b))
             }
             Calc::Fp(fp) => Ins::Do(Step::Fp(self.fp_calc_val(fp))),
-            Calc::Nth(l, i) => {
-                let (c, i) = (self.coll(*l), self.val(i));
-                Ins::Co(Co::Nth(self.sl(), c, i))
+            Calc::Index(l, i, read) => {
+                let i = self.val(i);
+                let c = self.coll(*l);
+                let d = self.sl();
+                Ins::Co(match read {
+                    IndexRead::Nth => Co::Nth(d, c, i),
+                    IndexRead::Aget => Co::Aget(d, c, i),
+                })
             }
             Calc::Count(l) => {
                 let c = self.coll(*l);
@@ -1680,7 +1703,7 @@ fn sinks(n: &Node) -> bool {
 fn reads_coll(e: &IExpr) -> bool {
     match e {
         IExpr::Calc(c) => match &**c {
-            Calc::Nth(..) | Calc::Count(_) | Calc::Nth2(..) => true,
+            Calc::Index(..) | Calc::Count(_) | Calc::Nth2(..) => true,
             Calc::Op1(_, a) | Calc::Fp(FpCalc::Math1(_, a) | FpCalc::Cast(_, a)) => reads_coll(a),
             Calc::Op2(_, a, b) | Calc::Fp(FpCalc::Div(a, b) | FpCalc::Math2(_, a, b)) => {
                 reads_coll(a) || reads_coll(b)
@@ -1728,6 +1751,10 @@ pub(crate) trait Host {
     /// AOT's nested lookup only probes immutable persistent vectors.
     fn can_defer_row_read(&self) -> bool {
         false
+    }
+    /// Mutable array reads use the VM's locking array accessor.
+    fn supports_array_read(&self) -> bool {
+        true
     }
     /// Resolve a read-only global collection (`Expr::Global(var)`) to a
     /// host-managed `Loc` (used by AOT for stable top-level vectors/tables).
@@ -1919,6 +1946,10 @@ impl<F: Fn(&Var) -> bool> Host for AotHost<'_, F> {
 
     fn can_defer_row_read(&self) -> bool {
         true
+    }
+
+    fn supports_array_read(&self) -> bool {
+        false
     }
 
     fn callee(&self, var: &Var, argc: usize) -> Option<Callee> {
@@ -2131,9 +2162,9 @@ fn misses(e: &IExpr) -> bool {
 
 fn calc_misses(c: &Calc) -> bool {
     match c {
-        Calc::Op1(_, a) | Calc::Fp(FpCalc::Math1(_, a) | FpCalc::Cast(_, a)) | Calc::Nth(_, a) => {
-            misses(a)
-        }
+        Calc::Op1(_, a)
+        | Calc::Fp(FpCalc::Math1(_, a) | FpCalc::Cast(_, a))
+        | Calc::Index(_, a, _) => misses(a),
         Calc::Op2(_, a, b)
         | Calc::Fp(FpCalc::Div(a, b) | FpCalc::Math2(_, a, b))
         | Calc::Nth2(_, a, b) => misses(a) || misses(b),
@@ -2618,6 +2649,11 @@ impl Builder<'_> {
         Some(match (name, args) {
             ("/", args) if !args.is_empty() => self.div_expr(args),
             ("nth", [coll, i]) => self.nth_expr(coll, i),
+            ("aget", [coll, i]) if self.host.supports_array_read() => {
+                self.read_coll(coll).map_or(IExpr::Deopt, |l| {
+                    calc(Calc::Index(l, self.expr(i), IndexRead::Aget))
+                })
+            }
             ("count", [coll]) => self
                 .read_coll(coll)
                 .map_or(IExpr::Deopt, |l| calc(Calc::Count(l))),
@@ -2642,7 +2678,7 @@ impl Builder<'_> {
 
     fn nth_expr(&mut self, coll: &Expr, idx: &Expr) -> IExpr {
         if let Some(loc) = self.read_coll(coll) {
-            return calc(Calc::Nth(loc, self.expr(idx)));
+            return calc(Calc::Index(loc, self.expr(idx), IndexRead::Nth));
         }
         if let Expr::Local(i) = coll {
             if let Some(Lex::NthRef(loc, row_slot)) = self.lookup(*i) {
@@ -3166,6 +3202,60 @@ mod tests {
         assert!(ast.primed);
         assert_eq!(ast.scalar, vec![true, true]);
         assert!(compile_aot_loop(&[Expr::Local(1)], &[1], 2, &callees, |_| false).is_none());
+    }
+
+    #[test]
+    fn scalar_array_reads_preserve_redefinition_and_errors() {
+        let mut ev = boot();
+        ev.set_eager_tier(true);
+        let src = r#"
+(defn sum-array [xs n]
+  (loop [i 0 sum 0]
+    (if (< i n) (recur (inc i) (+ sum (aget xs i))) sum)))
+(let [xs (int-array [3 4 5])]
+  [(sum-array xs 3)
+   (with-redefs [aget (fn [_ _] 7)] (sum-array xs 3))
+   (try (sum-array xs 4) (catch ArrayIndexOutOfBoundsException _ :bounds))
+   (try (sum-array [3 4 5] 3) (catch Throwable _ :type))])"#;
+        let values = ev.eval_source(src).expect("array loops");
+        assert_eq!(
+            clj_value::pr_to_string(values.last().unwrap(), &clj_value::PrintOpts::pr()),
+            "[12 21 :bounds :type]"
+        );
+    }
+
+    #[test]
+    fn array_read_is_collection_access_and_leaves_nth_and_count_boxed() {
+        use super::{Calc, IExpr, IndexRead, Loc, calc, coll_of, count, nth, reads_coll};
+
+        let mut ev = boot();
+        let array = ev.eval_source("(int-array 1)").unwrap().pop().unwrap();
+        let coll = coll_of(&array);
+        assert!(nth(&coll, Sv::int(0)).is_none());
+        assert!(count(&coll).is_none());
+        assert!(reads_coll(&calc(Calc::Index(
+            Loc::Reg(0),
+            IExpr::Kst(Sv::int(0)),
+            IndexRead::Aget,
+        ))));
+    }
+
+    #[test]
+    fn aot_scalar_loop_keeps_array_reads_on_its_general_path() {
+        let src = "(def xs (int-array [3 4 5]))
+                   (loop [i 0 sum 0]
+                     (if (< i 3) (recur (inc i) (+ sum (aget xs i))) sum))";
+        let mut ev = boot();
+        let front = front_end(&mut ev, src, "array-loop.clj").expect("plan");
+        let body = front
+            .units
+            .iter()
+            .find_map(|unit| match &unit.expr {
+                Expr::Loop { body, .. } => Some(body),
+                _ => None,
+            })
+            .expect("array loop");
+        assert!(compile_aot_loop(body, &[0, 1], 2, &HashMap::new(), |_| true).is_none());
     }
 
     #[test]

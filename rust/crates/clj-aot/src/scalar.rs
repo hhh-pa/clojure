@@ -240,7 +240,7 @@ impl AstScan {
                 self.record_coll(*loc, false, false);
                 Self::push_unique(&mut self.read_count, *loc);
             }
-            Calc::Nth(loc, a) => {
+            Calc::Index(loc, a, _) => {
                 self.record_coll(*loc, false, false);
                 Self::push_unique(&mut self.read_nth, *loc);
                 self.scan_expr(a);
@@ -2065,7 +2065,8 @@ impl<'ctx> Lowerer<'ctx> {
             }
             Calc::Fp(fp) => self.lower_sc_calc_fp(f, s, fp),
             Calc::Count(loc) => Ok(self.lower_sc_count(f, s, *loc)),
-            Calc::Nth(loc, idx) => self.lower_sc_nth(f, s, *loc, idx),
+            // The AOT host only emits nth for scalar collection reads.
+            Calc::Index(loc, idx, _) => self.lower_sc_nth(f, s, *loc, idx),
             Calc::Nth2(loc, idx, item) => self.lower_sc_nth2(f, s, *loc, idx, item),
         }
     }
