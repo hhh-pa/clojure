@@ -1135,6 +1135,19 @@ fn eval_literal_keys(
     keys.iter().map(|key| key(ev, f)).collect()
 }
 
+/// Read a two-dimensional vector without cloning the intermediate row.
+fn lookup_matrix_cell(coll: &Value, keys: &[Value]) -> Option<Value> {
+    let (Value::Vector(matrix), [row, col]) = (coll, keys) else {
+        return None;
+    };
+    let row = crate::vm_intrinsics::index(row)?;
+    let col = crate::vm_intrinsics::index(col)?;
+    let Value::Vector(cells) = matrix.get_ref(row)? else {
+        return None;
+    };
+    cells.get(col)
+}
+
 /// `(get-in coll [k ...])` / `(get-in coll [k ...] not-found)` over a
 /// vector-literal path (#277): the keys evaluate as operands (in the
 /// JVM's order: collection, keys, not-found) and the lookups nest, so no
@@ -1159,6 +1172,9 @@ pub(crate) fn get_in_literal(
             let mut args: SmallVec<[Value; 4]> = smallvec![cur, path];
             args.extend(nf);
             return native(ev, &c, args);
+        }
+        if let Some(cell) = lookup_matrix_cell(&cur, &ks) {
+            return Ok(cell);
         }
         for k in &ks {
             match crate::coll::lookup_present(ev, &cur, k).map_err(|e| ev.throw(e))? {

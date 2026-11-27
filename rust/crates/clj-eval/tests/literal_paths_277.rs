@@ -174,3 +174,19 @@ fn literal_path_ops_follow_a_redefined_var_277() {
         "[:assoc [:a :b] 7]"
     );
 }
+
+#[test]
+fn matrix_path_preserves_present_nil_and_fallback_types() {
+    let mut eval = boot();
+    assert_eq!(
+        outcome(
+            &mut eval,
+            r#"[(get-in [[nil]] [0 0] :missing)
+                (get-in [[1]] [0 1] :missing)
+                (get-in ["ab"] [0 1] :missing)
+                (get-in [{:key 7}] [0 :key] :missing)
+                (get-in [[9]] [4294967296 0] :missing)]"#,
+        ),
+        r#"[nil :missing \b 7 9]"#
+    );
+}

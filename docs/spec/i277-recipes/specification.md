@@ -93,3 +93,9 @@ Destructuring consumes its hidden VM input register. Persistent children with no
 The interpreter parses immutable string collections in one pass when `mapv` calls a unary Java numeric parser. It reuses the AOT parsing helper and falls back to the original call for invalid tokens or a redefined dispatch var. A reduction of mapped long products can consume two packed vector windows in one pass. It preserves checked arithmetic, with the ordinary reduction handling overflow and shared lazy inputs.
 
 All 60 outputs matched the saved reference files in a macOS release comparison. Relative to the previous interpreter, retired instructions fell by 88% for `perceptron` tc7, 36% for `red_gateway` tc7, and 32% for `tree_diameter` tc7. The earlier Linux A/B measured `tree_diameter` tc7 at 4.33× CPython before the ownership changes and 3.12× afterward.
+
+### Concatenation storage and nested vector reads
+
+A concat stores its remaining inputs in a single shared slice. When a collector owns the concat, it releases the root before traversal and moves past unused inputs. Nested concat tails keep their resume order. Literal two-key reads of vectors of vectors borrow the intermediate row, including when the final cell holds nil. Other lookup types and wrapped indexes continue through the ordinary lookup path.
+
+The macOS release comparison matched all 60 retry outputs. Peak RSS fell 16% for `hanoi` tc6, and the eight `rational_chebyshev` cases used 9–13% fewer instructions.

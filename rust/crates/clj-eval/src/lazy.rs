@@ -84,7 +84,7 @@ pub struct PendingSeq {
 /// stack).
 #[derive(Clone, Debug)]
 pub(crate) struct ConcatFrame {
-    rest: Arc<Vec<Value>>,
+    rest: Arc<[Value]>,
     idx: usize,
     parent: ConcatStack,
 }
@@ -155,7 +155,7 @@ pub(crate) enum Thunk {
         /// `string_function_calculation` took ~70s at n=32K).
         /// Shared inputs plus the index below make both the clone
         /// and the step O(1).
-        rest: Arc<Vec<Value>>,
+        rest: Arc<[Value]>,
         /// The next index into `rest` once `cur` exhausts.
         idx: usize,
         /// Outer levels flattened by the iterative descent (#205):
@@ -417,7 +417,7 @@ fn take_seq_state(state: &Mutex<SeqState>) -> SeqState {
 /// tails), else the sole remaining rest input when it is a
 /// sole-owned cell (right nests). Sibling cells unwind through
 /// their own `Drop`, and `outer` through `ConcatFrame::Drop`.
-fn drop_concat_link(cur: Value, rest: &mut Arc<Vec<Value>>, idx: usize) -> Option<Value> {
+fn drop_concat_link(cur: Value, rest: &mut Arc<[Value]>, idx: usize) -> Option<Value> {
     if as_pending(&cur).is_some() {
         return Some(cur);
     }
@@ -1898,7 +1898,7 @@ enum SoleMap {
     },
     Concat {
         cur: Value,
-        rest: Arc<Vec<Value>>,
+        rest: Arc<[Value]>,
         idx: usize,
         outer: ConcatStack,
     },
@@ -1938,6 +1938,20 @@ fn walk_parts(
     }
 }
 
+/// Release a consumed concat root before walking its children so the
+/// finished branches can be freed while the output is being built.
+fn walk_owned_parts(
+    eval: &mut Evaluator,
+    input: Value,
+    parts: SoleMap,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if matches!(parts, SoleMap::Concat { .. }) {
+        drop(input);
+    }
+    walk_parts(eval, parts, visit)
+}
+
 /// Walk every item of one collection in seq order without allocating
 /// lazy cells for sole unforced combinators, vectors, lists, subvectors,
 /// repeats, or counted long ranges. Answers whether `visit` let the
@@ -1948,7 +1962,7 @@ fn walk_all(
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Result<bool, Signal> {
     if let Some(parts) = sole_map_parts(&coll) {
-        return walk_parts(eval, parts, visit);
+        return walk_owned_parts(eval, coll, parts, visit);
     }
     match coll {
         Value::Nil => Ok(true),
@@ -2484,13 +2498,13 @@ fn walk_drop_while(
 fn walk_concat(
     eval: &mut Evaluator,
     mut cur: Value,
-    mut rest: Arc<Vec<Value>>,
+    mut rest: Arc<[Value]>,
     mut idx: usize,
     mut outer: ConcatStack,
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Result<bool, Signal> {
     loop {
-        while let Some((icur, irest, iidx, _)) = unforced_concat_parts(&cur) {
+        while let Some((icur, irest, iidx, iouter)) = unforced_concat_parts(&cur) {
             if rest.get(idx).is_some() {
                 outer = Some(Arc::new(ConcatFrame {
                     rest,
@@ -2498,6 +2512,7 @@ fn walk_concat(
                     parent: outer,
                 }));
             }
+            outer = splice_concat_stack(iouter, outer);
             cur = icur;
             rest = irest;
             idx = iidx;
@@ -2506,8 +2521,11 @@ fn walk_concat(
             return Ok(false);
         }
         loop {
-            if let Some(next) = rest.get(idx) {
-                cur = next.clone();
+            if idx < rest.len() {
+                cur = match Arc::get_mut(&mut rest) {
+                    Some(inputs) => std::mem::replace(&mut inputs[idx], Value::Nil),
+                    None => rest[idx].clone(),
+                };
                 idx += 1;
                 break;
             }
@@ -2655,7 +2673,7 @@ fn step_take(eval: &mut Evaluator, n: &Value, input: Value) -> Result<Forced, Si
 /// still forces normally later, yielding identical items. Forced
 /// cells (memoized chunks) and non-concat pendings answer `None`
 /// and step through the normal path.
-fn unforced_concat_parts(v: &Value) -> Option<(Value, Arc<Vec<Value>>, usize, ConcatStack)> {
+fn unforced_concat_parts(v: &Value) -> Option<(Value, Arc<[Value]>, usize, ConcatStack)> {
     let cell = as_pending(v)?;
     let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
     match &*state {
@@ -2694,14 +2712,14 @@ fn splice_concat_stack(inner: ConcatStack, mut outer: ConcatStack) -> ConcatStac
 }
 
 /// Pop one resume frame (O(1): two `Arc` clones).
-fn pop_concat_frame(stack: &mut ConcatStack) -> Option<(Arc<Vec<Value>>, usize)> {
+fn pop_concat_frame(stack: &mut ConcatStack) -> Option<(Arc<[Value]>, usize)> {
     let frame = stack.take()?;
     *stack = frame.parent.clone();
     Some((Arc::clone(&frame.rest), frame.idx))
 }
 
 /// `concat`: pass the first non-empty input's unit through,
-/// chaining its tail back ahead of the rest. The `rest` vec is
+/// chaining its tail back ahead of the rest. The `rest` slice is
 /// shared, never mutated: exhausted inputs advance the index,
 /// and the current input's tail travels in `cur` — every step is
 /// O(1) no matter how many inputs `(apply concat ...)` splices.
@@ -2712,7 +2730,7 @@ fn pop_concat_frame(stack: &mut ConcatStack) -> Option<(Arc<Vec<Value>>, usize)>
 fn step_concat(
     eval: &mut Evaluator,
     mut cur: Value,
-    mut rest: Arc<Vec<Value>>,
+    mut rest: Arc<[Value]>,
     mut idx: usize,
     mut outer: ConcatStack,
 ) -> Result<Forced, Signal> {
@@ -2856,7 +2874,7 @@ fn splice_first(eval: &mut Evaluator, s: &Value, cont: Value) -> Result<Forced, 
             items: Arc::from(vec![head]),
             tail: PendingSeq::pending(Thunk::Concat {
                 cur: tail,
-                rest: Arc::new(vec![cont]),
+                rest: Arc::from([cont]),
                 idx: 0,
                 outer: None,
             }),
@@ -2865,7 +2883,7 @@ fn splice_first(eval: &mut Evaluator, s: &Value, cont: Value) -> Result<Forced, 
             items,
             tail: PendingSeq::pending(Thunk::Concat {
                 cur: tail,
-                rest: Arc::new(vec![cont]),
+                rest: Arc::from([cont]),
                 idx: 0,
                 outer: None,
             }),
@@ -3146,7 +3164,7 @@ fn step_partition_collect(
             n: n.clone(),
             input: PendingSeq::pending(Thunk::Concat {
                 cur: lazy_window(eval, window)?,
-                rest: Arc::new(vec![pad]),
+                rest: Arc::from([pad]),
                 idx: 0,
                 outer: None,
             }),
@@ -4628,8 +4646,8 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, S
         tv.conj(item).expect("fresh transient accepts conj");
         Ok(true)
     };
-    if let Some(done) = walk_sole_map(eval, &v, &mut push) {
-        done?;
+    if let Some(parts) = sole_map_parts(&v) {
+        walk_owned_parts(eval, v, parts, &mut push)?;
         return Ok(tv.persistent().expect("fresh transient is valid at freeze"));
     }
     // Owned: the walk advances `cur` off the head (owned callers
@@ -4842,8 +4860,8 @@ pub(crate) fn collect_all(eval: &mut Evaluator, v: Value) -> Result<Vec<Value>, 
         out.push(item);
         Ok(true)
     };
-    if let Some(done) = walk_sole_map(eval, &v, &mut push) {
-        done?;
+    if let Some(parts) = sole_map_parts(&v) {
+        walk_owned_parts(eval, v, parts, &mut push)?;
         return Ok(out);
     }
     // Owned: the walk advances `cur` off the head (owned callers
@@ -5422,12 +5440,13 @@ pub(crate) fn take_thunk(n: Value, input: Value) -> Value {
 }
 
 /// A `Thunk::Concat` tail value.
-pub(crate) fn concat_thunk(inputs: Vec<Value>) -> Value {
-    let mut inputs = inputs.into_iter();
-    let cur = inputs.next().unwrap_or(Value::Nil);
+pub(crate) fn concat_thunk(inputs: &[Value]) -> Value {
+    let (cur, rest) = inputs
+        .split_first()
+        .map_or((Value::Nil, &[][..]), |(head, tail)| (head.clone(), tail));
     pending_value(Thunk::Concat {
         cur,
-        rest: Arc::new(inputs.collect()),
+        rest: Arc::from(rest),
         idx: 0,
         outer: None,
     })
@@ -6126,7 +6145,7 @@ mod tests {
         let chars = Value::Vector(Vector::from_flat_chars(vec!['é', 'x']));
         let repeat = Value::Extension(Arc::new(RepeatValue::new(Value::Char('ø'), Some(2))));
         let ints = Value::Vector(Vector::from_flat_ints(vec![1]));
-        let text = concat_thunk(vec![chars.clone(), Value::Nil, repeat]);
+        let text = concat_thunk(&[chars.clone(), Value::Nil, repeat]);
         assert_eq!(
             collect_direct(&text).unwrap().as_flat_chars(),
             Some(['é', 'x', 'ø', 'ø'].as_slice())
@@ -6137,7 +6156,7 @@ mod tests {
             vec![ints, chars.clone()],
             vec![doubles, chars],
         ] {
-            assert!(collect_direct(&concat_thunk(pieces)).is_none());
+            assert!(collect_direct(&concat_thunk(&pieces)).is_none());
         }
     }
 

@@ -333,7 +333,7 @@ fn native_drop_while(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 }
 
 fn native_concat(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    Ok(concat_thunk(args.to_vec()))
+    Ok(concat_thunk(args))
 }
 
 fn native_cycle(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
