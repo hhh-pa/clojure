@@ -6189,7 +6189,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_concat_collection_resumes_at_the_saved_index() {
+    fn concat_collection_resumes_at_the_saved_index() {
         let pending = PendingSeq::pending(Thunk::Concat {
             cur: Value::Vector(Vector::from_ints(vec![1])),
             rest: Arc::from([
@@ -6203,6 +6203,9 @@ mod tests {
             collect_direct(&pending).unwrap().as_flat_ints(),
             Some(&[1, 2, 3][..]),
         );
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let output = collect_all(&mut eval, pending).unwrap();
+        assert_eq!(output, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
     }
 
     #[test]
