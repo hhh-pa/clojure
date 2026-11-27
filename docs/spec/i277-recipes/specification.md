@@ -105,3 +105,7 @@ The macOS release comparison matched all 60 retry outputs. Peak RSS fell 16% for
 The interpreter's scalar loop tier reads invariant arrays through the existing locked `aget` accessor. The loop uses the normal boxed path for invalid indexes, unsupported values, and redefined vars. AOT continues to lower array reads through its general interop path.
 
 In a macOS release A/B, `lfsr` tc4–tc7 used about 29% fewer retired instructions. The final interpreter matched the reference output on all 3,315 cases.
+
+### PersistentQueue in AOT builds
+
+The AOT constant pool resolves the canonical `PersistentQueue/EMPTY` by static field name. With the queue's JVM-style printed form, trying to read it back as data caused native compilation to fall back to embedded evaluation. The linked executable test checks native compilation, field identity, and FIFO operations.

@@ -2533,9 +2533,15 @@ fn static_field_locale(field: &str) -> Option<Value> {
     }
 }
 
+static EMPTY_QUEUE: std::sync::OnceLock<Arc<dyn ExtensionValue>> = std::sync::OnceLock::new();
+
 fn static_field_queue(field: &str) -> Option<Value> {
     match field {
-        "EMPTY" => Some(crate::coll::empty_queue_value()),
+        "EMPTY" => Some(Value::Extension(
+            EMPTY_QUEUE
+                .get_or_init(|| Arc::new(clj_value::QueueValue::empty()))
+                .clone(),
+        )),
         _ => None,
     }
 }
@@ -7677,6 +7683,12 @@ impl LocaleHandle {
 /// The static field a folded constant came from (see
 /// `native_abi::static_field_origin`).
 pub(crate) fn static_field_origin(v: &Value) -> Option<(&'static str, &'static str)> {
+    // The canonical empty queue is a static object whose printed form
+    // cannot be read back. Identify the field by allocation, so a
+    // separately constructed empty queue retains its own identity.
+    if matches!(v, Value::Extension(e) if EMPTY_QUEUE.get().is_some_and(|q| Arc::ptr_eq(q, e))) {
+        return Some(("clojure.lang.PersistentQueue", "EMPTY"));
+    }
     match as_locale(v) {
         Some(l) if l.tag == "en_US" => Some(("java.util.Locale", "US")),
         _ => None,

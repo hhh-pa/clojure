@@ -2764,11 +2764,6 @@ pub(crate) fn queue_mut(e: &mut Arc<dyn clj_value::ExtensionValue>) -> Option<&m
         .and_then(|a| a.downcast_mut::<QueueValue>())
 }
 
-/// `clojure.lang.PersistentQueue/EMPTY`.
-pub(crate) fn empty_queue_value() -> Value {
-    Value::Extension(Arc::new(QueueValue::empty()))
-}
-
 fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/peek", args, &[1])?;
     match &args[0] {

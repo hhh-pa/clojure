@@ -357,6 +357,26 @@ fn mixed_binary_native_failure_exits_like_run_256() {
 }
 
 #[test]
+fn native_binary_resolves_persistent_queue_empty() {
+    let source = "\
+(defn queue [] clojure.lang.PersistentQueue/EMPTY)
+(let [q (conj (queue) 1 2)]
+  (println [(identical? (queue) clojure.lang.PersistentQueue/EMPTY)
+            (vector? q) (peek q) (peek (pop q)) (count (queue))
+            (= '(1 2) (seq q))]))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("queue-empty", source, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[true false 1 2 0 true]\n", "", 0)
+    );
+}
+
+#[test]
 fn native_binary_runs_assoc_conj_and_fx_259() {
     let source = "\
 (let [t (transient [[1] [2]])
