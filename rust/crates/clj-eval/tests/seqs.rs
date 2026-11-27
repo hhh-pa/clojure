@@ -1537,9 +1537,10 @@ fn reduce_long_products_uses_vector_windows_and_preserves_fallbacks() {
                 (reduce + 0.5 (map * [2] [3]))
                 (reduce +' (map *' [9223372036854775807] [2]))
                 (let [xs (map * [2] [3])] [(reduce + xs) (realized? xs) (first xs)])
-                (reduce + (map (fn [a b] (+ a b)) [2] [3]))]"#,
+                (reduce + (map (fn [a b] (+ a b)) [2] [3]))
+                (reduce + (map - [2] [3]))]"#,
         ),
-        "[31 14 0 6.5 18446744073709551614N [6 true 6] 5]"
+        "[31 14 0 6.5 18446744073709551614N [6 true 6] 5 -1]"
     );
     assert!(
         uncaught(&mut eval, "(reduce + (map * [9223372036854775807] [2]))")

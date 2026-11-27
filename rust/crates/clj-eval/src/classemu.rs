@@ -3277,9 +3277,6 @@ pub(crate) fn try_mapv_static_parse(
     let [arity] = vm.fun.source.as_ref() else {
         return None;
     };
-    let [Pattern::Symbol(_)] = arity.fixed.as_slice() else {
-        return None;
-    };
     let [Expr::Invoke { head, args, .. }] = arity.body.as_slice() else {
         return None;
     };
@@ -3291,7 +3288,10 @@ pub(crate) fn try_mapv_static_parse(
     else {
         return None;
     };
-    if *i != vm.fun.base || !eval.calls_fit(1) {
+    if !matches!(arity.fixed.as_slice(), [Pattern::Symbol(_)])
+        || *i != vm.fun.base
+        || !eval.calls_fit(1)
+    {
         return None;
     }
     let mode = match (class.as_ref(), method.as_ref()) {
@@ -8116,6 +8116,45 @@ mod tests {
         assert_eq!(identity_hash(&uri), identity_hash(&uri.clone()));
         let other = Value::Uri(Box::new(clj_value::Uri::parse("http://x/").unwrap()));
         assert_ne!(identity_hash(&uri), identity_hash(&other));
+    }
+
+    #[test]
+    fn bulk_static_parser_only_matches_the_unary_forwarder() {
+        let mut eval = crate::boot();
+        let inputs = Value::Vector(clj_value::Vector::from_vec(vec![Value::Str("1".into())]));
+        eval.eval_source("(defn other-static [_ _ x] x)").unwrap();
+        for source in [
+            r#"(fn ([x] (Long/parseLong x)) ([x y] y))"#,
+            r#"(fn [[x]] (Long/parseLong x))"#,
+            r#"(let [x "7"] (fn [_] (Long/parseLong x)))"#,
+            r#"(fn [x] (Long/valueOf x))"#,
+            r#"(let [f other-static] (fn [x] (f '"java.lang.Long" '"parseLong" x)))"#,
+            r#"(fn [x] (other-static '"java.lang.Long" '"parseLong" x))"#,
+        ] {
+            let function = eval.eval_source(source).unwrap().pop().unwrap();
+            assert!(
+                try_mapv_static_parse(&mut eval, &function, &inputs).is_none(),
+                "{source}"
+            );
+        }
+
+        let function = eval
+            .eval_source("#(Long/parseLong %)")
+            .unwrap()
+            .pop()
+            .unwrap();
+        let var_id = crate::ns::core_var(&eval, "__static*").unwrap();
+        let var = crate::ns::core_var_handle(var_id, "__static*");
+        for source in ["(constantly :overridden)", "vector"] {
+            let replacement = eval.eval_source(source).unwrap().pop().unwrap();
+            let depth = eval.push_binding(var.clone(), replacement);
+            assert!(try_mapv_static_parse(&mut eval, &function, &inputs).is_none());
+            eval.pop_bindings(depth);
+        }
+        assert_eq!(
+            try_mapv_static_parse(&mut eval, &function, &inputs),
+            Some(Value::Vector(clj_value::Vector::from_ints(vec![1])))
+        );
     }
 
     #[test]
