@@ -5063,6 +5063,39 @@ impl<'a> VectorWindow<'a> {
     }
 }
 
+/// Sum an unrealized two-input multiplication over packed long windows. A
+/// shared map must still memoize its elements for its other readers.
+pub(crate) fn sum_mapped_products(coll: &Value, init: Option<&Value>) -> Option<Value> {
+    let init = match init {
+        None => 0,
+        Some(Value::Int(n)) => *n,
+        _ => return None,
+    };
+    let Value::Extension(ext) = coll else {
+        return None;
+    };
+    if Arc::strong_count(ext) != 1 {
+        return None;
+    }
+    let cell = as_pending(coll)?;
+    let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+    let SeqState::Pending(thunk) = &*state else {
+        return None;
+    };
+    let Thunk::Map { f, inputs } = &**thunk else {
+        return None;
+    };
+    let [a, b] = inputs.as_slice() else {
+        return None;
+    };
+    if crate::ext::as_native(f)?.fast != crate::ext::FastArith::Mul {
+        return None;
+    }
+    let a = VectorWindow::of(a)?;
+    let b = VectorWindow::of(b)?;
+    crate::native_abi::checked_long_dot(init, a.int_slice()?, b.int_slice()?).map(Value::Int)
+}
+
 /// `APersistentVector.equiv`: two vector-likes compare by count
 /// first, then itemwise (the pairwise walk's step cells, buffer
 /// allocations and clones were most of a comparison's cost once a

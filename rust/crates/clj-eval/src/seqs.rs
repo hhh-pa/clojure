@@ -660,7 +660,7 @@ fn reduce_add_vector(f: &Value, init: Option<&Value>, coll: &Value) -> Option<Va
         return None;
     }
     let Value::Vector(v) = coll else {
-        return None;
+        return crate::lazy::sum_mapped_products(coll, init);
     };
     let mut items = v.iter();
     let first = match init {
@@ -1561,6 +1561,11 @@ pub(crate) fn native_mapv_owned(
     {
         if let Some(res) = try_mapv_parse_long(&inputs[0]) {
             return Ok(res);
+        }
+    }
+    if let [input] = inputs.as_slice() {
+        if let Some(parsed) = crate::classemu::try_mapv_static_parse(eval, &args[0], input) {
+            return Ok(parsed);
         }
     }
     // One input under a VM/native fn walks it in place (#226): no lazy map

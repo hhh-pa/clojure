@@ -1231,6 +1231,23 @@ mod tests {
     }
 
     #[test]
+    fn collection_print_restores_readably_after_writer_error() {
+        let mut eval = crate::boot();
+        let results = eval
+            .eval_source(
+                "(try (binding [*out* nil] (print []))
+                   (catch NullPointerException _ :writer-error))
+                 *print-readably*",
+            )
+            .unwrap();
+        assert_eq!(
+            results[0],
+            Value::Keyword(clj_value::Keyword::new(None, "writer-error"))
+        );
+        assert_eq!(results[1], Value::Bool(true));
+    }
+
+    #[test]
     fn print_plain_str_and_try_print_join_paths() {
         let mut eval = crate::boot();
         // print_scalars single-string fast path (`print`/`println`) vs `pr`/`prn`/multi-arg

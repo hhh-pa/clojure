@@ -1169,7 +1169,10 @@ impl Compiler {
         let inline = inline_unpack(pat);
         let pat = pat.clone();
         Box::new(move |ev, f| {
-            let v = f.regs[raw].clone();
+            // A destructured parameter has no lexical name for its raw slot.
+            // Keeping it alive here shares every nested accumulator with the
+            // body and forces persistent updates to copy their storage.
+            let v = std::mem::replace(&mut f.regs[raw], Value::Nil);
             if inline
                 .as_ref()
                 .is_some_and(|u| unpack_inline(u, &v, &regs, f))

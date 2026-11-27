@@ -940,45 +940,34 @@ impl QueueValue {
     /// the live window.
     #[must_use]
     pub fn pop(&self) -> Self {
-        if self.is_empty() {
-            return self.clone();
-        }
-        let start = self.start + 1;
-        if start > self.items.len() - start {
-            return Self {
-                items: Vector::from_vec(self.items.iter_from(start).collect()),
-                start: 0,
-                meta: self.meta.clone(),
-            };
-        }
-        Self {
-            items: self.items.clone(),
-            start,
-            meta: self.meta.clone(),
-        }
+        let mut queue = self.clone();
+        queue.pop_mut();
+        queue
     }
 
-    /// `conj`: `x` at the back (the vector's own `push_back`, so a
-    /// uniquely held queue grows in place).
+    /// Append to the back of the queue.
     #[must_use]
-    pub fn conj(self, x: Value) -> Self {
-        Self {
-            items: self.items.push_back(x),
-            start: self.start,
-            meta: self.meta,
+    pub fn conj(mut self, x: Value) -> Self {
+        self.push_mut(x);
+        self
+    }
+
+    /// Advance the front in place, compacting when the dead prefix is larger
+    /// than the live suffix.
+    pub fn pop_mut(&mut self) {
+        if self.is_empty() {
+            return;
+        }
+        self.start += 1;
+        if self.start > self.len() {
+            self.items = Vector::from_vec(self.iter().collect());
+            self.start = 0;
         }
     }
 
-    /// In-place `pop` (a uniquely held queue, #277).
-    pub fn pop_mut(&mut self) {
-        *self = self.pop();
-    }
-
-    /// In-place `conj` (a uniquely held queue: the vector grows in
-    /// place when nothing else shares it).
+    /// Append without creating a temporary empty backing vector.
     pub fn push_mut(&mut self, x: Value) {
-        let items = std::mem::replace(&mut self.items, Vector::new_sync());
-        self.items = items.push_back(x);
+        self.items.push_back_mut(x);
     }
 
     /// The items front to back.
@@ -2254,6 +2243,10 @@ mod tests {
             h.finish()
         };
         assert_eq!(digest(&q), digest(&other));
+        let queue = Value::Extension(Arc::new(q));
+        let vector = Value::Vector(Vector::from_vec(vec![int(3), int(4)]));
+        assert_eq!(queue, vector);
+        assert_eq!(hash_val(&queue), hash_val(&vector));
         // Popping empty is a no-op.
         let mut e = QueueValue::empty();
         e.pop_mut();

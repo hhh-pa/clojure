@@ -1925,12 +1925,15 @@ fn num_val_as_i64(vr: clj_value::ValueRef<'_>) -> Option<i64> {
     }
 }
 
+pub(crate) fn checked_long_dot(acc: i64, xs: &[i64], ys: &[i64]) -> Option<i64> {
+    xs.iter()
+        .zip(ys)
+        .try_fold(acc, |sum, (&x, &y)| sum.checked_add(x.checked_mul(y)?))
+}
+
 fn dot_ints(mut acc: i64, v1: &Vector, v2: &Vector) -> Option<Value> {
     if let (Some(s1), Some(s2)) = (v1.as_flat_ints(), v2.as_flat_ints()) {
-        for (&x, &y) in s1.iter().zip(s2.iter()) {
-            acc = acc.checked_add(x.checked_mul(y)?)?;
-        }
-        return Some(Value::Int(acc));
+        return checked_long_dot(acc, s1, s2).map(Value::Int);
     }
     let n = v1.len().min(v2.len());
     for i in 0..n {

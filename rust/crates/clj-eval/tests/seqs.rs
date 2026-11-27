@@ -1524,3 +1524,62 @@ fn mapv_filterv_packed_streaming_227() {
         "clojure.lang.ExceptionInfo | bap"
     );
 }
+
+#[test]
+fn reduce_long_products_uses_vector_windows_and_preserves_fallbacks() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"[(reduce + (map * (subvec [90 2 3 80] 1 3) [5 7 11]))
+                (reduce + 4 (map * [2 3] (subvec [0 5] 1)))
+                (reduce + (map * [] [3]))
+                (reduce + 0.5 (map * [2] [3]))
+                (reduce +' (map *' [9223372036854775807] [2]))
+                (let [xs (map * [2] [3])] [(reduce + xs) (realized? xs) (first xs)])
+                (reduce + (map (fn [a b] (+ a b)) [2] [3]))]"#,
+        ),
+        "[31 14 0 6.5 18446744073709551614N [6 true 6] 5]"
+    );
+    assert!(
+        uncaught(&mut eval, "(reduce + (map * [9223372036854775807] [2]))")
+            .starts_with("java.lang.ArithmeticException")
+    );
+    assert!(
+        uncaught(&mut eval, "(reduce + 1 (map * [9223372036854775807] [1]))")
+            .starts_with("java.lang.ArithmeticException")
+    );
+}
+
+#[test]
+fn mapv_static_parsers_keep_errors_and_redefinitions() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"[(mapv #(Long/parseLong %) ["+1" "-2" "٣"])
+                (mapv #(Integer/parseInt %) (subvec ["ignore" "3" "4"] 1))
+                (mapv #(Double/parseDouble %) ["1.25" "2e1"])
+                (mapv #(Long/parseLong %) [])
+                (mapv #(Long/parseLong %) '("1" "2"))
+                (mapv #(Long/parseLong % 16) ["a"])]"#,
+        ),
+        "[[1 -2 3] [3 4] [1.25 20.0] [] [1 2] [10]]"
+    );
+    for src in [
+        r#"(mapv #(Long/parseLong %) ["1" "bad"])"#,
+        r#"(mapv #(Integer/parseInt %) ["2147483648"])"#,
+        r#"(mapv #(Double/parseDouble %) ["bad"])"#,
+    ] {
+        assert!(uncaught(&mut eval, src).starts_with("java.lang.NumberFormatException"));
+    }
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"(let [parse #(Long/parseLong %)]
+                (with-redefs [clojure.core/__static* (fn [c m x] x)]
+                  (mapv parse ["1" "2"])))"#,
+        ),
+        "[\"1\" \"2\"]"
+    );
+}

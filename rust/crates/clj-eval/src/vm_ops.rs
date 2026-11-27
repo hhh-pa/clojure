@@ -1010,6 +1010,16 @@ pub(crate) enum Coll {
     Read(Operand),
 }
 
+impl From<Operand> for Coll {
+    fn from(operand: Operand) -> Self {
+        match operand {
+            Operand::Loc(Loc::Reg(r), true) => Self::Take(r),
+            Operand::Exec(e) => Self::Exec(e),
+            other => Self::Read(other),
+        }
+    }
+}
+
 /// An update op (`assoc`, `conj`): a computed collection runs
 /// first, then the other operands in order, then a local
 /// collection is read — last, so the last-use analysis can move it
@@ -1117,6 +1127,14 @@ fn upd_native(c: Site, coll: Coll, rest: Vec<Operand>) -> Exec {
     })
 }
 
+fn eval_literal_keys(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    keys: &[Exec],
+) -> Result<SmallVec<[Value; 4]>, Signal> {
+    keys.iter().map(|key| key(ev, f)).collect()
+}
+
 /// `(get-in coll [k ...])` / `(get-in coll [k ...] not-found)` over a
 /// vector-literal path (#277): the keys evaluate as operands (in the
 /// JVM's order: collection, keys, not-found) and the lookups nest, so no
@@ -1131,10 +1149,7 @@ pub(crate) fn get_in_literal(
     let c = Site::new(call);
     Box::new(move |ev, f| {
         let mut cur = coll(ev, f)?;
-        let mut ks: SmallVec<[Value; 4]> = SmallVec::with_capacity(keys.len());
-        for k in &keys {
-            ks.push(k(ev, f)?);
-        }
+        let ks = eval_literal_keys(ev, f, &keys)?;
         let nf = match &nf {
             Some(e) => Some(e(ev, f)?),
             None => None,
@@ -1167,20 +1182,13 @@ pub(crate) fn assoc_in_literal(
     val: Exec,
 ) -> Exec {
     let c = Site::new(call);
-    let coll = match coll {
-        Operand::Loc(Loc::Reg(r), true) => Coll::Take(r),
-        Operand::Exec(e) => Coll::Exec(e),
-        other => Coll::Read(other),
-    };
+    let coll = Coll::from(coll);
     Box::new(move |ev, f| {
         let mut m = match &coll {
             Coll::Exec(e) => e(ev, f)?,
             _ => Value::Nil,
         };
-        let mut ks: SmallVec<[Value; 4]> = SmallVec::with_capacity(keys.len());
-        for k in &keys {
-            ks.push(k(ev, f)?);
-        }
+        let ks = eval_literal_keys(ev, f, &keys)?;
         let v = val(ev, f)?;
         match &coll {
             Coll::Take(r) => m = std::mem::replace(&mut f.regs[*r], Value::Nil),
@@ -1236,11 +1244,7 @@ pub(crate) fn update_order(call: &DirectCall) -> bool {
 /// operand a last-use register moves out).
 pub(crate) fn update_code(ctor: UpdCtor, site: Arc<DirectCall>, mut ops: Vec<Operand>) -> Exec {
     let rest = ops.split_off(1);
-    let coll = match ops.pop().expect("the collection operand") {
-        Operand::Loc(Loc::Reg(r), true) => Coll::Take(r),
-        Operand::Exec(e) => Coll::Exec(e),
-        other => Coll::Read(other),
-    };
+    let coll = Coll::from(ops.pop().expect("the collection operand"));
     ctor(Site::new(site), coll, rest)
 }
 

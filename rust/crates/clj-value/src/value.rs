@@ -1657,6 +1657,11 @@ impl Vector {
     /// Append a value.
     #[must_use]
     pub fn push_back(mut self, v: Value) -> Self {
+        self.push_back_mut(v);
+        self
+    }
+
+    pub(crate) fn push_back_mut(&mut self, v: Value) {
         // Through `&mut`, so uniquely-owned `conj` chains mutate in
         // place while versions shared with other handles path-copy;
         // a foreign value converts typed storage once (to generic,
@@ -1668,7 +1673,6 @@ impl Vector {
             data.inner = VectorInner::Generic(g);
         }
         data.id = next_vector_id();
-        self
     }
 
     /// Replace the item at `index` (`None` when out of bounds).
@@ -5671,6 +5675,22 @@ mod tests {
             (small.sorted_len(), small.sorted_key(1)),
             (2, Some(&Value::Int(2)))
         );
+    }
+
+    #[test]
+    fn large_sorted_set_compacts_front_removals() {
+        let n = super::SORTED_SMALL_SET_MAX + 1;
+        let mut set = super::new_set()
+            .with_sort(Some(super::SortSpec::Natural))
+            .with_ordered_members((0..n as i64).map(Value::Int).collect());
+        let original = set.clone();
+        let removed = n / 2 + 1;
+        for _ in 0..removed {
+            set = set.without_sorted_at(0);
+        }
+        assert_eq!(original.size(), n);
+        assert_eq!(set.size(), n - removed);
+        assert_eq!(set.sorted_member(0), Some(&Value::Int(removed as i64)));
     }
 
     #[test]

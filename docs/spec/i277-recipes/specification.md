@@ -85,3 +85,11 @@ Vector and subvector equality checks lengths before comparing elements. Two pack
 Java method dispatch borrows the method name. Deques and priority queues handle collection methods through their concrete types before the generic collection handler walks the Java class hierarchy.
 
 In the workstation measurements, the vector change reduced instructions on `address_translation` tc7 from 4.69G to 2.04G. The collection dispatch change reduced `sliding_window_max` tc7 from 4.20 to 2.59 times the saved CPython instruction count. These are Linux perf measurements, with Pin remaining the CI gate.
+
+### Destructuring, queue updates, and numeric traversal
+
+Destructuring consumes its hidden VM input register. Persistent children with no other owners can then update in place. A consumed queue can also update its backing vector directly, and a front pop clones no backing storage until compaction.
+
+The interpreter parses immutable string collections in one pass when `mapv` calls a unary Java numeric parser. It reuses the AOT parsing helper and falls back to the original call for invalid tokens or a redefined dispatch var. A reduction of mapped long products can consume two packed vector windows in one pass. It preserves checked arithmetic, with the ordinary reduction handling overflow and shared lazy inputs.
+
+All 60 outputs matched the saved reference files in a macOS release comparison. Relative to the previous interpreter, retired instructions fell by 88% for `perceptron` tc7, 36% for `red_gateway` tc7, and 32% for `tree_diameter` tc7. The earlier Linux A/B measured `tree_diameter` tc7 at 4.33× CPython before the ownership changes and 3.12× afterward.

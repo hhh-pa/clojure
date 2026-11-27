@@ -649,7 +649,7 @@ jobs:
             sudo chown -R "$(id -u):$(id -g)" rust/target/llvm-cov
           fi
       - name: publish coverage summary
-        if: always()
+        if: always() && hashFiles('rust/target/llvm-cov/lcov.info') != ''
         run: ./ci-tools-bin/coverage-summary --out rust/target/llvm-cov/coverage-comment.md rust/target/llvm-cov/lcov.info >> "$GITHUB_STEP_SUMMARY"
       - name: upload coverage report
         if: always() && hashFiles('rust/target/llvm-cov/lcov.info') != ''

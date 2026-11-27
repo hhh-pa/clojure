@@ -3265,6 +3265,59 @@ fn static_arities_math(member: &str) -> Option<&'static [usize]> {
 pub(crate) fn lattice_is_iface(fqn: &str) -> bool {
     static_row(fqn).is_some_and(|r| r.iface)
 }
+/// Map a pure unary Java numeric parser over an immutable string collection.
+/// On invalid input the ordinary call reports the exception at its source.
+pub(crate) fn try_mapv_static_parse(
+    eval: &mut Evaluator,
+    f: &Value,
+    coll: &Value,
+) -> Option<Value> {
+    use crate::expr::{Expr, Pattern};
+    let (vm, _) = crate::vm::fixed_target(f, 1)?;
+    let [arity] = vm.fun.source.as_ref() else {
+        return None;
+    };
+    let [Pattern::Symbol(_)] = arity.fixed.as_slice() else {
+        return None;
+    };
+    let [Expr::Invoke { head, args, .. }] = arity.body.as_slice() else {
+        return None;
+    };
+    let [
+        Expr::Quote(Value::Str(class)),
+        Expr::Quote(Value::Str(method)),
+        Expr::Local(i),
+    ] = args.as_slice()
+    else {
+        return None;
+    };
+    if *i != vm.fun.base || !eval.calls_fit(1) {
+        return None;
+    }
+    let mode = match (class.as_ref(), method.as_ref()) {
+        ("java.lang.Long", "parseLong") => 0,
+        ("java.lang.Integer", "parseInt") => 1,
+        ("java.lang.Double", "parseDouble") => 2,
+        _ => return None,
+    };
+    let Expr::Global(var) = head.as_ref() else {
+        return None;
+    };
+    if var.sym.namespace() != Some("clojure.core") || var.sym.name() != "__static*" {
+        return None;
+    }
+    let epoch = eval.registry.epoch();
+    let root = eval.deref_var_cached(var.id, &var.sym);
+    let crate::ext::NativeTarget::Ptr(func) = crate::ext::as_native(&root)?.func else {
+        return None;
+    };
+    if !std::ptr::fn_addr_eq(func, native_static as crate::ns::NativeFnPtr) {
+        return None;
+    }
+    let result = crate::native_abi::try_mapv_parse_num(coll, mode)?;
+    (epoch == eval.registry.epoch()).then_some(result)
+}
+
 /// `__static*`: `(FQN member args…)` — the analyzer's static-call
 /// lowering plus the instance-position consult for class values.
 /// Known members dispatch; 0-arg field names read the field
@@ -8063,6 +8116,14 @@ mod tests {
         assert_eq!(identity_hash(&uri), identity_hash(&uri.clone()));
         let other = Value::Uri(Box::new(clj_value::Uri::parse("http://x/").unwrap()));
         assert_ne!(identity_hash(&uri), identity_hash(&other));
+    }
+
+    #[test]
+    fn deque_lattice_keeps_unmaterialized_interfaces() {
+        let deque = static_row("java.util.ArrayDeque").expect("deque class");
+        let supers = static_supers(deque);
+        assert!(supers.contains("java.util.Deque"));
+        assert!(supers.contains("java.io.Serializable"));
     }
 
     #[test]
