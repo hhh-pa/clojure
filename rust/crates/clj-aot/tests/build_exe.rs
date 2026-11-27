@@ -434,6 +434,38 @@ fn native_assoc_still_fuses_an_indexed_increment() {
 }
 
 #[test]
+fn native_sum_reads_two_key_paths_and_preserves_get_in_fallbacks() {
+    let source = "\
+(defn sum-column [m row col]
+  (loop [i 0 total 0]
+    (if (< i 2)
+      (recur (inc i) (+ total (get-in m [(+ row i) col])))
+      total)))
+(defn count-column [m]
+  (loop [i 0 n 0]
+    (if (< i 2)
+      (recur (inc i) (if (get-in m [i 1]) (inc n) n))
+      n)))
+(println [(sum-column [[2 3] [4 5]] 0 1)
+          (sum-column [[2 3] [4 5]] 4294967296 4294967297)
+          (sum-column {0 {:x 3} 1 {:x 5}} 0 :x)
+          (sum-column (subvec [[0] [2 3] [4 5]] 1) 0 1)
+          (count-column [[1] [nil nil]])
+          (count-column [\"ab\" nil])
+          (with-redefs [get-in (fn [_ _] 10)] (sum-column nil 0 1))])
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("two-key-scalar-read", source, &[]);
+    assert!(
+        report.starts_with("aot: native 2/2 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[8 8 8 8 0 1 20]\n", "", 0)
+    );
+}
+
+#[test]
 fn native_binary_runs_assoc_conj_and_fx_259() {
     let source = "\
 (let [t (transient [[1] [2]])

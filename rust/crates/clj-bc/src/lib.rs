@@ -1388,6 +1388,14 @@ mod tests {
         assert!(!ops::scalar_nth2(&nested, 2, 0, &mut k, &mut v, false));
         assert!(!ops::scalar_nth2(&nested, -1, 0, &mut k, &mut v, false));
         assert!(!ops::scalar_nth2(&nested, 0, -1, &mut k, &mut v, false));
+        assert!(!ops::scalar_nth2(
+            &nested,
+            0,
+            1 << 32,
+            &mut k,
+            &mut v,
+            false
+        ));
         assert!(!ops::scalar_nth2(&Value::Nil, 0, 0, &mut k, &mut v, false));
 
         let mut iptr = std::ptr::null();

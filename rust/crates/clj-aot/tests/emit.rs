@@ -1612,7 +1612,7 @@ fn native_emit_ir_lowers_double_scalar_loops_and_gvec_271() {
            (loop [i 0 acc 0.0]\n\
              (if (< i n)\n\
                (let [x (nth xs i)\n\
-                     y (nth (nth mat 0) i)\n\
+                     y (get-in mat [0 i])\n\
                      a (+ (- (* x G_SCALE) G_SCALE) *dyn-bias*)\n\
                      b (/ (inc (dec (- a))) 2.0)\n\
                      m (min (max b 0.0) 10.0)\n\
@@ -1650,6 +1650,7 @@ fn native_emit_ir_lowers_double_scalar_loops_and_gvec_271() {
         .find(|d| d.contains("user_fp_loop("))
         .expect("fp-loop fn");
     assert!(fp_body.contains("sc_nth_gvec"), "{fp_body}");
+    assert!(fp_body.contains("sc_nth2_ok"), "{fp_body}");
     assert!(fp_body.contains("@rt_n_math_log"), "{fp_body}");
     assert!(fp_body.contains("@rt_n_math_pow"), "{fp_body}");
     assert!(fp_body.contains("llvm.sqrt.f64"), "{fp_body}");

@@ -213,7 +213,7 @@ pub enum Calc {
     /// `(count coll)` over an invariant collection.
     Count(Loc),
     /// Item `j` of the vector at `coll[i]` (destructured `(let [[a b …] (nth coll i)] …)`
-    /// or nested `(nth (nth coll i) j)`).
+    /// nested `(nth (nth coll i) j)`, or `(get-in coll [i j])`).
     Nth2(Loc, IExpr, IExpr),
 }
 
@@ -614,12 +614,11 @@ fn aget(coll: &Coll<'_>, i: Sv) -> Option<Sv> {
     Sv::of(&crate::arrays::aget_fast(array, index)?)
 }
 
-/// The scalar item `j` of the vector at `coll[i]` (a destructured
-/// `(nth coll i)` or nested `(nth (nth coll i) j)`): anything but a vector
-/// there, or a non-scalar or missing item, misses.
+/// A scalar at two vector indexes. Wider indexes take the general path,
+/// where `get-in` narrows integer keys and `nth` checks them.
 fn nth2(coll: &Coll<'_>, i: Sv, j: Sv) -> Option<Sv> {
-    let idx = usize::try_from(i.int_of()?).ok()?;
-    let k = usize::try_from(j.int_of()?).ok()?;
+    let idx = i32::try_from(i.int_of()?).and_then(usize::try_from).ok()?;
+    let k = i32::try_from(j.int_of()?).and_then(usize::try_from).ok()?;
     let item = |v: &Value| match v {
         Value::Vector(inner) => inner.read_at(k, Sv::of),
         _ => None,
@@ -2649,6 +2648,7 @@ impl Builder<'_> {
         Some(match (name, args) {
             ("/", args) if !args.is_empty() => self.div_expr(args),
             ("nth", [coll, i]) => self.nth_expr(coll, i),
+            ("get-in", [coll, Expr::VecLit(keys, None)]) => return self.get_in_expr(coll, keys),
             ("aget", [coll, i]) if self.host.supports_array_read() => {
                 self.read_coll(coll).map_or(IExpr::Deopt, |l| {
                     calc(Calc::Index(l, self.expr(i), IndexRead::Aget))
@@ -2663,6 +2663,15 @@ impl Builder<'_> {
             ("abs", [x]) => calc(Calc::Fp(FpCalc::Math1(MathOp1::Abs, self.expr(x)))),
             _ => return None,
         })
+    }
+
+    fn get_in_expr(&mut self, coll: &Expr, keys: &[Expr]) -> Option<IExpr> {
+        let [row, col] = keys else {
+            return None;
+        };
+        let coll = self.read_coll(coll)?;
+        let row = self.expr(row);
+        Some(calc(Calc::Nth2(coll, row, self.expr(col))))
     }
 
     fn div_expr(&mut self, args: &[Expr]) -> IExpr {
@@ -3256,6 +3265,30 @@ mod tests {
             })
             .expect("array loop");
         assert!(compile_aot_loop(body, &[0, 1], 2, &HashMap::new(), |_| true).is_none());
+    }
+
+    #[test]
+    fn vm_scalar_two_key_lookup_keeps_general_get_in_semantics() {
+        let mut ev = boot();
+        let src = r#"
+(defn sum-column [m row col]
+  (loop [i 0 total 0]
+    (if (< i 5000)
+      (recur (inc i) (+ total (get-in m [row col])))
+      total)))
+[(sum-column [[2 3]] 0 1)
+ (sum-column [[2 3]] 4294967296 1)
+ (sum-column [[2 3]] 0 4294967297)
+ (sum-column {0 {:x 3}} 0 :x)
+ (with-redefs [get-in (fn [_ _] 2)] (sum-column nil 0 1))
+ (loop [i 0 n 0] (if (= i 5000) n (recur (inc i) (+ n (get-in [0] [0])))))
+ (loop [i 0 n 0] (if (= i 5000) n (recur (inc i) (+ n (get-in [[0]] [0 0])))))]
+"#;
+        let forms = ev.eval_source(src).unwrap();
+        let expected = ev
+            .eval_source("[15000 15000 15000 15000 10000 0 0]")
+            .unwrap();
+        assert_eq!(forms.last(), expected.last());
     }
 
     #[test]

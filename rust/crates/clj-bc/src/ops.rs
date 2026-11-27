@@ -1122,7 +1122,7 @@ fn vec_or_subvec_ref(coll: &Value, idx: usize) -> Option<ValueRef<'_>> {
     }
 }
 
-/// Unboxed nested `nth` (`coll[idx][item]`) for destructured tuple vectors.
+/// Unboxed two-level vector lookup at indexes shared by `nth` and `get-in`.
 #[inline]
 pub(crate) fn scalar_nth2(
     coll: &Value,
@@ -1135,7 +1135,7 @@ pub(crate) fn scalar_nth2(
     let Ok(i) = i32::try_from(idx).and_then(usize::try_from) else {
         return false;
     };
-    let Ok(j) = usize::try_from(item) else {
+    let Ok(j) = i32::try_from(item).and_then(usize::try_from) else {
         return false;
     };
     let Some(ValueRef::Ref(inner)) = vec_or_subvec_ref(coll, i) else {
