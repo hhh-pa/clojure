@@ -1136,8 +1136,8 @@ fn eval_literal_keys(
 }
 
 /// Read a two-dimensional vector without cloning the intermediate row.
-fn lookup_matrix_cell(coll: &Value, keys: &[Value]) -> Option<Value> {
-    let (Value::Vector(matrix), [row, col]) = (coll, keys) else {
+fn lookup_matrix_cell(coll: &Value, row: &Value, col: &Value) -> Option<Value> {
+    let Value::Vector(matrix) = coll else {
         return None;
     };
     let row = crate::vm_intrinsics::index(row)?;
@@ -1146,6 +1146,36 @@ fn lookup_matrix_cell(coll: &Value, keys: &[Value]) -> Option<Value> {
         return None;
     };
     cells.get(col)
+}
+
+/// A two-key lookup whose collection and keys are readable in place.
+/// Only a redefined `get-in` needs the original path vector.
+pub(crate) fn get_in_pair(
+    call: Arc<DirectCall>,
+    coll: Operand,
+    row: Operand,
+    col: Operand,
+) -> Exec {
+    let c = Site::new(call);
+    Box::new(move |ev, f| {
+        let coll = coll.read(f, None);
+        let row = row.read(f, None);
+        let col = col.read(f, None);
+        if !c.valid(ev) {
+            let path = Value::Vector(clj_value::Vector::from_vec(vec![row.clone(), col.clone()]));
+            return native(ev, &c, smallvec![coll.clone(), path]);
+        }
+        if let Some(v) = lookup_matrix_cell(coll, row, col) {
+            return Ok(v);
+        }
+        let Some(inner) = crate::coll::lookup_present(ev, coll, row).map_err(|e| ev.throw(e))?
+        else {
+            return Ok(Value::Nil);
+        };
+        Ok(crate::coll::lookup_present(ev, &inner, col)
+            .map_err(|e| ev.throw(e))?
+            .unwrap_or(Value::Nil))
+    })
 }
 
 /// `(get-in coll [k ...])` / `(get-in coll [k ...] not-found)` over a
@@ -1173,8 +1203,10 @@ pub(crate) fn get_in_literal(
             args.extend(nf);
             return native(ev, &c, args);
         }
-        if let Some(cell) = lookup_matrix_cell(&cur, &ks) {
-            return Ok(cell);
+        if let [row, col] = ks.as_slice() {
+            if let Some(cell) = lookup_matrix_cell(&cur, row, col) {
+                return Ok(cell);
+            }
         }
         for k in &ks {
             match crate::coll::lookup_present(ev, &cur, k).map_err(|e| ev.throw(e))? {

@@ -109,3 +109,9 @@ In a macOS release A/B, `lfsr` tc4–tc7 used about 29% fewer retired instructio
 ### PersistentQueue in AOT builds
 
 The AOT constant pool resolves the canonical `PersistentQueue/EMPTY` by static field name. With the queue's JVM-style printed form, trying to read it back as data caused native compilation to fall back to embedded evaluation. The linked executable test checks native compilation, field identity, and FIFO operations.
+
+### Fresh concat cells and two-key VM lookups
+
+A fresh concat stores its inputs in the memo cell. Once traversal starts, it can use a cursor and a resume stack to remember its position. The VM borrows the collection and keys for a two-key `get-in` when all three operands can be read in place. It continues to construct the path for a redefined var.
+
+On the Linux workstation, all 3,315 interpreter outputs matched the reference files. The largest `rational_chebyshev` cases used 24% fewer retired instructions, and `hanoi` tc6 peak RSS fell from 26,884 to 21,224 KiB.

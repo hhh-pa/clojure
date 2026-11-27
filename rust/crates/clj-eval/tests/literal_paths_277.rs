@@ -190,3 +190,36 @@ fn matrix_path_preserves_present_nil_and_fallback_types() {
         r#"[nil :missing \b 7 9]"#
     );
 }
+
+#[test]
+fn reusable_matrix_path_preserves_lookup_and_redefinition() {
+    let mut eval = boot();
+    eval.eval_source("(defn read-cell [m i j] [(get-in m [i j]) (count m)])")
+        .unwrap();
+    assert_eq!(
+        outcome(
+            &mut eval,
+            r#"[(read-cell [[3 nil]] 0 0)
+                (read-cell [[3 nil]] 0 1)
+                (read-cell [[3 nil]] 1 0)
+                (read-cell ["ab"] 0 1)
+                (read-cell [{:key 7}] 0 :key)
+                (read-cell [[9]] 4294967296 0)]"#,
+        ),
+        r#"[[3 1] [nil 1] [nil 1] [\b 1] [7 1] [9 1]]"#,
+    );
+    assert_eq!(
+        outcome(
+            &mut eval,
+            "(with-redefs [get-in (fn [m path] [m path])] (read-cell [[9]] 0 1))",
+        ),
+        "[[[[9]] [0 1]] 1]",
+    );
+    assert_eq!(
+        outcome(
+            &mut eval,
+            "(try (read-cell [(sorted-map 1 :x)] 0 :bad) (catch ClassCastException _ :error))",
+        ),
+        ":error",
+    );
+}

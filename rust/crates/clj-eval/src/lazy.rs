@@ -115,6 +115,12 @@ impl Drop for ConcatFrame {
 #[derive(Clone, Debug)]
 enum SeqState {
     Pending(Box<Thunk>),
+    // A fresh concat has no resume stack or cursor. Its inputs fit
+    // inline in the memo cell, saving a thunk box per concatenation.
+    PendingConcat {
+        cur: Value,
+        rest: Arc<[Value]>,
+    },
     Chunk {
         items: Arc<[Value]>,
         pos: usize,
@@ -358,7 +364,7 @@ impl PendingSeq {
     pub(crate) fn is_realized(&self) -> bool {
         !matches!(
             *self.state.lock().unwrap_or_else(|e| e.into_inner()),
-            SeqState::Pending(_)
+            SeqState::Pending(_) | SeqState::PendingConcat { .. }
         )
     }
 
@@ -386,7 +392,7 @@ impl PendingSeq {
     #[allow(dead_code)]
     pub(crate) fn with_meta_fresh(&self, meta: Option<Map>) -> Value {
         let state = match self.state.lock().ok().map(|s| s.clone()) {
-            Some(SeqState::Pending(t)) => SeqState::Pending(t),
+            Some(pending @ (SeqState::Pending(_) | SeqState::PendingConcat { .. })) => pending,
             // Forced states re-wrap as chains (already realized, so
             // no recomputation either way).
             Some(SeqState::Chunk { items, pos, tail }) => {
@@ -514,6 +520,12 @@ impl Drop for PendingSeq {
             let mut link = match cur {
                 SeqState::Empty => break,
                 SeqState::Chunk { tail, .. } => tail,
+                SeqState::PendingConcat { cur, mut rest } => {
+                    match drop_concat_link(cur, &mut rest, 0) {
+                        Some(link) => link,
+                        None => break,
+                    }
+                }
                 SeqState::Pending(thunk) => match drop_thunk_link(*thunk) {
                     Some(link) => link,
                     None => break,
@@ -544,7 +556,7 @@ impl ExtensionValue for PendingSeq {
         };
         match &*state {
             SeqState::Empty => "()".to_owned(),
-            SeqState::Pending(_) => "(...)".to_owned(),
+            SeqState::Pending(_) | SeqState::PendingConcat { .. } => "(...)".to_owned(),
             SeqState::Chunk { items, pos, tail } => {
                 let parts: Vec<String> = items[*pos..]
                     .iter()
@@ -769,6 +781,12 @@ fn force_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Forced, Signal>
                 return Ok(forced);
             }
             SeqState::Pending(t) => t,
+            SeqState::PendingConcat { cur, rest } => Box::new(Thunk::Concat {
+                cur,
+                rest,
+                idx: 0,
+                outer: None,
+            }),
         }
     };
     match step_thunk(eval, (*thunk).clone()) {
@@ -2063,10 +2081,16 @@ fn sole_map_parts(coll: &Value) -> Option<SoleMap> {
         return None;
     }
     let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
-    let SeqState::Pending(thunk) = &*state else {
-        return None;
-    };
-    sole_thunk_parts(thunk)
+    match &*state {
+        SeqState::Pending(thunk) => sole_thunk_parts(thunk),
+        SeqState::PendingConcat { cur, rest } => Some(SoleMap::Concat {
+            cur: cur.clone(),
+            rest: Arc::clone(rest),
+            idx: 0,
+            outer: None,
+        }),
+        _ => None,
+    }
 }
 
 fn sole_thunk_parts(thunk: &Thunk) -> Option<SoleMap> {
@@ -2677,6 +2701,7 @@ fn unforced_concat_parts(v: &Value) -> Option<(Value, Arc<[Value]>, usize, Conca
     let cell = as_pending(v)?;
     let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
     match &*state {
+        SeqState::PendingConcat { cur, rest } => Some((cur.clone(), Arc::clone(rest), 0, None)),
         SeqState::Pending(thunk) => match &**thunk {
             Thunk::Concat {
                 cur,
@@ -3856,6 +3881,7 @@ enum PendingChunk {
 fn chunked_pending_decision(p: &PendingSeq) -> PendingChunk {
     let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
     match &*state {
+        SeqState::PendingConcat { .. } => PendingChunk::Force,
         SeqState::Pending(t) => match &**t {
             Thunk::ChunkHead { chunk, tail } => PendingChunk::Parts(chunk.clone(), tail.clone()),
             Thunk::Chain { head, tail } => {
@@ -4795,19 +4821,19 @@ fn collect_concat_chars(parts: &[ConcatPart<'_>], total: usize) -> Option<Vector
 
 fn collect_concat(p: &PendingSeq) -> Option<Vector> {
     let guard = p.state.lock().unwrap_or_else(|e| e.into_inner());
-    let SeqState::Pending(thunk) = &*guard else {
-        return None;
+    let (cur, tail) = match &*guard {
+        SeqState::PendingConcat { cur, rest } => (cur, rest.as_ref()),
+        SeqState::Pending(thunk) => match thunk.as_ref() {
+            Thunk::Concat {
+                cur,
+                rest,
+                idx,
+                outer: None,
+            } => (cur, rest.get(*idx..)?),
+            _ => return None,
+        },
+        _ => return None,
     };
-    let Thunk::Concat {
-        cur,
-        rest,
-        idx,
-        outer: None,
-    } = thunk.as_ref()
-    else {
-        return None;
-    };
-    let tail = rest.get(*idx..)?;
     let mut parts = SmallVec::<[ConcatPart<'_>; 4]>::with_capacity(1 + tail.len());
     parts.push(concat_part(cur)?);
     for v in tail {
@@ -5439,17 +5465,19 @@ pub(crate) fn take_thunk(n: Value, input: Value) -> Value {
     PendingSeq::pending_cons_run(Thunk::Take { n, input })
 }
 
-/// A `Thunk::Concat` tail value.
+/// A lazy concat that has yet to consume any of its inputs.
 pub(crate) fn concat_thunk(inputs: &[Value]) -> Value {
     let (cur, rest) = inputs
         .split_first()
         .map_or((Value::Nil, &[][..]), |(head, tail)| (head.clone(), tail));
-    pending_value(Thunk::Concat {
-        cur,
-        rest: Arc::from(rest),
-        idx: 0,
-        outer: None,
-    })
+    Value::Extension(Arc::new(PendingSeq {
+        state: Mutex::new(SeqState::PendingConcat {
+            cur,
+            rest: Arc::from(rest),
+        }),
+        meta: None,
+        kind: LazyKind::LazySeq,
+    }))
 }
 
 /// `int?` over our numbers (fixed-precision integers only).
@@ -6161,6 +6189,23 @@ mod tests {
     }
 
     #[test]
+    fn packed_concat_collection_resumes_at_the_saved_index() {
+        let pending = PendingSeq::pending(Thunk::Concat {
+            cur: Value::Vector(Vector::from_ints(vec![1])),
+            rest: Arc::from([
+                Value::Vector(Vector::from_ints(vec![0])),
+                Value::Vector(Vector::from_ints(vec![2, 3])),
+            ]),
+            idx: 1,
+            outer: None,
+        });
+        assert_eq!(
+            collect_direct(&pending).unwrap().as_flat_ints(),
+            Some(&[1, 2, 3][..]),
+        );
+    }
+
+    #[test]
     fn collect_direct_bails_on_signed_long_range_overflow() {
         // `LongRange` keeps `Int` bounds strictly inside `i64`;
         // a hand-built overflowing `LongRange` pins the `None`
@@ -6173,6 +6218,28 @@ mod tests {
             Some(2),
         );
         assert!(super::collect_direct(&Value::Extension(Arc::new(r))).is_none());
+    }
+
+    #[test]
+    fn pending_concat_retains_its_lazy_state() {
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let input = Value::Vector(Vector::from_ints(vec![1, 2]));
+        let value = super::concat_thunk(&[input]);
+        let pending = as_pending(&value).unwrap();
+        assert!(!pending.is_realized());
+        assert_eq!(pending.print(), "(...)");
+
+        let rebuilt = pending.with_meta_fresh(Some(new_map()));
+        let rebuilt = as_pending(&rebuilt).unwrap();
+        assert!(rebuilt.meta().is_some());
+        assert!(!rebuilt.is_realized());
+        assert!(
+            super::chunked_pending_parts(&mut eval, rebuilt)
+                .unwrap()
+                .is_some()
+        );
+        assert!(rebuilt.is_realized());
+        assert!(!pending.is_realized());
     }
 
     #[test]

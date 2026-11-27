@@ -1892,6 +1892,20 @@ impl Compiler {
         if path.is_empty() || path.len() > 4 {
             return None;
         }
+        if let (None, [row, col]) = (nf, path.as_slice()) {
+            if [coll, row, col]
+                .iter()
+                .all(|expr| matches!(expr, Expr::Literal(_) | Expr::Local(_)))
+                && !self.is_last(coll)
+            {
+                return Some(crate::vm_ops::get_in_pair(
+                    site_of(call),
+                    self.operand(coll, false),
+                    self.operand(row, false),
+                    self.operand(col, false),
+                ));
+            }
+        }
         let coll = self.compile(coll);
         let keys = self.compile_all(path);
         let nf = nf.map(|e| self.compile(e));
