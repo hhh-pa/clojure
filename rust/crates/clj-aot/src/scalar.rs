@@ -53,6 +53,22 @@ struct CollCache<'ctx> {
     cnt_val: PointerValue<'ctx>,
 }
 
+/// Result slots and continuation shared by the scalar index read paths.
+#[derive(Clone, Copy)]
+struct ScalarReadTarget<'ctx> {
+    kind_slot: PointerValue<'ctx>,
+    value_slot: PointerValue<'ctx>,
+    done: BasicBlock<'ctx>,
+}
+
+/// Preheader slots describing a packed 64-bit vector.
+struct PackedScalarSource<'ctx> {
+    ptr_slot: PointerValue<'ctx>,
+    len_slot: PointerValue<'ctx>,
+    kind: K,
+    hit_block_name: &'static str,
+}
+
 /// Active loop target (outer loop vs nested `Inner` loop).
 enum LoopTarget<'a, 'ctx> {
     Outer {
@@ -2741,12 +2757,17 @@ impl<'ctx> Lowerer<'ctx> {
         let bc_ok_bb = self.ctx.append_basic_block(f.func, "sc_nth_bcok");
         let slow_bb = self.ctx.append_basic_block(f.func, "sc_nth_slow");
         let done_bb = self.ctx.append_basic_block(f.func, "sc_nth_done");
+        let target = ScalarReadTarget {
+            kind_slot: res_k,
+            value_slot: res_v,
+            done: done_bb,
+        };
         if c.mutated {
             self.builder
                 .build_unconditional_branch(ivec_chk_bb)
                 .expect("br");
         } else {
-            self.emit_sc_nth_str(f, c, iv, res_k, res_v, ivec_chk_bb, done_bb);
+            self.emit_sc_nth_str(f, c, iv, target, ivec_chk_bb);
         }
         let after_ivec = if c.dvec.is_some() {
             self.ctx.append_basic_block(f.func, "sc_nth_dchk")
@@ -2755,16 +2776,16 @@ impl<'ctx> Lowerer<'ctx> {
         };
         self.emit_sc_nth_packed64(
             f,
-            c.ivec_ptr,
-            c.ivec_len,
-            0,
-            "sc_nth_ivec",
+            PackedScalarSource {
+                ptr_slot: c.ivec_ptr,
+                len_slot: c.ivec_len,
+                kind: K::Int,
+                hit_block_name: "sc_nth_ivec",
+            },
             iv,
-            res_k,
-            res_v,
+            target,
             ivec_chk_bb,
             after_ivec,
-            done_bb,
         );
         if let Some((dvec_ptr, dvec_len)) = c.dvec {
             let after_dvec = if !c.mutated {
@@ -2774,19 +2795,19 @@ impl<'ctx> Lowerer<'ctx> {
             };
             self.emit_sc_nth_packed64(
                 f,
-                dvec_ptr,
-                dvec_len,
-                3,
-                "sc_nth_dvec",
+                PackedScalarSource {
+                    ptr_slot: dvec_ptr,
+                    len_slot: dvec_len,
+                    kind: K::Double,
+                    hit_block_name: "sc_nth_dvec",
+                },
                 iv,
-                res_k,
-                res_v,
+                target,
                 after_ivec,
                 after_dvec,
-                done_bb,
             );
             if !c.mutated {
-                self.emit_sc_nth_gvec(f, c, iv, res_k, res_v, after_dvec, bc_bb, done_bb);
+                self.emit_sc_nth_gvec(f, c, iv, target, after_dvec, bc_bb);
             }
         }
         self.builder.position_at_end(bc_bb);
@@ -2826,21 +2847,18 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder
             .build_unconditional_branch(done_bb)
             .expect("br");
-        self.emit_sc_nth_slow(f, s, c_slot, iv, res_k, res_v, slow_bb, done_bb);
+        self.emit_sc_nth_slow(f, s, c_slot, iv, target, slow_bb);
         self.builder.position_at_end(done_bb);
         Ok((self.load_i8(res_k), self.load_i64(res_v)))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn emit_sc_nth_str(
         &self,
         f: &FnCtx<'ctx>,
         c: &CollCache<'ctx>,
         iv: IntValue<'ctx>,
-        res_k: PointerValue<'ctx>,
-        res_v: PointerValue<'ctx>,
+        target: ScalarReadTarget<'ctx>,
         miss_bb: BasicBlock<'ctx>,
-        done_bb: BasicBlock<'ctx>,
     ) {
         let fast_str = self
             .builder
@@ -2875,61 +2893,62 @@ impl<'ctx> Lowerer<'ctx> {
             .build_int_z_extend(self.load_i8(bp), self.i64t, "ch64")
             .expect("zext");
         self.builder
-            .build_store(res_k, self.i8t.const_int(1, false))
+            .build_store(target.kind_slot, self.i8t.const_int(1, false))
             .expect("st");
-        self.builder.build_store(res_v, ch).expect("st");
+        self.builder.build_store(target.value_slot, ch).expect("st");
         self.builder
-            .build_unconditional_branch(done_bb)
+            .build_unconditional_branch(target.done)
             .expect("br");
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn emit_sc_nth_packed64(
         &self,
         f: &FnCtx<'ctx>,
-        ptr_slot: PointerValue<'ctx>,
-        len_slot: PointerValue<'ctx>,
-        kind: u64,
-        bb_name: &str,
+        source: PackedScalarSource<'ctx>,
         iv: IntValue<'ctx>,
-        res_k: PointerValue<'ctx>,
-        res_v: PointerValue<'ctx>,
+        target: ScalarReadTarget<'ctx>,
         chk_bb: BasicBlock<'ctx>,
         miss_bb: BasicBlock<'ctx>,
-        done_bb: BasicBlock<'ctx>,
     ) {
         self.builder.position_at_end(chk_bb);
         let fast = self
             .builder
-            .build_int_compare(IntPredicate::ULT, iv, self.load_i64(len_slot), "fp64")
+            .build_int_compare(
+                IntPredicate::ULT,
+                iv,
+                self.load_i64(source.len_slot),
+                "fp64",
+            )
             .expect("cmp");
-        let hit_bb = self.ctx.append_basic_block(f.func, bb_name);
+        let hit_bb = self.ctx.append_basic_block(f.func, source.hit_block_name);
         self.builder
             .build_conditional_branch(fast, hit_bb, miss_bb)
             .expect("br");
         self.builder.position_at_end(hit_bb);
-        let ep = self.ivec_elem_ptr(ptr_slot, iv);
+        let ep = self.ivec_elem_ptr(source.ptr_slot, iv);
         let val = self.load_i64(ep);
         self.builder
-            .build_store(res_k, self.i8t.const_int(kind, false))
+            .build_store(
+                target.kind_slot,
+                self.i8t.const_int(source.kind as u64, false),
+            )
             .expect("st");
-        self.builder.build_store(res_v, val).expect("st");
         self.builder
-            .build_unconditional_branch(done_bb)
+            .build_store(target.value_slot, val)
+            .expect("st");
+        self.builder
+            .build_unconditional_branch(target.done)
             .expect("br");
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn emit_sc_nth_gvec(
         &self,
         f: &FnCtx<'ctx>,
         c: &CollCache<'ctx>,
         iv: IntValue<'ctx>,
-        res_k: PointerValue<'ctx>,
-        res_v: PointerValue<'ctx>,
+        target: ScalarReadTarget<'ctx>,
         chk_bb: BasicBlock<'ctx>,
         miss_bb: BasicBlock<'ctx>,
-        done_bb: BasicBlock<'ctx>,
     ) {
         self.builder.position_at_end(chk_bb);
         let fast = self
@@ -2948,24 +2967,21 @@ impl<'ctx> Lowerer<'ctx> {
             .build_conditional_branch(ok, hit_bb, miss_bb)
             .expect("br");
         self.builder.position_at_end(hit_bb);
-        self.builder.build_store(res_k, uk).expect("st");
-        self.builder.build_store(res_v, uv).expect("st");
+        self.builder.build_store(target.kind_slot, uk).expect("st");
+        self.builder.build_store(target.value_slot, uv).expect("st");
         self.builder
-            .build_unconditional_branch(done_bb)
+            .build_unconditional_branch(target.done)
             .expect("br");
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn emit_sc_nth_slow(
         &mut self,
         f: &mut FnCtx<'ctx>,
         s: &ScalarSession<'ctx>,
         c_slot: PointerValue<'ctx>,
         iv: IntValue<'ctx>,
-        res_k: PointerValue<'ctx>,
-        res_v: PointerValue<'ctx>,
+        target: ScalarReadTarget<'ctx>,
         slow_bb: BasicBlock<'ctx>,
-        done_bb: BasicBlock<'ctx>,
     ) {
         self.builder.position_at_end(slow_bb);
         self.unlock_all_tvecs(f, s);
@@ -2990,10 +3006,10 @@ impl<'ctx> Lowerer<'ctx> {
         );
         let (u_ok, uk, uv) = self.unbox_scalar(tmp_out, s.allow_fp);
         self.drop_and_nil_slots(f.func, &[tmp_out]);
-        self.builder.build_store(res_k, uk).expect("st");
-        self.builder.build_store(res_v, uv).expect("st");
+        self.builder.build_store(target.kind_slot, uk).expect("st");
+        self.builder.build_store(target.value_slot, uv).expect("st");
         self.builder
-            .build_conditional_branch(u_ok, done_bb, s.deopt_bb)
+            .build_conditional_branch(u_ok, target.done, s.deopt_bb)
             .expect("br");
     }
 
