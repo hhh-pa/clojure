@@ -92,6 +92,83 @@ fn vec_concat_preserves_order_and_mixed_numeric_types() {
 }
 
 #[test]
+fn scalar_range_reduction_preserves_order_and_fallbacks() {
+    let mut eval = boot();
+    let cases = [
+        (
+            "(let [m (vec (repeat 12 [1.5 2.0]))
+                    f (fn [s i] (+ s (* (get-in m [i 0]) (get-in m [i 1]))))]
+                [(reduce f 0.0 (range 12))
+                 (reduce f 2.0 (range 11 0 -1))
+                 (with-redefs [get-in (constantly 0.5)] (reduce f 0.0 (range 12)))])",
+            "[36.0 35.0 3.0]",
+        ),
+        (
+            "(let [m (vec (repeat 10 [1 2]))
+                    f (fn [s i] (+ s (* (get-in m [i 0]) (get-in m [i 1]))))]
+                (reduce f 0.0 (range 10)))",
+            "20.0",
+        ),
+        (
+            "(let [xs (vec (repeat 12 2.0))
+                    ys (vec (repeat 12 3.0))
+                    ks (vec (repeat 12 1))]
+                [(reduce (fn [s i] (+ s (* (nth xs i) (nth ys i))))
+                         0.0 (range 12))
+                 (reduce (fn [s i] (let [k (nth ks i)] (+ s (* k (nth xs k)))))
+                         0.0 (range 12))])",
+            "[72.0 24.0]",
+        ),
+        (
+            "(let [a (double-array [2.0 3.0])
+                    f (fn [s i] (+ s (aget a (bit-and i 1))))]
+                (reduce f 0.0 (range 10)))",
+            "25.0",
+        ),
+        (
+            "(let [xs (vec (repeat 12 0.5))]
+                [(reduce (fn [s i] (+ s (* i 0.25))) 0.0 (range 3))
+                 (reduce (fn [s i] (+ s (* i 0.25))) 0.0 (range 12))
+                 (reduce (fn [s i] (+ s (* (count xs) (nth xs i))))
+                         0.0 (range 12))])",
+            "[0.75 16.5 72.0]",
+        ),
+        (
+            "(letfn [(helper [] :present)
+                     (fold [s i] (if helper (+ s i) s))]
+                (reduce fold 0 (range 12)))",
+            "66",
+        ),
+        (
+            "(let [s \"abcdefghijkl\"
+                    m (vec (repeat 12 \"a\"))
+                    xs (vec (repeat 12 1.0))]
+                [(try (reduce (fn [s0 i] (+ s0 (* (nth s i) (nth xs i))))
+                              0.0 (range 12)) (catch ClassCastException _ :char))
+                 (try (reduce (fn [s0 i] (+ s0 (* (get-in m [i 0]) (nth xs i))))
+                              0.0 (range 12)) (catch ClassCastException _ :char))])",
+            "[:char :char]",
+        ),
+        (
+            "(try (reduce (fn [a i] (+ a i)) Long/MAX_VALUE (range 12))
+                  (catch ArithmeticException _ :overflow))",
+            ":overflow",
+        ),
+        (
+            "(let [seen (atom [])]
+                (reduce (fn [a i] (swap! seen conj i)
+                          (if (= i 3) (reduced a) (+ a i)))
+                        0 (range 12))
+                @seen)",
+            "[0 1 2 3]",
+        ),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(run_last(&mut eval, source), expected, "{source}");
+    }
+}
+
+#[test]
 fn reduced_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(reduced? (reduced 1))"), "true");

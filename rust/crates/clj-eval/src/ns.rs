@@ -2997,6 +2997,7 @@ pub(crate) static FULL_LAZY_HOOKS: crate::eval::LazyHooks = crate::eval::LazyHoo
     vm_apply_moved: vm_apply_moved_hook,
     vm_call1: crate::vm::vm_call1,
     vm_call2: crate::vm::vm_call2,
+    vm_reduce_range: crate::vm::reduce_range,
     eval_expr: Evaluator::eval,
 };
 

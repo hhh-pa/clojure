@@ -1093,13 +1093,7 @@ fn run(ev: &mut Evaluator, f: &mut Frame<'_>, sc: &ScalarLoop, targets: &[usize]
             s[p] = Sv::of(&f.regs[*r])?;
         }
     }
-    for (slot, l) in sc.loads.iter() {
-        s[usize::from(*slot)] = Sv::of(f.get(*l))?;
-    }
-    for (slot, var) in sc.globals.iter() {
-        let val = ev.deref_var_cached(var.id, &var.sym);
-        s[usize::from(*slot)] = Sv::of(&val)?;
-    }
+    load_scalar_inputs(ev, f, sc, s)?;
     if !may_enter(ev, sc) {
         return None;
     }
@@ -1149,6 +1143,226 @@ fn run_program(ev: &mut Evaluator, f: &Frame<'_>, sc: &ScalarLoop, s: &mut [Sv])
         rollback(&mut log);
     }
     out
+}
+
+/// Load captured scalars and dereference globals in the current evaluator.
+fn load_scalar_inputs(
+    ev: &mut Evaluator,
+    frame: &Frame<'_>,
+    sc: &ScalarLoop,
+    slots: &mut [Sv],
+) -> Option<()> {
+    for (slot, loc) in &sc.loads {
+        slots[usize::from(*slot)] = Sv::of(frame.get(*loc))?;
+    }
+    for (slot, var) in &sc.globals {
+        slots[usize::from(*slot)] = Sv::of(&ev.deref_var_cached(var.id, &var.sym))?;
+    }
+    Some(())
+}
+
+pub(crate) struct ScalarFunction {
+    scalar: ScalarLoop,
+    dot: Option<[DotRead; 2]>,
+}
+
+#[inline(never)]
+pub(crate) fn run_scalar_call(
+    ev: &mut Evaluator,
+    frame: &Frame<'_>,
+    plan: &ScalarFunction,
+) -> Option<Value> {
+    let sc = &plan.scalar;
+    if sc.code.len() < 8 {
+        return None;
+    }
+    let snap = ev.direct_snapshot();
+    if !may_enter(ev, sc) {
+        return None;
+    }
+    let mut slots: SmallVec<[Sv; 64]> = SmallVec::from_slice(&sc.init);
+    for (index, used) in sc.scalar.iter().copied().enumerate() {
+        if used {
+            slots[index] = Sv::of(frame.get(Loc::Reg(index)))?;
+        }
+    }
+    load_scalar_inputs(ev, frame, sc, &mut slots)?;
+    let colls: SmallVec<[Coll<'_>; 8]> = sc.colls.iter().map(|l| coll_of(frame.get(*l))).collect();
+    if !immutable_reads(&colls) {
+        return None;
+    }
+    let mut watch = Watch {
+        snap,
+        trips: 0,
+        done: 0,
+        iters: 0,
+        logged: 0,
+    };
+    let result = exec::<false, false>(
+        sc,
+        ev,
+        frame,
+        &mut slots,
+        &colls,
+        &mut Log::default(),
+        &mut watch,
+    )?;
+    (ev.direct_snapshot() == snap).then_some(result)
+}
+
+fn immutable_reads(colls: &[Coll<'_>]) -> bool {
+    colls
+        .iter()
+        .all(|c| matches!(c, Coll::Ascii(_) | Coll::Str(_) | Coll::Vec(_)))
+}
+
+/// Attempt a pure range fold. On a miss, the caller can restart the
+/// general reduction because this program observes immutable inputs only.
+pub(crate) fn run_reduce(
+    ev: &mut Evaluator,
+    frame: &Frame<'_>,
+    plan: &ScalarFunction,
+    acc: &Value,
+    mut index: i64,
+    step: i64,
+    count: usize,
+) -> Option<Value> {
+    let sc = &plan.scalar;
+    let mut acc = Sv::of(acc)?;
+    let snap = ev.direct_snapshot();
+    if !may_enter(ev, sc) {
+        return None;
+    }
+    let mut watch = Watch {
+        snap,
+        trips: 0,
+        done: 0,
+        iters: 0,
+        logged: 0,
+    };
+    let mut slots: SmallVec<[Sv; 16]> = SmallVec::from_slice(&sc.init);
+    load_scalar_inputs(ev, frame, sc, &mut slots)?;
+    let colls: SmallVec<[Coll<'_>; 8]> = sc.colls.iter().map(|l| coll_of(frame.get(*l))).collect();
+    if !immutable_reads(&colls) {
+        return None;
+    }
+    if let (Some(dot), K::Double) = (plan.dot, acc.k) {
+        if let Some(out) = reduce_double_dot(dot, acc, index, step, count, &slots, &colls) {
+            return (ev.direct_snapshot() == watch.snap).then_some(out);
+        }
+    }
+    let mut log = Log::default();
+    for _ in 0..count {
+        slots[0] = acc;
+        slots[1] = Sv::int(index);
+        let result = exec::<false, false>(sc, ev, frame, &mut slots, &colls, &mut log, &mut watch)?;
+        acc = Sv::of(&result)?;
+        index = index.wrapping_add(step);
+    }
+    (ev.direct_snapshot() == watch.snap).then(|| acc.value())
+}
+
+/// The two packed reads in a sequential sum of products. Analyze the
+/// shape once, when the reducer is compiled.
+fn double_dot(code: &[Ins], out: Sl) -> Option<[DotRead; 2]> {
+    let [
+        Ins::Co(a),
+        Ins::Co(b),
+        Ins::Do(Step::Op2(IntOp2::Mul, product, lhs, rhs)),
+        Ins::Do(Step::Op2(IntOp2::Add, result, 0, addend)),
+        Ins::Exit(0),
+    ] = code
+    else {
+        return None;
+    };
+    let (ad, a) = DotRead::from_read(*a)?;
+    let (bd, b) = DotRead::from_read(*b)?;
+    let written = [0, ad, bd, *product, *result];
+    if *lhs != ad
+        || *rhs != bd
+        || addend != product
+        || *result != out
+        || !a.invariant_indices(&written)
+        || !b.invariant_indices(&written)
+    {
+        return None;
+    }
+    Some([a, b])
+}
+
+fn reduce_double_dot(
+    [a, b]: [DotRead; 2],
+    acc: Sv,
+    mut index: i64,
+    step: i64,
+    count: usize,
+    slots: &[Sv],
+    colls: &[Coll<'_>],
+) -> Option<Value> {
+    let mut total = acc.f64_of()?;
+    for _ in 0..count {
+        let x = a.item(index, slots, colls)?;
+        let y = b.item(index, slots, colls)?;
+        total += x * y;
+        index = index.wrapping_add(step);
+    }
+    Some(Value::Double(total))
+}
+
+#[derive(Clone, Copy)]
+struct DotRead {
+    coll: u16,
+    index: Sl,
+    column: Option<Sl>,
+}
+
+impl DotRead {
+    fn from_read(read: Co) -> Option<(Sl, Self)> {
+        let (dest, coll, index, column) = match read {
+            Co::Nth(dest, coll, index) => (dest, coll, index, None),
+            Co::Nth2(dest, coll, index, column) => (dest, coll, index, Some(column)),
+            _ => return None,
+        };
+        Some((
+            dest,
+            Self {
+                coll,
+                index,
+                column,
+            },
+        ))
+    }
+
+    fn invariant_indices(self, written: &[Sl]) -> bool {
+        !written.contains(&self.index) && self.column.is_none_or(|c| !written.contains(&c))
+    }
+
+    #[inline]
+    fn item(self, index: i64, slots: &[Sv], colls: &[Coll<'_>]) -> Option<f64> {
+        let Coll::Vec(vector) = colls[usize::from(self.coll)] else {
+            return None;
+        };
+        let i = dot_index(self.index, index, slots)?;
+        let Some(column) = self.column else {
+            return vector.as_flat_doubles()?.get(i).copied();
+        };
+        let Value::Vector(row) = vector.get_ref(i)? else {
+            return None;
+        };
+        row.as_flat_doubles()?
+            .get(dot_index(column, index, slots)?)
+            .copied()
+    }
+}
+
+#[inline]
+fn dot_index(slot: Sl, index: i64, slots: &[Sv]) -> Option<usize> {
+    let n = if slot == 1 {
+        index
+    } else {
+        slots[usize::from(slot)].int_of()?
+    };
+    i32::try_from(n).and_then(usize::try_from).ok()
 }
 
 /// Whether a run may start: the sites validate (one cached verdict
@@ -1222,7 +1436,33 @@ struct Lower<'b> {
     targets: &'b [usize],
 }
 
-impl Lower<'_> {
+impl<'a> Lower<'a> {
+    fn new(nslots: usize, scalar: &'a [bool], targets: &'a [usize]) -> Self {
+        Self {
+            code: Vec::new(),
+            nslots,
+            consts: Vec::new(),
+            loads: Vec::new(),
+            globals: Vec::new(),
+            colls: Vec::new(),
+            effs: Vec::new(),
+            exits: Vec::new(),
+            labels: vec![0],
+            scalar,
+            targets,
+        }
+    }
+
+    /// Slot, effect, exit and collection ids are written as `u16`s.
+    fn ids_fit(&self) -> bool {
+        let ids = self
+            .nslots
+            .max(self.effs.len())
+            .max(self.exits.len())
+            .max(self.colls.len());
+        ids < usize::from(Sl::MAX)
+    }
+
     /// A fresh slot (indexes wrap past `Sl::MAX`; [`compile`]
     /// rejects such programs).
     fn sl(&mut self) -> Sl {
@@ -1640,14 +1880,47 @@ impl Lower<'_> {
         self.place(after);
     }
 
-    /// Resolve label ids to code indexes (label 0 is the head).
-    fn finish(mut self) -> Vec<Ins> {
+    fn finish(
+        mut self,
+        sites: Vec<Site>,
+        roots: Vec<RootSite>,
+        depth: usize,
+        (entries, trips): (u32, u32),
+    ) -> Option<ScalarLoop> {
+        self.ids_fit().then_some(())?;
+        let mut init = vec![Sv::ZERO; self.nslots];
+        for (slot, v) in self.consts {
+            init[usize::from(slot)] = v;
+        }
+        // Resolve label ids to code indexes (label 0 is the head).
         for ins in &mut self.code {
             if let Ins::Br(_, t) | Ins::Jmp(t) = ins {
                 *t = self.labels[*t as usize];
             }
         }
-        self.code
+        let logs = !self.effs.is_empty() && mark_unlogged(&mut self.code);
+        Some(ScalarLoop {
+            scalar: self.scalar.into(),
+            init: init.into(),
+            code: self.code.into(),
+            loads: self.loads.into(),
+            globals: self.globals.into(),
+            colls: self.colls.into(),
+            effs: self.effs.into(),
+            exits: self.exits.into(),
+            sites: sites.into(),
+            roots: roots.into(),
+            depth,
+            logs,
+            gid: crate::vm::next_site(),
+            log_iters: AtomicUsize::new(0),
+            logged: AtomicUsize::new(0),
+            entries: AtomicU32::new(entries),
+            iters: AtomicU32::new(trips),
+            runs: AtomicU32::new(0),
+            misses: AtomicU32::new(0),
+            off: AtomicBool::new(false),
+        })
     }
 }
 
@@ -1740,6 +2013,7 @@ fn loc_eq(a: Loc, b: Loc) -> bool {
 /// the call-site records, and the closures calls may inline.
 pub(crate) trait Host {
     fn resolve_local(&mut self, idx: usize) -> Loc;
+
     /// Whether `expr` may read local `g` (`vm_live::may_read` over
     /// the compiling scope).
     fn reads(&self, expr: &Expr, g: usize) -> bool;
@@ -1884,26 +2158,7 @@ fn build_ast(
     targets: &[usize],
     body_base: usize,
 ) -> Option<ScalarAst> {
-    let n = targets.len();
-    let mut b = Builder {
-        host,
-        body_base,
-        lex: Vec::new(),
-        nslots: n,
-        targets: targets.to_vec(),
-        scalar: vec![false; n],
-        boxed: vec![false; n],
-        sites: Vec::new(),
-        roots: Vec::new(),
-        stack: Vec::new(),
-        max_depth: 0,
-        inlined: 0,
-        inner: None,
-        primed: false,
-        seen_effect: false,
-        primed_after_effect: false,
-        deferred_row_read: false,
-    };
+    let mut b = Builder::new(host, body_base, targets);
     let node = b.body(body);
     let clash = b.scalar.iter().zip(&b.boxed).any(|(s, x)| *s && *x);
     if clash || !productive(&node) {
@@ -1998,25 +2253,9 @@ pub fn compile_aot_expr(
         can_read_global_coll,
         global_colls: Vec::new(),
     };
-    let mut b = Builder {
-        host: &mut host,
-        body_base,
-        lex: (0..n_params).map(Lex::Slot).collect(),
-        nslots: n_params,
-        targets: Vec::new(),
-        scalar: Vec::new(),
-        boxed: Vec::new(),
-        sites: Vec::new(),
-        roots: Vec::new(),
-        stack: Vec::new(),
-        max_depth: 0,
-        inlined: 0,
-        inner: None,
-        primed: false,
-        seen_effect: false,
-        primed_after_effect: false,
-        deferred_row_read: false,
-    };
+    let mut b = Builder::new(&mut host, body_base, &[]);
+    b.lex = (0..n_params).map(Lex::Slot).collect();
+    b.nslots = n_params;
     let expr = b.seq_expr(body);
     if b.seen_effect || misses(&expr) {
         return None;
@@ -2063,59 +2302,34 @@ pub(crate) fn compile(
 ) -> Option<ScalarLoop> {
     (entries < JUDGE_AFTER || trips >= MIN_TRIPS.saturating_mul(entries)).then_some(())?;
     let ast = build_ast(host, body, targets, body_base)?;
-    let mut lw = Lower {
-        code: vec![Ins::Top],
-        nslots: ast.nslots,
-        consts: Vec::new(),
-        loads: Vec::new(),
-        globals: Vec::new(),
-        colls: Vec::new(),
-        effs: Vec::new(),
-        exits: Vec::new(),
-        labels: vec![0],
-        scalar: &ast.scalar,
-        targets,
-    };
+    let mut lw = Lower::new(ast.nslots, &ast.scalar, targets);
+    lw.code.push(Ins::Top);
     lw.node(&ast.node, &Ctx::Outer);
-    // Slot, effect, exit and collection ids are `u16`s.
-    let ids = lw
-        .nslots
-        .max(lw.effs.len())
-        .max(lw.exits.len())
-        .max(lw.colls.len());
-    (ids < usize::from(Sl::MAX)).then_some(())?;
-    let mut init = vec![Sv::ZERO; lw.nslots];
-    for (slot, v) in &lw.consts {
-        init[usize::from(*slot)] = *v;
+    lw.finish(ast.sites, ast.roots, ast.max_depth, (entries, trips))
+}
+
+pub(crate) fn compile_scalar_function(
+    host: &mut dyn Host,
+    body: &[Expr],
+    body_base: usize,
+    targets: &[usize],
+) -> Option<ScalarFunction> {
+    let mut b = Builder::new(host, body_base, targets);
+    let expr = b.seq_expr(body);
+    let clash = b.scalar.iter().zip(&b.boxed).any(|(s, x)| *s && *x);
+    if b.seen_effect || b.inner.is_some() || clash || misses(&expr) {
+        return None;
     }
-    let loads = std::mem::take(&mut lw.loads);
-    let globals = std::mem::take(&mut lw.globals);
-    let (colls, effs) = (std::mem::take(&mut lw.colls), std::mem::take(&mut lw.effs));
-    let exits = std::mem::take(&mut lw.exits);
-    let mut code = lw.finish();
-    let logs = mark_unlogged(&mut code);
-    Some(ScalarLoop {
-        scalar: ast.scalar.into(),
-        init: init.into(),
-        code: code.into(),
-        loads: loads.into(),
-        globals: globals.into(),
-        colls: colls.into(),
-        effs: effs.into(),
-        exits: exits.into(),
-        sites: ast.sites.into(),
-        roots: ast.roots.into(),
-        depth: ast.max_depth,
-        logs,
-        gid: crate::vm::next_site(),
-        log_iters: AtomicUsize::new(0),
-        logged: AtomicUsize::new(0),
-        entries: AtomicU32::new(entries),
-        iters: AtomicU32::new(trips),
-        runs: AtomicU32::new(0),
-        misses: AtomicU32::new(0),
-        off: AtomicBool::new(false),
-    })
+    let mut lw = Lower::new(b.nslots, &b.scalar, targets);
+    let result = lw.val(&expr);
+    lw.effs.is_empty().then_some(())?;
+    lw.exits.push(ExitI::Slot(result));
+    lw.code.push(Ins::Exit(0));
+    let scalar = lw.finish(b.sites, b.roots, b.max_depth + 1, (0, 0))?;
+    let dot = (targets.len() == 2)
+        .then(|| double_dot(&scalar.code, result))
+        .flatten();
+    Some(ScalarFunction { scalar, dot })
 }
 
 /// Whether some `recur` leaf can run on scalars (a body that
@@ -2190,7 +2404,30 @@ fn cond_misses(c: &Cond) -> bool {
     }
 }
 
-impl Builder<'_> {
+impl<'h> Builder<'h> {
+    fn new(host: &'h mut dyn Host, body_base: usize, targets: &[usize]) -> Self {
+        let n = targets.len();
+        Self {
+            host,
+            body_base,
+            lex: Vec::new(),
+            nslots: n,
+            targets: targets.to_vec(),
+            scalar: vec![false; n],
+            boxed: vec![false; n],
+            sites: Vec::new(),
+            roots: Vec::new(),
+            stack: Vec::new(),
+            max_depth: 0,
+            inlined: 0,
+            inner: None,
+            primed: false,
+            seen_effect: false,
+            primed_after_effect: false,
+            deferred_row_read: false,
+        }
+    }
+
     fn slot(&mut self) -> usize {
         let s = self.nslots;
         self.nslots += 1;

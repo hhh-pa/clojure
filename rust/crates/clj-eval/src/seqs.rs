@@ -582,6 +582,21 @@ pub(crate) fn native_reduce_owned(
     Ok(acc)
 }
 
+fn try_reduce_long_range(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &Value,
+    coll: &Value,
+) -> Option<Value> {
+    let hooks = eval.lazy_hooks?;
+    let (start, step, count) = long_range(coll)?;
+    let n = usize::try_from(count).ok()?;
+    if n < 8 {
+        return None;
+    }
+    (hooks.vm_reduce_range)(eval, f, acc, start, step, n)
+}
+
 /// The `reduce` shapes answered before the general walk: an eduction
 /// (`IReduce`-less, completing in 3-arg) and a numeric `(reduce + …)`
 /// over a vector (`None`: walk).
@@ -610,7 +625,9 @@ fn reduce_early(
             ecoll.clone(),
         ));
     }
-    reduce_add_vector(f, (args.len() == 3).then(|| &args[1]), coll).map(Ok)
+    let init = (args.len() == 3).then(|| &args[1]);
+    let scalar = init.and_then(|acc| try_reduce_long_range(eval, f, acc, coll));
+    scalar.or_else(|| reduce_add_vector(f, init, coll)).map(Ok)
 }
 
 /// A long or double operand of [`reduce_add_vector`].

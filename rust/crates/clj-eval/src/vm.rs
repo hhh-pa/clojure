@@ -86,7 +86,8 @@ pub(crate) struct CompiledFun {
     /// The lexical index of the first param (locals below it are
     /// captured or the fn's own `letfn` names).
     pub(crate) base: usize,
-    arities: Vec<CompiledArity>,
+    arities: Box<[CompiledArity]>,
+    scalar_scope: Option<Box<ScalarScope>>,
 }
 
 impl std::fmt::Debug for CompiledFun {
@@ -107,6 +108,21 @@ pub(crate) struct CompiledArity {
     nregs: usize,
     bind: Option<Exec>,
     body: Exec,
+    scalar: Option<Box<ScalarArity>>,
+}
+
+/// Capture indexes shared by the function's scalar arities.
+struct ScalarScope {
+    rec: Box<[usize]>,
+    captures: Box<[usize]>,
+}
+
+/// A fixed arity compiles to scalar code once it runs enough calls
+/// or is used as a reducer over a counted range.
+struct ScalarArity {
+    arity: usize,
+    calls: AtomicU32,
+    program: OnceLock<Option<Box<crate::vm_scalar::ScalarFunction>>>,
 }
 
 /// A VM closure's run-time half: the code, the captured values, and
@@ -130,6 +146,15 @@ impl std::fmt::Debug for VmCode {
                 &self.rec.as_ref().and_then(|g| g.get()).map(|g| g.len()),
             )
             .finish()
+    }
+}
+
+impl VmCode {
+    fn recursive_bindings(&self) -> &[Value] {
+        self.rec
+            .as_ref()
+            .and_then(|g| g.get())
+            .map_or(&[][..], |g| &g[..])
     }
 }
 
@@ -301,6 +326,26 @@ pub(crate) fn vm_call2(
     ev.guarded_call(|ev| run_arity(ev, code, arity, &mut regs))
 }
 
+pub(crate) fn reduce_range(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &Value,
+    start: i64,
+    step: i64,
+    n: usize,
+) -> Option<Value> {
+    let (code, arity) = fixed_target(f, 2)?;
+    let plan = arity.scalar.as_ref()?;
+    let program = plan.program(eval, &code.fun, arity.fixed)?;
+    let mut locals = [Value::Nil, Value::Nil];
+    let frame = Frame {
+        regs: &mut locals,
+        up: &code.captured,
+        rec: code.recursive_bindings(),
+    };
+    crate::vm_scalar::run_reduce(eval, &frame, program, acc, start, step, n)
+}
+
 impl<'c> Prepared<'c> {
     /// `callee` prepared for `argc` args: a VM closure without
     /// conveyed bindings with a fixed arity for the count, or a
@@ -418,19 +463,17 @@ fn run_arity(
     arity: &CompiledArity,
     regs: &mut SmallVec<[Value; 8]>,
 ) -> Result<Value, Signal> {
+    if let Some(result) = scalar_call(eval, code, arity, regs) {
+        return Ok(result);
+    }
     // A push loop, not `resize` (an out-of-line call per run).
     while regs.len() < arity.nregs {
         regs.push(Value::Nil);
     }
-    let rec = code
-        .rec
-        .as_ref()
-        .and_then(|g| g.get())
-        .map_or(&[][..], |g| &g[..]);
     let mut frame = Frame {
         regs,
         up: &code.captured,
-        rec,
+        rec: code.recursive_bindings(),
     };
     let params = arity.fixed + usize::from(arity.variadic);
     loop {
@@ -711,18 +754,15 @@ impl LazyScalar {
     /// An outer local's place as of the body (`None`: one the body
     /// never read, which the compile cannot ask for).
     fn loc(&self, idx: usize) -> Option<Loc> {
-        match idx.checked_sub(self.scope_base) {
-            Some(i) => self.regs.get(i).map(|r| Loc::Reg(*r)),
-            None => (self.rec.iter().position(|i| *i == idx).map(Loc::Rec))
-                .or_else(|| self.captures.iter().position(|i| *i == idx).map(Loc::Up)),
-        }
+        scalar_loc(self.scope_base, &self.regs, &self.rec, &self.captures, idx)
     }
 
     /// The program, compiled on the first ask.
     fn program(&self, ev: &Evaluator, targets: &[usize]) -> Option<&crate::vm_scalar::ScalarLoop> {
         let compile = || {
             let mut host = LateHost {
-                plan: self,
+                scope_base: self.scope_base,
+                locate: |idx| self.loc(idx),
                 roots: &ev.registry,
                 lost: false,
             };
@@ -741,25 +781,95 @@ impl LazyScalar {
     }
 }
 
+fn scalar_loc(
+    base: usize,
+    regs: &[usize],
+    rec: &[usize],
+    captures: &[usize],
+    idx: usize,
+) -> Option<Loc> {
+    match idx.checked_sub(base) {
+        Some(i) => regs.get(i).map(|r| Loc::Reg(*r)),
+        None => rec
+            .iter()
+            .position(|i| *i == idx)
+            .map(Loc::Rec)
+            .or_else(|| captures.iter().position(|i| *i == idx).map(Loc::Up)),
+    }
+}
+
+fn scalar_call(
+    eval: &mut Evaluator,
+    code: &VmCode,
+    arity: &CompiledArity,
+    regs: &mut [Value],
+) -> Option<Value> {
+    let plan = arity.scalar.as_ref()?;
+    let program = match plan.program.get() {
+        Some(program) => program.as_deref(),
+        None if plan.calls.fetch_add(1, Ordering::Relaxed) >= HOT => {
+            plan.program(eval, &code.fun, arity.fixed)
+        }
+        None => return None,
+    }?;
+    let frame = Frame {
+        regs,
+        up: &code.captured,
+        rec: code.recursive_bindings(),
+    };
+    crate::vm_scalar::run_scalar_call(eval, &frame, program)
+}
+
+impl ScalarArity {
+    fn program(
+        &self,
+        ev: &Evaluator,
+        fun: &CompiledFun,
+        argc: usize,
+    ) -> Option<&crate::vm_scalar::ScalarFunction> {
+        self.program
+            .get_or_init(|| {
+                let scope = fun.scalar_scope.as_ref()?;
+                let regs: Vec<_> = (0..argc).collect();
+                let mut host = LateHost {
+                    scope_base: fun.base,
+                    locate: |idx| scalar_loc(fun.base, &regs, &scope.rec, &scope.captures, idx),
+                    roots: &ev.registry,
+                    lost: false,
+                };
+                crate::vm_scalar::compile_scalar_function(
+                    &mut host,
+                    &fun.source[self.arity].body,
+                    fun.base + argc,
+                    &regs,
+                )
+                .filter(|_| !host.lost)
+                .map(Box::new)
+            })
+            .as_deref()
+    }
+}
+
 /// The scalar compile's view of a hot loop's scope (its snapshot
 /// in [`LazyScalar`]) and of the var roots now.
-struct LateHost<'a> {
-    plan: &'a LazyScalar,
+struct LateHost<'a, F> {
+    scope_base: usize,
+    locate: F,
     roots: &'a SharedRegistry,
     /// Whether the compile asked for a local the snapshot lacks (its
     /// program is dropped).
     lost: bool,
 }
 
-impl crate::vm_scalar::Host for LateHost<'_> {
+impl<F: Fn(usize) -> Option<Loc>> crate::vm_scalar::Host for LateHost<'_, F> {
     fn resolve_local(&mut self, idx: usize) -> Loc {
-        let loc = self.plan.loc(idx);
+        let loc = (self.locate)(idx);
         self.lost |= loc.is_none();
         loc.unwrap_or(Loc::Reg(usize::MAX))
     }
 
     fn reads(&self, expr: &Expr, g: usize) -> bool {
-        crate::vm_live::may_read(expr, self.plan.scope_base, g + 1, g)
+        crate::vm_live::may_read(expr, self.scope_base, g + 1, g)
     }
 
     fn site(&self, call: &DirectCall) -> crate::vm_ops::Site {
@@ -1562,19 +1672,31 @@ impl Compiler {
         rec: Vec<usize>,
     ) -> (Arc<CompiledFun>, Vec<Loc>) {
         self.scopes.push(Scope::new(base, rec));
-        let arities = fun.arities.iter().map(|a| self.compile_arity(a)).collect();
+        let arities: Box<[_]> = fun
+            .arities
+            .iter()
+            .enumerate()
+            .map(|(i, a)| self.compile_arity(i, a))
+            .collect();
         let scope = self.scopes.pop().expect("the fn scope");
         let captures = scope.captures.iter().map(|(_, loc)| *loc).collect();
+        let scalar_scope = arities.iter().any(|a| a.scalar.is_some()).then(|| {
+            Box::new(ScalarScope {
+                rec: scope.rec.into(),
+                captures: scope.captures.iter().map(|(index, _)| *index).collect(),
+            })
+        });
         let compiled = CompiledFun {
             display: Arc::from(fun.display.as_str()),
             source: Arc::clone(&fun.arities),
             base,
             arities,
+            scalar_scope,
         };
         (Arc::new(compiled), captures)
     }
 
-    fn compile_arity(&mut self, arity: &Arity) -> CompiledArity {
+    fn compile_arity(&mut self, index: usize, arity: &Arity) -> CompiledArity {
         let pats: Vec<&Pattern> = arity.fixed.iter().chain(arity.rest.iter()).collect();
         let s = self.scope();
         s.locals.clear();
@@ -1604,12 +1726,21 @@ impl Compiler {
                 Ok(Value::Nil)
             })),
         };
+        let scalar = (bind.is_none() && arity.rest.is_none() && (1..=8).contains(&pats.len()))
+            .then(|| {
+                Box::new(ScalarArity {
+                    arity: index,
+                    calls: AtomicU32::new(0),
+                    program: OnceLock::new(),
+                })
+            });
         CompiledArity {
             fixed: arity.fixed.len(),
             variadic: arity.rest.is_some(),
             nregs: self.scope().nregs,
             bind,
             body,
+            scalar,
         }
     }
 
@@ -3035,6 +3166,41 @@ pub(crate) fn direct_slow_values(
 #[cfg(test)]
 mod tests {
     use clj_value::Value;
+
+    #[test]
+    fn hot_scalar_calls_preserve_checked_inputs_and_redefinition() {
+        let mut eval = crate::boot();
+        let src = "
+            (defn score [xs i factor]
+              (let [x (nth xs i) y (nth xs (inc i)) z (* x factor)]
+                (if (< x y) (+ z (* y y) (inc i)) (- z y))))
+            (dotimes [_ 128] (score [1 2 6] 0 2))
+            score";
+        let forms = eval.eval_source(src).unwrap();
+        let (code, arity) = super::fixed_target(forms.last().unwrap(), 3).expect("fixed closure");
+        let mut args = [
+            Value::Vector(clj_value::Vector::from_ints(vec![1, 2, 6])),
+            Value::Int(0),
+            Value::Int(2),
+        ];
+        assert_eq!(
+            super::scalar_call(&mut eval, code, arity, &mut args),
+            Some(Value::Int(7))
+        );
+        args[1] = Value::Bool(false);
+        assert_eq!(super::scalar_call(&mut eval, code, arity, &mut args), None);
+        for src in [
+            "(= 7 (score (subvec [0 1 2 6] 1) 0 2))",
+            "(= 3 (with-redefs [nth (fn [_ _] 3)] (score [1 2 6] 0 2)))",
+            "(try (score [1 2 6] 7 2) (catch IndexOutOfBoundsException _ true))",
+        ] {
+            assert_eq!(
+                eval.eval_source(src).unwrap().last(),
+                Some(&Value::Bool(true)),
+                "{src}"
+            );
+        }
+    }
 
     #[test]
     fn compiled_closures_debug_their_display() {

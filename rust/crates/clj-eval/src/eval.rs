@@ -195,6 +195,8 @@ pub(crate) struct LazyHooks {
         Value,
         Value,
     ) -> Result<Value, Signal>,
+    pub(crate) vm_reduce_range:
+        fn(&mut Evaluator, &Value, &Value, i64, i64, usize) -> Option<Value>,
     pub(crate) eval_expr: fn(&mut Evaluator, &Expr, &crate::env::Env) -> Result<Value, Signal>,
 }
 
