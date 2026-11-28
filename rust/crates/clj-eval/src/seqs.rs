@@ -718,6 +718,32 @@ fn reduce_step(
     }
 }
 
+pub(crate) fn reduce_reversed_vector(
+    eval: &mut Evaluator,
+    f: &Value,
+    mut acc: Value,
+    coll: &Vector,
+) -> Result<Value, NativeError> {
+    if coll.is_empty() {
+        return Ok(acc);
+    }
+    let scalar = coll
+        .as_flat_doubles()
+        .and_then(|items| crate::vm::reduce_reversed_doubles(eval, f, &acc, items));
+    if let Some(result) = scalar {
+        return Ok(result);
+    }
+    let prepared = crate::vm::Prepared::of(f, 2);
+    for index in (0..coll.len()).rev() {
+        let head = coll.get(index).expect("item index is in range");
+        acc = reduce_step(eval, f, prepared.as_ref(), acc, &head)?;
+        if let Some(result) = as_reduced(&acc) {
+            return Ok(result.clone());
+        }
+    }
+    Ok(acc)
+}
+
 fn reduce_kv_step(
     eval: &mut Evaluator,
     f: &Value,

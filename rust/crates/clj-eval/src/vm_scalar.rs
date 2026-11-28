@@ -1164,6 +1164,7 @@ fn load_scalar_inputs(
 pub(crate) struct ScalarFunction {
     scalar: ScalarLoop,
     dot: Option<[DotRead; 2]>,
+    scale: Option<Sl>,
 }
 
 #[inline(never)]
@@ -1268,6 +1269,46 @@ pub(crate) fn run_reduce(
         index = index.wrapping_add(step);
     }
     (ev.direct_snapshot() == watch.snap).then(|| acc.value())
+}
+
+pub(crate) fn run_reverse_fold(
+    ev: &mut Evaluator,
+    frame: &Frame<'_>,
+    plan: &ScalarFunction,
+    acc: &Value,
+    items: &[f64],
+) -> Option<Value> {
+    let scale = usize::from(plan.scale?);
+    let sc = &plan.scalar;
+    let Value::Double(mut result) = *acc else {
+        return None;
+    };
+    let snap = ev.direct_snapshot();
+    if !may_enter(ev, sc) {
+        return None;
+    }
+    let mut slots: SmallVec<[Sv; 16]> = SmallVec::from_slice(&sc.init);
+    load_scalar_inputs(ev, frame, sc, &mut slots)?;
+    let factor = slots[scale].f64_of()?;
+    for &item in items.iter().rev() {
+        result = result * factor + item;
+    }
+    (ev.direct_snapshot() == snap).then_some(Value::Double(result))
+}
+
+/// The straight-line double fold `(+ (* acc factor) item)` in its
+/// original operand order. The factor is a constant or a captured scalar.
+fn double_scale_add(code: &[Ins], out: Sl) -> Option<Sl> {
+    let [
+        Ins::Do(Step::Op2(IntOp2::Mul, product, 0, scale)),
+        Ins::Do(Step::Op2(IntOp2::Add, result, addend, 1)),
+        Ins::Exit(0),
+    ] = code
+    else {
+        return None;
+    };
+    (*product == *addend && *result == out && *scale > 1 && ![product, result].contains(&scale))
+        .then_some(*scale)
 }
 
 /// The two packed reads in a sequential sum of products. Analyze the
@@ -2334,10 +2375,15 @@ pub(crate) fn compile_scalar_function(
     lw.exits.push(ExitI::Slot(result));
     lw.code.push(Ins::Exit(0));
     let scalar = lw.finish(b.sites, b.roots, b.max_depth + 1, (0, 0))?;
-    let dot = (targets.len() == 2)
-        .then(|| double_dot(&scalar.code, result))
-        .flatten();
-    Some(ScalarFunction { scalar, dot })
+    let (dot, scale) = if targets.len() == 2 {
+        (
+            double_dot(&scalar.code, result),
+            double_scale_add(&scalar.code, result),
+        )
+    } else {
+        (None, None)
+    };
+    Some(ScalarFunction { scalar, dot, scale })
 }
 
 /// Whether some `recur` leaf can run on scalars (a body that

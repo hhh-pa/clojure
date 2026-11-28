@@ -88,6 +88,7 @@ fn vec_concat_preserves_order_and_mixed_numeric_types() {
         ("(vec (concat [1 2] [3] [4]))", "[1 2 3 4]"),
         ("(vec (concat [1.0 2.0] [3.0]))", "[1.0 2.0 3.0]"),
         ("(vec (concat [\\a \\b] [\\c]))", "[\\a \\b \\c]"),
+        ("(vec (concat [\\a] [\\b]))", "[\\a \\b]"),
         (
             "(let [x (concat [1 2] [3] [nil] [4 5])]
                [(first x) (vec (rest (rest x))) (vec x)])",
@@ -190,6 +191,29 @@ fn suffix_trim_keeps_reverse_predicate_order_and_native_fallbacks() {
         "[[1 2] [0 0 2] nil [1 2] [] [1 2 0 0]]",
     );
     assert!(uncaught(&mut eval, "(trim-tail 0 [1])").starts_with("java.lang.ClassCastException"));
+}
+
+#[test]
+fn reversed_vector_fold_keeps_order_and_guarded_fallbacks() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(defn poly [xs factor init]
+               (reduce (fn [s c] (+ (* s factor) c)) init (reverse xs)))
+             (let [xs [2.0 3.0 4.0] seen (atom [])
+                   mark (fn [s c] (swap! seen conj c) (if (= c 3.0) (reduced s) (+ s c)))]
+               (dotimes [_ 100] (poly xs 2.0 0.0))
+               [(poly xs 2.0 0.0) (poly xs 2 0.0) (poly xs 2 0)
+                (poly '() 2.0 0.0) (poly '(2.0 3.0 4.0) 2.0 0.0)
+                (poly [] 2.0 1.0) (poly [2 3 4] 2.0 0.0)
+                (reduce + 0.0 (reverse xs))
+                (reduce mark 0.0 (reverse xs)) @seen
+                (with-redefs [reverse identity] (poly xs 2.0 0.0))
+                (with-redefs [* (fn [s _] s)] (poly xs 2.0 0.0))])",
+        ),
+        "[24.0 24.0 24.0 0.0 24.0 1.0 24.0 9.0 4.0 [4.0 3.0] 18.0 9.0]",
+    );
 }
 
 #[test]

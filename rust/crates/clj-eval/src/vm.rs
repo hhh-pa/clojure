@@ -346,6 +346,26 @@ pub(crate) fn reduce_range(
     crate::vm_scalar::run_reduce(eval, &frame, program, acc, start, step, n)
 }
 
+pub(crate) fn reduce_reversed_doubles(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &Value,
+    items: &[f64],
+) -> Option<Value> {
+    let (code, arity) = fixed_target(f, 2)?;
+    let program = arity
+        .scalar
+        .as_ref()?
+        .hot_program(eval, &code.fun, arity.fixed)?;
+    let mut locals = [Value::Nil, Value::Nil];
+    let frame = Frame {
+        regs: &mut locals,
+        up: &code.captured,
+        rec: code.recursive_bindings(),
+    };
+    crate::vm_scalar::run_reverse_fold(eval, &frame, program, acc, items)
+}
+
 impl<'c> Prepared<'c> {
     /// `callee` prepared for `argc` args: a VM closure without
     /// conveyed bindings with a fixed arity for the count, or a
@@ -804,14 +824,10 @@ fn scalar_call(
     arity: &CompiledArity,
     regs: &mut [Value],
 ) -> Option<Value> {
-    let plan = arity.scalar.as_ref()?;
-    let program = match plan.program.get() {
-        Some(program) => program.as_deref(),
-        None if plan.calls.fetch_add(1, Ordering::Relaxed) >= HOT => {
-            plan.program(eval, &code.fun, arity.fixed)
-        }
-        None => return None,
-    }?;
+    let program = arity
+        .scalar
+        .as_ref()?
+        .hot_program(eval, &code.fun, arity.fixed)?;
     let frame = Frame {
         regs,
         up: &code.captured,
@@ -821,6 +837,21 @@ fn scalar_call(
 }
 
 impl ScalarArity {
+    fn hot_program(
+        &self,
+        eval: &Evaluator,
+        fun: &CompiledFun,
+        argc: usize,
+    ) -> Option<&crate::vm_scalar::ScalarFunction> {
+        match self.program.get() {
+            Some(program) => program.as_deref(),
+            None if self.calls.fetch_add(1, Ordering::Relaxed) >= HOT => {
+                self.program(eval, fun, argc)
+            }
+            None => None,
+        }
+    }
+
     fn program(
         &self,
         ev: &Evaluator,
@@ -2037,6 +2068,9 @@ impl Compiler {
         if let Some(code) = self.try_trim_vector_tail(call) {
             return code;
         }
+        if let Some(code) = self.try_reduce_reversed(call) {
+            return code;
+        }
         self.compile_direct_plain(call)
     }
 
@@ -2058,6 +2092,45 @@ impl Compiler {
             let predicate = predicate.eval(ev, frame)?;
             ev.with_native_span(outer_span, |ev| {
                 crate::lazy::trim_vector_tail(ev, &predicate, &vector).map(Value::Vector)
+            })
+        }))
+    }
+
+    fn try_reduce_reversed(&mut self, call: &DirectCall) -> Option<Exec> {
+        let [f, init, reverse] = call.args.as_slice() else {
+            return None;
+        };
+        if crate::vm_ops::core_name(call) != Some("reduce") {
+            return None;
+        }
+        let reverse = core_call(reverse, "reverse", 1)?;
+        let input = &reverse.args[0];
+        // These forms can evaluate without changing either native's
+        // root between the operator reads.
+        if !matches!(f, Expr::Fn(_) | Expr::Local(_))
+            || !matches!(init, Expr::Local(_) | Expr::Literal(_))
+            || !matches!(input, Expr::Local(_) | Expr::Literal(_))
+        {
+            return None;
+        }
+        let sites = [call, reverse].map(|call| crate::vm_ops::Site::new(site_of(call)));
+        let span = call.span;
+        let fallback = self.compile_direct_plain(call);
+        let f = self.operand(f, false);
+        let init = self.operand(init, true);
+        let input = self.operand(input, false);
+        Some(Box::new(move |ev, frame| {
+            if !sites.iter().all(|site| site.valid(ev)) {
+                return fallback(ev, frame);
+            }
+            let Value::Vector(input) = input.read(frame, None) else {
+                return fallback(ev, frame);
+            };
+            let input = input.clone();
+            let f = f.eval(ev, frame)?;
+            let init = init.eval(ev, frame)?;
+            ev.with_native_span(span, |ev| {
+                crate::seqs::reduce_reversed_vector(ev, &f, init, &input).map_err(|e| ev.throw(e))
             })
         }))
     }
