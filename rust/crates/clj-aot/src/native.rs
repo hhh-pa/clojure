@@ -5047,7 +5047,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.position_at_end(general);
         let range_args =
             self.materialize_range_srcs(f, rsrc1.as_ref(), rsrc2.as_ref(), coll, coll2);
-        self.emit_hof_general(f, hl, base, acc, coll, coll2, dest)?;
+        self.emit_hof_general(f, hl, base, &state, state2.as_ref(), dest)?;
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
         self.free_slots(f, &[coll, acc]);
@@ -5415,15 +5415,13 @@ impl<'ctx> Lowerer<'ctx> {
     /// The general path of [`try_lower_collection_call`]: the `fn` as a closure,
     /// then the original core calls (`map` then `dorun` / `vec` / `into`,
     /// or `mapv` / `reduce`) over the evaluated collection.
-    #[allow(clippy::too_many_arguments)]
     fn emit_hof_general(
         &mut self,
         f: &mut FnCtx<'ctx>,
         hl: &HofLoop<'_>,
         base: usize,
-        acc: PointerValue<'ctx>,
-        coll: PointerValue<'ctx>,
-        coll2: Option<PointerValue<'ctx>>,
+        state: &LoopState<'ctx>,
+        state2: Option<&LoopState<'ctx>>,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
         let closure = self.slot(f);
@@ -5435,11 +5433,11 @@ impl<'ctx> Lowerer<'ctx> {
         let folds_items =
             hl.kind == HofKind::Reduce || (hl.kind == HofKind::Sum && hl.outer.is_none());
         if folds_items && hl.init.is_some() {
-            args.push(acc);
+            args.push(state.acc);
         }
-        args.push(coll);
-        if let Some(c2) = coll2 {
-            args.push(c2);
+        args.push(state.coll);
+        if let Some(second) = state2 {
+            args.push(second.coll);
         }
         let Some((outer, prefix)) = hl.outer else {
             self.core_call_owned(f, hl.inner, &args, dest);
@@ -5454,7 +5452,7 @@ impl<'ctx> Lowerer<'ctx> {
             outer_args.push(s);
         }
         if hl.kind == HofKind::Sum && hl.init.is_some() {
-            outer_args.push(acc);
+            outer_args.push(state.acc);
         }
         outer_args.push(seq);
         self.core_call_owned(f, outer, &outer_args, dest);
