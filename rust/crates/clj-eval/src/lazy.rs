@@ -2678,6 +2678,29 @@ fn test_filter_item(
     }
 }
 
+/// Test a realized vector from its end. Only the prefix that remains
+/// after the suffix test is copied, with the metadata-free `vec` shape.
+pub(crate) fn trim_vector_tail(
+    eval: &mut Evaluator,
+    predicate: &Value,
+    vector: &Vector,
+) -> Result<Vector, Signal> {
+    let mut len = vector.len();
+    if len == 0 {
+        return Ok(Vector::new_sync());
+    }
+    crate::core::check_ifn(eval, predicate)?;
+    let prepared = filter_prep(predicate);
+    while len > 0 {
+        let item = vector.get(len - 1).expect("remaining vector item");
+        if !test_filter_item(eval, predicate, prepared.as_ref(), &item)? {
+            break;
+        }
+        len -= 1;
+    }
+    Ok(vector.slice_packed(0, len))
+}
+
 /// `filter`/`remove`: consume whole units, testing each item in
 /// order, until a non-empty chunk (or the end).
 fn step_filter(
@@ -6539,7 +6562,7 @@ mod tests {
 
         let cons = Value::Extension(Arc::new(ConsValue::new(Value::Int(4), Value::Nil)));
         let forced = super::splice_first(&mut eval, &cons, singleton(5)).unwrap();
-        assert!(matches!(forced, Forced::Chunk { items, .. } if &*items == [Value::Int(4)]));
+        assert!(matches!(forced, Forced::Chunk { items, .. } if items.as_ref() == [Value::Int(4)]));
     }
 
     #[test]

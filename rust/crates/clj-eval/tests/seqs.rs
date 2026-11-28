@@ -173,6 +173,26 @@ fn two_key_assoc_preserves_persistent_rows() {
 }
 
 #[test]
+fn suffix_trim_keeps_reverse_predicate_order_and_native_fallbacks() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(defn trim-tail [pred xs] (vec (reverse (drop-while pred (reverse xs)))))
+             (let [seen (atom []) xs (with-meta [1 2 0 0] {:source true})
+                   pred (fn [item] (swap! seen conj item) (zero? item))
+                   trimmed (trim-tail pred xs)]
+               [trimmed @seen (meta trimmed)
+                (trim-tail zero? '(1 2 0))
+                (trim-tail 0 [])
+                (with-redefs [drop-while (fn [_ xs] xs)] (trim-tail zero? xs))])",
+        ),
+        "[[1 2] [0 0 2] nil [1 2] [] [1 2 0 0]]",
+    );
+    assert!(uncaught(&mut eval, "(trim-tail 0 [1])").starts_with("java.lang.ClassCastException"));
+}
+
+#[test]
 fn scalar_range_reduction_preserves_order_and_fallbacks() {
     let mut eval = boot();
     let cases = [

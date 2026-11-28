@@ -635,6 +635,17 @@ impl Evaluator {
         self.native_call_span
     }
 
+    pub(crate) fn with_native_span<T>(
+        &mut self,
+        span: Span,
+        call: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let saved = self.native_call_span.replace(span);
+        let result = call(self);
+        self.native_call_span = saved;
+        result
+    }
+
     /// The next `fn` display sequence number (the analyzer
     /// numbers every `fn` it analyzes; lineage-shared, so forked
     /// evaluators never collide).

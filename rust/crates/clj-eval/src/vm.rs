@@ -2034,7 +2034,32 @@ impl Compiler {
         if let Some(code) = self.try_assoc_conj(call, false) {
             return code;
         }
+        if let Some(code) = self.try_trim_vector_tail(call) {
+            return code;
+        }
         self.compile_direct_plain(call)
+    }
+
+    fn try_trim_vector_tail(&mut self, call: &DirectCall) -> Option<Exec> {
+        let (predicate, input, calls) = trim_vector_tail_shape(call)?;
+        let sites = calls.map(|call| crate::vm_ops::Site::new(site_of(call)));
+        let outer_span = calls[1].span;
+        let fallback = self.compile_direct_plain(call);
+        let predicate = self.operand(predicate, false);
+        let input = self.operand(input, false);
+        Some(Box::new(move |ev, frame| {
+            if !sites.iter().all(|site| site.valid(ev)) {
+                return fallback(ev, frame);
+            }
+            let Value::Vector(vector) = input.read(frame, None) else {
+                return fallback(ev, frame);
+            };
+            let vector = vector.clone();
+            let predicate = predicate.eval(ev, frame)?;
+            ev.with_native_span(outer_span, |ev| {
+                crate::lazy::trim_vector_tail(ev, &predicate, &vector).map(Value::Vector)
+            })
+        }))
     }
 
     fn compile_direct_plain(&mut self, call: &DirectCall) -> Exec {
@@ -3163,6 +3188,22 @@ fn core_call<'e>(e: &'e Expr, name: &str, argc: usize) -> Option<&'e DirectCall>
         }
         _ => None,
     }
+}
+
+/// A suffix trim expressed as two reversals. The callable and input
+/// reads must leave the four native sites' evaluation order intact.
+fn trim_vector_tail_shape(call: &DirectCall) -> Option<(&Expr, &Expr, [&DirectCall; 4])> {
+    let ([arg], Some("vec")) = (call.args.as_slice(), crate::vm_ops::core_name(call)) else {
+        return None;
+    };
+    let outer = core_call(arg, "reverse", 1)?;
+    let drop = core_call(&outer.args[0], "drop-while", 2)?;
+    let inner = core_call(&drop.args[1], "reverse", 1)?;
+    let predicate = &drop.args[0];
+    let input = &inner.args[0];
+    (matches!(predicate, Expr::Local(_) | Expr::Literal(_) | Expr::Fn(_))
+        && matches!(input, Expr::Local(_) | Expr::Literal(_)))
+    .then_some((predicate, input, [call, outer, drop, inner]))
 }
 
 /// `(assoc! t k (conj (nth t k) x))`'s parts: the transient local,
