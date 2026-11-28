@@ -1113,8 +1113,14 @@ pub(crate) fn assoc_in_keys(
     eval: &mut Evaluator,
     mut m: Value,
     keys: &[Value],
-    v: Value,
+    mut v: Value,
 ) -> Result<Value, NativeError> {
+    if matches!(
+        keys,
+        [row, column] if crate::vm_intrinsics::assoc_matrix_cell(&mut m, row, column, &mut v)
+    ) {
+        return Ok(m);
+    }
     // The op passes 1-4 keys (an empty path stays with the native).
     let (k, rest) = keys.split_first().expect("a non-empty literal path");
     if rest.is_empty() {

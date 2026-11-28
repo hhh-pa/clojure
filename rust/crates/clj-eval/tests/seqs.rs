@@ -92,6 +92,23 @@ fn vec_concat_preserves_order_and_mixed_numeric_types() {
 }
 
 #[test]
+fn two_key_assoc_preserves_persistent_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [m [[1.0 2.0] [3.0 4.0]]
+                   change (fn [x] (assoc-in x [0 1] (inc (get-in x [0 1]))))]
+               [(change [[1.0 2.0]]) (change m) m
+                (assoc-in [[1]] [0 1] 2)
+                (assoc-in [[1 2]] [0 4294967297] 3)
+                (with-redefs [assoc-in (fn [x _ _] x)] (change m))])",
+        ),
+        "[[[1.0 3.0]] [[1.0 3.0] [3.0 4.0]] [[1.0 2.0] [3.0 4.0]] [[1 2]] [[1 3]] [[1.0 2.0] [3.0 4.0]]]",
+    );
+}
+
+#[test]
 fn scalar_range_reduction_preserves_order_and_fallbacks() {
     let mut eval = boot();
     let cases = [

@@ -44,6 +44,19 @@ pub(crate) fn index(v: &Value) -> Option<usize> {
     }
 }
 
+/// Update an in-range cell of an unshared matrix.
+pub(crate) fn assoc_matrix_cell(
+    coll: &mut Value,
+    row: &Value,
+    column: &Value,
+    value: &mut Value,
+) -> bool {
+    let (Value::Vector(matrix), Some(row), Some(column)) = (coll, index(row), index(column)) else {
+        return false;
+    };
+    matrix.assoc_nested_unique(row, column, value)
+}
+
 /// `nth` of a vector, transient vector, or string at an `int`
 /// index: in range answers the item; with `not-found`, past either
 /// end answers that (the native's `int` coercion fails wider

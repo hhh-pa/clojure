@@ -1727,6 +1727,28 @@ impl Vector {
         }
     }
 
+    /// Update an existing cell of a uniquely held vector of vectors.
+    /// Shared rows and storage changes take the normal assoc path.
+    #[inline]
+    pub fn assoc_nested_unique(&mut self, row: usize, column: usize, value: &mut Value) -> bool {
+        let Some(data) = Arc::get_mut(&mut self.0) else {
+            return false;
+        };
+        let VectorInner::Generic(rows) = &mut data.inner else {
+            return false;
+        };
+        let Some(Value::Vector(row)) = rows.unique_flat_mut().and_then(|rows| rows.get_mut(row))
+        else {
+            return false;
+        };
+        if !row.assoc_unique(column, value) {
+            return false;
+        }
+        row.data_mut().id = next_vector_id();
+        data.id = next_vector_id();
+        true
+    }
+
     /// `conj` in place on a uniquely held, non-empty flat vector below
     /// [`FLAT_MAX`](crate::trie::FLAT_MAX) items, within its capacity (#271 lean owned path),
     /// under [`assoc_unique`](Self::assoc_unique)'s rules: `false`
@@ -6871,6 +6893,30 @@ mod tests {
             !flat_max.conj_unique(&mut Value::Int(1)),
             "a full flat run moves to the trie"
         );
+    }
+
+    #[test]
+    fn nested_assoc_updates_only_unshared_rows() {
+        let row = Vector::from_flat_doubles(vec![1.0, 2.0]);
+        let row_id = row.id();
+        let mut matrix = Vector::from_vec(vec![Value::Vector(row)]);
+        let matrix_id = matrix.id();
+        assert!(matrix.assoc_nested_unique(0, 1, &mut Value::Double(3.0)));
+        assert_ne!(matrix.id(), matrix_id);
+        let row = matrix.get(0).expect("first row");
+        assert!(matches!(&row, Value::Vector(v) if v.id() != row_id));
+        assert_eq!(
+            row,
+            Value::Vector(Vector::from_flat_doubles(vec![1.0, 3.0]))
+        );
+
+        let mut new = Value::Double(4.0);
+        assert!(!matrix.assoc_nested_unique(0, 1, &mut new));
+        assert_eq!(new, Value::Double(4.0));
+        assert_eq!(matrix.get(0), Some(row));
+        assert!(!matrix.assoc_nested_unique(1, 0, &mut new));
+        assert!(!matrix.clone().assoc_nested_unique(0, 0, &mut new));
+        assert!(!Vector::from_flat_doubles(vec![1.0]).assoc_nested_unique(0, 0, &mut new));
     }
 
     #[test]

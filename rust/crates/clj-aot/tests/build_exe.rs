@@ -434,6 +434,32 @@ fn native_assoc_still_fuses_an_indexed_increment() {
 }
 
 #[test]
+fn native_assoc_in_reads_and_then_moves_the_matrix() {
+    let source = "\
+(defn bump [m]
+  (loop [i 0 out m]
+    (if (= i (count out)) out
+        (recur (inc i) (assoc-in out [i 0] (inc (get-in out [i 0])))))))
+(let [base [[2.0 3.0] [4.0 5.0]]]
+  (println [(bump [[2.0]]) (bump base) base
+            (with-redefs [assoc-in (fn [m _ _] m)] (bump base))]))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("assoc-in-last-read", source, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            "[[[3.0]] [[3.0 3.0] [5.0 5.0]] [[2.0 3.0] [4.0 5.0]] [[2.0 3.0] [4.0 5.0]]]\n",
+            "",
+            0
+        )
+    );
+}
+
+#[test]
 fn native_sum_reads_two_key_paths_and_preserves_get_in_fallbacks() {
     let source = "\
 (defn sum-column [m row col]

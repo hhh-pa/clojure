@@ -5812,7 +5812,10 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> Result<(), Unsupported> {
         let n = arg_ptrs.len();
         let (arr, elems) = self.slot_array(f, n);
-        let deferred = if op_name == Some("assoc") && n == 3 {
+        let deferred = if matches!(
+            (op_name, n),
+            (Some("assoc" | "assoc-in"), 3) | (Some("assoc-in2"), 4)
+        ) {
             self.moved_local_slot(f, arg_ptrs[0])
         } else {
             None
@@ -10012,8 +10015,9 @@ fn assoc_local(call: &clj_eval::expr::DirectCall) -> Option<&Expr> {
     let [coll @ Expr::Local(_), _, _] = call.args.as_slice() else {
         return None;
     };
-    (call.var.sym.namespace() == Some("clojure.core") && call.var.sym.name() == "assoc")
-        .then_some(coll)
+    (call.var.sym.namespace() == Some("clojure.core")
+        && matches!(call.var.sym.name(), "assoc" | "assoc-in"))
+    .then_some(coll)
 }
 
 fn walk_case_moves(

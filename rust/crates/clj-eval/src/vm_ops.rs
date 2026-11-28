@@ -1492,6 +1492,9 @@ pub(crate) fn apply_update3(args: &mut [Value]) -> Option<Value> {
 /// 4 args `[coll, k1, k2, v]`.
 pub(crate) fn apply_assoc_in2(args: &mut [Value]) -> Option<Value> {
     let [coll, k1, k2, v] = args else { return None };
+    if crate::vm_intrinsics::assoc_matrix_cell(coll, k1, k2, v) {
+        return Some(take(coll));
+    }
     match try_step_in2(take(coll), k1, |inner| try_assoc_leaf(inner, k2, v)) {
         Ok(out) => Some(out),
         Err(orig) => {
@@ -3340,6 +3343,22 @@ mod apply_tests {
         );
 
         // Outer vector in try_step_in2
+        let mut owned = [
+            Value::Vector(Vector::from_vec(vec![Value::Vector(Vector::from_ints(
+                vec![7],
+            ))])),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(8),
+        ];
+        assert_eq!(
+            apply_assoc_in2(&mut owned),
+            Some(Value::Vector(Vector::from_vec(vec![Value::Vector(
+                Vector::from_ints(vec![8])
+            )])))
+        );
+        assert_eq!(owned[0], Value::Nil);
+
         let nested_vec = Value::Vector(Vector::from_vec(vec![
             Value::Vector(Vector::from_vec(vec![Value::Int(7)])),
             Value::Nil,
