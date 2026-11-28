@@ -85,6 +85,14 @@ fn vec_concat_preserves_order_and_mixed_numeric_types() {
         ),
         ("(vec (concat [1 2] [3.0] [4]))", "[1 2 3.0 4]"),
         ("(vec (concat [1] (repeat 1 :x)))", "[1 :x]"),
+        ("(vec (concat [1 2] [3] [4]))", "[1 2 3 4]"),
+        ("(vec (concat [1.0 2.0] [3.0]))", "[1.0 2.0 3.0]"),
+        ("(vec (concat [\\a \\b] [\\c]))", "[\\a \\b \\c]"),
+        (
+            "(let [x (concat [1 2] [3] [nil] [4 5])]
+               [(first x) (vec (rest (rest x))) (vec x)])",
+            "[1 [3 nil 4 5] [1 2 3 nil 4 5]]",
+        ),
     ];
     for (source, expected) in cases {
         assert_eq!(run_last(&mut eval, source), expected, "{source}");
