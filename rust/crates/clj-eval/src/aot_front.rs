@@ -448,9 +448,26 @@ pub fn is_env_effect(expr: &Expr) -> bool {
         Expr::Invoke { head, .. } => {
             matches!(head.as_ref(), Expr::Global(var) if is_env_var(var))
         }
-        Expr::DirectNative(call) => is_env_var(&call.var),
-        _ => false,
+        Expr::DirectNative(call) => is_env_var(&call.var) || is_literal_import(call),
+        _ => is_import_block(expr),
     }
+}
+
+fn is_import_block(expr: &Expr) -> bool {
+    let Expr::Do(forms) = expr else {
+        return false;
+    };
+    !forms.is_empty()
+        && forms
+            .iter()
+            .all(|form| matches!(form, Expr::DirectNative(call) if is_literal_import(call)))
+}
+
+/// The import macro expands each class to a call with a literal name.
+fn is_literal_import(call: &DirectCall) -> bool {
+    call.var.sym.namespace() == Some("clojure.core")
+        && call.var.sym.name() == "__import*"
+        && matches!(call.args.as_slice(), [Expr::Literal(Value::Str(_))])
 }
 
 /// Whether evaluating `expr` cannot have side effects (constants and
@@ -699,6 +716,20 @@ mod tests {
                 "vector/1"
             ]
         );
+    }
+
+    #[test]
+    fn front_end_resolves_imported_static_fields() {
+        let mut eval = boot();
+        let front = front_end(
+            &mut eval,
+            "(import '[java.util Locale]) (identity Locale/US)
+             (clojure.core/__import* (str \"java.util.\" \"Calendar\"))",
+            "t.clj",
+        )
+        .expect("Locale resolves after the import");
+        assert!(front.units.iter().any(|u| u.form == 0 && u.env_effect));
+        assert!(front.units.iter().any(|u| u.form == 2 && !u.env_effect));
     }
 
     #[test]
