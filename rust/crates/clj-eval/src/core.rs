@@ -1166,6 +1166,24 @@ fn native_min(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     minmax("clojure.core/min", args, false)
 }
 
+/// Apply the stock min or max to already packed integers.
+pub(crate) fn apply_int_extremum(args: &[Value]) -> Option<Value> {
+    let [f, Value::Vector(values)] = args else {
+        return None;
+    };
+    let crate::ext::NativeTarget::Ptr(f) = crate::ext::as_native(f)?.func else {
+        return None;
+    };
+    let ints = values.as_flat_ints()?.iter().copied();
+    if std::ptr::fn_addr_eq(f, native_max as crate::ns::NativeFnPtr) {
+        return ints.max().map(Value::Int);
+    }
+    if std::ptr::fn_addr_eq(f, native_min as crate::ns::NativeFnPtr) {
+        return ints.min().map(Value::Int);
+    }
+    None
+}
+
 /// `=` as `Util.equiv` (sequential pairs walk pairwise with
 /// early exit, so finite-vs-infinite answers `false` instead of
 /// hanging; maps/sets recurse; the rest is `==`).

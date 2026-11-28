@@ -1934,35 +1934,87 @@ fn some_fn_rest_by_pred(
 }
 
 fn native_max_key(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/max-key", args, 2)?;
-    let k = args[0].clone();
-    let mut best = args[1].clone();
-    let mut kbest = call_checked(eval, &k, std::slice::from_ref(&best))?;
-    for cand in &args[2..] {
-        let kcand = call_checked(eval, &k, std::slice::from_ref(cand))?;
-        let ge = deref_core(eval, ">=");
-        if call_checked(eval, &ge, &[kcand.clone(), kbest.clone()])?.is_truthy() {
-            best = cand.clone();
-            kbest = kcand;
-        }
-    }
-    Ok(best)
+    key_extremum(eval, args, "clojure.core/max-key", ">=")
 }
 
 fn native_min_key(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/min-key", args, 2)?;
-    let k = args[0].clone();
-    let mut best = args[1].clone();
-    let mut kbest = call_checked(eval, &k, std::slice::from_ref(&best))?;
+    key_extremum(eval, args, "clojure.core/min-key", "<=")
+}
+
+fn key_extremum(
+    eval: &mut Evaluator,
+    args: &[Value],
+    name: &str,
+    compare: &'static str,
+) -> Result<Value, NativeError> {
+    check_min_arity(name, args, 2)?;
+    let key = &args[0];
+    let first = &args[1];
+    let mut best = (
+        first.clone(),
+        call_checked(eval, key, std::slice::from_ref(first))?,
+    );
     for cand in &args[2..] {
-        let kcand = call_checked(eval, &k, std::slice::from_ref(cand))?;
-        let le = deref_core(eval, "<=");
-        if call_checked(eval, &le, &[kcand.clone(), kbest.clone()])?.is_truthy() {
-            best = cand.clone();
-            kbest = kcand;
-        }
+        consider_key(eval, key, cand, compare, &mut best)?;
     }
-    Ok(best)
+    Ok(best.0)
+}
+
+fn consider_key(
+    eval: &mut Evaluator,
+    key: &Value,
+    candidate: &Value,
+    compare: &'static str,
+    best: &mut (Value, Value),
+) -> Result<(), NativeError> {
+    let k = call_checked(eval, key, std::slice::from_ref(candidate))?;
+    let cmp = deref_core(eval, compare);
+    if call_checked(eval, &cmp, &[k.clone(), best.1.clone()])?.is_truthy() {
+        *best = (candidate.clone(), k);
+    }
+    Ok(())
+}
+
+/// Apply a key extremum to a counted range without materializing the
+/// spread. The immutable range has no effects to run before the key fn.
+pub(crate) fn apply_key_extremum(
+    eval: &mut Evaluator,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let [f, key, range] = args else {
+        return None;
+    };
+    let crate::ext::NativeTarget::Ptr(f) = crate::ext::as_native(f)?.func else {
+        return None;
+    };
+    let compare = if std::ptr::fn_addr_eq(f, native_max_key as crate::ns::NativeFnPtr) {
+        ">="
+    } else if std::ptr::fn_addr_eq(f, native_min_key as crate::ns::NativeFnPtr) {
+        "<="
+    } else {
+        return None;
+    };
+    let (start, step, count) = long_range(range)?;
+    let count = usize::try_from(count).ok().filter(|&n| n > 0)?;
+    Some(key_extremum_range(eval, key, compare, start, step, count))
+}
+
+fn key_extremum_range(
+    eval: &mut Evaluator,
+    key: &Value,
+    compare: &'static str,
+    start: i64,
+    step: i64,
+    count: usize,
+) -> Result<Value, NativeError> {
+    let first = Value::Int(start);
+    let mut best = (first.clone(), call_checked(eval, key, &[first])?);
+    let mut next = start;
+    for _ in 1..count {
+        next = next.wrapping_add(step);
+        consider_key(eval, key, &Value::Int(next), compare, &mut best)?;
+    }
+    Ok(best.0)
 }
 
 fn native_comp(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {

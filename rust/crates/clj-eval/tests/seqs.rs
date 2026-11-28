@@ -92,6 +92,31 @@ fn vec_concat_preserves_order_and_mixed_numeric_types() {
 }
 
 #[test]
+fn apply_extrema_stream_realized_numeric_inputs() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [seen (atom [])
+                   keyfn (fn [x] (swap! seen conj x) (rem x 2))]
+               [(apply max [2 5 -4])
+                (apply min [2 5 -4])
+                (apply max-key keyfn (range 5 0 -1))
+                @seen
+                (apply min-key identity (range 5 0 -1))
+                (with-redefs [>= (constantly false)] (apply max-key identity (range 4)))
+                (with-redefs [max vector] (apply max [1 2]))
+                (apply max [1 2.0])
+                (apply max-key identity '(2 4 1))
+                (apply min-key identity 9 (range 1 3))
+                (apply (constantly :vector) [1 2])
+                (apply (constantly :range) identity (range 2))])",
+        ),
+        "[5 -4 1 [5 4 3 2 1] 1 0 [1 2] 2.0 4 1 :vector :range]",
+    );
+}
+
+#[test]
 fn two_key_assoc_preserves_persistent_rows() {
     let mut eval = boot();
     assert_eq!(
