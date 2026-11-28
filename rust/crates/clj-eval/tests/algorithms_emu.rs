@@ -2321,6 +2321,27 @@ fn io_resource_shapes() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn deque_member_sites_keep_live_dispatch_and_argument_order() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(let [dq (java.util.ArrayDeque. [1])
+                     peek (fn [d] (.peekFirst d))
+                     add (fn [d x] (.addLast d x))]
+                 [(peek dq) (add dq 2)
+                  (with-redefs [clojure.core/__meth* (fn [name _] name)] (peek dq))
+                  (peek dq) (.pollLast dq)
+                  (clojure.core/__meth* (str "peekFirst") dq)
+                  (try (peek nil) (catch NullPointerException _ :nil-target))
+                  (try (add dq nil) (catch NullPointerException _ :nil-item))
+                  (.addLast dq (do (.pollFirst dq) 3)) (.pollFirst dq)])"#
+        ),
+        r#"[1 true "peekFirst" 1 2 1 :nil-target :nil-item true 3]"#
+    );
+}
+
 /// `ArrayDeque`: ends add/poll/peek, collection ctors, nils.
 #[test]
 fn deque_ends() {

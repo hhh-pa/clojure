@@ -492,6 +492,30 @@ fn native_sum_reads_two_key_paths_and_preserves_get_in_fallbacks() {
 }
 
 #[test]
+fn native_deque_members_preserve_other_receivers_and_errors() {
+    let source = "\
+(defn empty-member [x] (.isEmpty x))
+(defn add-member [x v] (.addLast x v))
+(let [q (java.util.ArrayDeque.) name (str \"peekLast\")]
+  (println [(empty-member q) (empty-member [1])
+            (add-member q 7) (.peekLast q)
+            (clojure.core/__meth* name q) (.peekLast (identity q))
+            (letfn [(f [] 0)] (if (empty-member q) (.peekLast f) :kept))
+            (try (add-member q nil) (catch NullPointerException _ :nil))
+            (.pollLast q) (empty-member q)]))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("deque-members", source, &[]);
+    assert!(
+        report.starts_with("aot: native 2/2 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[true false true 7 7 7 :kept :nil 7 true]\n", "", 0)
+    );
+}
+
+#[test]
 fn native_reduce_inlines_a_destructured_accumulator() {
     let source = "\
 (defn fold-items [items start]

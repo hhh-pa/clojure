@@ -3079,10 +3079,72 @@ impl<'ctx> Lowerer<'ctx> {
         if self.try_lower_static(f, head, args, dest)?
             || self.try_lower_kw_invoke(f, head, args, dest)?
             || self.try_lower_stable_lookup(f, head, args, dest)?
+            || self.try_lower_deque_member(f, head, args, dest)?
         {
             return Ok(());
         }
         self.lower_value_invoke(f, head, args, dest)
+    }
+
+    /// A literal deque member over local operands, in a Lite program
+    /// where the core method dispatcher cannot be rebound.
+    fn try_lower_deque_member(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        head: &Expr,
+        args: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if !self.lite {
+            return Ok(false);
+        }
+        let Some((member, operands)) = deque_member_call(head, args) else {
+            return Ok(false);
+        };
+        let refs: Option<Vec<_>> = operands
+            .iter()
+            .map(|(local, _)| self.slot_of(f, *local).filter(|p| *p != dest))
+            .collect();
+        let Some(refs) = refs else {
+            return Ok(false);
+        };
+        let target = refs[0];
+        let arg = refs.get(1).copied().unwrap_or(target);
+        let hit = self
+            .call(
+                "rt_n_try_deque",
+                Some(self.i8t),
+                &[
+                    dest.into(),
+                    self.i8t.const_int(u64::from(member), false).into(),
+                    target.into(),
+                    arg.into(),
+                ],
+            )
+            .expect("deque hit");
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, hit, self.i8t.const_zero(), "deque_hit")
+            .expect("cmp");
+        let fast = self.ctx.append_basic_block(f.func, "deque_fast");
+        let fallback = self.ctx.append_basic_block(f.func, "deque_fallback");
+        let done = self.ctx.append_basic_block(f.func, "deque_done");
+        self.builder
+            .build_conditional_branch(ok, fast, fallback)
+            .expect("br");
+        self.builder.position_at_end(fast);
+        let moved: Vec<_> = refs
+            .into_iter()
+            .zip(operands)
+            .filter_map(|(p, (_, expr))| is_move(f, expr).then_some(p))
+            .collect();
+        self.drop_and_nil_slots(f.func, &moved);
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(fallback);
+        self.lower_value_invoke(f, head, args, dest)?;
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        Ok(true)
     }
 
     /// `dest = (head args…)` through [`emit_value_call`](Self::emit_value_call).
@@ -10772,6 +10834,31 @@ fn mentions_rebinding(e: &Expr) -> bool {
     found
 }
 
+fn deque_member_call<'a>(head: &Expr, args: &'a [Expr]) -> Option<(u8, Vec<(usize, &'a Expr)>)> {
+    let Expr::Global(var) = head else {
+        return None;
+    };
+    if var.sym.namespace() != Some("clojure.core") || var.sym.name() != "__meth*" {
+        return None;
+    }
+    let [
+        Expr::Quote(Value::Str(name)) | Expr::Literal(Value::Str(name)),
+        operands @ ..,
+    ] = args
+    else {
+        return None;
+    };
+    let member = native_abi::deque_member_id(name, operands.len().checked_sub(1)?)?;
+    let locals = operands
+        .iter()
+        .map(|expr| match expr {
+            Expr::Local(index) => Some((*index, expr)),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    Some((member, locals))
+}
+
 /// The `ns` constant descriptor (see `clj_rt::native::run_ns`).
 fn ns_desc(name: &str, doc: Option<&str>, attr: Option<&Map>, clauses: &[NsClause]) -> Value {
     let mut items = vec![
@@ -11116,6 +11203,15 @@ fn expr_lite_ok(e: &Expr, scope: &LiteScope<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deque_shape_leaves_computed_method_names_to_general_lowering() {
+        let head = Expr::Global(clj_value::Var {
+            id: 0,
+            sym: clj_value::Symbol::new(Some("clojure.core"), "__meth*"),
+        });
+        assert!(deque_member_call(&head, &[Expr::Local(0), Expr::Local(1)]).is_none());
+    }
 
     #[test]
     fn runtime_abi_params_follow_their_rust_types_271() {

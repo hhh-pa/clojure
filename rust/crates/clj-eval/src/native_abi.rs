@@ -30,6 +30,17 @@ use crate::error::{NativeError, Signal};
 use crate::eval::Evaluator;
 use crate::expr::{CaseTest, NsClause};
 
+/// Operation number for a deque member of this name and arity.
+pub fn deque_member_id(name: &str, argc: usize) -> Option<u8> {
+    crate::emucoll::DequeMember::from_name(name, argc).map(|member| member as u8)
+}
+
+/// Try a recognized deque member. A missing target or an invalid
+/// element leaves the caller to ordinary method dispatch.
+pub fn try_deque_member(id: u8, target: &Value, arg: &Value) -> Option<Value> {
+    crate::emucoll::DequeMember::from_id(id)?.try_call(target, arg)
+}
+
 /// The result of every step: a value or a pending throw.
 pub type Step = Result<Value, Signal>;
 

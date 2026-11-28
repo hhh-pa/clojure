@@ -20,6 +20,36 @@ use cljrt::{
 use support::{inbox, render};
 
 #[test]
+fn deque_member_probe_preserves_the_fallback_result_slot() {
+    use clj_eval::native_abi::deque_member_id;
+
+    let mut eval = clj_eval::boot();
+    let mut values = eval.eval_source("(java.util.ArrayDeque.)").unwrap();
+    let deque = values.pop().unwrap();
+    let add = deque_member_id("addLast", 1).unwrap();
+    let pop = deque_member_id("pollFirst", 0).unwrap();
+    let mut out = Value::Bool(false);
+
+    assert_eq!(nabi::rt_n_try_deque(&mut out, add, &deque, &Value::Nil), 0);
+    assert_eq!(
+        nabi::rt_n_try_deque(&mut out, pop, &Value::Nil, &Value::Nil),
+        0
+    );
+    assert_eq!(
+        nabi::rt_n_try_deque(&mut out, u8::MAX, &deque, &Value::Nil),
+        0
+    );
+    assert_eq!(out, Value::Bool(false));
+    assert_eq!(
+        nabi::rt_n_try_deque(&mut out, add, &deque, &Value::Int(7)),
+        1
+    );
+    assert_eq!(out, Value::Bool(true));
+    assert_eq!(nabi::rt_n_try_deque(&mut out, pop, &deque, &Value::Nil), 1);
+    assert_eq!(out, Value::Int(7));
+}
+
+#[test]
 fn scalar_boxes_render() {
     assert_eq!(render(rt_nil()), "nil");
     assert_eq!(render(rt_bool(0)), "false");

@@ -6010,16 +6010,14 @@ fn surface_gated_regex(
     }
 }
 
-/// The `java.util` collection members (#205): deque ends
-/// and queue heap ops (each gates its own target type).
+/// The queue heap and digest members, each gated by its target type.
 fn surface_gated_jcoll(
     eval: &mut Evaluator,
     meth: &str,
     target: &Value,
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
-    crate::emucoll::deque_method(meth, target, rest)
-        .or_else(|| crate::emucoll::pqueue_method(eval, meth, target, rest))
+    crate::emucoll::pqueue_method(eval, meth, target, rest)
         .or_else(|| crate::emudigest::digest_method(meth, target, rest))
 }
 
@@ -7963,6 +7961,9 @@ pub(crate) fn surface_meth(
     target: &Value,
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
+    if let Some(hit) = crate::emucoll::deque_method(meth, target, rest) {
+        return Some(hit);
+    }
     if let Some(hit) = surface_universal(eval, meth, target, rest) {
         return Some(hit);
     }

@@ -243,27 +243,74 @@ pub(crate) fn deque_method(
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
     let d = as_deque(target)?;
-    match (meth, rest.len()) {
-        ("add" | "addLast" | "offer" | "offerLast", 1) => {
-            if matches!(&rest[0], Value::Nil) {
-                return Some(Err(null_element()));
+    Some(DequeMember::from_name(meth, rest.len())?.call(d, rest))
+}
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum DequeMember {
+    AddFirst,
+    AddLast,
+    PollFirst,
+    PollLast,
+    PeekFirst,
+    PeekLast,
+    IsEmpty,
+}
+
+impl DequeMember {
+    pub(crate) fn from_id(id: u8) -> Option<Self> {
+        const MEMBERS: [DequeMember; 7] = [
+            DequeMember::AddFirst,
+            DequeMember::AddLast,
+            DequeMember::PollFirst,
+            DequeMember::PollLast,
+            DequeMember::PeekFirst,
+            DequeMember::PeekLast,
+            DequeMember::IsEmpty,
+        ];
+        MEMBERS.get(usize::from(id)).copied()
+    }
+
+    pub(crate) fn from_name(name: &str, arity: usize) -> Option<Self> {
+        Some(match (name, arity) {
+            ("add" | "addLast" | "offer" | "offerLast", 1) => Self::AddLast,
+            ("addFirst" | "offerFirst", 1) => Self::AddFirst,
+            ("poll" | "pollFirst", 0) => Self::PollFirst,
+            ("pollLast", 0) => Self::PollLast,
+            ("peek" | "peekFirst", 0) => Self::PeekFirst,
+            ("peekLast", 0) => Self::PeekLast,
+            ("isEmpty", 0) => Self::IsEmpty,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn call(self, d: &JavaDeque, args: &[Value]) -> Result<Value, NativeError> {
+        let out = match self {
+            Self::AddFirst | Self::AddLast => {
+                let item = &args[0];
+                if matches!(item, Value::Nil) {
+                    return Err(null_element());
+                }
+                let mut deque = lock_deque(d);
+                match self {
+                    Self::AddFirst => deque.push_front(item.clone()),
+                    _ => deque.push_back(item.clone()),
+                }
+                Value::Bool(true)
             }
-            lock_deque(d).push_back(rest[0].clone());
-            Some(Ok(Value::Bool(true)))
-        }
-        ("addFirst" | "offerFirst", 1) => {
-            if matches!(&rest[0], Value::Nil) {
-                return Some(Err(null_element()));
-            }
-            lock_deque(d).push_front(rest[0].clone());
-            Some(Ok(Value::Bool(true)))
-        }
-        ("poll" | "pollFirst", 0) => Some(Ok(lock_deque(d).pop_front().unwrap_or(Value::Nil))),
-        ("pollLast", 0) => Some(Ok(lock_deque(d).pop_back().unwrap_or(Value::Nil))),
-        ("peek" | "peekFirst", 0) => Some(Ok(lock_deque(d).front().cloned().unwrap_or(Value::Nil))),
-        ("peekLast", 0) => Some(Ok(lock_deque(d).back().cloned().unwrap_or(Value::Nil))),
-        ("isEmpty", 0) => Some(Ok(Value::Bool(lock_deque(d).is_empty()))),
-        _ => None,
+            Self::PollFirst => lock_deque(d).pop_front().unwrap_or(Value::Nil),
+            Self::PollLast => lock_deque(d).pop_back().unwrap_or(Value::Nil),
+            Self::PeekFirst => lock_deque(d).front().cloned().unwrap_or(Value::Nil),
+            Self::PeekLast => lock_deque(d).back().cloned().unwrap_or(Value::Nil),
+            Self::IsEmpty => Value::Bool(lock_deque(d).is_empty()),
+        };
+        Ok(out)
+    }
+
+    pub(crate) fn try_call(self, target: &Value, arg: &Value) -> Option<Value> {
+        let deque = as_deque(target)?;
+        self.call(deque, std::slice::from_ref(arg)).ok()
     }
 }
 

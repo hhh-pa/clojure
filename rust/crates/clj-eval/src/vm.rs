@@ -2000,6 +2000,13 @@ impl Compiler {
                 return exec;
             }
         }
+        if let Some(exec) = self.try_deque_member(head, args, span) {
+            return exec;
+        }
+        self.compile_general_invoke(head, args, span)
+    }
+
+    fn compile_general_invoke(&mut self, head: &Expr, args: &[Expr], span: Span) -> Exec {
         let head = self.compile(head);
         let args: Vec<Operand> = args.iter().map(|a| self.operand(a, true)).collect();
         Box::new(move |ev, f| {
@@ -2011,6 +2018,32 @@ impl Compiler {
             eval_operands(ev, f, &args, &mut values)?;
             call_value(ev, &callee, &mut values, span)
         })
+    }
+
+    fn try_deque_member(&mut self, head: &Expr, args: &[Expr], span: Span) -> Option<Exec> {
+        let (var, member, receiver, arg) = deque_method_shape(head, args)?;
+        let receiver = self.in_place(receiver)?;
+        let arg = match arg {
+            None => None,
+            Some(arg) => Some(self.in_place(arg)?),
+        };
+        let site = next_site();
+        let var = var.clone();
+        let fallback = self.compile_general_invoke(head, args, span);
+        Some(Box::new(move |ev, frame| {
+            let Some(deque) = crate::emucoll::as_deque(receiver.get(frame)) else {
+                return fallback(ev, frame);
+            };
+            if !ev.group_valid(site, |ev| is_method_dispatch(ev, &var)) {
+                return fallback(ev, frame);
+            }
+            let operands = arg
+                .as_ref()
+                .map_or(&[][..], |a| std::slice::from_ref(a.get(frame)));
+            member
+                .call(deque, operands)
+                .map_err(|err| ev.with_native_span(span, |ev| ev.throw(err)))
+        }))
     }
 
     /// Fast-path literal keyword invocations (`(:kw target)` or `(:kw target fallback)`).
@@ -3312,6 +3345,41 @@ fn core_call<'e>(e: &'e Expr, name: &str, argc: usize) -> Option<&'e DirectCall>
     }
 }
 
+fn deque_method_shape<'a>(
+    head: &'a Expr,
+    args: &'a [Expr],
+) -> Option<(
+    &'a Var,
+    crate::emucoll::DequeMember,
+    &'a Expr,
+    Option<&'a Expr>,
+)> {
+    let Expr::Global(var) = head else {
+        return None;
+    };
+    if var.sym.namespace() != Some("clojure.core") || var.sym.name() != "__meth*" {
+        return None;
+    }
+    let [
+        Expr::Quote(Value::Str(name)) | Expr::Literal(Value::Str(name)),
+        receiver,
+        rest @ ..,
+    ] = args
+    else {
+        return None;
+    };
+    let member = crate::emucoll::DequeMember::from_name(name, rest.len())?;
+    Some((var, member, receiver, rest.first()))
+}
+
+fn is_method_dispatch(eval: &mut Evaluator, var: &Var) -> bool {
+    let root = eval.deref_var_cached(var.id, &var.sym);
+    crate::ext::as_native(&root).is_some_and(|native| {
+        matches!(native.func, crate::ext::NativeTarget::Ptr(f)
+            if std::ptr::fn_addr_eq(f, crate::types::native_meth as crate::ns::NativeFnPtr))
+    })
+}
+
 /// A suffix trim expressed as two reversals. The callable and input
 /// reads must leave the four native sites' evaluation order intact.
 fn trim_vector_tail_shape(call: &DirectCall) -> Option<(&Expr, &Expr, [&DirectCall; 4])> {
@@ -3377,6 +3445,17 @@ pub(crate) fn direct_slow_values(
 #[cfg(test)]
 mod tests {
     use clj_value::Value;
+
+    #[test]
+    fn deque_shape_leaves_computed_names_to_general_invocation() {
+        use super::{Expr, Var};
+
+        let head = Expr::Global(Var {
+            id: 0,
+            sym: clj_value::Symbol::new(Some("clojure.core"), "__meth*"),
+        });
+        assert!(super::deque_method_shape(&head, &[Expr::Local(0), Expr::Local(1)]).is_none());
+    }
 
     #[test]
     fn hot_scalar_calls_preserve_checked_inputs_and_redefinition() {

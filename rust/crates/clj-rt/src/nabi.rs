@@ -505,6 +505,16 @@ pub extern "C" fn rt_n_invoke(out: &mut Value, f: &Value, args: &CSlice<Value>) 
     )
 }
 
+/// Dispatch a known deque member, returning 0 without effects on a miss.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_n_try_deque(out: &mut Value, member: u8, target: &Value, arg: &Value) -> u8 {
+    let Some(result) = native_abi::try_deque_member(member, target, arg) else {
+        return 0;
+    };
+    *out = result;
+    1
+}
+
 /// Enter a call of `f` with `argc` args when `f` is a compiled closure of
 /// exactly that fixed arity (#271): writes its code address and captured
 /// values for the call site to call directly (then `rt_n_leave`), as a
@@ -1574,6 +1584,7 @@ pub fn native_symbols() -> Vec<(&'static str, usize)> {
         rt_n_fast_vars,
         rt_n_varref,
         rt_n_invoke,
+        rt_n_try_deque,
         rt_n_enter_closure,
         rt_n_native_mv,
         rt_n_core_ref,
