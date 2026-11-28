@@ -79,6 +79,36 @@ fn captured_frame_preserves_copy_on_recur() {
     assert_eq!(run_last(&mut eval, src), "[0 1 2 3 4]");
 }
 
+#[test]
+fn last_use_captures_keep_later_reads_and_shared_upvalues() {
+    let mut eval = boot();
+    let cases = [
+        ("(let [v [:live] f (fn [] v)] [(f) v])", "[[:live] [:live]]"),
+        (
+            "(let [v [7] mk (fn [] (fn [] v)) f (mk) g (mk)]
+               [(identical? (f) (g)) (f)])",
+            "[true [7]]",
+        ),
+        (
+            "(let [v [7]]
+               (loop [i 0 fns []]
+                 (if (= i 3)
+                   (mapv (fn [f] (f)) fns)
+                   (recur (inc i) (conj fns (fn [] v))))))",
+            "[[7] [7] [7]]",
+        ),
+        (
+            "(let [v [:live]]
+               (try ((fn [] v)) (throw (ex-info \"err\" {}))
+                    (catch Exception _ v)))",
+            "[:live]",
+        ),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(run_last(&mut eval, source), expected, "{source}");
+    }
+}
+
 /// Nested loops: inner loop recycles buffers from the pool without
 /// disturbing outer loop variables or state.
 #[test]

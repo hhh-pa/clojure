@@ -695,8 +695,10 @@ fn closure_value(
 }
 
 /// The capture list's current values.
-fn capture(frame: &Frame<'_>, locs: &[Loc]) -> Arc<[Value]> {
-    locs.iter().map(|l| frame.get(*l).clone()).collect()
+fn capture(frame: &Frame<'_>, locs: &[(usize, Loc)]) -> Arc<[Value]> {
+    locs.iter()
+        .map(|(_, loc)| frame.get(*loc).clone())
+        .collect()
 }
 
 /// One fn's compile scope. Lexical indexes below `base` are outer
@@ -726,7 +728,7 @@ impl Scope {
             captures: Vec::new(),
             rec,
             recur: Arc::from([]),
-            last: crate::vm_live::LastUses::new(),
+            last: crate::vm_live::LastUses::default(),
         }
     }
 }
@@ -1017,7 +1019,7 @@ impl Compiler {
     /// Whether `expr` (a local read) is its register's last use.
     fn is_last(&self, expr: &Expr) -> bool {
         let s = self.scopes.last().expect("a scope is always open");
-        s.last.contains(&(expr as *const Expr))
+        s.last.contains(expr)
     }
 
     fn resolve(&mut self, old: usize) -> Loc {
@@ -1067,7 +1069,7 @@ impl Compiler {
             Expr::Let { bindings, body } => self.compile_let(bindings, body),
             Expr::Loop { bindings, body } => self.compile_loop(bindings, body),
             Expr::Recur(args) => self.compile_recur(args),
-            Expr::Fn(fun) => self.compile_fn(fun),
+            Expr::Fn(fun) => self.compile_fn(expr, fun),
             Expr::LetFn { fns, body } => self.compile_letfn(fns, body),
             Expr::LazySeqStar { body } => self.compile_lazy_seq(body),
             Expr::DelayStar { display, body } => self.compile_delay(display, body),
@@ -1749,7 +1751,7 @@ impl Compiler {
         fun: &FunExpr,
         base: usize,
         rec: Vec<usize>,
-    ) -> (Arc<CompiledFun>, Vec<Loc>) {
+    ) -> (Arc<CompiledFun>, Vec<(usize, Loc)>) {
         self.scopes.push(Scope::new(base, rec));
         let arities: Box<[_]> = fun
             .arities
@@ -1758,7 +1760,6 @@ impl Compiler {
             .map(|(i, a)| self.compile_arity(i, a))
             .collect();
         let scope = self.scopes.pop().expect("the fn scope");
-        let captures = scope.captures.iter().map(|(_, loc)| *loc).collect();
         let scalar_scope = arities.iter().any(|a| a.scalar.is_some()).then(|| {
             Box::new(ScalarScope {
                 rec: scope.rec.into(),
@@ -1772,7 +1773,7 @@ impl Compiler {
             arities,
             scalar_scope,
         };
-        (Arc::new(compiled), captures)
+        (Arc::new(compiled), scope.captures)
     }
 
     fn compile_arity(&mut self, index: usize, arity: &Arity) -> CompiledArity {
@@ -1823,11 +1824,26 @@ impl Compiler {
         }
     }
 
-    fn compile_fn(&mut self, fun: &FunExpr) -> Exec {
+    fn compile_fn(&mut self, expr: &Expr, fun: &FunExpr) -> Exec {
         let base = self.visible();
         let (compiled, captures) = self.compile_fun(fun, base, Vec::new());
+        let scope = self.scope();
+        let captures: Vec<_> = captures
+            .into_iter()
+            .map(|(lexical, loc)| {
+                let moved = matches!(loc, Loc::Reg(_))
+                    && scope.last.can_move_capture(expr, lexical - scope.base);
+                (loc, moved)
+            })
+            .collect();
         Box::new(move |ev, f| {
-            let captured = capture(f, &captures);
+            let captured = captures
+                .iter()
+                .map(|(loc, moved)| match loc {
+                    Loc::Reg(reg) if *moved => std::mem::replace(&mut f.regs[*reg], Value::Nil),
+                    _ => f.get(*loc).clone(),
+                })
+                .collect();
             Ok(make_closure(ev, &compiled, captured, None))
         })
     }
@@ -1840,7 +1856,7 @@ impl Compiler {
         let visible = self.visible();
         let names: Vec<usize> = fns.iter().map(|_| self.push_local()).collect();
         let rec: Vec<usize> = (visible..visible + fns.len()).collect();
-        let funs: Vec<(Arc<CompiledFun>, Vec<Loc>)> = fns
+        let funs: Vec<_> = fns
             .iter()
             .map(|(_, fun)| self.compile_fun(fun, visible + fns.len(), rec.clone()))
             .collect();
@@ -1883,7 +1899,11 @@ impl Compiler {
         })
     }
 
-    fn compile_thunk(&mut self, display: &str, body: &[Expr]) -> (Arc<CompiledFun>, Vec<Loc>) {
+    fn compile_thunk(
+        &mut self,
+        display: &str,
+        body: &[Expr],
+    ) -> (Arc<CompiledFun>, Vec<(usize, Loc)>) {
         let fun = FunExpr {
             display: display.to_owned(),
             arities: Arc::from([Arity {
