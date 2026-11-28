@@ -861,6 +861,31 @@ fn some_rows() {
 }
 
 #[test]
+fn map_walk_keeps_entry_types_and_seq_order() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"(let [calls (atom [])
+                     m (sorted-map 3 :c 1 false 2 :b)
+                     hit (some (fn [[k v :as e]] (swap! calls conj k) (when v e)) m)]
+                 [@calls (map-entry? hit) (key hit) (val hit)
+                  (identical? hit (find m 2)) (some identity {})])"#
+        ),
+        "[[1 2] true 2 :b false nil]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"(every? (fn [m] (= (mapv key m) (mapv key (seq m))))
+                       [{:c 1 :a 2 :b 3} (zipmap (range 20) (range 20))
+                        (sorted-map-by > 1 :a 2 :b)])"#
+        ),
+        "true"
+    );
+}
+
+#[test]
 fn not_any_every_rows() {
     let mut eval = boot();
     assert_eq!(run_last(&mut eval, "(not-any? odd? [2 4])"), "true");

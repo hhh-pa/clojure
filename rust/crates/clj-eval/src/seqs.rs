@@ -183,9 +183,9 @@ fn walk_sole_map(
     )
 }
 
-/// Walk a vector, a finite repeat, or a counted `long` range in
-/// place (#226): no chunk seq copies the items 32 at a time — the
-/// order and items are the seq's (`None`: walk the seq).
+/// Walk collections whose entries can be read in seq order
+/// without constructing the seq. A map visitor gets a fresh
+/// entry for each item it reaches.
 fn walk_direct(
     eval: &mut Evaluator,
     coll: &Value,
@@ -201,6 +201,11 @@ fn walk_direct(
     };
     if let Value::Vector(v) = coll {
         return Some(each(&mut v.iter()));
+    }
+    if let Value::Map(m) = coll {
+        return Some(each(&mut m.iter().map(|(key, value)| {
+            clj_value::map_entry(key.clone(), value.clone())
+        })));
     }
     if let Some(sp) = crate::lazy::as_splitvec(coll) {
         return Some(each(&mut sp.iter()));
