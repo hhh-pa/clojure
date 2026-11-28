@@ -60,7 +60,7 @@ Extend `scripts/ci/go/cmd/h2h-compare`:
    - Provision LLVM 23 via `./.github/actions/setup-llvm`.
    - Install `ocaml` and `ocaml-native-compilers` via `awalsh128/cache-apt-pkgs-action` (same package pair as `ocaml-code-snippet`).
    - Check out `hhh-pa/ocaml-code-snippet` at `ocaml_snippets_sha` alongside `snippets` (`clojure-code-snippet`) and `py` (`python-code-snippet`).
-   - Decrypt and extract shared test resources into `ocaml/tests/resources` using `RESOURCES_PASSPHRASE` (same archive already extracted for `snippets` and `py`).
+   - Decrypt and extract shared test resources into `ocaml/tests/resources` (same archive already extracted for `snippets` and `py`). Since the snippet repos' T1263 merges (`clojure-code-snippet#71`), the archive comes from the `hhhpa/snippet-resources` Docker Hub image and decrypts once with the `RESOURCES_IMAGE_PASSPHRASE` organization secret (#277).
 2. **Isolated binary builds:**
    - Build `--no-default-features` interpreter binaries (`rs-from`, `rs-to`) and copy/stage them **before or in separate target dirs from** default-feature `aot` builds so feature toggling never contaminates `run` measurements.
    - Build `aot-from` (from `work/`) and `aot-to` (from `base/` when distinct from `work/`) with default `aot` feature:

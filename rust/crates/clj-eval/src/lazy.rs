@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 
 use clj_value::{
     Array, CHUNK_SIZE, ConsValue, CycleValue, ExtensionValue, IterateValue, KeySeqValue, List, Map,
-    PrimitiveVector, RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set,
+    PrimitiveVector, QueueValue, RangeNum, RangeValue, RealizedSeq, RepeatValue, Seq, SeqKind, Set,
     SplitVecValue, SubVectorValue, ThrowClass, TransientVector, ValSeqValue, Value, Vector,
 };
 
@@ -84,7 +84,7 @@ pub struct PendingSeq {
 /// stack).
 #[derive(Clone, Debug)]
 pub(crate) struct ConcatFrame {
-    rest: Arc<Vec<Value>>,
+    rest: ConcatTail,
     idx: usize,
     parent: ConcatStack,
 }
@@ -93,6 +93,38 @@ pub(crate) struct ConcatFrame {
 /// O(1) — `force_pending` clones the whole thunk per force, so an
 /// owned `Vec` would make every step O(depth)).
 pub(crate) type ConcatStack = Option<Arc<ConcatFrame>>;
+
+/// Concat inputs shared by all cursors over the same tail. A short
+/// tail can keep the items of singleton vectors directly in its slots.
+#[derive(Clone, Debug)]
+pub(crate) struct ConcatTail {
+    values: Arc<[Value]>,
+    singletons: u8,
+}
+
+impl ConcatTail {
+    fn one(value: Value) -> Self {
+        Self {
+            values: Arc::from([value]),
+            singletons: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn is_singleton(&self, index: usize) -> bool {
+        index < u8::BITS as usize && self.singletons & (1 << index) != 0
+    }
+
+    fn take(&mut self, index: usize) -> Value {
+        match Arc::get_mut(&mut self.values) {
+            Some(inputs) => std::mem::replace(&mut inputs[index], Value::Nil),
+            None => self.values[index].clone(),
+        }
+    }
+}
 
 impl Drop for ConcatFrame {
     fn drop(&mut self) {
@@ -115,6 +147,13 @@ impl Drop for ConcatFrame {
 #[derive(Clone, Debug)]
 enum SeqState {
     Pending(Box<Thunk>),
+    // A fresh concat has no resume stack or cursor. Its inputs fit
+    // inline in the memo cell, saving a thunk box per concatenation.
+    PendingConcat {
+        cur: Value,
+        rest: ConcatTail,
+    },
+    PendingConcatItem(Value),
     Chunk {
         items: Arc<[Value]>,
         pos: usize,
@@ -155,7 +194,7 @@ pub(crate) enum Thunk {
         /// `string_function_calculation` took ~70s at n=32K).
         /// Shared inputs plus the index below make both the clone
         /// and the step O(1).
-        rest: Arc<Vec<Value>>,
+        rest: ConcatTail,
         /// The next index into `rest` once `cur` exhausts.
         idx: usize,
         /// Outer levels flattened by the iterative descent (#205):
@@ -358,7 +397,7 @@ impl PendingSeq {
     pub(crate) fn is_realized(&self) -> bool {
         !matches!(
             *self.state.lock().unwrap_or_else(|e| e.into_inner()),
-            SeqState::Pending(_)
+            SeqState::Pending(_) | SeqState::PendingConcat { .. } | SeqState::PendingConcatItem(_)
         )
     }
 
@@ -386,7 +425,11 @@ impl PendingSeq {
     #[allow(dead_code)]
     pub(crate) fn with_meta_fresh(&self, meta: Option<Map>) -> Value {
         let state = match self.state.lock().ok().map(|s| s.clone()) {
-            Some(SeqState::Pending(t)) => SeqState::Pending(t),
+            Some(
+                pending @ (SeqState::Pending(_)
+                | SeqState::PendingConcat { .. }
+                | SeqState::PendingConcatItem(_)),
+            ) => pending,
             // Forced states re-wrap as chains (already realized, so
             // no recomputation either way).
             Some(SeqState::Chunk { items, pos, tail }) => {
@@ -417,12 +460,12 @@ fn take_seq_state(state: &Mutex<SeqState>) -> SeqState {
 /// tails), else the sole remaining rest input when it is a
 /// sole-owned cell (right nests). Sibling cells unwind through
 /// their own `Drop`, and `outer` through `ConcatFrame::Drop`.
-fn drop_concat_link(cur: Value, rest: &mut Arc<Vec<Value>>, idx: usize) -> Option<Value> {
+fn drop_concat_link(cur: Value, rest: &mut ConcatTail, idx: usize) -> Option<Value> {
     if as_pending(&cur).is_some() {
         return Some(cur);
     }
     if idx + 1 == rest.len() {
-        if let Some(slot) = Arc::get_mut(rest).and_then(|v| v.get_mut(idx)) {
+        if let Some(slot) = Arc::get_mut(&mut rest.values).and_then(|v| v.get_mut(idx)) {
             if as_pending(slot).is_some() {
                 return Some(std::mem::replace(slot, Value::Nil));
             }
@@ -514,6 +557,13 @@ impl Drop for PendingSeq {
             let mut link = match cur {
                 SeqState::Empty => break,
                 SeqState::Chunk { tail, .. } => tail,
+                SeqState::PendingConcatItem(item) => item,
+                SeqState::PendingConcat { cur, mut rest } => {
+                    match drop_concat_link(cur, &mut rest, 0) {
+                        Some(link) => link,
+                        None => break,
+                    }
+                }
                 SeqState::Pending(thunk) => match drop_thunk_link(*thunk) {
                     Some(link) => link,
                     None => break,
@@ -544,7 +594,9 @@ impl ExtensionValue for PendingSeq {
         };
         match &*state {
             SeqState::Empty => "()".to_owned(),
-            SeqState::Pending(_) => "(...)".to_owned(),
+            SeqState::Pending(_)
+            | SeqState::PendingConcat { .. }
+            | SeqState::PendingConcatItem(_) => "(...)".to_owned(),
             SeqState::Chunk { items, pos, tail } => {
                 let parts: Vec<String> = items[*pos..]
                     .iter()
@@ -729,6 +781,7 @@ pub(crate) fn is_seqable(v: &Value) -> bool {
                 || any.downcast_ref::<ConsValue>().is_some()
                 || any.downcast_ref::<KeySeqValue>().is_some()
                 || any.downcast_ref::<ValSeqValue>().is_some()
+                || any.downcast_ref::<QueueValue>().is_some()
                 || crate::emucoll::as_list(v).is_some()
         }
         _ => false,
@@ -768,6 +821,26 @@ fn force_pending(eval: &mut Evaluator, p: &PendingSeq) -> Result<Forced, Signal>
                 return Ok(forced);
             }
             SeqState::Pending(t) => t,
+            SeqState::PendingConcatItem(item) => {
+                let items = Arc::<[Value]>::from([item]);
+                let tail = concat_cont(Value::Nil, concat_rest(&[]), 0, None);
+                let forced = Forced::Chunk {
+                    items: Arc::clone(&items),
+                    tail: tail.clone(),
+                };
+                *state = SeqState::Chunk {
+                    items,
+                    pos: 0,
+                    tail,
+                };
+                return Ok(forced);
+            }
+            SeqState::PendingConcat { cur, rest } => Box::new(Thunk::Concat {
+                cur,
+                rest,
+                idx: 0,
+                outer: None,
+            }),
         }
     };
     match step_thunk(eval, (*thunk).clone()) {
@@ -835,9 +908,9 @@ fn step_unit_extension_tail(eval: &mut Evaluator, v: &Value) -> Result<StepUnit,
         let s = crate::collmisc::seq_iteration(eval, it)?;
         return step_unit(eval, &s);
     }
-    // #205: walking an `ArrayList` steps its snapshot seq (same
-    // hook as `seq`).
-    if let Some(items) = crate::emucoll::list_snapshot(v) {
+    // #205: walking an `ArrayList` (or a #277 queue) steps its
+    // snapshot seq (same hook as `seq`).
+    if let Some(items) = extension_snapshot(v) {
         let s = realized_value(items, false, true, false, clj_value::SeqKind::Array);
         return step_unit(eval, &s);
     }
@@ -1872,6 +1945,7 @@ pub(crate) fn walk_sole_map(
 /// `remove`, `take`, `drop`, `take-while`, `drop-while`, and `concat` (#271).
 enum SoleMap {
     One(Value, Value),
+    Item(Value),
     Vectors(Value, Vec<Vector>),
     Cat(Box<SoleMap>),
     Filter {
@@ -1897,7 +1971,7 @@ enum SoleMap {
     },
     Concat {
         cur: Value,
-        rest: Arc<Vec<Value>>,
+        rest: ConcatTail,
         idx: usize,
         outer: ConcatStack,
     },
@@ -1913,6 +1987,7 @@ fn walk_parts(
 ) -> Result<bool, Signal> {
     match parts {
         SoleMap::One(f, input) => walk_map_one(eval, &f, input, visit),
+        SoleMap::Item(item) => visit(eval, item),
         SoleMap::Vectors(f, inputs) => walk_map_vectors(eval, &f, &inputs, visit),
         SoleMap::Cat(outer) => {
             let mut go_on = true;
@@ -1937,6 +2012,20 @@ fn walk_parts(
     }
 }
 
+/// Release a consumed concat root before walking its children so the
+/// finished branches can be freed while the output is being built.
+fn walk_owned_parts(
+    eval: &mut Evaluator,
+    input: Value,
+    parts: SoleMap,
+    visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
+) -> Result<bool, Signal> {
+    if matches!(parts, SoleMap::Concat { .. }) {
+        drop(input);
+    }
+    walk_parts(eval, parts, visit)
+}
+
 /// Walk every item of one collection in seq order without allocating
 /// lazy cells for sole unforced combinators, vectors, lists, subvectors,
 /// repeats, or counted long ranges. Answers whether `visit` let the
@@ -1947,7 +2036,7 @@ fn walk_all(
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Result<bool, Signal> {
     if let Some(parts) = sole_map_parts(&coll) {
-        return walk_parts(eval, parts, visit);
+        return walk_owned_parts(eval, coll, parts, visit);
     }
     match coll {
         Value::Nil => Ok(true),
@@ -2048,10 +2137,17 @@ fn sole_map_parts(coll: &Value) -> Option<SoleMap> {
         return None;
     }
     let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
-    let SeqState::Pending(thunk) = &*state else {
-        return None;
-    };
-    sole_thunk_parts(thunk)
+    match &*state {
+        SeqState::Pending(thunk) => sole_thunk_parts(thunk),
+        SeqState::PendingConcatItem(item) => Some(SoleMap::Item(item.clone())),
+        SeqState::PendingConcat { cur, rest } => Some(SoleMap::Concat {
+            cur: cur.clone(),
+            rest: rest.clone(),
+            idx: 0,
+            outer: None,
+        }),
+        _ => None,
+    }
 }
 
 fn sole_thunk_parts(thunk: &Thunk) -> Option<SoleMap> {
@@ -2091,7 +2187,7 @@ fn sole_thunk_parts(thunk: &Thunk) -> Option<SoleMap> {
             outer,
         } => Some(SoleMap::Concat {
             cur: cur.clone(),
-            rest: Arc::clone(rest),
+            rest: rest.clone(),
             idx: *idx,
             outer: outer.clone(),
         }),
@@ -2483,20 +2579,31 @@ fn walk_drop_while(
 fn walk_concat(
     eval: &mut Evaluator,
     mut cur: Value,
-    mut rest: Arc<Vec<Value>>,
+    mut rest: ConcatTail,
     mut idx: usize,
     mut outer: ConcatStack,
     visit: &mut dyn FnMut(&mut Evaluator, Value) -> Result<bool, Signal>,
 ) -> Result<bool, Signal> {
     loop {
-        while let Some((icur, irest, iidx, _)) = unforced_concat_parts(&cur) {
-            if rest.get(idx).is_some() {
+        while let Some(parts) = unforced_concat_parts(&cur) {
+            let (icur, irest, iidx, iouter) = match parts {
+                ConcatParts::Item(item) => {
+                    if !visit(eval, item)? {
+                        return Ok(false);
+                    }
+                    cur = Value::Nil;
+                    break;
+                }
+                ConcatParts::Inputs(cur, rest, idx, outer) => (cur, rest, idx, outer),
+            };
+            if idx < rest.len() {
                 outer = Some(Arc::new(ConcatFrame {
                     rest,
                     idx,
                     parent: outer,
                 }));
             }
+            outer = splice_concat_stack(iouter, outer);
             cur = icur;
             rest = irest;
             idx = iidx;
@@ -2505,17 +2612,18 @@ fn walk_concat(
             return Ok(false);
         }
         loop {
-            if let Some(next) = rest.get(idx) {
-                cur = next.clone();
-                idx += 1;
+            if !resume_concat(&mut rest, &mut idx, &mut outer) {
+                return Ok(true);
+            }
+            let next = rest.take(idx);
+            let singleton = rest.is_singleton(idx);
+            idx += 1;
+            if !singleton {
+                cur = next;
                 break;
             }
-            match pop_concat_frame(&mut outer) {
-                Some((orest, oidx)) => {
-                    rest = orest;
-                    idx = oidx;
-                }
-                None => return Ok(true),
+            if !visit(eval, next)? {
+                return Ok(false);
             }
         }
     }
@@ -2568,6 +2676,29 @@ fn test_filter_item(
         Some(p) => Ok(p.call1(eval, crate::vm::clone_value(item))?.is_truthy()),
         None => filter_pred(eval, f, item),
     }
+}
+
+/// Test a realized vector from its end. Only the prefix that remains
+/// after the suffix test is copied, with the metadata-free `vec` shape.
+pub(crate) fn trim_vector_tail(
+    eval: &mut Evaluator,
+    predicate: &Value,
+    vector: &Vector,
+) -> Result<Vector, Signal> {
+    let mut len = vector.len();
+    if len == 0 {
+        return Ok(Vector::new_sync());
+    }
+    crate::core::check_ifn(eval, predicate)?;
+    let prepared = filter_prep(predicate);
+    while len > 0 {
+        let item = vector.get(len - 1).expect("remaining vector item");
+        if !test_filter_item(eval, predicate, prepared.as_ref(), &item)? {
+            break;
+        }
+        len -= 1;
+    }
+    Ok(vector.slice_packed(0, len))
 }
 
 /// `filter`/`remove`: consume whole units, testing each item in
@@ -2654,17 +2785,31 @@ fn step_take(eval: &mut Evaluator, n: &Value, input: Value) -> Result<Forced, Si
 /// still forces normally later, yielding identical items. Forced
 /// cells (memoized chunks) and non-concat pendings answer `None`
 /// and step through the normal path.
-fn unforced_concat_parts(v: &Value) -> Option<(Value, Arc<Vec<Value>>, usize, ConcatStack)> {
+enum ConcatParts {
+    Item(Value),
+    Inputs(Value, ConcatTail, usize, ConcatStack),
+}
+
+fn unforced_concat_parts(v: &Value) -> Option<ConcatParts> {
     let cell = as_pending(v)?;
     let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
     match &*state {
+        SeqState::PendingConcatItem(item) => Some(ConcatParts::Item(item.clone())),
+        SeqState::PendingConcat { cur, rest } => {
+            Some(ConcatParts::Inputs(cur.clone(), rest.clone(), 0, None))
+        }
         SeqState::Pending(thunk) => match &**thunk {
             Thunk::Concat {
                 cur,
                 rest,
                 idx,
                 outer,
-            } => Some((cur.clone(), Arc::clone(rest), *idx, outer.clone())),
+            } => Some(ConcatParts::Inputs(
+                cur.clone(),
+                rest.clone(),
+                *idx,
+                outer.clone(),
+            )),
             _ => None,
         },
         _ => None,
@@ -2679,7 +2824,7 @@ fn splice_concat_stack(inner: ConcatStack, mut outer: ConcatStack) -> ConcatStac
     let mut frames = Vec::new();
     let mut node = inner;
     while let Some(frame) = node {
-        frames.push((Arc::clone(&frame.rest), frame.idx));
+        frames.push((frame.rest.clone(), frame.idx));
         node = frame.parent.clone();
     }
     for (rest, idx) in frames.into_iter().rev() {
@@ -2693,14 +2838,34 @@ fn splice_concat_stack(inner: ConcatStack, mut outer: ConcatStack) -> ConcatStac
 }
 
 /// Pop one resume frame (O(1): two `Arc` clones).
-fn pop_concat_frame(stack: &mut ConcatStack) -> Option<(Arc<Vec<Value>>, usize)> {
+fn pop_concat_frame(stack: &mut ConcatStack) -> Option<(ConcatTail, usize)> {
     let frame = stack.take()?;
     *stack = frame.parent.clone();
-    Some((Arc::clone(&frame.rest), frame.idx))
+    Some((frame.rest.clone(), frame.idx))
+}
+
+fn resume_concat(rest: &mut ConcatTail, idx: &mut usize, outer: &mut ConcatStack) -> bool {
+    while *idx >= rest.len() {
+        let Some((tail, next)) = pop_concat_frame(outer) else {
+            return false;
+        };
+        *rest = tail;
+        *idx = next;
+    }
+    true
+}
+
+fn concat_cont(cur: Value, rest: ConcatTail, idx: usize, outer: ConcatStack) -> Value {
+    PendingSeq::pending(Thunk::Concat {
+        cur,
+        rest,
+        idx,
+        outer,
+    })
 }
 
 /// `concat`: pass the first non-empty input's unit through,
-/// chaining its tail back ahead of the rest. The `rest` vec is
+/// chaining its tail back ahead of the rest. The `rest` slice is
 /// shared, never mutated: exhausted inputs advance the index,
 /// and the current input's tail travels in `cur` — every step is
 /// O(1) no matter how many inputs `(apply concat ...)` splices.
@@ -2711,7 +2876,7 @@ fn pop_concat_frame(stack: &mut ConcatStack) -> Option<(Arc<Vec<Value>>, usize)>
 fn step_concat(
     eval: &mut Evaluator,
     mut cur: Value,
-    mut rest: Arc<Vec<Value>>,
+    mut rest: ConcatTail,
     mut idx: usize,
     mut outer: ConcatStack,
 ) -> Result<Forced, Signal> {
@@ -2721,8 +2886,17 @@ fn step_concat(
         // (nothing left past `idx`) push nothing: mapcat tails
         // always advance past their single input, so the hot path
         // keeps the stack empty and stays O(1) per step.
-        while let Some((icur, irest, iidx, iouter)) = unforced_concat_parts(&cur) {
-            if rest.get(idx).is_some() {
+        while let Some(parts) = unforced_concat_parts(&cur) {
+            let (icur, irest, iidx, iouter) = match parts {
+                ConcatParts::Item(item) => {
+                    return Ok(Forced::Chunk {
+                        items: Arc::from([item]),
+                        tail: concat_cont(Value::Nil, rest, idx, outer),
+                    });
+                }
+                ConcatParts::Inputs(cur, rest, idx, outer) => (cur, rest, idx, outer),
+            };
+            if idx < rest.len() {
                 outer = Some(Arc::new(ConcatFrame {
                     rest,
                     idx,
@@ -2738,41 +2912,29 @@ fn step_concat(
             StepUnit::Empty => {
                 // Advance past the spent `cur`, unwinding spent
                 // levels (a resumed level may itself be spent).
-                loop {
-                    if let Some(next) = rest.get(idx) {
-                        cur = next.clone();
-                        idx += 1;
-                        break;
-                    }
-                    match pop_concat_frame(&mut outer) {
-                        Some((orest, oidx)) => {
-                            rest = orest;
-                            idx = oidx;
-                        }
-                        None => return Ok(Forced::Empty),
-                    }
+                if !resume_concat(&mut rest, &mut idx, &mut outer) {
+                    return Ok(Forced::Empty);
                 }
+                let next = rest.values[idx].clone();
+                if rest.is_singleton(idx) {
+                    return Ok(Forced::Chunk {
+                        items: Arc::from([next]),
+                        tail: concat_cont(Value::Nil, rest, idx + 1, outer),
+                    });
+                }
+                cur = next;
+                idx += 1;
             }
             StepUnit::One { head, tail } => {
                 return Ok(Forced::Chunk {
                     items: Arc::from(vec![head]),
-                    tail: PendingSeq::pending(Thunk::Concat {
-                        cur: tail,
-                        rest,
-                        idx,
-                        outer,
-                    }),
+                    tail: concat_cont(tail, rest, idx, outer),
                 });
             }
             StepUnit::Chunk { items, tail } => {
                 return Ok(Forced::Chunk {
                     items,
-                    tail: PendingSeq::pending(Thunk::Concat {
-                        cur: tail,
-                        rest,
-                        idx,
-                        outer,
-                    }),
+                    tail: concat_cont(tail, rest, idx, outer),
                 });
             }
         }
@@ -2855,7 +3017,7 @@ fn splice_first(eval: &mut Evaluator, s: &Value, cont: Value) -> Result<Forced, 
             items: Arc::from(vec![head]),
             tail: PendingSeq::pending(Thunk::Concat {
                 cur: tail,
-                rest: Arc::new(vec![cont]),
+                rest: ConcatTail::one(cont),
                 idx: 0,
                 outer: None,
             }),
@@ -2864,7 +3026,7 @@ fn splice_first(eval: &mut Evaluator, s: &Value, cont: Value) -> Result<Forced, 
             items,
             tail: PendingSeq::pending(Thunk::Concat {
                 cur: tail,
-                rest: Arc::new(vec![cont]),
+                rest: ConcatTail::one(cont),
                 idx: 0,
                 outer: None,
             }),
@@ -3145,7 +3307,7 @@ fn step_partition_collect(
             n: n.clone(),
             input: PendingSeq::pending(Thunk::Concat {
                 cur: lazy_window(eval, window)?,
-                rest: Arc::new(vec![pad]),
+                rest: ConcatTail::one(pad),
                 idx: 0,
                 outer: None,
             }),
@@ -3837,6 +3999,7 @@ enum PendingChunk {
 fn chunked_pending_decision(p: &PendingSeq) -> PendingChunk {
     let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
     match &*state {
+        SeqState::PendingConcat { .. } | SeqState::PendingConcatItem(_) => PendingChunk::Force,
         SeqState::Pending(t) => match &**t {
             Thunk::ChunkHead { chunk, tail } => PendingChunk::Parts(chunk.clone(), tail.clone()),
             Thunk::Chain { head, tail } => {
@@ -3934,9 +4097,9 @@ fn seq_value_extension(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal>
     if let Some(it) = crate::collmisc::as_iteration(v) {
         return crate::collmisc::seq_iteration(eval, it);
     }
-    // #205: `ArrayList` seqs snapshot the slots (empties answer
-    // nil — `realized_value` holds that shape).
-    if let Some(items) = crate::emucoll::list_snapshot(v) {
+    // #205: `ArrayList` seqs snapshot the slots, and #277 queues their
+    // window (empties answer nil — `realized_value` holds that shape).
+    if let Some(items) = extension_snapshot(v) {
         return Ok(realized_value(
             items,
             false,
@@ -4111,9 +4274,18 @@ fn seq_maplike(eval: &mut Evaluator, v: &Value) -> Result<Value, Signal> {
     }
 }
 
+/// The items of an extension collection that seqs by snapshot: an
+/// `ArrayList`'s slots or a queue's window (#277).
+fn extension_snapshot(v: &Value) -> Option<Vec<Value>> {
+    crate::emucoll::list_snapshot(v).or_else(|| crate::coll::as_queue(v).map(QueueValue::items))
+}
+
 /// The first item of an extension collection (the subvector
-/// head, else the `ArrayList` snapshot head).
+/// head, a queue's front, else the `ArrayList` snapshot head).
 fn first_direct_extension(v: &Value) -> Option<Value> {
+    if let Some(q) = crate::coll::as_queue(v) {
+        return Some(q.peek());
+    }
     if let Some(sp) = as_splitvec(v) {
         return Some(sp.nth(0).unwrap_or(Value::Nil));
     }
@@ -4618,8 +4790,8 @@ pub(crate) fn collect_packed(eval: &mut Evaluator, v: Value) -> Result<Vector, S
         tv.conj(item).expect("fresh transient accepts conj");
         Ok(true)
     };
-    if let Some(done) = walk_sole_map(eval, &v, &mut push) {
-        done?;
+    if let Some(parts) = sole_map_parts(&v) {
+        walk_owned_parts(eval, v, parts, &mut push)?;
         return Ok(tv.persistent().expect("fresh transient is valid at freeze"));
     }
     // Owned: the walk advances `cur` off the head (owned callers
@@ -4765,25 +4937,40 @@ fn collect_concat_chars(parts: &[ConcatPart<'_>], total: usize) -> Option<Vector
     Some(Vector::from_flat_chars(out))
 }
 
+fn concat_singleton_part(v: &Value) -> Option<ConcatPart<'_>> {
+    match v {
+        Value::Int(n) => Some(ConcatPart::RepeatInt(*n, 1)),
+        Value::Double(n) => Some(ConcatPart::RepeatDouble(*n, 1)),
+        Value::Char(c) => Some(ConcatPart::RepeatChar(*c, 1)),
+        _ => None,
+    }
+}
+
 fn collect_concat(p: &PendingSeq) -> Option<Vector> {
     let guard = p.state.lock().unwrap_or_else(|e| e.into_inner());
-    let SeqState::Pending(thunk) = &*guard else {
-        return None;
+    let (cur, tail, start) = match &*guard {
+        SeqState::PendingConcat { cur, rest } => (cur, rest, 0),
+        SeqState::Pending(thunk) => match thunk.as_ref() {
+            Thunk::Concat {
+                cur,
+                rest,
+                idx,
+                outer: None,
+            } => (cur, rest, *idx),
+            _ => return None,
+        },
+        _ => return None,
     };
-    let Thunk::Concat {
-        cur,
-        rest,
-        idx,
-        outer: None,
-    } = thunk.as_ref()
-    else {
-        return None;
-    };
-    let tail = rest.get(*idx..)?;
-    let mut parts = SmallVec::<[ConcatPart<'_>; 4]>::with_capacity(1 + tail.len());
+    let values = tail.values.get(start..)?;
+    let mut parts = SmallVec::<[ConcatPart<'_>; 4]>::with_capacity(1 + values.len());
     parts.push(concat_part(cur)?);
-    for v in tail {
-        parts.push(concat_part(v)?);
+    for (i, v) in values.iter().enumerate() {
+        let part = if tail.is_singleton(start + i) {
+            concat_singleton_part(v)?
+        } else {
+            concat_part(v)?
+        };
+        parts.push(part);
     }
     collect_concat_parts(&parts)
 }
@@ -4832,8 +5019,8 @@ pub(crate) fn collect_all(eval: &mut Evaluator, v: Value) -> Result<Vec<Value>, 
         out.push(item);
         Ok(true)
     };
-    if let Some(done) = walk_sole_map(eval, &v, &mut push) {
-        done?;
+    if let Some(parts) = sole_map_parts(&v) {
+        walk_owned_parts(eval, v, parts, &mut push)?;
         return Ok(out);
     }
     // Owned: the walk advances `cur` off the head (owned callers
@@ -5017,14 +5204,120 @@ fn map_or_struct_content(v: &Value) -> Option<&Map> {
     }
 }
 
-/// `Util.equiv`: sequential pairs walk pairwise (early exit);
+/// A vector-like value under `=` (a plain vector or a subvector,
+/// the JVM's `APersistentVector` kinds): a window `off..off + len`
+/// over a backing vector.
+#[derive(Clone, Copy)]
+struct VectorWindow<'a> {
+    vec: &'a Vector,
+    off: usize,
+    len: usize,
+}
+
+impl<'a> VectorWindow<'a> {
+    /// The vector-like behind `v` (`None` for anything else).
+    fn of(v: &'a Value) -> Option<Self> {
+        match v {
+            Value::Vector(x) => Some(Self {
+                vec: x,
+                off: 0,
+                len: x.len(),
+            }),
+            Value::Extension(_) => as_subvector(v).map(|sv| Self {
+                vec: sv.vec(),
+                off: sv.start(),
+                len: sv.end() - sv.start(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The window as a flat `i64` slice (packed integer storage).
+    fn int_slice(&self) -> Option<&[i64]> {
+        self.vec
+            .as_flat_ints()
+            .map(|all| &all[self.off..self.off + self.len])
+    }
+}
+
+/// Sum an unrealized two-input multiplication over packed long windows. A
+/// shared map must still memoize its elements for its other readers.
+pub(crate) fn sum_mapped_products(coll: &Value, init: Option<&Value>) -> Option<Value> {
+    let init = match init {
+        None => 0,
+        Some(Value::Int(n)) => *n,
+        _ => return None,
+    };
+    let Value::Extension(ext) = coll else {
+        return None;
+    };
+    if Arc::strong_count(ext) != 1 {
+        return None;
+    }
+    let cell = as_pending(coll)?;
+    let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+    let SeqState::Pending(thunk) = &*state else {
+        return None;
+    };
+    let Thunk::Map { f, inputs } = &**thunk else {
+        return None;
+    };
+    let [a, b] = inputs.as_slice() else {
+        return None;
+    };
+    if crate::ext::as_native(f)?.fast != crate::ext::FastArith::Mul {
+        return None;
+    }
+    let a = VectorWindow::of(a)?;
+    let b = VectorWindow::of(b)?;
+    crate::native_abi::checked_long_dot(init, a.int_slice()?, b.int_slice()?).map(Value::Int)
+}
+
+/// `APersistentVector.equiv`: two vector-likes compare by count
+/// first, then itemwise (the pairwise walk's step cells, buffer
+/// allocations and clones were most of a comparison's cost once a
+/// loop compares small vectors or subvectors — #277).
+fn equiv_vectors(
+    eval: &mut Evaluator,
+    a: VectorWindow<'_>,
+    b: VectorWindow<'_>,
+) -> Result<bool, Signal> {
+    if a.len != b.len {
+        return Ok(false);
+    }
+    if let (Some(xs), Some(ys)) = (a.int_slice(), b.int_slice()) {
+        return Ok(xs == ys);
+    }
+    for (x, y) in a
+        .vec
+        .iter_from(a.off)
+        .zip(b.vec.iter_from(b.off))
+        .take(a.len)
+    {
+        let same = match (&x, &y) {
+            (Value::Int(p), Value::Int(q)) => p == q,
+            _ => equiv_vals(eval, &x, &y)?,
+        };
+        if !same {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `Util.equiv`: vector-likes compare by count, then itemwise
+/// ([`equiv_vectors`]); the other sequential pairs walk pairwise
+/// (early exit);
 /// maps compare by size plus per-key recursion (missing keys fail
 /// even for nil values, like the JVM's sentinel lookup) — struct
 /// instances equiv as their content map, to plain maps and across
 /// bases (S12 oracles `sm-eq-map`, `sm-cross-basis`);
-/// unhashable-infinite members throw like `hasheq` does during
-/// the JVM's hash lookups; anything else falls back to `==`.
+/// unhashable-infinite members throw like `hasheq` does during the
+/// JVM's hash lookups; anything else falls back to `==`.
 pub(crate) fn equiv_vals(eval: &mut Evaluator, a: &Value, b: &Value) -> Result<bool, Signal> {
+    if let (Some(x), Some(y)) = (VectorWindow::of(a), VectorWindow::of(b)) {
+        return equiv_vectors(eval, x, y);
+    }
     if is_sequential(a) && is_sequential(b) {
         return equiv_seq(eval, a, b);
     }
@@ -5305,16 +5598,104 @@ pub(crate) fn take_thunk(n: Value, input: Value) -> Value {
     PendingSeq::pending_cons_run(Thunk::Take { n, input })
 }
 
-/// A `Thunk::Concat` tail value.
-pub(crate) fn concat_thunk(inputs: Vec<Value>) -> Value {
-    let mut inputs = inputs.into_iter();
-    let cur = inputs.next().unwrap_or(Value::Nil);
-    pending_value(Thunk::Concat {
-        cur,
-        rest: Arc::new(inputs.collect()),
-        idx: 0,
-        outer: None,
-    })
+/// A lazy concat that has yet to consume any of its inputs.
+pub(crate) fn concat_thunk(inputs: &[Value]) -> Value {
+    let trimmed: SmallVec<[Value; 3]>;
+    let inputs = if inputs.len() <= 3 && inputs.iter().any(empty_concat_input) {
+        trimmed = inputs
+            .iter()
+            .filter(|v| !empty_concat_input(v))
+            .cloned()
+            .collect();
+        trimmed.as_slice()
+    } else {
+        inputs
+    };
+    Value::Extension(Arc::new(PendingSeq {
+        state: Mutex::new(concat_state(inputs)),
+        meta: None,
+        kind: LazyKind::LazySeq,
+    }))
+}
+
+fn concat_state(inputs: &[Value]) -> SeqState {
+    let Some((head, tail)) = inputs.split_first() else {
+        return SeqState::PendingConcat {
+            cur: Value::Nil,
+            rest: concat_rest(&[]),
+        };
+    };
+    if inputs.len() <= u8::BITS as usize {
+        if let Some(item) = concat_item(head) {
+            return if tail.is_empty() {
+                SeqState::PendingConcatItem(item)
+            } else {
+                SeqState::PendingConcat {
+                    cur: Value::Nil,
+                    rest: concat_rest_with_item(Some(item), tail),
+                }
+            };
+        }
+    }
+    SeqState::PendingConcat {
+        cur: head.clone(),
+        rest: concat_rest(tail),
+    }
+}
+
+/// A singleton chunk whose count and only item are known without
+/// sequencing the input. Nested singleton cells need no separate
+/// storage when the concat is their only owner.
+fn concat_item(v: &Value) -> Option<Value> {
+    match v {
+        Value::Vector(vector) if vector.len() == 1 => vector.get(0),
+        Value::Extension(e) if Arc::strong_count(e) == 1 => {
+            let p = as_pending(v)?;
+            match &*p.state.lock().unwrap_or_else(|e| e.into_inner()) {
+                SeqState::PendingConcatItem(item) => Some(item.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn empty_concat_input(input: &Value) -> bool {
+    match input {
+        Value::Nil => true,
+        Value::Vector(vector) => vector.is_empty(),
+        Value::List(list) => list.is_empty(),
+        _ => false,
+    }
+}
+
+fn concat_rest(input: &[Value]) -> ConcatTail {
+    concat_rest_with_item(None, input)
+}
+
+fn concat_rest_with_item(first: Option<Value>, input: &[Value]) -> ConcatTail {
+    static EMPTY: std::sync::OnceLock<Arc<[Value]>> = std::sync::OnceLock::new();
+    let offset = usize::from(first.is_some());
+    let len = input.len() + offset;
+    let mut singletons = offset as u8;
+    let values = if len == 0 {
+        Arc::clone(EMPTY.get_or_init(|| Arc::from([])))
+    } else if len <= u8::BITS as usize {
+        first
+            .into_iter()
+            .chain(input.iter().enumerate().map(|(i, v)| {
+                if let Some(item) = concat_item(v) {
+                    singletons |= 1 << (i + offset);
+                    item
+                } else {
+                    v.clone()
+                }
+            }))
+            .collect()
+    } else {
+        Arc::from(input)
+    };
+    ConcatTail { values, singletons }
 }
 
 /// `int?` over our numbers (fixed-precision integers only).
@@ -6010,7 +6391,7 @@ mod tests {
         let chars = Value::Vector(Vector::from_flat_chars(vec!['é', 'x']));
         let repeat = Value::Extension(Arc::new(RepeatValue::new(Value::Char('ø'), Some(2))));
         let ints = Value::Vector(Vector::from_flat_ints(vec![1]));
-        let text = concat_thunk(vec![chars.clone(), Value::Nil, repeat]);
+        let text = concat_thunk(&[chars.clone(), Value::Nil, repeat]);
         assert_eq!(
             collect_direct(&text).unwrap().as_flat_chars(),
             Some(['é', 'x', 'ø', 'ø'].as_slice())
@@ -6021,8 +6402,28 @@ mod tests {
             vec![ints, chars.clone()],
             vec![doubles, chars],
         ] {
-            assert!(collect_direct(&concat_thunk(pieces)).is_none());
+            assert!(collect_direct(&concat_thunk(&pieces)).is_none());
         }
+    }
+
+    #[test]
+    fn concat_collection_resumes_at_the_saved_index() {
+        let pending = PendingSeq::pending(Thunk::Concat {
+            cur: Value::Vector(Vector::from_ints(vec![1])),
+            rest: super::concat_rest(&[
+                Value::Vector(Vector::from_ints(vec![0])),
+                Value::Vector(Vector::from_ints(vec![2, 3])),
+            ]),
+            idx: 1,
+            outer: None,
+        });
+        assert_eq!(
+            collect_direct(&pending).unwrap().as_flat_ints(),
+            Some(&[1, 2, 3][..]),
+        );
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let output = collect_all(&mut eval, pending).unwrap();
+        assert_eq!(output, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
     }
 
     #[test]
@@ -6038,6 +6439,143 @@ mod tests {
             Some(2),
         );
         assert!(super::collect_direct(&Value::Extension(Arc::new(r))).is_none());
+    }
+
+    #[test]
+    fn pending_concat_retains_its_lazy_state() {
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let input = Value::Vector(Vector::from_ints(vec![1, 2]));
+        let value = super::concat_thunk(&[input]);
+        let pending = as_pending(&value).unwrap();
+        assert!(!pending.is_realized());
+        assert_eq!(pending.print(), "(...)");
+
+        let rebuilt = pending.with_meta_fresh(Some(new_map()));
+        let rebuilt = as_pending(&rebuilt).unwrap();
+        assert!(rebuilt.meta().is_some());
+        assert!(!rebuilt.is_realized());
+        assert!(
+            super::chunked_pending_parts(&mut eval, rebuilt)
+                .unwrap()
+                .is_some()
+        );
+        assert!(rebuilt.is_realized());
+        assert!(!pending.is_realized());
+    }
+
+    #[test]
+    fn singleton_concat_preserves_the_chunk_and_its_item() {
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let item = super::concat_thunk(&[Value::Vector(Vector::from_ints(vec![1, 2]))]);
+        let input = Value::Vector(Vector::from_vec(vec![item.clone()]));
+        let value = super::concat_thunk(&[
+            Value::Vector(Vector::new_sync()),
+            input.clone(),
+            Value::List(List::from_vec(Vec::new())),
+        ]);
+        let pending = as_pending(&value).unwrap();
+        assert!(!pending.is_realized());
+        assert_eq!(pending.print(), "(...)");
+
+        let mut visited = Vec::new();
+        super::walk_sole_map(&mut eval, &value, &mut |_, item| {
+            visited.push(item);
+            Ok(false)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(visited, std::slice::from_ref(&item));
+        assert!(!pending.is_realized());
+
+        let rebuilt = pending.with_meta_fresh(Some(new_map()));
+        let rebuilt = as_pending(&rebuilt).unwrap();
+        assert!(rebuilt.meta().is_some());
+        let (chunk, tail) = super::chunked_pending_parts(&mut eval, rebuilt)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk.items_arc().as_ref(), std::slice::from_ref(&item));
+        assert!(tail.is_none());
+        assert!(rebuilt.is_realized());
+        assert!(!pending.is_realized());
+        assert!(!as_pending(&item).unwrap().is_realized());
+        assert_eq!(input, Value::Vector(Vector::from_vec(vec![item])));
+
+        let outer =
+            super::concat_thunk(&[value.clone(), Value::Vector(Vector::from_ints(vec![3]))]);
+        assert_eq!(collect_all(&mut eval, outer).unwrap().len(), 2);
+        assert!(!pending.is_realized());
+        let outer =
+            super::concat_thunk(&[value.clone(), Value::Vector(Vector::from_ints(vec![3]))]);
+        let mut visited = Vec::new();
+        super::walk_sole_map(&mut eval, &outer, &mut |_, item| {
+            visited.push(item);
+            Ok(false)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(visited.len(), 1);
+        assert!(as_pending(&visited[0]).is_some());
+        assert!(!pending.is_realized());
+
+        let outer =
+            super::concat_thunk(&[value.clone(), Value::Vector(Vector::from_ints(vec![3]))]);
+        assert!(!matches!(
+            super::first_value(&mut eval, &outer).unwrap(),
+            Value::Nil
+        ));
+        assert!(!pending.is_realized());
+        let outer = super::concat_thunk(std::slice::from_ref(&value));
+        super::walk_sole_map(&mut eval, &outer, &mut |_, _| Ok(false))
+            .unwrap()
+            .unwrap();
+        assert!(!pending.is_realized());
+
+        let nil = super::concat_thunk(&[
+            Value::Nil,
+            Value::Vector(Vector::from_vec(vec![Value::Nil])),
+        ]);
+        assert_eq!(collect_all(&mut eval, nil).unwrap(), vec![Value::Nil]);
+
+        let empty = super::concat_thunk(&[Value::Nil, Value::Vector(Vector::new_sync())]);
+        assert!(collect_all(&mut eval, empty).unwrap().is_empty());
+    }
+
+    #[test]
+    fn concat_adopts_unshared_singleton_chunks() {
+        let mut eval = crate::eval::Evaluator::new_bare("user");
+        let singleton = |n| super::concat_thunk(&[Value::Vector(Vector::from_ints(vec![n]))]);
+        let value = super::concat_thunk(&[
+            singleton(1),
+            Value::Vector(Vector::from_vec(vec![Value::Nil])),
+            singleton(3),
+        ]);
+        let pending = as_pending(&value).expect("concat cell");
+        assert!(
+            matches!(&*pending.state.lock().unwrap(), SeqState::PendingConcat { rest, .. } if rest.singletons == 0b111)
+        );
+        assert!(!pending.is_realized());
+        assert!(collect_direct(&value).is_none());
+        let mut visited = Vec::new();
+        super::walk_sole_map(&mut eval, &value, &mut |_, item| {
+            visited.push(item);
+            Ok(false)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(visited, vec![Value::Int(1)]);
+
+        assert_eq!(
+            super::first_value(&mut eval, &value).unwrap(),
+            Value::Int(1)
+        );
+        assert_eq!(
+            collect_all(&mut eval, value).unwrap(),
+            vec![Value::Int(1), Value::Nil, Value::Int(3)]
+        );
+
+        let cons = Value::Extension(Arc::new(ConsValue::new(Value::Int(4), Value::Nil)));
+        let forced = super::splice_first(&mut eval, &cons, singleton(5)).unwrap();
+        assert!(matches!(forced, Forced::Chunk { items, .. } if items.as_ref() == [Value::Int(4)]));
     }
 
     #[test]

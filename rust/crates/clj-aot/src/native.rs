@@ -2037,6 +2037,13 @@ impl<'ctx> Lowerer<'ctx> {
         Ok(())
     }
 
+    fn moved_local_slot(&self, f: &FnCtx<'ctx>, expr: &Expr) -> Option<PointerValue<'ctx>> {
+        match expr {
+            Expr::Local(i) if is_move(f, expr) => self.slot_of(f, *i),
+            _ => None,
+        }
+    }
+
     /// The raw slot holding local `idx` (a cell local yields the cell).
     fn local_slot(&self, f: &FnCtx<'ctx>, idx: usize) -> Option<PointerValue<'ctx>> {
         match f.env.get(idx).copied().flatten()? {
@@ -3072,10 +3079,72 @@ impl<'ctx> Lowerer<'ctx> {
         if self.try_lower_static(f, head, args, dest)?
             || self.try_lower_kw_invoke(f, head, args, dest)?
             || self.try_lower_stable_lookup(f, head, args, dest)?
+            || self.try_lower_deque_member(f, head, args, dest)?
         {
             return Ok(());
         }
         self.lower_value_invoke(f, head, args, dest)
+    }
+
+    /// A literal deque member over local operands, in a Lite program
+    /// where the core method dispatcher cannot be rebound.
+    fn try_lower_deque_member(
+        &mut self,
+        f: &mut FnCtx<'ctx>,
+        head: &Expr,
+        args: &[Expr],
+        dest: PointerValue<'ctx>,
+    ) -> Result<bool, Unsupported> {
+        if !self.lite {
+            return Ok(false);
+        }
+        let Some((member, operands)) = deque_member_call(head, args) else {
+            return Ok(false);
+        };
+        let refs: Option<Vec<_>> = operands
+            .iter()
+            .map(|(local, _)| self.slot_of(f, *local).filter(|p| *p != dest))
+            .collect();
+        let Some(refs) = refs else {
+            return Ok(false);
+        };
+        let target = refs[0];
+        let arg = refs.get(1).copied().unwrap_or(target);
+        let hit = self
+            .call(
+                "rt_n_try_deque",
+                Some(self.i8t),
+                &[
+                    dest.into(),
+                    self.i8t.const_int(u64::from(member), false).into(),
+                    target.into(),
+                    arg.into(),
+                ],
+            )
+            .expect("deque hit");
+        let ok = self
+            .builder
+            .build_int_compare(IntPredicate::NE, hit, self.i8t.const_zero(), "deque_hit")
+            .expect("cmp");
+        let fast = self.ctx.append_basic_block(f.func, "deque_fast");
+        let fallback = self.ctx.append_basic_block(f.func, "deque_fallback");
+        let done = self.ctx.append_basic_block(f.func, "deque_done");
+        self.builder
+            .build_conditional_branch(ok, fast, fallback)
+            .expect("br");
+        self.builder.position_at_end(fast);
+        let moved: Vec<_> = refs
+            .into_iter()
+            .zip(operands)
+            .filter_map(|(p, (_, expr))| is_move(f, expr).then_some(p))
+            .collect();
+        self.drop_and_nil_slots(f.func, &moved);
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(fallback);
+        self.lower_value_invoke(f, head, args, dest)?;
+        self.builder.build_unconditional_branch(done).expect("br");
+        self.builder.position_at_end(done);
+        Ok(true)
     }
 
     /// `dest = (head args…)` through [`emit_value_call`](Self::emit_value_call).
@@ -5040,7 +5109,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.builder.position_at_end(general);
         let range_args =
             self.materialize_range_srcs(f, rsrc1.as_ref(), rsrc2.as_ref(), coll, coll2);
-        self.emit_hof_general(f, hl, base, acc, coll, coll2, dest)?;
+        self.emit_hof_general(f, hl, base, &state, state2.as_ref(), dest)?;
         self.builder.build_unconditional_branch(done).expect("br");
         self.builder.position_at_end(done);
         self.free_slots(f, &[coll, acc]);
@@ -5379,11 +5448,20 @@ impl<'ctx> Lowerer<'ctx> {
         own_params: bool,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
-        for p in params {
-            f.env.push(Some(LocalRef::Slot(*p)));
+        let mut bindings = Vec::new();
+        for (pattern, &param) in arity.fixed.iter().zip(params) {
+            if let Pattern::Vec(v) = pattern {
+                // Only the fold plan admits a destructured accumulator.
+                debug_assert!(own_params);
+                bindings.extend(self.bind_vec(f, v, param)?);
+                self.drop_and_nil_slots(f.func, &[param]);
+            } else {
+                debug_assert!(matches!(pattern, Pattern::Symbol(_)));
+                f.env.push(Some(LocalRef::Slot(param)));
+            }
         }
         let owned: Vec<usize> = if own_params {
-            (base..base + params.len()).collect()
+            (base..f.env.len()).collect()
         } else {
             Vec::new()
         };
@@ -5392,21 +5470,20 @@ impl<'ctx> Lowerer<'ctx> {
         let lowered = self.lower_body(f, &arity.body, dest);
         f.moves = saved;
         f.env.truncate(base);
+        self.free_slots(f, &bindings);
         lowered
     }
 
     /// The general path of [`try_lower_collection_call`]: the `fn` as a closure,
     /// then the original core calls (`map` then `dorun` / `vec` / `into`,
     /// or `mapv` / `reduce`) over the evaluated collection.
-    #[allow(clippy::too_many_arguments)]
     fn emit_hof_general(
         &mut self,
         f: &mut FnCtx<'ctx>,
         hl: &HofLoop<'_>,
         base: usize,
-        acc: PointerValue<'ctx>,
-        coll: PointerValue<'ctx>,
-        coll2: Option<PointerValue<'ctx>>,
+        state: &LoopState<'ctx>,
+        state2: Option<&LoopState<'ctx>>,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
         let closure = self.slot(f);
@@ -5418,11 +5495,11 @@ impl<'ctx> Lowerer<'ctx> {
         let folds_items =
             hl.kind == HofKind::Reduce || (hl.kind == HofKind::Sum && hl.outer.is_none());
         if folds_items && hl.init.is_some() {
-            args.push(acc);
+            args.push(state.acc);
         }
-        args.push(coll);
-        if let Some(c2) = coll2 {
-            args.push(c2);
+        args.push(state.coll);
+        if let Some(second) = state2 {
+            args.push(second.coll);
         }
         let Some((outer, prefix)) = hl.outer else {
             self.core_call_owned(f, hl.inner, &args, dest);
@@ -5437,7 +5514,7 @@ impl<'ctx> Lowerer<'ctx> {
             outer_args.push(s);
         }
         if hl.kind == HofKind::Sum && hl.init.is_some() {
-            outer_args.push(acc);
+            outer_args.push(state.acc);
         }
         outer_args.push(seq);
         self.core_call_owned(f, outer, &outer_args, dest);
@@ -5795,16 +5872,24 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> Result<(), Unsupported> {
         let n = arg_ptrs.len();
         let (arr, elems) = self.slot_array(f, n);
-        for (&a, e) in arg_ptrs.iter().zip(&elems) {
-            let moved = match a {
-                Expr::Local(i) if is_move(f, a) => self.slot_of(f, *i),
-                _ => None,
-            };
-            if let Some(src) = moved {
+        let deferred = if matches!(
+            (op_name, n),
+            (Some("assoc" | "assoc-in"), 3) | (Some("assoc-in2"), 4)
+        ) {
+            self.moved_local_slot(f, arg_ptrs[0])
+        } else {
+            None
+        };
+        let skip = usize::from(deferred.is_some());
+        for (&a, e) in arg_ptrs.iter().zip(&elems).skip(skip) {
+            if let Some(src) = self.moved_local_slot(f, a) {
                 self.move_v(f.func, *e, src);
             } else {
                 self.lower(f, a, *e)?;
             }
+        }
+        if let Some(src) = deferred {
+            self.move_v(f.func, elems[0], src);
         }
         let lean_done = self.try_lean_own(f, op_name, n, dest, arr, &elems);
         let st = if op_name == Some("assoc") && n == 3 {
@@ -5893,7 +5978,17 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> Result<(), Unsupported> {
         let k = self.var_of(&call.var);
         let n = call.args.len();
-        let arr = self.lower_args(f, &call.args)?;
+        let arr = match assoc_local(call).and_then(|a| self.moved_local_slot(f, a)) {
+            Some(src) => {
+                let (arr, elems) = self.slot_array(f, n);
+                for (arg, &slot) in call.args.iter().zip(&elems).skip(1) {
+                    self.lower(f, arg, slot)?;
+                }
+                self.move_v(f.func, elems[0], src);
+                arr
+            }
+            None => self.lower_args(f, &call.args)?,
+        };
         let aref = self.slots_ref(f, arr, n);
         let st = self
             .call(
@@ -9249,7 +9344,11 @@ fn one_hof_loop<'a>(
     } else {
         1
     };
-    let lf = fns.of(fe, n_params)?;
+    let lf = if kind == HofKind::Reduce {
+        destructuring_reducer(fe).or_else(|| fns.of(fe, n_params))
+    } else {
+        fns.of(fe, n_params)
+    }?;
     if lf.eta.is_some() && lazy_colls(coll, coll2) {
         return None;
     }
@@ -9441,17 +9540,43 @@ fn runtime_traversal(hof: &str, fe: &Expr) -> bool {
 /// and never `recur`s to itself: its body can run inline per item (a
 /// named `fn` arrives as a `letfn`, so it never refers to itself here).
 fn inline_fn(e: &Expr, params: usize) -> Option<(&FunExpr, &Arity)> {
+    let (fun, arity) = fixed_inline_fn(e, params)?;
+    arity
+        .fixed
+        .iter()
+        .all(|p| matches!(p, Pattern::Symbol(_)))
+        .then_some((fun, arity))
+}
+
+fn fixed_inline_fn(e: &Expr, params: usize) -> Option<(&FunExpr, &Arity)> {
     let Expr::Fn(fun) = e else {
         return None;
     };
     let [arity] = &fun.arities[..] else {
         return None;
     };
-    (arity.rest.is_none()
-        && arity.fixed.len() == params
-        && arity.fixed.iter().all(|p| matches!(p, Pattern::Symbol(_)))
-        && !self_recurs(&arity.body))
-    .then_some((fun, arity))
+    (arity.rest.is_none() && arity.fixed.len() == params && !self_recurs(&arity.body))
+        .then_some((fun, arity))
+}
+
+/// A fold that destructures its accumulator into a fixed vector of locals.
+fn destructuring_reducer(e: &Expr) -> Option<LoopFn<'_>> {
+    let (fun, arity) = fixed_inline_fn(e, 2)?;
+    let [Pattern::Vec(v), Pattern::Symbol(_)] = arity.fixed.as_slice() else {
+        return None;
+    };
+    if v.rest.is_some()
+        || v.as_sym.is_some()
+        || v.fixed.is_empty()
+        || !v.fixed.iter().all(|p| matches!(p, Pattern::Symbol(_)))
+    {
+        return None;
+    }
+    Some(LoopFn {
+        fun,
+        arity,
+        eta: None,
+    })
 }
 
 /// Whether every use of local `i` in `body` is a read-only call operand
@@ -9929,11 +10054,30 @@ fn walk_children_moves(
     later: &mut BTreeSet<usize>,
     out: &mut Vec<(usize, usize)>,
 ) {
+    if let Expr::DirectNative(call) = e
+        && let Some(coll) = assoc_local(call)
+    {
+        // The RHS can still read the collection before the update takes it.
+        walk_moves(coll, slots, min_slot, later, out);
+        for arg in call.args[1..].iter().rev() {
+            walk_moves(arg, slots, min_slot, later, out);
+        }
+        return;
+    }
     let mut kids = Vec::new();
     for_each_child(e, &mut |c| kids.push(c));
     for c in kids.into_iter().rev() {
         walk_moves(c, slots, min_slot, later, out);
     }
+}
+
+fn assoc_local(call: &clj_eval::expr::DirectCall) -> Option<&Expr> {
+    let [coll @ Expr::Local(_), _, _] = call.args.as_slice() else {
+        return None;
+    };
+    (call.var.sym.namespace() == Some("clojure.core")
+        && matches!(call.var.sym.name(), "assoc" | "assoc-in"))
+    .then_some(coll)
 }
 
 fn walk_case_moves(
@@ -10474,13 +10618,13 @@ fn mapped_str_join(call: &clj_eval::expr::DirectCall) -> Option<(&str, &Expr)> {
         .then_some((sep.as_ref(), input))
 }
 
-/// Match a vector update and indexed read of the same locals. The read
-/// must be the collection's last use so the update can take its slot.
+/// Match a vector update and indexed read of the same locals. The update
+/// can take the slot when the collection is dead after the call.
 fn assoc_nth_step_args(
     call: &clj_eval::expr::DirectCall,
     f: &FnCtx<'_>,
 ) -> Option<(usize, usize, i64)> {
-    let [Expr::Local(coll), Expr::Local(idx), op] = call.args.as_slice() else {
+    let [owner @ Expr::Local(coll), Expr::Local(idx), op] = call.args.as_slice() else {
         return None;
     };
     let (name, [item]) = core_call(op)? else {
@@ -10494,7 +10638,8 @@ fn assoc_nth_step_args(
     let ("nth", [source @ Expr::Local(c), Expr::Local(i)]) = core_call(item)? else {
         return None;
     };
-    (*coll == *c && *idx == *i && is_move(f, source)).then_some((*coll, *idx, step))
+    (*coll == *c && *idx == *i && (is_move(f, owner) || is_move(f, source)))
+        .then_some((*coll, *idx, step))
 }
 
 fn scaled_long_args(call: &clj_eval::expr::DirectCall) -> Option<[&Expr; 3]> {
@@ -10687,6 +10832,31 @@ fn mentions_rebinding(e: &Expr) -> bool {
         for_each_child(e, &mut |c| found = found || mentions_rebinding(c));
     }
     found
+}
+
+fn deque_member_call<'a>(head: &Expr, args: &'a [Expr]) -> Option<(u8, Vec<(usize, &'a Expr)>)> {
+    let Expr::Global(var) = head else {
+        return None;
+    };
+    if var.sym.namespace() != Some("clojure.core") || var.sym.name() != "__meth*" {
+        return None;
+    }
+    let [
+        Expr::Quote(Value::Str(name)) | Expr::Literal(Value::Str(name)),
+        operands @ ..,
+    ] = args
+    else {
+        return None;
+    };
+    let member = native_abi::deque_member_id(name, operands.len().checked_sub(1)?)?;
+    let locals = operands
+        .iter()
+        .map(|expr| match expr {
+            Expr::Local(index) => Some((*index, expr)),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    Some((member, locals))
 }
 
 /// The `ns` constant descriptor (see `clj_rt::native::run_ns`).
@@ -11033,6 +11203,15 @@ fn expr_lite_ok(e: &Expr, scope: &LiteScope<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deque_shape_leaves_computed_method_names_to_general_lowering() {
+        let head = Expr::Global(clj_value::Var {
+            id: 0,
+            sym: clj_value::Symbol::new(Some("clojure.core"), "__meth*"),
+        });
+        assert!(deque_member_call(&head, &[Expr::Local(0), Expr::Local(1)]).is_none());
+    }
 
     #[test]
     fn runtime_abi_params_follow_their_rust_types_271() {

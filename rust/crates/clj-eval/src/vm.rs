@@ -86,7 +86,8 @@ pub(crate) struct CompiledFun {
     /// The lexical index of the first param (locals below it are
     /// captured or the fn's own `letfn` names).
     pub(crate) base: usize,
-    arities: Vec<CompiledArity>,
+    arities: Box<[CompiledArity]>,
+    scalar_scope: Option<Box<ScalarScope>>,
 }
 
 impl std::fmt::Debug for CompiledFun {
@@ -107,6 +108,21 @@ pub(crate) struct CompiledArity {
     nregs: usize,
     bind: Option<Exec>,
     body: Exec,
+    scalar: Option<Box<ScalarArity>>,
+}
+
+/// Capture indexes shared by the function's scalar arities.
+struct ScalarScope {
+    rec: Box<[usize]>,
+    captures: Box<[usize]>,
+}
+
+/// A fixed arity compiles to scalar code once it runs enough calls
+/// or is used as a reducer over a counted range.
+struct ScalarArity {
+    arity: usize,
+    calls: AtomicU32,
+    program: OnceLock<Option<Box<crate::vm_scalar::ScalarFunction>>>,
 }
 
 /// A VM closure's run-time half: the code, the captured values, and
@@ -130,6 +146,15 @@ impl std::fmt::Debug for VmCode {
                 &self.rec.as_ref().and_then(|g| g.get()).map(|g| g.len()),
             )
             .finish()
+    }
+}
+
+impl VmCode {
+    fn recursive_bindings(&self) -> &[Value] {
+        self.rec
+            .as_ref()
+            .and_then(|g| g.get())
+            .map_or(&[][..], |g| &g[..])
     }
 }
 
@@ -301,6 +326,46 @@ pub(crate) fn vm_call2(
     ev.guarded_call(|ev| run_arity(ev, code, arity, &mut regs))
 }
 
+pub(crate) fn reduce_range(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &Value,
+    start: i64,
+    step: i64,
+    n: usize,
+) -> Option<Value> {
+    let (code, arity) = fixed_target(f, 2)?;
+    let plan = arity.scalar.as_ref()?;
+    let program = plan.program(eval, &code.fun, arity.fixed)?;
+    let mut locals = [Value::Nil, Value::Nil];
+    let frame = Frame {
+        regs: &mut locals,
+        up: &code.captured,
+        rec: code.recursive_bindings(),
+    };
+    crate::vm_scalar::run_reduce(eval, &frame, program, acc, start, step, n)
+}
+
+pub(crate) fn reduce_reversed_doubles(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &Value,
+    items: &[f64],
+) -> Option<Value> {
+    let (code, arity) = fixed_target(f, 2)?;
+    let program = arity
+        .scalar
+        .as_ref()?
+        .hot_program(eval, &code.fun, arity.fixed)?;
+    let mut locals = [Value::Nil, Value::Nil];
+    let frame = Frame {
+        regs: &mut locals,
+        up: &code.captured,
+        rec: code.recursive_bindings(),
+    };
+    crate::vm_scalar::run_reverse_fold(eval, &frame, program, acc, items)
+}
+
 impl<'c> Prepared<'c> {
     /// `callee` prepared for `argc` args: a VM closure without
     /// conveyed bindings with a fixed arity for the count, or a
@@ -418,19 +483,17 @@ fn run_arity(
     arity: &CompiledArity,
     regs: &mut SmallVec<[Value; 8]>,
 ) -> Result<Value, Signal> {
+    if let Some(result) = scalar_call(eval, code, arity, regs) {
+        return Ok(result);
+    }
     // A push loop, not `resize` (an out-of-line call per run).
     while regs.len() < arity.nregs {
         regs.push(Value::Nil);
     }
-    let rec = code
-        .rec
-        .as_ref()
-        .and_then(|g| g.get())
-        .map_or(&[][..], |g| &g[..]);
     let mut frame = Frame {
         regs,
         up: &code.captured,
-        rec,
+        rec: code.recursive_bindings(),
     };
     let params = arity.fixed + usize::from(arity.variadic);
     loop {
@@ -632,8 +695,10 @@ fn closure_value(
 }
 
 /// The capture list's current values.
-fn capture(frame: &Frame<'_>, locs: &[Loc]) -> Arc<[Value]> {
-    locs.iter().map(|l| frame.get(*l).clone()).collect()
+fn capture(frame: &Frame<'_>, locs: &[(usize, Loc)]) -> Arc<[Value]> {
+    locs.iter()
+        .map(|(_, loc)| frame.get(*loc).clone())
+        .collect()
 }
 
 /// One fn's compile scope. Lexical indexes below `base` are outer
@@ -663,7 +728,7 @@ impl Scope {
             captures: Vec::new(),
             rec,
             recur: Arc::from([]),
-            last: crate::vm_live::LastUses::new(),
+            last: crate::vm_live::LastUses::default(),
         }
     }
 }
@@ -711,18 +776,15 @@ impl LazyScalar {
     /// An outer local's place as of the body (`None`: one the body
     /// never read, which the compile cannot ask for).
     fn loc(&self, idx: usize) -> Option<Loc> {
-        match idx.checked_sub(self.scope_base) {
-            Some(i) => self.regs.get(i).map(|r| Loc::Reg(*r)),
-            None => (self.rec.iter().position(|i| *i == idx).map(Loc::Rec))
-                .or_else(|| self.captures.iter().position(|i| *i == idx).map(Loc::Up)),
-        }
+        scalar_loc(self.scope_base, &self.regs, &self.rec, &self.captures, idx)
     }
 
     /// The program, compiled on the first ask.
     fn program(&self, ev: &Evaluator, targets: &[usize]) -> Option<&crate::vm_scalar::ScalarLoop> {
         let compile = || {
             let mut host = LateHost {
-                plan: self,
+                scope_base: self.scope_base,
+                locate: |idx| self.loc(idx),
                 roots: &ev.registry,
                 lost: false,
             };
@@ -741,25 +803,154 @@ impl LazyScalar {
     }
 }
 
+fn scalar_loc(
+    base: usize,
+    regs: &[usize],
+    rec: &[usize],
+    captures: &[usize],
+    idx: usize,
+) -> Option<Loc> {
+    match idx.checked_sub(base) {
+        Some(i) => regs.get(i).map(|r| Loc::Reg(*r)),
+        None => rec
+            .iter()
+            .position(|i| *i == idx)
+            .map(Loc::Rec)
+            .or_else(|| captures.iter().position(|i| *i == idx).map(Loc::Up)),
+    }
+}
+
+fn scalar_call(
+    eval: &mut Evaluator,
+    code: &VmCode,
+    arity: &CompiledArity,
+    regs: &mut [Value],
+) -> Option<Value> {
+    let program = arity
+        .scalar
+        .as_ref()?
+        .hot_program(eval, &code.fun, arity.fixed)?;
+    let frame = Frame {
+        regs,
+        up: &code.captured,
+        rec: code.recursive_bindings(),
+    };
+    crate::vm_scalar::run_scalar_call(eval, &frame, program)
+}
+
+impl ScalarArity {
+    fn hot_program(
+        &self,
+        eval: &Evaluator,
+        fun: &CompiledFun,
+        argc: usize,
+    ) -> Option<&crate::vm_scalar::ScalarFunction> {
+        match self.program.get() {
+            Some(program) => program.as_deref(),
+            None if self.calls.fetch_add(1, Ordering::Relaxed) >= HOT => {
+                self.program(eval, fun, argc)
+            }
+            None => None,
+        }
+    }
+
+    fn program(
+        &self,
+        ev: &Evaluator,
+        fun: &CompiledFun,
+        argc: usize,
+    ) -> Option<&crate::vm_scalar::ScalarFunction> {
+        self.program
+            .get_or_init(|| {
+                compile_scalar_body(ev, fun, argc, &fun.source[self.arity].body).map(Box::new)
+            })
+            .as_deref()
+    }
+}
+
+fn compile_scalar_body(
+    ev: &Evaluator,
+    fun: &CompiledFun,
+    argc: usize,
+    body: &[Expr],
+) -> Option<crate::vm_scalar::ScalarFunction> {
+    let scope = fun.scalar_scope.as_ref()?;
+    let regs: SmallVec<[usize; 8]> = (0..argc).collect();
+    let mut host = LateHost {
+        scope_base: fun.base,
+        locate: |idx| scalar_loc(fun.base, &regs, &scope.rec, &scope.captures, idx),
+        roots: &ev.registry,
+        lost: false,
+    };
+    crate::vm_scalar::compile_scalar_function(&mut host, body, fun.base + argc, &regs)
+        .filter(|_| !host.lost)
+}
+
+/// A vector key whose elements can all be computed without running
+/// user code or modifying state. Each read still validates its sites.
+pub(crate) struct SortProjection<'a> {
+    code: &'a VmCode,
+    fields: Vec<crate::vm_scalar::ScalarFunction>,
+}
+
+impl<'a> SortProjection<'a> {
+    pub(crate) fn compile(ev: &Evaluator, key: &'a Value) -> Option<Self> {
+        let (code, arity) = fixed_target(key, 1)?;
+        let plan = arity.scalar.as_ref()?;
+        let [Expr::VecLit(fields, None)] = code.fun.source[plan.arity].body.as_slice() else {
+            return None;
+        };
+        if !(2..=4).contains(&fields.len()) {
+            return None;
+        }
+        let fields = fields
+            .iter()
+            .map(|field| compile_scalar_body(ev, &code.fun, 1, std::slice::from_ref(field)))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self { code, fields })
+    }
+
+    pub(crate) fn key(&self, ev: &mut Evaluator, item: &Value) -> Option<[i64; 4]> {
+        let Value::Int(item) = item else {
+            return None;
+        };
+        let mut regs = [Value::Int(*item)];
+        let frame = Frame {
+            regs: &mut regs,
+            up: &self.code.captured,
+            rec: self.code.recursive_bindings(),
+        };
+        let mut result = [0; 4];
+        for (out, field) in result.iter_mut().zip(&self.fields) {
+            let Value::Int(value) = crate::vm_scalar::run_scalar_value(ev, &frame, field)? else {
+                return None;
+            };
+            *out = value;
+        }
+        Some(result)
+    }
+}
+
 /// The scalar compile's view of a hot loop's scope (its snapshot
 /// in [`LazyScalar`]) and of the var roots now.
-struct LateHost<'a> {
-    plan: &'a LazyScalar,
+struct LateHost<'a, F> {
+    scope_base: usize,
+    locate: F,
     roots: &'a SharedRegistry,
     /// Whether the compile asked for a local the snapshot lacks (its
     /// program is dropped).
     lost: bool,
 }
 
-impl crate::vm_scalar::Host for LateHost<'_> {
+impl<F: Fn(usize) -> Option<Loc>> crate::vm_scalar::Host for LateHost<'_, F> {
     fn resolve_local(&mut self, idx: usize) -> Loc {
-        let loc = self.plan.loc(idx);
+        let loc = (self.locate)(idx);
         self.lost |= loc.is_none();
         loc.unwrap_or(Loc::Reg(usize::MAX))
     }
 
     fn reads(&self, expr: &Expr, g: usize) -> bool {
-        crate::vm_live::may_read(expr, self.plan.scope_base, g + 1, g)
+        crate::vm_live::may_read(expr, self.scope_base, g + 1, g)
     }
 
     fn site(&self, call: &DirectCall) -> crate::vm_ops::Site {
@@ -828,7 +1019,7 @@ impl Compiler {
     /// Whether `expr` (a local read) is its register's last use.
     fn is_last(&self, expr: &Expr) -> bool {
         let s = self.scopes.last().expect("a scope is always open");
-        s.last.contains(&(expr as *const Expr))
+        s.last.contains(expr)
     }
 
     fn resolve(&mut self, old: usize) -> Loc {
@@ -878,7 +1069,7 @@ impl Compiler {
             Expr::Let { bindings, body } => self.compile_let(bindings, body),
             Expr::Loop { bindings, body } => self.compile_loop(bindings, body),
             Expr::Recur(args) => self.compile_recur(args),
-            Expr::Fn(fun) => self.compile_fn(fun),
+            Expr::Fn(fun) => self.compile_fn(expr, fun),
             Expr::LetFn { fns, body } => self.compile_letfn(fns, body),
             Expr::LazySeqStar { body } => self.compile_lazy_seq(body),
             Expr::DelayStar { display, body } => self.compile_delay(display, body),
@@ -1169,7 +1360,10 @@ impl Compiler {
         let inline = inline_unpack(pat);
         let pat = pat.clone();
         Box::new(move |ev, f| {
-            let v = f.regs[raw].clone();
+            // A destructured parameter has no lexical name for its raw slot.
+            // Keeping it alive here shares every nested accumulator with the
+            // body and forces persistent updates to copy their storage.
+            let v = std::mem::replace(&mut f.regs[raw], Value::Nil);
             if inline
                 .as_ref()
                 .is_some_and(|u| unpack_inline(u, &v, &regs, f))
@@ -1557,21 +1751,32 @@ impl Compiler {
         fun: &FunExpr,
         base: usize,
         rec: Vec<usize>,
-    ) -> (Arc<CompiledFun>, Vec<Loc>) {
+    ) -> (Arc<CompiledFun>, Vec<(usize, Loc)>) {
         self.scopes.push(Scope::new(base, rec));
-        let arities = fun.arities.iter().map(|a| self.compile_arity(a)).collect();
+        let arities: Box<[_]> = fun
+            .arities
+            .iter()
+            .enumerate()
+            .map(|(i, a)| self.compile_arity(i, a))
+            .collect();
         let scope = self.scopes.pop().expect("the fn scope");
-        let captures = scope.captures.iter().map(|(_, loc)| *loc).collect();
+        let scalar_scope = arities.iter().any(|a| a.scalar.is_some()).then(|| {
+            Box::new(ScalarScope {
+                rec: scope.rec.into(),
+                captures: scope.captures.iter().map(|(index, _)| *index).collect(),
+            })
+        });
         let compiled = CompiledFun {
             display: Arc::from(fun.display.as_str()),
             source: Arc::clone(&fun.arities),
             base,
             arities,
+            scalar_scope,
         };
-        (Arc::new(compiled), captures)
+        (Arc::new(compiled), scope.captures)
     }
 
-    fn compile_arity(&mut self, arity: &Arity) -> CompiledArity {
+    fn compile_arity(&mut self, index: usize, arity: &Arity) -> CompiledArity {
         let pats: Vec<&Pattern> = arity.fixed.iter().chain(arity.rest.iter()).collect();
         let s = self.scope();
         s.locals.clear();
@@ -1601,20 +1806,44 @@ impl Compiler {
                 Ok(Value::Nil)
             })),
         };
+        let scalar = (bind.is_none() && arity.rest.is_none() && (1..=8).contains(&pats.len()))
+            .then(|| {
+                Box::new(ScalarArity {
+                    arity: index,
+                    calls: AtomicU32::new(0),
+                    program: OnceLock::new(),
+                })
+            });
         CompiledArity {
             fixed: arity.fixed.len(),
             variadic: arity.rest.is_some(),
             nregs: self.scope().nregs,
             bind,
             body,
+            scalar,
         }
     }
 
-    fn compile_fn(&mut self, fun: &FunExpr) -> Exec {
+    fn compile_fn(&mut self, expr: &Expr, fun: &FunExpr) -> Exec {
         let base = self.visible();
         let (compiled, captures) = self.compile_fun(fun, base, Vec::new());
+        let scope = self.scope();
+        let captures: Vec<_> = captures
+            .into_iter()
+            .map(|(lexical, loc)| {
+                let moved = matches!(loc, Loc::Reg(_))
+                    && scope.last.can_move_capture(expr, lexical - scope.base);
+                (loc, moved)
+            })
+            .collect();
         Box::new(move |ev, f| {
-            let captured = capture(f, &captures);
+            let captured = captures
+                .iter()
+                .map(|(loc, moved)| match loc {
+                    Loc::Reg(reg) if *moved => std::mem::replace(&mut f.regs[*reg], Value::Nil),
+                    _ => f.get(*loc).clone(),
+                })
+                .collect();
             Ok(make_closure(ev, &compiled, captured, None))
         })
     }
@@ -1627,7 +1856,7 @@ impl Compiler {
         let visible = self.visible();
         let names: Vec<usize> = fns.iter().map(|_| self.push_local()).collect();
         let rec: Vec<usize> = (visible..visible + fns.len()).collect();
-        let funs: Vec<(Arc<CompiledFun>, Vec<Loc>)> = fns
+        let funs: Vec<_> = fns
             .iter()
             .map(|(_, fun)| self.compile_fun(fun, visible + fns.len(), rec.clone()))
             .collect();
@@ -1670,7 +1899,11 @@ impl Compiler {
         })
     }
 
-    fn compile_thunk(&mut self, display: &str, body: &[Expr]) -> (Arc<CompiledFun>, Vec<Loc>) {
+    fn compile_thunk(
+        &mut self,
+        display: &str,
+        body: &[Expr],
+    ) -> (Arc<CompiledFun>, Vec<(usize, Loc)>) {
         let fun = FunExpr {
             display: display.to_owned(),
             arities: Arc::from([Arity {
@@ -1767,6 +2000,13 @@ impl Compiler {
                 return exec;
             }
         }
+        if let Some(exec) = self.try_deque_member(head, args, span) {
+            return exec;
+        }
+        self.compile_general_invoke(head, args, span)
+    }
+
+    fn compile_general_invoke(&mut self, head: &Expr, args: &[Expr], span: Span) -> Exec {
         let head = self.compile(head);
         let args: Vec<Operand> = args.iter().map(|a| self.operand(a, true)).collect();
         Box::new(move |ev, f| {
@@ -1778,6 +2018,32 @@ impl Compiler {
             eval_operands(ev, f, &args, &mut values)?;
             call_value(ev, &callee, &mut values, span)
         })
+    }
+
+    fn try_deque_member(&mut self, head: &Expr, args: &[Expr], span: Span) -> Option<Exec> {
+        let (var, member, receiver, arg) = deque_method_shape(head, args)?;
+        let receiver = self.in_place(receiver)?;
+        let arg = match arg {
+            None => None,
+            Some(arg) => Some(self.in_place(arg)?),
+        };
+        let site = next_site();
+        let var = var.clone();
+        let fallback = self.compile_general_invoke(head, args, span);
+        Some(Box::new(move |ev, frame| {
+            let Some(deque) = crate::emucoll::as_deque(receiver.get(frame)) else {
+                return fallback(ev, frame);
+            };
+            if !ev.group_valid(site, |ev| is_method_dispatch(ev, &var)) {
+                return fallback(ev, frame);
+            }
+            let operands = arg
+                .as_ref()
+                .map_or(&[][..], |a| std::slice::from_ref(a.get(frame)));
+            member
+                .call(deque, operands)
+                .map_err(|err| ev.with_native_span(span, |ev| ev.throw(err)))
+        }))
     }
 
     /// Fast-path literal keyword invocations (`(:kw target)` or `(:kw target fallback)`).
@@ -1852,10 +2118,112 @@ impl Compiler {
         if let Some(code) = self.try_assoc_conj(call, false) {
             return code;
         }
+        if let Some(code) = self.try_trim_vector_tail(call) {
+            return code;
+        }
+        if let Some(code) = self.try_reduce_reversed(call) {
+            return code;
+        }
+        if let Some(code) = self.try_nth_peek(call) {
+            return code;
+        }
         self.compile_direct_plain(call)
     }
 
+    /// Fuse the reads of `(nth coll (peek stack))` when both operands
+    /// are already available and both core vars still hold their natives.
+    fn try_nth_peek(&mut self, call: &DirectCall) -> Option<Exec> {
+        let ([coll, index], Some("nth")) = (call.args.as_slice(), crate::vm_ops::core_name(call))
+        else {
+            return None;
+        };
+        let peek = core_call(index, "peek", 1)?;
+        let coll = self.in_place(coll)?;
+        let stack = self.in_place(&peek.args[0])?;
+        let site = next_site();
+        let sites = [call, peek].map(|c| crate::vm_ops::Site::new(site_of(c)));
+        let fallback = self.compile_direct_plain(call);
+        Some(Box::new(move |ev, frame| {
+            use crate::vm_ops::{Nth, Op1, Op2, Peek};
+            if ev.group_valid(site, |ev| sites.iter().all(|site| site.valid(ev))) {
+                if let Some(value) =
+                    Peek::apply(stack.get(frame)).and_then(|idx| Nth::apply(coll.get(frame), &idx))
+                {
+                    return Ok(value);
+                }
+            }
+            fallback(ev, frame)
+        }))
+    }
+
+    fn try_trim_vector_tail(&mut self, call: &DirectCall) -> Option<Exec> {
+        let (predicate, input, calls) = trim_vector_tail_shape(call)?;
+        let sites = calls.map(|call| crate::vm_ops::Site::new(site_of(call)));
+        let outer_span = calls[1].span;
+        let fallback = self.compile_direct_plain(call);
+        let predicate = self.operand(predicate, false);
+        let input = self.operand(input, false);
+        Some(Box::new(move |ev, frame| {
+            if !sites.iter().all(|site| site.valid(ev)) {
+                return fallback(ev, frame);
+            }
+            let Value::Vector(vector) = input.read(frame, None) else {
+                return fallback(ev, frame);
+            };
+            let vector = vector.clone();
+            let predicate = predicate.eval(ev, frame)?;
+            ev.with_native_span(outer_span, |ev| {
+                crate::lazy::trim_vector_tail(ev, &predicate, &vector).map(Value::Vector)
+            })
+        }))
+    }
+
+    fn try_reduce_reversed(&mut self, call: &DirectCall) -> Option<Exec> {
+        let [f, init, reverse] = call.args.as_slice() else {
+            return None;
+        };
+        if crate::vm_ops::core_name(call) != Some("reduce") {
+            return None;
+        }
+        let reverse = core_call(reverse, "reverse", 1)?;
+        let input = &reverse.args[0];
+        // These forms can evaluate without changing either native's
+        // root between the operator reads.
+        if !matches!(f, Expr::Fn(_) | Expr::Local(_))
+            || !matches!(init, Expr::Local(_) | Expr::Literal(_))
+            || !matches!(input, Expr::Local(_) | Expr::Literal(_))
+        {
+            return None;
+        }
+        let sites = [call, reverse].map(|call| crate::vm_ops::Site::new(site_of(call)));
+        let span = call.span;
+        let fallback = self.compile_direct_plain(call);
+        let f = self.operand(f, false);
+        let init = self.operand(init, true);
+        let input = self.operand(input, false);
+        Some(Box::new(move |ev, frame| {
+            if !sites.iter().all(|site| site.valid(ev)) {
+                return fallback(ev, frame);
+            }
+            let Value::Vector(input) = input.read(frame, None) else {
+                return fallback(ev, frame);
+            };
+            let input = input.clone();
+            let f = f.eval(ev, frame)?;
+            let init = init.eval(ev, frame)?;
+            ev.with_native_span(span, |ev| {
+                crate::seqs::reduce_reversed_vector(ev, &f, init, &input).map_err(|e| ev.throw(e))
+            })
+        }))
+    }
+
     fn compile_direct_plain(&mut self, call: &DirectCall) -> Exec {
+        if let Some(code) = self.try_get_in_literal(call) {
+            return code;
+        }
+        if let Some(code) = self.try_assoc_in_literal(call) {
+            return code;
+        }
         if let Some(ctor) = crate::vm_ops::value_ctor(call) {
             let ops = self.in_place_operands(call);
             return ctor.code(site_of(call), ops);
@@ -1867,6 +2235,63 @@ impl Compiler {
         }
         let ops: Vec<Operand> = call.args.iter().map(|a| self.operand(a, true)).collect();
         direct_general(site, ops)
+    }
+
+    /// A core `get-in` over a short vector-literal path (#277, see
+    /// [`crate::vm_ops::get_in_literal`]).
+    fn try_get_in_literal(&mut self, call: &DirectCall) -> Option<Exec> {
+        if crate::vm_ops::core_name(call)? != "get-in" {
+            return None;
+        }
+        let (coll, path, nf) = match call.args.as_slice() {
+            [coll, Expr::VecLit(path, None)] => (coll, path, None),
+            [coll, Expr::VecLit(path, None), nf] => (coll, path, Some(nf)),
+            _ => return None,
+        };
+        if path.is_empty() || path.len() > 4 {
+            return None;
+        }
+        if let (None, [row, col]) = (nf, path.as_slice()) {
+            if [coll, row, col]
+                .iter()
+                .all(|expr| matches!(expr, Expr::Literal(_) | Expr::Local(_)))
+                && !self.is_last(coll)
+            {
+                return Some(crate::vm_ops::get_in_pair(
+                    site_of(call),
+                    self.operand(coll, false),
+                    self.operand(row, false),
+                    self.operand(col, false),
+                ));
+            }
+        }
+        let coll = self.compile(coll);
+        let keys = self.compile_all(path);
+        let nf = nf.map(|e| self.compile(e));
+        Some(crate::vm_ops::get_in_literal(site_of(call), coll, keys, nf))
+    }
+
+    /// A core `assoc-in` over a short vector-literal path (#277, see
+    /// [`crate::vm_ops::assoc_in_literal`]).
+    fn try_assoc_in_literal(&mut self, call: &DirectCall) -> Option<Exec> {
+        if crate::vm_ops::core_name(call)? != "assoc-in" {
+            return None;
+        }
+        let [coll, Expr::VecLit(path, None), val] = call.args.as_slice() else {
+            return None;
+        };
+        if path.is_empty() || path.len() > 4 {
+            return None;
+        }
+        let coll = self.operand(coll, true);
+        let keys = self.compile_all(path);
+        let val = self.compile(val);
+        Some(crate::vm_ops::assoc_in_literal(
+            site_of(call),
+            coll,
+            keys,
+            val,
+        ))
     }
 
     fn compile_vec(&mut self, elems: &[Expr], meta: Option<Map>) -> Exec {
@@ -2920,6 +3345,57 @@ fn core_call<'e>(e: &'e Expr, name: &str, argc: usize) -> Option<&'e DirectCall>
     }
 }
 
+fn deque_method_shape<'a>(
+    head: &'a Expr,
+    args: &'a [Expr],
+) -> Option<(
+    &'a Var,
+    crate::emucoll::DequeMember,
+    &'a Expr,
+    Option<&'a Expr>,
+)> {
+    let Expr::Global(var) = head else {
+        return None;
+    };
+    if var.sym.namespace() != Some("clojure.core") || var.sym.name() != "__meth*" {
+        return None;
+    }
+    let [
+        Expr::Quote(Value::Str(name)) | Expr::Literal(Value::Str(name)),
+        receiver,
+        rest @ ..,
+    ] = args
+    else {
+        return None;
+    };
+    let member = crate::emucoll::DequeMember::from_name(name, rest.len())?;
+    Some((var, member, receiver, rest.first()))
+}
+
+fn is_method_dispatch(eval: &mut Evaluator, var: &Var) -> bool {
+    let root = eval.deref_var_cached(var.id, &var.sym);
+    crate::ext::as_native(&root).is_some_and(|native| {
+        matches!(native.func, crate::ext::NativeTarget::Ptr(f)
+            if std::ptr::fn_addr_eq(f, crate::types::native_meth as crate::ns::NativeFnPtr))
+    })
+}
+
+/// A suffix trim expressed as two reversals. The callable and input
+/// reads must leave the four native sites' evaluation order intact.
+fn trim_vector_tail_shape(call: &DirectCall) -> Option<(&Expr, &Expr, [&DirectCall; 4])> {
+    let ([arg], Some("vec")) = (call.args.as_slice(), crate::vm_ops::core_name(call)) else {
+        return None;
+    };
+    let outer = core_call(arg, "reverse", 1)?;
+    let drop = core_call(&outer.args[0], "drop-while", 2)?;
+    let inner = core_call(&drop.args[1], "reverse", 1)?;
+    let predicate = &drop.args[0];
+    let input = &inner.args[0];
+    (matches!(predicate, Expr::Local(_) | Expr::Literal(_) | Expr::Fn(_))
+        && matches!(input, Expr::Local(_) | Expr::Literal(_)))
+    .then_some((predicate, input, [call, outer, drop, inner]))
+}
+
 /// `(assoc! t k (conj (nth t k) x))`'s parts: the transient local,
 /// the key, the appended form, and the `conj` and `nth` calls.
 type AssocConj<'e> = (&'e Expr, &'e Expr, &'e Expr, &'e DirectCall, &'e DirectCall);
@@ -2969,6 +3445,52 @@ pub(crate) fn direct_slow_values(
 #[cfg(test)]
 mod tests {
     use clj_value::Value;
+
+    #[test]
+    fn deque_shape_leaves_computed_names_to_general_invocation() {
+        use super::{Expr, Var};
+
+        let head = Expr::Global(Var {
+            id: 0,
+            sym: clj_value::Symbol::new(Some("clojure.core"), "__meth*"),
+        });
+        assert!(super::deque_method_shape(&head, &[Expr::Local(0), Expr::Local(1)]).is_none());
+    }
+
+    #[test]
+    fn hot_scalar_calls_preserve_checked_inputs_and_redefinition() {
+        let mut eval = crate::boot();
+        let src = "
+            (defn score [xs i factor]
+              (let [x (nth xs i) y (nth xs (inc i)) z (* x factor)]
+                (if (< x y) (+ z (* y y) (inc i)) (- z y))))
+            (dotimes [_ 128] (score [1 2 6] 0 2))
+            score";
+        let forms = eval.eval_source(src).unwrap();
+        let (code, arity) = super::fixed_target(forms.last().unwrap(), 3).expect("fixed closure");
+        let mut args = [
+            Value::Vector(clj_value::Vector::from_ints(vec![1, 2, 6])),
+            Value::Int(0),
+            Value::Int(2),
+        ];
+        assert_eq!(
+            super::scalar_call(&mut eval, code, arity, &mut args),
+            Some(Value::Int(7))
+        );
+        args[1] = Value::Bool(false);
+        assert_eq!(super::scalar_call(&mut eval, code, arity, &mut args), None);
+        for src in [
+            "(= 7 (score (subvec [0 1 2 6] 1) 0 2))",
+            "(= 3 (with-redefs [nth (fn [_ _] 3)] (score [1 2 6] 0 2)))",
+            "(try (score [1 2 6] 7 2) (catch IndexOutOfBoundsException _ true))",
+        ] {
+            assert_eq!(
+                eval.eval_source(src).unwrap().last(),
+                Some(&Value::Bool(true)),
+                "{src}"
+            );
+        }
+    }
 
     #[test]
     fn compiled_closures_debug_their_display() {

@@ -85,6 +85,208 @@ fn vec_concat_preserves_order_and_mixed_numeric_types() {
         ),
         ("(vec (concat [1 2] [3.0] [4]))", "[1 2 3.0 4]"),
         ("(vec (concat [1] (repeat 1 :x)))", "[1 :x]"),
+        ("(vec (concat [1 2] [3] [4]))", "[1 2 3 4]"),
+        ("(vec (concat [1.0 2.0] [3.0]))", "[1.0 2.0 3.0]"),
+        ("(vec (concat [\\a \\b] [\\c]))", "[\\a \\b \\c]"),
+        ("(vec (concat [\\a] [\\b]))", "[\\a \\b]"),
+        (
+            "(let [x (concat [1 2] [3] [nil] [4 5])]
+               [(first x) (vec (rest (rest x))) (vec x)])",
+            "[1 [3 nil 4 5] [1 2 3 nil 4 5]]",
+        ),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(run_last(&mut eval, source), expected, "{source}");
+    }
+}
+
+#[test]
+fn sort_by_can_cache_pure_integer_vector_keys() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [xs (vec (range 100 0 -1))
+                   values (vec (map (fn [i] [(rem i 7) (quot i 11)]) (range 101)))
+                   keyfn (fn [i] [(nth (nth values i) 0) (nth (nth values i) 1)])
+                   calls (atom 0)
+                   effectful (fn [i] [(do (swap! calls inc) (rem i 7)) (quot i 11)])
+                   indirect (fn [i] (swap! calls inc) (keyfn i))
+                   fast (vec (sort-by keyfn xs))
+                   boxed (vec (sort-by effectful xs))
+                   doubles (vec (sort-by (fn [i] [(double (rem i 7)) (quot i 11)]) xs))
+                   mixed (assoc xs 40 60.0)
+                   desc (fn [a b] (compare b a))
+                   redefined (with-redefs [nth (fn [_ _] 0)] (vec (sort-by keyfn xs)))]
+               [(= fast boxed) (> @calls 100)
+                (= fast (vec (sort-by indirect xs)))
+                (= redefined xs) (not= fast redefined)
+                (= fast doubles)
+                (= (mapv long (sort-by (fn [i] [(rem i 7) (quot i 11)]) mixed)) boxed)
+                (= (vec (sort-by (fn [i] [i]) xs)) (vec (range 1 101)))
+                (= (vec (sort-by keyfn desc xs))
+                   (vec (sort-by effectful desc xs)))])",
+        ),
+        "[true true true true true true true true true]",
+    );
+}
+
+#[test]
+fn apply_extrema_stream_realized_numeric_inputs() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [seen (atom [])
+                   keyfn (fn [x] (swap! seen conj x) (rem x 2))]
+               [(apply max [2 5 -4])
+                (apply min [2 5 -4])
+                (apply max-key keyfn (range 5 0 -1))
+                @seen
+                (apply min-key identity (range 5 0 -1))
+                (with-redefs [>= (constantly false)] (apply max-key identity (range 4)))
+                (with-redefs [max vector] (apply max [1 2]))
+                (apply max [1 2.0])
+                (apply max-key identity '(2 4 1))
+                (apply min-key identity 9 (range 1 3))
+                (apply (constantly :vector) [1 2])
+                (apply (constantly :range) identity (range 2))])",
+        ),
+        "[5 -4 1 [5 4 3 2 1] 1 0 [1 2] 2.0 4 1 :vector :range]",
+    );
+}
+
+#[test]
+fn two_key_assoc_preserves_persistent_rows() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [m [[1.0 2.0] [3.0 4.0]]
+                   change (fn [x] (assoc-in x [0 1] (inc (get-in x [0 1]))))]
+               [(change [[1.0 2.0]]) (change m) m
+                (assoc-in [[1]] [0 1] 2)
+                (assoc-in [[1 2]] [0 4294967297] 3)
+                (with-redefs [assoc-in (fn [x _ _] x)] (change m))])",
+        ),
+        "[[[1.0 3.0]] [[1.0 3.0] [3.0 4.0]] [[1.0 2.0] [3.0 4.0]] [[1 2]] [[1 3]] [[1.0 2.0] [3.0 4.0]]]",
+    );
+}
+
+#[test]
+fn suffix_trim_keeps_reverse_predicate_order_and_native_fallbacks() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(defn trim-tail [pred xs] (vec (reverse (drop-while pred (reverse xs)))))
+             (let [seen (atom []) xs (with-meta [1 2 0 0] {:source true})
+                   pred (fn [item] (swap! seen conj item) (zero? item))
+                   trimmed (trim-tail pred xs)]
+               [trimmed @seen (meta trimmed)
+                (trim-tail zero? '(1 2 0))
+                (trim-tail 0 [])
+                (with-redefs [drop-while (fn [_ xs] xs)] (trim-tail zero? xs))])",
+        ),
+        "[[1 2] [0 0 2] nil [1 2] [] [1 2 0 0]]",
+    );
+    assert!(uncaught(&mut eval, "(trim-tail 0 [1])").starts_with("java.lang.ClassCastException"));
+}
+
+#[test]
+fn reversed_vector_fold_keeps_order_and_guarded_fallbacks() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(defn poly [xs factor init]
+               (reduce (fn [s c] (+ (* s factor) c)) init (reverse xs)))
+             (let [xs [2.0 3.0 4.0] seen (atom [])
+                   mark (fn [s c] (swap! seen conj c) (if (= c 3.0) (reduced s) (+ s c)))]
+               (dotimes [_ 100] (poly xs 2.0 0.0))
+               [(poly xs 2.0 0.0) (poly xs 2 0.0) (poly xs 2 0)
+                (poly '() 2.0 0.0) (poly '(2.0 3.0 4.0) 2.0 0.0)
+                (poly [] 2.0 1.0) (poly [2 3 4] 2.0 0.0)
+                (reduce + 0.0 (reverse xs))
+                (reduce mark 0.0 (reverse xs)) @seen
+                (with-redefs [reverse identity] (poly xs 2.0 0.0))
+                (with-redefs [* (fn [s _] s)] (poly xs 2.0 0.0))])",
+        ),
+        "[24.0 24.0 24.0 0.0 24.0 1.0 24.0 9.0 4.0 [4.0 3.0] 18.0 9.0]",
+    );
+}
+
+#[test]
+fn scalar_range_reduction_preserves_order_and_fallbacks() {
+    let mut eval = boot();
+    let cases = [
+        (
+            "(let [m (vec (repeat 12 [1.5 2.0]))
+                    f (fn [s i] (+ s (* (get-in m [i 0]) (get-in m [i 1]))))]
+                [(reduce f 0.0 (range 12))
+                 (reduce f 2.0 (range 11 0 -1))
+                 (with-redefs [get-in (constantly 0.5)] (reduce f 0.0 (range 12)))])",
+            "[36.0 35.0 3.0]",
+        ),
+        (
+            "(let [m (vec (repeat 10 [1 2]))
+                    f (fn [s i] (+ s (* (get-in m [i 0]) (get-in m [i 1]))))]
+                (reduce f 0.0 (range 10)))",
+            "20.0",
+        ),
+        (
+            "(let [xs (vec (repeat 12 2.0))
+                    ys (vec (repeat 12 3.0))
+                    ks (vec (repeat 12 1))]
+                [(reduce (fn [s i] (+ s (* (nth xs i) (nth ys i))))
+                         0.0 (range 12))
+                 (reduce (fn [s i] (let [k (nth ks i)] (+ s (* k (nth xs k)))))
+                         0.0 (range 12))])",
+            "[72.0 24.0]",
+        ),
+        (
+            "(let [a (double-array [2.0 3.0])
+                    f (fn [s i] (+ s (aget a (bit-and i 1))))]
+                (reduce f 0.0 (range 10)))",
+            "25.0",
+        ),
+        (
+            "(let [xs (vec (repeat 12 0.5))]
+                [(reduce (fn [s i] (+ s (* i 0.25))) 0.0 (range 3))
+                 (reduce (fn [s i] (+ s (* i 0.25))) 0.0 (range 12))
+                 (reduce (fn [s i] (+ s (* (count xs) (nth xs i))))
+                         0.0 (range 12))])",
+            "[0.75 16.5 72.0]",
+        ),
+        (
+            "(letfn [(helper [] :present)
+                     (fold [s i] (if helper (+ s i) s))]
+                (reduce fold 0 (range 12)))",
+            "66",
+        ),
+        (
+            "(let [s \"abcdefghijkl\"
+                    m (vec (repeat 12 \"a\"))
+                    xs (vec (repeat 12 1.0))]
+                [(try (reduce (fn [s0 i] (+ s0 (* (nth s i) (nth xs i))))
+                              0.0 (range 12)) (catch ClassCastException _ :char))
+                 (try (reduce (fn [s0 i] (+ s0 (* (get-in m [i 0]) (nth xs i))))
+                              0.0 (range 12)) (catch ClassCastException _ :char))])",
+            "[:char :char]",
+        ),
+        (
+            "(try (reduce (fn [a i] (+ a i)) Long/MAX_VALUE (range 12))
+                  (catch ArithmeticException _ :overflow))",
+            ":overflow",
+        ),
+        (
+            "(let [seen (atom [])]
+                (reduce (fn [a i] (swap! seen conj i)
+                          (if (= i 3) (reduced a) (+ a i)))
+                        0 (range 12))
+                @seen)",
+            "[0 1 2 3]",
+        ),
     ];
     for (source, expected) in cases {
         assert_eq!(run_last(&mut eval, source), expected, "{source}");
@@ -655,6 +857,49 @@ fn some_rows() {
     assert_eq!(
         run_last(&mut eval, "(some :a [{:a false} #{:b} #{:a}])"),
         ":a"
+    );
+}
+
+#[test]
+fn indexed_peek_uses_live_roots_and_preserves_errors() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"(let [v [10 20 30] f (fn [s] (nth v (peek s)))]
+                 [(f [0 1]) (f '(2 0))
+                  (with-redefs [peek (fn [_] 0)] (f [1]))
+                  (with-redefs [nth (fn [_ i] i)] (f [1]))
+                  (f [2]) (try (f [10]) (catch IndexOutOfBoundsException _ :miss))])"#
+        ),
+        "[20 30 10 1 30 :miss]"
+    );
+}
+
+#[test]
+fn map_walk_keeps_entry_types_and_seq_order() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"(let [calls (atom [])
+                     m (sorted-map 3 :c 1 false 2 :b)
+                     hit (some (fn [[k v :as e]] (swap! calls conj k) (when v e)) m)]
+                 [@calls (map-entry? hit) (key hit) (val hit)
+                  (identical? hit (find m 2)) (some identity {})])"#
+        ),
+        "[[1 2] true 2 :b false nil]"
+    );
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"(every? (fn [m] (let [keys (atom [])]
+                                (some (fn [e] (swap! keys conj (key e)) nil) m)
+                                (= @keys (mapv key (seq m)))))
+                       [{:c 1 :a 2 :b 3} (zipmap (range 20) (range 20))
+                        (sorted-map-by > 1 :a 2 :b)])"#
+        ),
+        "true"
     );
 }
 
@@ -1522,5 +1767,65 @@ fn mapv_filterv_packed_streaming_227() {
             "(reduce (fn [a x] (throw (ex-info \"bap\" {}))) 0 [1 2])"
         ),
         "clojure.lang.ExceptionInfo | bap"
+    );
+}
+
+#[test]
+fn reduce_long_products_uses_vector_windows_and_preserves_fallbacks() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"[(reduce + (map * (subvec [90 2 3 80] 1 3) [5 7 11]))
+                (reduce + 4 (map * [2 3] (subvec [0 5] 1)))
+                (reduce + (map * [] [3]))
+                (reduce + 0.5 (map * [2] [3]))
+                (reduce +' (map *' [9223372036854775807] [2]))
+                (let [xs (map * [2] [3])] [(reduce + xs) (realized? xs) (first xs)])
+                (reduce + (map (fn [a b] (+ a b)) [2] [3]))
+                (reduce + (map - [2] [3]))]"#,
+        ),
+        "[31 14 0 6.5 18446744073709551614N [6 true 6] 5 -1]"
+    );
+    assert!(
+        uncaught(&mut eval, "(reduce + (map * [9223372036854775807] [2]))")
+            .starts_with("java.lang.ArithmeticException")
+    );
+    assert!(
+        uncaught(&mut eval, "(reduce + 1 (map * [9223372036854775807] [1]))")
+            .starts_with("java.lang.ArithmeticException")
+    );
+}
+
+#[test]
+fn mapv_static_parsers_keep_errors_and_redefinitions() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"[(mapv #(Long/parseLong %) ["+1" "-2" "٣"])
+                (mapv #(Integer/parseInt %) (subvec ["ignore" "3" "4"] 1))
+                (mapv #(Double/parseDouble %) ["1.25" "2e1"])
+                (mapv #(Long/parseLong %) [])
+                (mapv #(Long/parseLong %) '("1" "2"))
+                (mapv #(Long/parseLong % 16) ["a"])]"#,
+        ),
+        "[[1 -2 3] [3 4] [1.25 20.0] [] [1 2] [10]]"
+    );
+    for src in [
+        r#"(mapv #(Long/parseLong %) ["1" "bad"])"#,
+        r#"(mapv #(Integer/parseInt %) ["2147483648"])"#,
+        r#"(mapv #(Double/parseDouble %) ["bad"])"#,
+    ] {
+        assert!(uncaught(&mut eval, src).starts_with("java.lang.NumberFormatException"));
+    }
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"(let [parse #(Long/parseLong %)]
+                (with-redefs [clojure.core/__static* (fn [c m x] x)]
+                  (mapv parse ["1" "2"])))"#,
+        ),
+        "[\"1\" \"2\"]"
     );
 }

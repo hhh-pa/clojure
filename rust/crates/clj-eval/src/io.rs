@@ -573,7 +573,7 @@ fn print_scalars(
     ln: bool,
 ) -> Result<bool, NativeError> {
     let plain = !args.is_empty() && args.iter().all(is_print_scalar);
-    if !plain || !eval.print_defaults_only || snap.dup {
+    if !plain || !snap.defaults_only || snap.dup {
         return Ok(false);
     }
     check_writer(&snap.out)?;
@@ -786,7 +786,7 @@ pub(crate) fn try_print_join(
         return Ok(false);
     };
     let snap = eval.print_snap_mut()?;
-    if !eval.print_defaults_only || snap.dup {
+    if !snap.defaults_only || snap.dup {
         return Ok(false);
     }
     check_writer(&snap.out)?;
@@ -1231,9 +1231,25 @@ mod tests {
     }
 
     #[test]
+    fn collection_print_restores_readably_after_writer_error() {
+        let mut eval = crate::boot();
+        let results = eval
+            .eval_source(
+                "(try (binding [*out* nil] (print []))
+                   (catch NullPointerException _ :writer-error))
+                 *print-readably*",
+            )
+            .unwrap();
+        assert_eq!(
+            results[0],
+            Value::Keyword(clj_value::Keyword::new(None, "writer-error"))
+        );
+        assert_eq!(results[1], Value::Bool(true));
+    }
+
+    #[test]
     fn print_plain_str_and_try_print_join_paths() {
         let mut eval = crate::boot();
-        eval.print_defaults_only = true;
         // print_scalars single-string fast path (`print`/`println`) vs `pr`/`prn`/multi-arg
         let res = eval
             .eval_source(
@@ -1355,7 +1371,8 @@ mod tests {
         eval.pop_bindings(depth);
         assert!(!hit);
 
-        eval.print_defaults_only = false;
+        eval.eval_source("(defmethod print-method String [s w] (.write w s))")
+            .unwrap();
         let (hit, _) = run_stream(&mut eval, &comma, &sp, 3);
         assert!(!hit);
     }

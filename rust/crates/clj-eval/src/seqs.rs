@@ -333,7 +333,7 @@ fn native_drop_while(eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nati
 }
 
 fn native_concat(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    Ok(concat_thunk(args.to_vec()))
+    Ok(concat_thunk(args))
 }
 
 fn native_cycle(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -582,6 +582,21 @@ pub(crate) fn native_reduce_owned(
     Ok(acc)
 }
 
+fn try_reduce_long_range(
+    eval: &mut Evaluator,
+    f: &Value,
+    acc: &Value,
+    coll: &Value,
+) -> Option<Value> {
+    let hooks = eval.lazy_hooks?;
+    let (start, step, count) = long_range(coll)?;
+    let n = usize::try_from(count).ok()?;
+    if n < 8 {
+        return None;
+    }
+    (hooks.vm_reduce_range)(eval, f, acc, start, step, n)
+}
+
 /// The `reduce` shapes answered before the general walk: an eduction
 /// (`IReduce`-less, completing in 3-arg) and a numeric `(reduce + …)`
 /// over a vector (`None`: walk).
@@ -610,7 +625,9 @@ fn reduce_early(
             ecoll.clone(),
         ));
     }
-    reduce_add_vector(f, (args.len() == 3).then(|| &args[1]), coll).map(Ok)
+    let init = (args.len() == 3).then(|| &args[1]);
+    let scalar = init.and_then(|acc| try_reduce_long_range(eval, f, acc, coll));
+    scalar.or_else(|| reduce_add_vector(f, init, coll)).map(Ok)
 }
 
 /// A long or double operand of [`reduce_add_vector`].
@@ -660,7 +677,7 @@ fn reduce_add_vector(f: &Value, init: Option<&Value>, coll: &Value) -> Option<Va
         return None;
     }
     let Value::Vector(v) = coll else {
-        return None;
+        return crate::lazy::sum_mapped_products(coll, init);
     };
     let mut items = v.iter();
     let first = match init {
@@ -699,6 +716,32 @@ fn reduce_step(
             call_checked_owned(eval, f, step_args)
         }
     }
+}
+
+pub(crate) fn reduce_reversed_vector(
+    eval: &mut Evaluator,
+    f: &Value,
+    mut acc: Value,
+    coll: &Vector,
+) -> Result<Value, NativeError> {
+    if coll.is_empty() {
+        return Ok(acc);
+    }
+    let scalar = coll
+        .as_flat_doubles()
+        .and_then(|items| crate::vm::reduce_reversed_doubles(eval, f, &acc, items));
+    if let Some(result) = scalar {
+        return Ok(result);
+    }
+    let prepared = crate::vm::Prepared::of(f, 2);
+    for index in (0..coll.len()).rev() {
+        let head = coll.get(index).expect("item index is in range");
+        acc = reduce_step(eval, f, prepared.as_ref(), acc, &head)?;
+        if let Some(result) = as_reduced(&acc) {
+            return Ok(result.clone());
+        }
+    }
+    Ok(acc)
 }
 
 fn reduce_kv_step(
@@ -1373,8 +1416,11 @@ pub(crate) fn native_sort_by_owned(
     // `compare` as `jvm_compare` itself (each was a checked general
     // call, three per comparison).
     let key = crate::vm::Prepared::of(&keyfn, 1);
-    let cmp = crate::vm::Prepared::of(&comp, 2);
     let default_compare = is_core_fn(&comp, "clojure.core/compare");
+    if default_compare && sort_integer_keys(eval, &keyfn, &mut items).is_some() {
+        return Ok(sorted_seq(items));
+    }
+    let cmp = crate::vm::Prepared::of(&comp, 2);
     sort_by_checked(&mut items, |a, b| {
         // `(comp (keyfn x) (keyfn y))` directly (the keyfn runs per
         // comparison; no int mapping).
@@ -1387,6 +1433,26 @@ pub(crate) fn native_sort_by_owned(
         afunction_order(r, || sort_cmp(eval, cmp.as_ref(), &comp, &kb, &ka))
     })?;
     Ok(sorted_seq(items))
+}
+
+/// A stable sort with integer vector keys. Every key must project
+/// successfully before the first item moves. A miss leaves the
+/// original ordering for the comparator-driven path.
+fn sort_integer_keys(eval: &mut Evaluator, key: &Value, items: &mut [Value]) -> Option<()> {
+    if items.len() < 64 {
+        return None;
+    }
+    let snapshot = eval.direct_snapshot();
+    let projection = crate::vm::SortProjection::compile(eval, key)?;
+    let keys = items
+        .iter()
+        .map(|item| projection.key(eval, item))
+        .collect::<Option<Vec<_>>>()?;
+    (eval.direct_snapshot() == snapshot).then(|| {
+        let mut order: Vec<usize> = (0..items.len()).collect();
+        order.sort_by_key(|&i| keys[i]);
+        permute(items, &mut order);
+    })
 }
 
 /// `(keyfn x)` for `sort-by`: the prepared callee when the keyfn has one
@@ -1561,6 +1627,11 @@ pub(crate) fn native_mapv_owned(
     {
         if let Some(res) = try_mapv_parse_long(&inputs[0]) {
             return Ok(res);
+        }
+    }
+    if let [input] = inputs.as_slice() {
+        if let Some(parsed) = crate::classemu::try_mapv_static_parse(eval, &args[0], input) {
+            return Ok(parsed);
         }
     }
     // One input under a VM/native fn walks it in place (#226): no lazy map
@@ -1912,35 +1983,87 @@ fn some_fn_rest_by_pred(
 }
 
 fn native_max_key(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/max-key", args, 2)?;
-    let k = args[0].clone();
-    let mut best = args[1].clone();
-    let mut kbest = call_checked(eval, &k, std::slice::from_ref(&best))?;
-    for cand in &args[2..] {
-        let kcand = call_checked(eval, &k, std::slice::from_ref(cand))?;
-        let ge = deref_core(eval, ">=");
-        if call_checked(eval, &ge, &[kcand.clone(), kbest.clone()])?.is_truthy() {
-            best = cand.clone();
-            kbest = kcand;
-        }
-    }
-    Ok(best)
+    key_extremum(eval, args, "clojure.core/max-key", ">=")
 }
 
 fn native_min_key(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
-    check_min_arity("clojure.core/min-key", args, 2)?;
-    let k = args[0].clone();
-    let mut best = args[1].clone();
-    let mut kbest = call_checked(eval, &k, std::slice::from_ref(&best))?;
+    key_extremum(eval, args, "clojure.core/min-key", "<=")
+}
+
+fn key_extremum(
+    eval: &mut Evaluator,
+    args: &[Value],
+    name: &str,
+    compare: &'static str,
+) -> Result<Value, NativeError> {
+    check_min_arity(name, args, 2)?;
+    let key = &args[0];
+    let first = &args[1];
+    let mut best = (
+        first.clone(),
+        call_checked(eval, key, std::slice::from_ref(first))?,
+    );
     for cand in &args[2..] {
-        let kcand = call_checked(eval, &k, std::slice::from_ref(cand))?;
-        let le = deref_core(eval, "<=");
-        if call_checked(eval, &le, &[kcand.clone(), kbest.clone()])?.is_truthy() {
-            best = cand.clone();
-            kbest = kcand;
-        }
+        consider_key(eval, key, cand, compare, &mut best)?;
     }
-    Ok(best)
+    Ok(best.0)
+}
+
+fn consider_key(
+    eval: &mut Evaluator,
+    key: &Value,
+    candidate: &Value,
+    compare: &'static str,
+    best: &mut (Value, Value),
+) -> Result<(), NativeError> {
+    let k = call_checked(eval, key, std::slice::from_ref(candidate))?;
+    let cmp = deref_core(eval, compare);
+    if call_checked(eval, &cmp, &[k.clone(), best.1.clone()])?.is_truthy() {
+        *best = (candidate.clone(), k);
+    }
+    Ok(())
+}
+
+/// Apply a key extremum to a counted range without materializing the
+/// spread. The immutable range has no effects to run before the key fn.
+pub(crate) fn apply_key_extremum(
+    eval: &mut Evaluator,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let [f, key, range] = args else {
+        return None;
+    };
+    let crate::ext::NativeTarget::Ptr(f) = crate::ext::as_native(f)?.func else {
+        return None;
+    };
+    let compare = if std::ptr::fn_addr_eq(f, native_max_key as crate::ns::NativeFnPtr) {
+        ">="
+    } else if std::ptr::fn_addr_eq(f, native_min_key as crate::ns::NativeFnPtr) {
+        "<="
+    } else {
+        return None;
+    };
+    let (start, step, count) = long_range(range)?;
+    let count = usize::try_from(count).ok().filter(|&n| n > 0)?;
+    Some(key_extremum_range(eval, key, compare, start, step, count))
+}
+
+fn key_extremum_range(
+    eval: &mut Evaluator,
+    key: &Value,
+    compare: &'static str,
+    start: i64,
+    step: i64,
+    count: usize,
+) -> Result<Value, NativeError> {
+    let first = Value::Int(start);
+    let mut best = (first.clone(), call_checked(eval, key, &[first])?);
+    let mut next = start;
+    for _ in 1..count {
+        next = next.wrapping_add(step);
+        consider_key(eval, key, &Value::Int(next), compare, &mut best)?;
+    }
+    Ok(best.0)
 }
 
 fn native_comp(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2213,14 +2336,26 @@ pub(crate) fn native_some_owned(
     };
     let mut found = Value::Nil;
     let prep = crate::vm::Prepared::of(&pred, 1);
-    walk_seq(eval, coll, |eval, head| {
+    let mut visit = |eval: &mut Evaluator, head: &Value| {
         let r = call_pred1(eval, &pred, prep.as_ref(), head)?;
         if r.is_truthy() {
             found = r;
             return Ok(Walk::Stop);
         }
         Ok(Walk::Continue)
-    })?;
+    };
+    if let Value::Map(map) = coll {
+        // Walk entries in seq order. An early hit never constructs
+        // the remaining entries or a sequence over them.
+        for (key, value) in map.iter() {
+            let entry = clj_value::map_entry(key.clone(), value.clone());
+            if matches!(visit(eval, &entry)?, Walk::Stop) {
+                break;
+            }
+        }
+    } else {
+        walk_seq(eval, coll, visit)?;
+    }
     Ok(found)
 }
 

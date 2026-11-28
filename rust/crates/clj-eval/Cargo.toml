@@ -14,6 +14,10 @@ num-rational = "0.4"
 num-traits = "0.2"
 rand = "0.9"
 regex = "1"
+# Pattern properties (#273: whether a pattern can match the empty
+# string, which decides the JDK `find` order); already in the tree
+# through `regex`.
+regex-syntax = "0.8"
 # Stack-inline call-arg buffers (already in the lockfile via rpds:
 # zero new crates compiled).
 smallvec = "1"

@@ -1166,6 +1166,24 @@ fn native_min(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     minmax("clojure.core/min", args, false)
 }
 
+/// Apply the stock min or max to already packed integers.
+pub(crate) fn apply_int_extremum(args: &[Value]) -> Option<Value> {
+    let [f, Value::Vector(values)] = args else {
+        return None;
+    };
+    let crate::ext::NativeTarget::Ptr(f) = crate::ext::as_native(f)?.func else {
+        return None;
+    };
+    let ints = values.as_flat_ints()?.iter().copied();
+    if std::ptr::fn_addr_eq(f, native_max as crate::ns::NativeFnPtr) {
+        return ints.max().map(Value::Int);
+    }
+    if std::ptr::fn_addr_eq(f, native_min as crate::ns::NativeFnPtr) {
+        return ints.min().map(Value::Int);
+    }
+    None
+}
+
 /// `=` as `Util.equiv` (sequential pairs walk pairwise with
 /// early exit, so finite-vs-infinite answers `false` instead of
 /// hanging; maps/sets recurse; the rest is `==`).
@@ -1720,6 +1738,7 @@ fn is_coll(v: &Value) -> bool {
             | Value::Set(_)
             | Value::PrimitiveVector(_)
     ) || as_subvector(v).is_some()
+        || crate::coll::as_queue(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)
@@ -1729,6 +1748,7 @@ fn is_sequential(v: &Value) -> bool {
         v,
         Value::Vector(_) | Value::MapEntry { .. } | Value::PrimitiveVector(_)
     ) || as_subvector(v).is_some()
+        || crate::coll::as_queue(v).is_some()
         || is_seq_value(v)
 }
 fn is_associative(v: &Value) -> bool {
@@ -1750,6 +1770,7 @@ pub(crate) fn is_counted(v: &Value) -> bool {
             | Value::PrimitiveVector(_)
     ) || crate::coll::is_transient(v)
         || as_subvector(v).is_some()
+        || crate::coll::as_queue(v).is_some()
         || is_counted_seq(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)
@@ -1806,6 +1827,7 @@ fn is_seqable(v: &Value) -> bool {
             | Value::Array(_)
             | Value::PrimitiveVector(_)
     ) || as_subvector(v).is_some()
+        || crate::coll::as_queue(v).is_some()
         || is_seq_value(v)
         || crate::types::is_host_record(v)
         || crate::types::is_host_struct(v)

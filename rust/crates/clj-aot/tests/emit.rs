@@ -1508,6 +1508,42 @@ fn native_emit_ir_fuses_filter_some_and_in2_moves_271() {
 }
 
 #[test]
+fn native_emit_ir_inlines_a_fixed_accumulator_pattern() {
+    let ir = tmp("fold-pattern.ll");
+    let source = "\
+(defn fixed-fold [xs]
+  (reduce (fn [[q d] x] [(conj q x) (+ d x)]) [[] 0] xs))
+(defn rest-fold [xs]
+  (reduce (fn [[d & more] x] [(+ d x) more]) [0] xs))
+(println (fixed-fold [1 2]) (rest-fold [1 2]))
+";
+    clj_aot::build_str(
+        source,
+        "f.clj",
+        &tmp("nope-fold-pattern"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let fixed = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_fixed_fold("))
+        .expect("fixed fold");
+    assert_eq!(general_paths(fixed), 1, "{fixed}");
+    let rest = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_rest_fold("))
+        .expect("rest fold");
+    assert_eq!(general_paths(rest), 0, "{rest}");
+}
+
+#[test]
 fn native_emit_ir_plans_range_loops_directly_271() {
     let ir = tmp("range-plans.ll");
     clj_aot::build_str(
@@ -1612,7 +1648,7 @@ fn native_emit_ir_lowers_double_scalar_loops_and_gvec_271() {
            (loop [i 0 acc 0.0]\n\
              (if (< i n)\n\
                (let [x (nth xs i)\n\
-                     y (nth (nth mat 0) i)\n\
+                     y (get-in mat [0 i])\n\
                      a (+ (- (* x G_SCALE) G_SCALE) *dyn-bias*)\n\
                      b (/ (inc (dec (- a))) 2.0)\n\
                      m (min (max b 0.0) 10.0)\n\
@@ -1650,6 +1686,7 @@ fn native_emit_ir_lowers_double_scalar_loops_and_gvec_271() {
         .find(|d| d.contains("user_fp_loop("))
         .expect("fp-loop fn");
     assert!(fp_body.contains("sc_nth_gvec"), "{fp_body}");
+    assert!(fp_body.contains("sc_nth2_ok"), "{fp_body}");
     assert!(fp_body.contains("@rt_n_math_log"), "{fp_body}");
     assert!(fp_body.contains("@rt_n_math_pow"), "{fp_body}");
     assert!(fp_body.contains("llvm.sqrt.f64"), "{fp_body}");

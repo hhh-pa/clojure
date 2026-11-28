@@ -25,6 +25,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -200,13 +201,7 @@ func addCount(record map[int]int64, lineno int, count uint64) {
 	if count >= clamp {
 		count = 0
 	}
-	// ParseUint yields a uint64. The clamp leaves the value below
-	// 2^62, which fits in int64, but CodeQL only accepts a constant
-	// bound before the narrower conversion.
-	if count > uint64(math.MaxInt64) {
-		record[lineno] = saturate
-		return
-	}
+	// Below the clamp (2^62), so the value fits in int64.
 	hits := int64(count)
 	prev := record[lineno]
 	if uint64(hits) > uint64(saturate-prev) {
@@ -214,6 +209,19 @@ func addCount(record map[int]int64, lineno int, count uint64) {
 	} else {
 		record[lineno] = prev + hits
 	}
+}
+
+// parseCount reads a DA hit count. ParseUint with bitSize 63 keeps every
+// parsed value within int64 (CodeQL go/incorrect-integer-conversion,
+// code-scanning alert #1); a count past 63 bits (llvm's 2^64-1
+// "unreachable" marker) reads as the clamp, which addCount records as
+// zero, as before. Anything else that does not parse is malformed.
+func parseCount(s string) (uint64, bool) {
+	n, err := strconv.ParseUint(s, 10, 63)
+	if errors.Is(err, strconv.ErrRange) {
+		return clamp, true
+	}
+	return n, err == nil
 }
 
 // parseCanonical folds raw llvm-cov LCOV into path-normalized per-line
@@ -234,8 +242,8 @@ func parseCanonical(raw, top string) map[string]map[int]int64 {
 				continue
 			}
 			lineno, err1 := strconv.Atoi(rest[0])
-			count, err2 := strconv.ParseUint(rest[1], 10, 64)
-			if err1 != nil || err2 != nil {
+			count, ok := parseCount(rest[1])
+			if err1 != nil || !ok {
 				continue
 			}
 			record := merged[current]

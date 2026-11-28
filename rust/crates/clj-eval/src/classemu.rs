@@ -2533,9 +2533,15 @@ fn static_field_locale(field: &str) -> Option<Value> {
     }
 }
 
+static EMPTY_QUEUE: std::sync::OnceLock<Arc<dyn ExtensionValue>> = std::sync::OnceLock::new();
+
 fn static_field_queue(field: &str) -> Option<Value> {
     match field {
-        "EMPTY" => Some(crate::coll::empty_queue_value()),
+        "EMPTY" => Some(Value::Extension(
+            EMPTY_QUEUE
+                .get_or_init(|| Arc::new(clj_value::QueueValue::empty()))
+                .clone(),
+        )),
         _ => None,
     }
 }
@@ -3101,6 +3107,7 @@ fn static_member_arities_rest(fqn: &str, member: &str) -> Option<&'static [usize
         "java.util.Collections" => static_arities_collections(member),
         "java.security.MessageDigest" => static_arities_digest(member),
         "java.util.regex.Pattern" => static_arities_pattern(member),
+        "java.util.regex.Matcher" => static_arities_matcher(member),
         "java.io.File" => static_arities_file(member),
         "java.net.URLEncoder" => static_arities_urlencoder(member),
         "java.lang.String" => static_arities_string(member),
@@ -3264,6 +3271,59 @@ fn static_arities_math(member: &str) -> Option<&'static [usize]> {
 pub(crate) fn lattice_is_iface(fqn: &str) -> bool {
     static_row(fqn).is_some_and(|r| r.iface)
 }
+/// Map a pure unary Java numeric parser over an immutable string collection.
+/// On invalid input the ordinary call reports the exception at its source.
+pub(crate) fn try_mapv_static_parse(
+    eval: &mut Evaluator,
+    f: &Value,
+    coll: &Value,
+) -> Option<Value> {
+    use crate::expr::{Expr, Pattern};
+    let (vm, _) = crate::vm::fixed_target(f, 1)?;
+    let [arity] = vm.fun.source.as_ref() else {
+        return None;
+    };
+    let [Expr::Invoke { head, args, .. }] = arity.body.as_slice() else {
+        return None;
+    };
+    let [
+        Expr::Quote(Value::Str(class)),
+        Expr::Quote(Value::Str(method)),
+        Expr::Local(i),
+    ] = args.as_slice()
+    else {
+        return None;
+    };
+    if !matches!(arity.fixed.as_slice(), [Pattern::Symbol(_)])
+        || *i != vm.fun.base
+        || !eval.calls_fit(1)
+    {
+        return None;
+    }
+    let mode = match (class.as_ref(), method.as_ref()) {
+        ("java.lang.Long", "parseLong") => 0,
+        ("java.lang.Integer", "parseInt") => 1,
+        ("java.lang.Double", "parseDouble") => 2,
+        _ => return None,
+    };
+    let Expr::Global(var) = head.as_ref() else {
+        return None;
+    };
+    if var.sym.namespace() != Some("clojure.core") || var.sym.name() != "__static*" {
+        return None;
+    }
+    let epoch = eval.registry.epoch();
+    let root = eval.deref_var_cached(var.id, &var.sym);
+    let crate::ext::NativeTarget::Ptr(func) = crate::ext::as_native(&root)?.func else {
+        return None;
+    };
+    if !std::ptr::fn_addr_eq(func, native_static as crate::ns::NativeFnPtr) {
+        return None;
+    }
+    let result = crate::native_abi::try_mapv_parse_num(coll, mode)?;
+    (epoch == eval.registry.epoch()).then_some(result)
+}
+
 /// `__static*`: `(FQN member args…)` — the analyzer's static-call
 /// lowering plus the instance-position consult for class values.
 /// Known members dispatch; 0-arg field names read the field
@@ -3313,6 +3373,7 @@ fn native_static_mid(
         "java.util.Collections" => static_call_collections(member, rest),
         "java.security.MessageDigest" => static_call_digest(eval, member, rest),
         "java.util.regex.Pattern" => static_call_pattern(member, rest),
+        "java.util.regex.Matcher" => static_call_matcher(member, rest),
         "java.io.File" => static_call_file(eval, member, rest),
         _ => native_static_tail(eval, fqn, member, rest),
     }
@@ -3563,6 +3624,29 @@ fn static_call_pattern(member: &str, rest: &[Value]) -> Result<Value, NativeErro
     match member {
         "quote" => static_pattern_quote(rest),
         _ => static_field_or_miss("java.util.regex.Pattern", member, rest),
+    }
+}
+
+fn static_arities_matcher(member: &str) -> Option<&'static [usize]> {
+    match member {
+        "quoteReplacement" => Some(&[1]),
+        _ => None,
+    }
+}
+
+/// `Matcher/quoteReplacement` (#273: `string.clj`'s `replace-by` and
+/// `re-quote-replacement` call it): `\` and `$` quoted; nil is its
+/// NPE, anything else fails the `String` parameter cast.
+fn static_call_matcher(member: &str, rest: &[Value]) -> Result<Value, NativeError> {
+    match (member, rest) {
+        ("quoteReplacement", [s]) => {
+            let s = crate::jdkmatch::replacement_string(s)?;
+            Ok(Value::Str(match crate::jdkmatch::quote_replacement(&s) {
+                std::borrow::Cow::Borrowed(_) => s,
+                std::borrow::Cow::Owned(q) => Arc::from(q.as_str()),
+            }))
+        }
+        _ => static_field_or_miss("java.util.regex.Matcher", member, rest),
     }
 }
 
@@ -5860,9 +5944,11 @@ fn surface_gated(
 ) -> Option<Result<Value, NativeError>> {
     // Split by family for the complexity budget (arms are disjoint,
     // so order is irrelevant).
-    surface_gated_coll(eval, meth, target, rest)
+    // Deques and priority queues can answer isEmpty directly, before the
+    // generic collection handler walks the Java class hierarchy.
+    surface_gated_jcoll(eval, meth, target, rest)
+        .or_else(|| surface_gated_coll(eval, meth, target, rest))
         .or_else(|| surface_gated_misc(eval, meth, target, rest))
-        .or_else(|| surface_gated_jcoll(eval, meth, target, rest))
         .or_else(|| surface_gated_str(meth, target, rest))
         .or_else(|| surface_gated_builder(eval, meth, target, rest))
         .or_else(|| surface_gated_regex(meth, target, rest))
@@ -5924,16 +6010,14 @@ fn surface_gated_regex(
     }
 }
 
-/// The `java.util` collection members (#205): deque ends
-/// and queue heap ops (each gates its own target type).
+/// The queue heap and digest members, each gated by its target type.
 fn surface_gated_jcoll(
     eval: &mut Evaluator,
     meth: &str,
     target: &Value,
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
-    crate::emucoll::deque_method(meth, target, rest)
-        .or_else(|| crate::emucoll::pqueue_method(eval, meth, target, rest))
+    crate::emucoll::pqueue_method(eval, meth, target, rest)
         .or_else(|| crate::emudigest::digest_method(meth, target, rest))
 }
 
@@ -6062,6 +6146,67 @@ fn surface_gated_matcher(
         ("group", 1) => Some(str_int_arg(&rest[0]).and_then(|i| h.group_n(i))),
         ("start", 0) => Some(h.last_span().map(|(s, _)| Value::Int(s as i64))),
         ("end", 0) => Some(h.last_span().map(|(_, e)| Value::Int(e as i64))),
+        _ => surface_gated_matcher_append(meth, target, h, rest),
+    }
+}
+
+/// The `Matcher` replacement members (#273): `replaceFirst`,
+/// `appendReplacement`, `appendTail` (arguments of other types miss
+/// through to the uniform error, like the JVM's reflector).
+fn surface_gated_matcher_append(
+    meth: &str,
+    target: &Value,
+    h: &crate::collmisc::MatcherHandle,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    match (meth, rest.len()) {
+        ("replaceFirst", 1) => gated_matcher_replace_first(h, &rest[0]),
+        ("appendReplacement", 2) => gated_matcher_append_replacement(target, h, rest),
+        ("appendTail", 1) => {
+            let sb = builder_arg(&rest[0])?;
+            Some(h.append_tail(sb).map(|()| rest[0].clone()))
+        }
+        _ => None,
+    }
+}
+
+/// `Matcher.replaceFirst(String)` (nil is `Objects.requireNonNull`'s
+/// message-less NPE).
+fn gated_matcher_replace_first(
+    h: &crate::collmisc::MatcherHandle,
+    rep: &Value,
+) -> Option<Result<Value, NativeError>> {
+    match rep {
+        Value::Str(r) => Some(h.replace(r, 1).map(|s| Value::Str(Arc::from(s.as_str())))),
+        Value::Nil => Some(Err(NativeError::new(
+            ThrowClass::NullPointerException,
+            String::new(),
+        ))),
+        _ => None,
+    }
+}
+
+/// `Matcher.appendReplacement(sb, replacement)`: the matcher back.
+fn gated_matcher_append_replacement(
+    target: &Value,
+    h: &crate::collmisc::MatcherHandle,
+    rest: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let sb = builder_arg(&rest[0])?;
+    let rep = match &rest[1] {
+        Value::Str(r) => Some(r.as_ref()),
+        Value::Nil => None,
+        _ => return None,
+    };
+    Some(h.append_replacement(sb, rep).map(|()| target.clone()))
+}
+
+/// A `StringBuffer`/`StringBuilder` parameter: `Some(None)` for nil,
+/// `None` for anything that is not a buffer.
+fn builder_arg(v: &Value) -> Option<Option<&StringBuilder>> {
+    match v {
+        Value::Nil => Some(None),
+        Value::Extension(e) => e.as_any().downcast_ref::<StringBuilder>().map(Some),
         _ => None,
     }
 }
@@ -6074,7 +6219,10 @@ fn surface_gated_matcher(
 fn gated_matcher_replace_all(target: &Value, rest: &[Value]) -> Option<Result<Value, NativeError>> {
     let h = crate::collmisc::as_matcher(target)?;
     match &rest[0] {
-        Value::Str(r) => Some(Ok(Value::Str(Arc::from(h.replace_all(r).as_str())))),
+        Value::Str(r) => Some(
+            h.replace(r, usize::MAX)
+                .map(|s| Value::Str(Arc::from(s.as_str()))),
+        ),
         Value::Nil => Some(Err(NativeError::new(
             ThrowClass::IllegalArgumentException,
             "More than one matching method found: replaceAll".to_owned(),
@@ -7458,13 +7606,16 @@ fn gated_bigdec_conv(meth: &str, target: &Value) -> Option<Result<Value, NativeE
     }))
 }
 
-/// A `java.lang.StringBuilder` (issue #201 S5): a growable
-/// buffer behind the `Extension` facade. Identity is the
-/// sequence `id` (like `Writer`); `str`/`toString` render the
-/// buffer via `print_str`, `print` keeps the `#object[…]` form.
+/// A `java.lang.StringBuilder` (issue #201 S5) or, with the same
+/// members, a `java.lang.StringBuffer` (#273: `string.clj`'s
+/// `replace-by` builds one): a growable buffer behind the
+/// `Extension` facade. Identity is the sequence `id` (like
+/// `Writer`); `str`/`toString` render the buffer via `print_str`,
+/// `print` keeps the `#object[…]` form.
 #[derive(Debug)]
 pub(crate) struct StringBuilder {
     id: u64,
+    class: &'static str,
     buf: Mutex<String>,
 }
 
@@ -7485,14 +7636,29 @@ pub(crate) fn char_sequence_text(v: &Value) -> Option<Arc<str>> {
 
 impl StringBuilder {
     pub(crate) fn fresh(content: String) -> Self {
+        Self::of_class("java.lang.StringBuilder", content)
+    }
+
+    /// A `java.lang.StringBuffer` (#273).
+    pub(crate) fn fresh_buffer(content: String) -> Self {
+        Self::of_class("java.lang.StringBuffer", content)
+    }
+
+    fn of_class(class: &'static str, content: String) -> Self {
         Self {
             id: NEXT_BUILDER.fetch_add(1, Ordering::Relaxed),
+            class,
             buf: Mutex::new(content),
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, String> {
         self.buf.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Run `f` over the buffer (the `Matcher` append members, #273).
+    pub(crate) fn with_buf<R>(&self, f: impl FnOnce(&mut String) -> R) -> R {
+        f(&mut self.lock())
     }
 }
 
@@ -7515,6 +7681,12 @@ impl LocaleHandle {
 /// The static field a folded constant came from (see
 /// `native_abi::static_field_origin`).
 pub(crate) fn static_field_origin(v: &Value) -> Option<(&'static str, &'static str)> {
+    // The canonical empty queue is a static object whose printed form
+    // cannot be read back. Identify the field by allocation, so a
+    // separately constructed empty queue retains its own identity.
+    if matches!(v, Value::Extension(e) if EMPTY_QUEUE.get().is_some_and(|q| Arc::ptr_eq(q, e))) {
+        return Some(("clojure.lang.PersistentQueue", "EMPTY"));
+    }
     match as_locale(v) {
         Some(l) if l.tag == "en_US" => Some(("java.util.Locale", "US")),
         _ => None,
@@ -7656,7 +7828,7 @@ impl ExtensionValue for UriHandle {
 
 impl ExtensionValue for StringBuilder {
     fn class_name(&self) -> String {
-        "java.lang.StringBuilder".to_owned()
+        self.class.to_owned()
     }
 
     /// `print-object`: the `toString` (the buffer) printed
@@ -7664,7 +7836,8 @@ impl ExtensionValue for StringBuilder {
     fn print(&self) -> String {
         let text = Value::Str(Arc::from(self.lock().as_str()));
         format!(
-            "#object[java.lang.StringBuilder 0x{:x} {}]",
+            "#object[{} 0x{:x} {}]",
+            self.class,
             self.id,
             clj_value::pr_to_string(&text, &clj_value::PrintOpts::pr())
         )
@@ -7673,7 +7846,8 @@ impl ExtensionValue for StringBuilder {
     /// Not readably, the buffer goes in unquoted.
     fn print_str(&self) -> Option<String> {
         Some(format!(
-            "#object[java.lang.StringBuilder 0x{:x} {}]",
+            "#object[{} 0x{:x} {}]",
+            self.class,
             self.id,
             self.lock()
         ))
@@ -7787,6 +7961,9 @@ pub(crate) fn surface_meth(
     target: &Value,
     rest: &[Value],
 ) -> Option<Result<Value, NativeError>> {
+    if let Some(hit) = crate::emucoll::deque_method(meth, target, rest) {
+        return Some(hit);
+    }
     if let Some(hit) = surface_universal(eval, meth, target, rest) {
         return Some(hit);
     }
@@ -7952,6 +8129,53 @@ mod tests {
         assert_eq!(identity_hash(&uri), identity_hash(&uri.clone()));
         let other = Value::Uri(Box::new(clj_value::Uri::parse("http://x/").unwrap()));
         assert_ne!(identity_hash(&uri), identity_hash(&other));
+    }
+
+    #[test]
+    fn bulk_static_parser_only_matches_the_unary_forwarder() {
+        let mut eval = crate::boot();
+        let inputs = Value::Vector(clj_value::Vector::from_vec(vec![Value::Str("1".into())]));
+        eval.eval_source("(defn other-static [_ _ x] x)").unwrap();
+        for source in [
+            r#"(fn ([x] (Long/parseLong x)) ([x y] y))"#,
+            r#"(fn [[x]] (Long/parseLong x))"#,
+            r#"(let [x "7"] (fn [_] (Long/parseLong x)))"#,
+            r#"(fn [x] (Long/valueOf x))"#,
+            r#"(let [f other-static] (fn [x] (f '"java.lang.Long" '"parseLong" x)))"#,
+            r#"(fn [x] (other-static '"java.lang.Long" '"parseLong" x))"#,
+        ] {
+            let function = eval.eval_source(source).unwrap().pop().unwrap();
+            assert!(
+                try_mapv_static_parse(&mut eval, &function, &inputs).is_none(),
+                "{source}"
+            );
+        }
+
+        let function = eval
+            .eval_source("#(Long/parseLong %)")
+            .unwrap()
+            .pop()
+            .unwrap();
+        let var_id = crate::ns::core_var(&eval, "__static*").unwrap();
+        let var = crate::ns::core_var_handle(var_id, "__static*");
+        for source in ["(constantly :overridden)", "vector"] {
+            let replacement = eval.eval_source(source).unwrap().pop().unwrap();
+            let depth = eval.push_binding(var.clone(), replacement);
+            assert!(try_mapv_static_parse(&mut eval, &function, &inputs).is_none());
+            eval.pop_bindings(depth);
+        }
+        assert_eq!(
+            try_mapv_static_parse(&mut eval, &function, &inputs),
+            Some(Value::Vector(clj_value::Vector::from_ints(vec![1])))
+        );
+    }
+
+    #[test]
+    fn deque_lattice_keeps_unmaterialized_interfaces() {
+        let deque = static_row("java.util.ArrayDeque").expect("deque class");
+        let supers = static_supers(deque);
+        assert!(supers.contains("java.util.Deque"));
+        assert!(supers.contains("java.io.Serializable"));
     }
 
     #[test]

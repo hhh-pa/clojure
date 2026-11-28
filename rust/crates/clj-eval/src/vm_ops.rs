@@ -1010,6 +1010,16 @@ pub(crate) enum Coll {
     Read(Operand),
 }
 
+impl From<Operand> for Coll {
+    fn from(operand: Operand) -> Self {
+        match operand {
+            Operand::Loc(Loc::Reg(r), true) => Self::Take(r),
+            Operand::Exec(e) => Self::Exec(e),
+            other => Self::Read(other),
+        }
+    }
+}
+
 /// An update op (`assoc`, `conj`): a computed collection runs
 /// first, then the other operands in order, then a local
 /// collection is read — last, so the last-use analysis can move it
@@ -1117,6 +1127,130 @@ fn upd_native(c: Site, coll: Coll, rest: Vec<Operand>) -> Exec {
     })
 }
 
+fn eval_literal_keys(
+    ev: &mut Evaluator,
+    f: &mut Frame<'_>,
+    keys: &[Exec],
+) -> Result<SmallVec<[Value; 4]>, Signal> {
+    keys.iter().map(|key| key(ev, f)).collect()
+}
+
+/// Read a two-dimensional vector without cloning the intermediate row.
+fn lookup_matrix_cell(coll: &Value, row: &Value, col: &Value) -> Option<Value> {
+    let Value::Vector(matrix) = coll else {
+        return None;
+    };
+    let row = crate::vm_intrinsics::index(row)?;
+    let col = crate::vm_intrinsics::index(col)?;
+    let Value::Vector(cells) = matrix.get_ref(row)? else {
+        return None;
+    };
+    cells.get(col)
+}
+
+/// A two-key lookup whose collection and keys are readable in place.
+/// Only a redefined `get-in` needs the original path vector.
+pub(crate) fn get_in_pair(
+    call: Arc<DirectCall>,
+    coll: Operand,
+    row: Operand,
+    col: Operand,
+) -> Exec {
+    let c = Site::new(call);
+    Box::new(move |ev, f| {
+        let coll = coll.read(f, None);
+        let row = row.read(f, None);
+        let col = col.read(f, None);
+        if !c.valid(ev) {
+            let path = Value::Vector(clj_value::Vector::from_vec(vec![row.clone(), col.clone()]));
+            return native(ev, &c, smallvec![coll.clone(), path]);
+        }
+        if let Some(v) = lookup_matrix_cell(coll, row, col) {
+            return Ok(v);
+        }
+        let Some(inner) = crate::coll::lookup_present(ev, coll, row).map_err(|e| ev.throw(e))?
+        else {
+            return Ok(Value::Nil);
+        };
+        Ok(crate::coll::lookup_present(ev, &inner, col)
+            .map_err(|e| ev.throw(e))?
+            .unwrap_or(Value::Nil))
+    })
+}
+
+/// `(get-in coll [k ...])` / `(get-in coll [k ...] not-found)` over a
+/// vector-literal path (#277): the keys evaluate as operands (in the
+/// JVM's order: collection, keys, not-found) and the lookups nest, so no
+/// path vector is built or stepped per call. A redefined `get-in` (an
+/// invalid site) gets its vector and is called through the var.
+pub(crate) fn get_in_literal(
+    call: Arc<DirectCall>,
+    coll: Exec,
+    keys: Vec<Exec>,
+    nf: Option<Exec>,
+) -> Exec {
+    let c = Site::new(call);
+    Box::new(move |ev, f| {
+        let mut cur = coll(ev, f)?;
+        let ks = eval_literal_keys(ev, f, &keys)?;
+        let nf = match &nf {
+            Some(e) => Some(e(ev, f)?),
+            None => None,
+        };
+        if !ev.site_direct_valid(c.sid, &c.call) {
+            let path = Value::Vector(clj_value::Vector::from_vec(ks.into_vec()));
+            let mut args: SmallVec<[Value; 4]> = smallvec![cur, path];
+            args.extend(nf);
+            return native(ev, &c, args);
+        }
+        if let [row, col] = ks.as_slice() {
+            if let Some(cell) = lookup_matrix_cell(&cur, row, col) {
+                return Ok(cell);
+            }
+        }
+        for k in &ks {
+            match crate::coll::lookup_present(ev, &cur, k).map_err(|e| ev.throw(e))? {
+                Some(v) => cur = v,
+                None => return Ok(nf.unwrap_or(Value::Nil)),
+            }
+        }
+        Ok(cur)
+    })
+}
+
+/// `(assoc-in coll [k ...] v)` over a vector-literal path (#277): like
+/// the update ops (a last-use collection register moves out, so unique
+/// nests update in place), with the keys as operands, so no path vector
+/// is built or stepped per call. A redefined `assoc-in` (an invalid site)
+/// gets its vector and is called through the var.
+pub(crate) fn assoc_in_literal(
+    call: Arc<DirectCall>,
+    coll: Operand,
+    keys: Vec<Exec>,
+    val: Exec,
+) -> Exec {
+    let c = Site::new(call);
+    let coll = Coll::from(coll);
+    Box::new(move |ev, f| {
+        let mut m = match &coll {
+            Coll::Exec(e) => e(ev, f)?,
+            _ => Value::Nil,
+        };
+        let ks = eval_literal_keys(ev, f, &keys)?;
+        let v = val(ev, f)?;
+        match &coll {
+            Coll::Take(r) => m = std::mem::replace(&mut f.regs[*r], Value::Nil),
+            Coll::Read(o) => m = o.eval(ev, f)?,
+            Coll::Exec(_) => {}
+        }
+        if !ev.site_direct_valid(c.sid, &c.call) {
+            let path = Value::Vector(clj_value::Vector::from_vec(ks.into_vec()));
+            return native(ev, &c, smallvec![m, path, v]);
+        }
+        crate::coll::assoc_in_keys(ev, m, &ks, v).map_err(|e| ev.throw(e))
+    })
+}
+
 /// The update ops by core name and arg count.
 /// An update-op table row: core name, arg count, code constructor.
 type UpdRow = (&'static str, usize, UpdCtor);
@@ -1158,11 +1292,7 @@ pub(crate) fn update_order(call: &DirectCall) -> bool {
 /// operand a last-use register moves out).
 pub(crate) fn update_code(ctor: UpdCtor, site: Arc<DirectCall>, mut ops: Vec<Operand>) -> Exec {
     let rest = ops.split_off(1);
-    let coll = match ops.pop().expect("the collection operand") {
-        Operand::Loc(Loc::Reg(r), true) => Coll::Take(r),
-        Operand::Exec(e) => Coll::Exec(e),
-        other => Coll::Read(other),
-    };
+    let coll = Coll::from(ops.pop().expect("the collection operand"));
     ctor(Site::new(site), coll, rest)
 }
 
@@ -1362,6 +1492,9 @@ pub(crate) fn apply_update3(args: &mut [Value]) -> Option<Value> {
 /// 4 args `[coll, k1, k2, v]`.
 pub(crate) fn apply_assoc_in2(args: &mut [Value]) -> Option<Value> {
     let [coll, k1, k2, v] = args else { return None };
+    if crate::vm_intrinsics::assoc_matrix_cell(coll, k1, k2, v) {
+        return Some(take(coll));
+    }
     match try_step_in2(take(coll), k1, |inner| try_assoc_leaf(inner, k2, v)) {
         Ok(out) => Some(out),
         Err(orig) => {
@@ -1490,7 +1623,7 @@ pub(crate) enum InPlace {
 
 impl InPlace {
     #[inline(always)]
-    fn get<'v>(&'v self, f: &'v Frame<'_>) -> &'v Value {
+    pub(crate) fn get<'v>(&'v self, f: &'v Frame<'_>) -> &'v Value {
         match self {
             InPlace::Reg(r) => &f.regs[*r],
             InPlace::Up(u) => &f.up[*u],
@@ -1593,6 +1726,18 @@ impl Upd for Conj {
             Value::Vector(v) => Some(Value::Vector(v.push_back(take(x)))),
             Value::List(l) => Some(Value::List(l.push_front(take(x)))),
             Value::Nil => Some(Value::List(clj_value::List::from_vec(vec![take(x)]))),
+            // A uniquely held queue (#277) grows in place; a shared
+            // one takes the persistent native.
+            Value::Extension(mut e) => match crate::coll::queue_mut(&mut e) {
+                Some(q) => {
+                    q.push_mut(take(x));
+                    Some(Value::Extension(e))
+                }
+                None => {
+                    *coll = Value::Extension(e);
+                    None
+                }
+            },
             Value::Set(s) if !s.is_sorted() && crate::vm_intrinsics::is_scalar_key(x) => {
                 Some(Value::Set(s.insert(take(x))))
             }
@@ -2343,6 +2488,17 @@ impl Upd for Pop {
             Value::Vector(x) if !x.is_empty() && x.meta().is_none() => {
                 x.drop_last_owned().map(Value::Vector)
             }
+            // A uniquely held queue (#277) drops its front in place.
+            Value::Extension(mut e) => match crate::coll::queue_mut(&mut e) {
+                Some(q) => {
+                    q.pop_mut();
+                    Some(Value::Extension(e))
+                }
+                None => {
+                    *coll = Value::Extension(e);
+                    None
+                }
+            },
             other => {
                 *coll = other;
                 None
@@ -3187,6 +3343,22 @@ mod apply_tests {
         );
 
         // Outer vector in try_step_in2
+        let mut owned = [
+            Value::Vector(Vector::from_vec(vec![Value::Vector(Vector::from_ints(
+                vec![7],
+            ))])),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(8),
+        ];
+        assert_eq!(
+            apply_assoc_in2(&mut owned),
+            Some(Value::Vector(Vector::from_vec(vec![Value::Vector(
+                Vector::from_ints(vec![8])
+            )])))
+        );
+        assert_eq!(owned[0], Value::Nil);
+
         let nested_vec = Value::Vector(Vector::from_vec(vec![
             Value::Vector(Vector::from_vec(vec![Value::Int(7)])),
             Value::Nil,

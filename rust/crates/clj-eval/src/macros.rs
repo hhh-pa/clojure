@@ -491,6 +491,12 @@ fn native_apply(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     if args.len() < 2 {
         return Err(NativeError::arity("clojure.core/apply", args.len()));
     }
+    if let Some(result) = crate::core::apply_int_extremum(args) {
+        return Ok(result);
+    }
+    if let Some(result) = crate::seqs::apply_key_extremum(eval, args) {
+        return result;
+    }
     if crate::ext::as_native(&args[0]).is_some_and(|n| &*n.display == "clojure.core/str") {
         if let Some(s) = crate::core::apply_str_direct(eval, &args[1..])? {
             return Ok(s);

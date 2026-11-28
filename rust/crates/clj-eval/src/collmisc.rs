@@ -22,6 +22,7 @@ use crate::coll::lookup_present;
 use crate::core::{cce_err, int_cast_value, number_int_cast};
 use crate::error::{NativeError, Signal};
 use crate::eval::Evaluator;
+use crate::jdkmatch::{Template, utf16_index};
 use crate::lazy::{
     PendingSeq, Thunk, check_seqable, chunked_parts, empty_list_value, first_value,
     is_chunked_seq_value, next_value, pending_value, realize_deep, seq_value,
@@ -960,12 +961,14 @@ pub(crate) fn seq_iteration(eval: &mut Evaluator, it: &IterationValue) -> Result
 /// A matcher handle's mutable state: the next search offset plus
 /// the last match groups (full text first, one slot per group —
 /// `None` for unmatched groups, like `Matcher.group` returning
-/// null) and the last match's byte offsets (for `start`/`end`).
-#[derive(Clone, Debug)]
+/// null), the last match's byte offsets (for `start`/`end`), and
+/// the append position (`appendReplacement`/`appendTail`, #273).
+#[derive(Clone, Debug, Default)]
 struct MatcherState {
     next: usize,
     last: Option<Vec<Option<String>>>,
     last_span: Option<(usize, usize)>,
+    append: usize,
 }
 
 /// A stateful regex matcher handle (`re-matcher`): the compiled
@@ -1002,9 +1005,11 @@ impl MatcherHandle {
     fn do_find(&self, from: Option<usize>) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(from) = from {
-            state.next = from;
-            state.last = None;
-            state.last_span = None;
+            // `find(int)` resets first (the append position too).
+            *state = MatcherState {
+                next: from,
+                ..MatcherState::default()
+            };
         }
         let text: &str = &self.text;
         if state.next > text.len() {
@@ -1022,11 +1027,7 @@ impl MatcherHandle {
             return false;
         };
         let m = caps.get(0).expect("a match holds group 0");
-        state.next = if m.start() == m.end() {
-            m.end() + text[m.end()..].chars().next().map_or(1, |c| c.len_utf8())
-        } else {
-            m.end()
-        };
+        state.next = crate::jdkmatch::next_from(text, m.start(), m.end());
         let groups: Vec<Option<String>> = (0..caps.len())
             .map(|i| caps.get(i).map(|g| g.as_str().to_owned()))
             .collect();
@@ -1096,20 +1097,112 @@ impl MatcherHandle {
         clj_value::unpoison(self.state.lock()).last.clone()
     }
 
-    /// `Matcher.replaceAll(String)`: replace every match over the
-    /// whole input (the JVM resets first, so in-flight `find`
-    /// state is discarded). `$g` group refs expand via the regex
-    /// crate (`$$` quotes); Java `\<c>` quotes have no
-    /// regex-crate spelling and pass through literally.
-    pub(crate) fn replace_all(&self, replacement: &str) -> String {
-        {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.next = 0;
-            state.last = None;
+    /// `Matcher.replaceAll(String)` (`limit` `usize::MAX`) and
+    /// `replaceFirst` (`1`), #273: the JDK's own loop — reset, then
+    /// `appendReplacement` per `find`, then `appendTail` — so the
+    /// template follows the JDK grammar (checked only once something
+    /// matches) and the handle ends where the JDK's does (no match,
+    /// the append position past the last one).
+    pub(crate) fn replace(&self, replacement: &str, limit: usize) -> Result<String, NativeError> {
+        *clj_value::unpoison(self.state.lock()) = MatcherState::default();
+        let mut out = String::new();
+        let mut template = None;
+        let mut n = 0;
+        while n < limit && self.do_find(None) {
+            let t = template.get_or_insert_with(|| Template::parse(&self.re, replacement));
+            self.append_expanded(&mut out, t)?;
+            n += 1;
         }
-        let text: &str = &self.text;
-        self.re.replace_all(text, replacement).into_owned()
+        self.append_tail_into(&mut out);
+        Ok(out)
     }
+
+    /// `Matcher.appendReplacement(sb, replacement)` (#273): needs a
+    /// match (`No match found`), then a buffer (nil is the JDK's NPE;
+    /// the `StringBuffer` overload is the one nil reaches), then
+    /// appends like [`Self::append_expanded`]. A nil replacement
+    /// appends the intervening text before its NPE (no rollback: only
+    /// template errors roll back).
+    pub(crate) fn append_replacement(
+        &self,
+        sb: Option<&crate::classemu::StringBuilder>,
+        replacement: Option<&str>,
+    ) -> Result<(), NativeError> {
+        if clj_value::unpoison(self.state.lock()).last_span.is_none() {
+            return Err(no_match_found());
+        }
+        let sb = sb.ok_or_else(|| {
+            npe("Cannot invoke \"java.lang.StringBuffer.length()\" because \"sb\" is null")
+        })?;
+        let template = replacement.map_or_else(
+            || {
+                Template::failing(npe(
+                    "Cannot invoke \"String.length()\" because \"replacement\" is null",
+                ))
+            },
+            |r| Template::parse(&self.re, r),
+        );
+        sb.with_buf(|buf| self.append_expanded(buf, &template))
+    }
+
+    /// `Matcher.appendTail(sb)` (#273): the text past the append
+    /// position (nil is the JDK's NPE).
+    pub(crate) fn append_tail(
+        &self,
+        sb: Option<&crate::classemu::StringBuilder>,
+    ) -> Result<(), NativeError> {
+        let sb = sb.ok_or_else(|| {
+            npe("Cannot invoke \"java.lang.StringBuffer.append(java.lang.CharSequence, int, int)\" because \"sb\" is null")
+        })?;
+        sb.with_buf(|buf| self.append_tail_into(buf));
+        Ok(())
+    }
+
+    /// One `appendReplacement` into `out`: the text from the append
+    /// position to the match (a position already past the match start
+    /// is the JDK's range `IndexOutOfBoundsException`), then the
+    /// template's expansion. A template error rolls `out` back when it
+    /// is an `IllegalArgumentException` (the JDK resets the buffer's
+    /// length for those only) and leaves the append position.
+    fn append_expanded(&self, out: &mut String, template: &Template) -> Result<(), NativeError> {
+        let mut state = clj_value::unpoison(self.state.lock());
+        let (start, end) = state.last_span.ok_or_else(no_match_found)?;
+        let text: &str = &self.text;
+        if state.append > start {
+            return Err(NativeError::new(
+                ThrowClass::IndexOutOfBoundsException,
+                format!(
+                    "Range [{}, {}) out of bounds for length {}",
+                    utf16_index(text, state.append),
+                    utf16_index(text, start),
+                    utf16_index(text, text.len())
+                ),
+            ));
+        }
+        let rollback = out.len();
+        out.push_str(&text[state.append..start]);
+        let groups = state.last.as_deref().unwrap_or_default();
+        template.expand_into(out, |g| groups.get(g).and_then(|t| t.as_deref()));
+        if let Some(err) = template.error() {
+            if err.class == ThrowClass::IllegalArgumentException {
+                out.truncate(rollback);
+            }
+            return Err(err.clone());
+        }
+        state.append = end;
+        Ok(())
+    }
+
+    /// `appendTail` into `out`.
+    fn append_tail_into(&self, out: &mut String) {
+        let append = clj_value::unpoison(self.state.lock()).append;
+        out.push_str(&self.text[append..]);
+    }
+}
+
+/// An NPE with the JDK's helpful text.
+fn npe(message: &str) -> NativeError {
+    NativeError::new(ThrowClass::NullPointerException, message.to_owned())
 }
 
 impl ExtensionValue for MatcherHandle {
@@ -1196,11 +1289,7 @@ fn native_re_matcher(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
                 re,
                 anchored,
                 text: Arc::clone(text),
-                state: Arc::new(Mutex::new(MatcherState {
-                    next: 0,
-                    last: None,
-                    last_span: None,
-                })),
+                state: Arc::new(Mutex::new(MatcherState::default())),
             })))
         }
         Value::Nil => Err(NativeError::new(

@@ -872,6 +872,20 @@ fn new_object_reroute() {
         run(&mut eval, "(let [new (fn [x] x)] (class (new Object)))"),
         "java.lang.Object"
     );
+    assert_eq!(
+        run(
+            &mut eval,
+            "(let [obj (new Object)
+                    small #{obj}
+                    large (into small (range 32))]
+                [(identical? (get small obj) obj)
+                 (identical? (get large obj) obj)
+                 (contains? large (new Object))
+                 (contains? (disj large obj) obj)
+                 (count large)])"
+        ),
+        "[true true false false 33]"
+    );
 }
 
 // ---- Runtime miss arms (coverage floor) ----

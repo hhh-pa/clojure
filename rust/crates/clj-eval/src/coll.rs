@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 
 use clj_value::{
-    Array, ConsValue, Keyword, List, Map, PrimitiveVector, Set, SortSpec, SubVectorValue,
+    Array, ConsValue, List, Map, PrimitiveVector, QueueValue, Set, SortSpec, SubVectorValue,
     ThrowClass, Transient, TransientError, TransientKind, TransientMap, TransientSet,
     TransientVector, Value, Vector, new_map, new_set,
 };
@@ -531,7 +531,7 @@ fn conj_one(eval: &mut Evaluator, coll: Value, x: Value) -> Result<Value, Native
             let coll = Value::HostType(h);
             conj_maplike(eval, coll, &x)
         }
-        Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, &s, x)?)),
+        Value::Set(s) if s.is_sorted() => Ok(Value::Set(sorted_conj_set(eval, s, x)?)),
         Value::Set(s) => {
             let x = crate::lazy::realize_key(eval, &x).map_err(signal_to_native)?;
             Ok(Value::Set(s.insert(x)))
@@ -543,7 +543,16 @@ fn conj_one(eval: &mut Evaluator, coll: Value, x: Value) -> Result<Value, Native
 /// Conj onto anything else (split from [`conj_one`] for the
 /// complexity budget): subvectors conj through their window, seqs
 /// `cons`, and anything else takes the collection cast.
-fn conj_other(other: Value, x: Value) -> Result<Value, NativeError> {
+fn conj_other(mut other: Value, x: Value) -> Result<Value, NativeError> {
+    if let Value::Extension(e) = &mut other {
+        if let Some(queue) = queue_mut(e) {
+            queue.push_mut(x);
+            return Ok(other);
+        }
+        if let Some(queue) = e.as_any().downcast_ref::<QueueValue>() {
+            return Ok(Value::Extension(Arc::new(queue.clone().conj(x))));
+        }
+    }
     if let Some(sv) = as_subvector(&other) {
         return Ok(subvector_conj(sv, x));
     }
@@ -778,6 +787,9 @@ fn count_transient(t: &Transient) -> Result<i64, NativeError> {
 /// `RT.count` over the extension/seq tail (subvectors, ranges,
 /// realized seqs, repeats, then a seq walk).
 fn count_fallback(eval: &mut Evaluator, v: &Value) -> Result<i64, NativeError> {
+    if let Some(q) = as_queue(v) {
+        return Ok(q.len() as i64);
+    }
     if let Some(sp) = crate::lazy::as_splitvec(v) {
         return Ok(sp.len() as i64);
     }
@@ -1094,6 +1106,31 @@ fn update_in_up(
     }
 }
 
+/// `assoc-in` over an evaluated key path (#277: the VM's literal-path
+/// op, so no path vector is built or stepped): each level takes its
+/// child out of an owned parent, so uniquely held nests update in place.
+pub(crate) fn assoc_in_keys(
+    eval: &mut Evaluator,
+    mut m: Value,
+    keys: &[Value],
+    mut v: Value,
+) -> Result<Value, NativeError> {
+    if matches!(
+        keys,
+        [row, column] if crate::vm_intrinsics::assoc_matrix_cell(&mut m, row, column, &mut v)
+    ) {
+        return Ok(m);
+    }
+    // The op passes 1-4 keys (an empty path stays with the native).
+    let (k, rest) = keys.split_first().expect("a non-empty literal path");
+    if rest.is_empty() {
+        return assoc3(eval, m, k, v);
+    }
+    let inner = take_lookup(eval, &mut m, k)?.unwrap_or(Value::Nil);
+    let updated = assoc_in_keys(eval, inner, rest, v)?;
+    assoc3(eval, m, k, updated)
+}
+
 /// The `assoc-in` recursion (`ks` already stepped once).
 fn assoc_in_up(
     eval: &mut Evaluator,
@@ -1187,6 +1224,11 @@ fn native_empty(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeEr
     if let Some(v) = empty_vector_like(&args[0]) {
         return Ok(v);
     }
+    if let Some(q) = as_queue(&args[0]) {
+        return Ok(Value::Extension(Arc::new(
+            QueueValue::empty().with_meta(q.meta().cloned()),
+        )));
+    }
     Ok(match &args[0] {
         Value::Map(m) => Value::Map(
             new_map()
@@ -1236,7 +1278,7 @@ pub(crate) fn native_disj_owned(
         Value::Set(s) if s.is_sorted() => {
             let mut out = s;
             for k in &args[1..] {
-                out = sorted_without_set(eval, &out, k)?;
+                out = sorted_without_set(eval, out, k)?;
             }
             Ok(Value::Set(out))
         }
@@ -2042,7 +2084,7 @@ pub(crate) fn native_nth_owned(
         return nth_array(a, n, not_found);
     }
     // (Strings dispatch in `nth_fast`, above.)
-    if matches!(coll, Value::List(_)) || is_seq_value(coll) {
+    if matches!(coll, Value::List(_)) || is_seq_value(coll) || as_queue(coll).is_some() {
         return nth_walk(eval, coll, n, not_found.as_ref());
     }
     Err(nth_unsupported(coll))
@@ -2716,40 +2758,22 @@ fn native_pop_bang(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nativ
     Ok(Value::Transient(t.clone()))
 }
 
-/// The `PersistentQueue` emulation mark: queues ride on
-/// vectors (insertion-ordered, `conj`/`count`/`seq`/`nth`
-/// already correct), distinguished by this metadata key so
-/// `peek`/`pop` take the front. `conj` and `pop` preserve
-/// metadata, so queues stay queues through BFS loops. The mark
-/// is visible to `meta` (a documented narrowing — real queues
-/// print `#object[…]`; these print as vectors).
-fn queue_mark_key() -> Value {
-    Value::Keyword(Keyword::new(Some("clojure-rs"), "queue"))
-}
-
-/// Whether a vector is a queue emulation (see
-/// [`empty_queue_value`]).
-fn is_queue_vec(x: &Vector) -> bool {
-    x.meta().and_then(|m| m.get(&queue_mark_key())).is_some()
-}
-
-/// `clojure.lang.PersistentQueue/EMPTY`: a marked empty vector
-/// (FIFO via the `peek`/`pop` arms below; 4 recipes BFS with
-/// it).
-pub(crate) fn empty_queue_value() -> Value {
-    Value::Vector(
-        Vector::from_vec(vec![])
-            .with_meta(Some(new_map().insert(queue_mark_key(), Value::Bool(true)))),
-    )
-}
-
-/// `pop` over a queue emulation: drops the FRONT (empty pops
-/// answer the queue itself, like the JVM — oracle).
-fn pop_queue(x: &Vector) -> Value {
-    if x.is_empty() {
-        return Value::Vector(x.clone());
+/// The `clojure.lang.PersistentQueue` behind a value (#277: a real
+/// FIFO, [`QueueValue`], instead of a marked vector whose `pop`
+/// rebuilt it).
+pub(crate) fn as_queue(v: &Value) -> Option<&QueueValue> {
+    match v {
+        Value::Extension(e) => e.as_any().downcast_ref::<QueueValue>(),
+        _ => None,
     }
-    Value::Vector(Vector::from_vec(x.iter().skip(1).collect()).with_meta(x.meta().cloned()))
+}
+
+/// A uniquely held queue, for the owned in-place ops (`None` when
+/// shared or not a queue).
+pub(crate) fn queue_mut(e: &mut Arc<dyn clj_value::ExtensionValue>) -> Option<&mut QueueValue> {
+    Arc::get_mut(e)
+        .and_then(|x| x.as_any_mut())
+        .and_then(|a| a.downcast_mut::<QueueValue>())
 }
 
 fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
@@ -2757,7 +2781,6 @@ fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(x) if is_queue_vec(x) => Ok(x.iter().next().unwrap_or(Value::Nil)),
         Value::Vector(x) => Ok(x.iter().next_back().unwrap_or(Value::Nil)),
         Value::PrimitiveVector(p) => Ok(p.iter().last().cloned().unwrap_or(Value::Nil)),
         Value::MapEntry { val, .. } => Ok((**val).clone()),
@@ -2771,6 +2794,9 @@ fn native_peek(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
             }
             if let Some(sv) = as_subvector(&args[0]) {
                 return Ok(sv.iter().last().unwrap_or(Value::Nil));
+            }
+            if let Some(q) = as_queue(&args[0]) {
+                return Ok(q.peek());
             }
             Err(cce_err(&args[0], "clojure.lang.IPersistentStack"))
         }
@@ -2818,8 +2844,12 @@ fn pop_pv(p: PrimitiveVector) -> Result<Value, NativeError> {
     ))
 }
 
-/// `pop` over anything else (subvectors shrink; the rest fail).
+/// `pop` over anything else (queues drop their front, subvectors
+/// shrink; the rest fail).
 fn pop_fallback(arg: &Value) -> Result<Value, NativeError> {
+    if let Some(q) = as_queue(arg) {
+        return Ok(Value::Extension(Arc::new(q.pop())));
+    }
     if let Some(sp) = crate::lazy::as_splitvec(arg) {
         if sp.len() == 1 {
             return Ok(Value::Vector(Vector::from_vec(Vec::new())));
@@ -2847,7 +2877,6 @@ fn native_pop(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErro
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         Value::List(l) => pop_list(l),
-        Value::Vector(x) if is_queue_vec(x) => Ok(pop_queue(x)),
         Value::Vector(x) => pop_vector(x.clone()),
         Value::PrimitiveVector(p) => pop_pv(p.clone()),
         // Popping an entry answers its 1-vector (Oracle FX2
@@ -3154,10 +3183,13 @@ fn sorted_lookup_map(
 }
 
 /// Sorted `conj`: a compare-0 hit is a no-op (the member stays).
-fn sorted_conj_set(eval: &mut Evaluator, s: &Set, v: Value) -> Result<Set, NativeError> {
-    Ok(match set_position(eval, s, &v)? {
-        SortPos::Found(_) => s.clone(),
-        SortPos::Insert(i) => s.clone().insert_sorted_at(i, v),
+/// Sorted `conj` over an owned set (#277: a uniquely held set, such as
+/// a moved loop accumulator, inserts in place; the borrowed version
+/// cloned it first, so every insert copied every member).
+fn sorted_conj_set(eval: &mut Evaluator, s: Set, v: Value) -> Result<Set, NativeError> {
+    Ok(match set_position(eval, &s, &v)? {
+        SortPos::Found(_) => s,
+        SortPos::Insert(i) => s.insert_sorted_at(i, v),
     })
 }
 
@@ -3170,11 +3202,12 @@ fn set_position(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<SortPos, Nat
     sort_position(eval, &spec, s.sorted_len(), |i| s.sorted_member(i), v)
 }
 
-/// Sorted `disj` / `contains?` through the stored member.
-fn sorted_without_set(eval: &mut Evaluator, s: &Set, v: &Value) -> Result<Set, NativeError> {
-    Ok(match set_position(eval, s, v)? {
-        SortPos::Found(i) => s.clone().without_sorted_at(i),
-        SortPos::Insert(_) => s.clone(),
+/// Sorted `disj` over an owned set (in place when uniquely held, like
+/// [`sorted_conj_set`]).
+fn sorted_without_set(eval: &mut Evaluator, s: Set, v: &Value) -> Result<Set, NativeError> {
+    Ok(match set_position(eval, &s, v)? {
+        SortPos::Found(i) => s.without_sorted_at(i),
+        SortPos::Insert(_) => s,
     })
 }
 
@@ -3228,7 +3261,7 @@ fn sorted_set_from(
 ) -> Result<Value, NativeError> {
     let mut out = new_set().with_sort(Some(spec));
     for v in members {
-        out = sorted_conj_set(eval, &out, v.clone())?;
+        out = sorted_conj_set(eval, out, v.clone())?;
     }
     Ok(Value::Set(out))
 }

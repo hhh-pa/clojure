@@ -18,18 +18,35 @@
 //! order, tracking which of the fn's own lexical locals (indexes at
 //! or past its `base`) are still read later. `recur` jumps to its
 //! target's head, whose live set comes from a fixed point; every
-//! form the analysis does not model precisely — `try` (a handler may
-//! still read anything), closure creation (captures copy), escapes
-//! to the tree evaluator, `:or` defaults — reads every visible local,
-//! so no read before it is a last use.
+//! form the analysis does not model precisely, including `try`,
+//! escapes to the tree evaluator, and `:or` defaults, reads every
+//! visible local. An anonymous fn still reads every visible local
+//! here, but the compiler can move its actual captures if nothing
+//! that runs after closure creation reads them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::expr::{DirectCall, Expr, Pattern, pattern_count};
 
-/// The last-use reads of one body, by node address (the analyzed
-/// tree outlives its compilation).
-pub(crate) type LastUses = HashSet<*const Expr>;
+/// Last-use reads and the locals live after closure creation, keyed
+/// by expression address. The analyzed tree outlives compilation.
+#[derive(Default)]
+pub(crate) struct LastUses {
+    reads: HashSet<*const Expr>,
+    after_closure: HashMap<*const Expr, Live>,
+}
+
+impl LastUses {
+    pub(crate) fn contains(&self, expr: &Expr) -> bool {
+        self.reads.contains(&(expr as *const Expr))
+    }
+
+    pub(crate) fn can_move_capture(&self, expr: &Expr, local: usize) -> bool {
+        self.after_closure
+            .get(&(expr as *const Expr))
+            .is_some_and(|after| !after.contains(local))
+    }
+}
 
 /// Lexical locals at or past `base`, as a bit set.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -78,7 +95,7 @@ pub(crate) fn last_uses(body: &[Expr], base: usize, visible: usize) -> LastUses 
         visible,
         recur_after: Live::default(),
         record: true,
-        last: HashSet::new(),
+        last: LastUses::default(),
     };
     let mut live = Live::default();
     w.seq(body, &mut live);
@@ -94,7 +111,7 @@ pub(crate) fn may_read(expr: &Expr, base: usize, visible: usize, local: usize) -
         visible,
         recur_after: Live::default(),
         record: false,
-        last: HashSet::new(),
+        last: LastUses::default(),
     };
     let mut live = Live::default();
     w.walk(expr, &mut live);
@@ -118,7 +135,7 @@ impl Walk {
         }
         let rel = i - self.base;
         if self.record && !live.contains(rel) {
-            self.last.insert(e as *const Expr);
+            self.last.reads.insert(e as *const Expr);
         }
         live.insert(rel);
     }
@@ -225,6 +242,14 @@ impl Walk {
                 }
                 live.union(&failing);
                 self.walk(test, live);
+            }
+            Expr::Fn(_) => {
+                if self.record {
+                    self.last
+                        .after_closure
+                        .insert(e as *const Expr, live.clone());
+                }
+                self.read_all(live);
             }
             _ => self.read_all(live),
         }

@@ -995,7 +995,14 @@ fn throwable_ctors() {
 #[test]
 fn static_field_calls() {
     let mut eval = boot();
-    assert_eq!(run(&mut eval, "(clojure.lang.PersistentQueue/EMPTY)"), "[]");
+    // #277: the JVM's queue prints its `#object` form (the identity
+    // hash is arbitrary; `@1` is the empty queue's `hashCode`).
+    let empty_queue = run(&mut eval, "(clojure.lang.PersistentQueue/EMPTY)");
+    assert!(
+        empty_queue.starts_with("#object[clojure.lang.PersistentQueue 0x")
+            && empty_queue.ends_with(" \"clojure.lang.PersistentQueue@1\"]"),
+        "{empty_queue}"
+    );
     assert_eq!(run(&mut eval, "(Math/PI)"), "3.141592653589793");
     assert_eq!(run(&mut eval, "(Long/MAX_VALUE)"), "9223372036854775807");
     // Methods still win over the field path.
@@ -2312,6 +2319,27 @@ fn io_resource_shapes() {
     );
     std::fs::remove_dir_all(&sub).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn deque_member_sites_keep_live_dispatch_and_argument_order() {
+    let mut eval = boot();
+    assert_eq!(
+        run(
+            &mut eval,
+            r#"(let [dq (java.util.ArrayDeque. [1])
+                     peek (fn [d] (.peekFirst d))
+                     add (fn [d x] (.addLast d x))]
+                 [(peek dq) (add dq 2)
+                  (with-redefs [clojure.core/__meth* (fn [name _] name)] (peek dq))
+                  (peek dq) (.pollLast dq)
+                  (clojure.core/__meth* (str "peekFirst") dq)
+                  (try (peek nil) (catch NullPointerException _ :nil-target))
+                  (try (add dq nil) (catch NullPointerException _ :nil-item))
+                  (.addLast dq (do (.pollFirst dq) 3)) (.pollFirst dq)])"#
+        ),
+        r#"[1 true "peekFirst" 1 2 1 :nil-target :nil-item true 3]"#
+    );
 }
 
 /// `ArrayDeque`: ends add/poll/peek, collection ctors, nils.

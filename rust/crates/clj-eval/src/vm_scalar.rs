@@ -208,13 +208,19 @@ pub enum Calc {
     Op1(IntOp1, IExpr),
     Op2(IntOp2, IExpr, IExpr),
     Fp(FpCalc),
-    /// `(nth coll i)` over an invariant collection.
-    Nth(Loc, IExpr),
+    /// Read a scalar at an index in an invariant collection.
+    Index(Loc, IExpr, IndexRead),
     /// `(count coll)` over an invariant collection.
     Count(Loc),
     /// Item `j` of the vector at `coll[i]` (destructured `(let [[a b …] (nth coll i)] …)`
-    /// or nested `(nth (nth coll i) j)`).
+    /// nested `(nth (nth coll i) j)`, or `(get-in coll [i j])`).
     Nth2(Loc, IExpr, IExpr),
+}
+
+#[derive(Clone, Copy)]
+pub enum IndexRead {
+    Nth,
+    Aget,
 }
 
 /// Floating-point, math, and numeric cast operations.
@@ -359,6 +365,7 @@ enum FpStep {
 #[derive(Clone, Copy)]
 enum Co {
     Nth(Sl, u16, Sl),
+    Aget(Sl, u16, Sl),
     Count(Sl, u16),
     /// Result, collection index, outer index slot, inner index slot.
     Nth2(Sl, u16, Sl, Sl),
@@ -409,7 +416,7 @@ impl Ins {
                     | FpStep::Cast(_, d, _),
                 ),
             )
-            | Ins::Co(Co::Nth(d, ..) | Co::Count(d, _) | Co::Nth2(d, ..)) => d,
+            | Ins::Co(Co::Nth(d, ..) | Co::Aget(d, ..) | Co::Count(d, _) | Co::Nth2(d, ..)) => d,
             _ => return false,
         };
         let hit = *d == from;
@@ -562,6 +569,7 @@ enum Coll<'v> {
     Str(&'v std::sync::Arc<str>),
     Vec(&'v clj_value::Vector),
     Trans(&'v clj_value::Transient),
+    Array(&'v clj_value::Array),
     Other,
 }
 
@@ -571,6 +579,7 @@ fn coll_of(v: &Value) -> Coll<'_> {
         Value::Str(s) => Coll::Str(s),
         Value::Vector(v) => Coll::Vec(v),
         Value::Transient(t) => Coll::Trans(t),
+        Value::Array(a) => Coll::Array(a),
         _ => Coll::Other,
     }
 }
@@ -593,16 +602,23 @@ fn nth(coll: &Coll<'_>, i: Sv) -> Option<Sv> {
             TransientKind::Vector(tv) => tv.read_at(idx, Sv::of),
             _ => None,
         },
-        Coll::Other => None,
+        Coll::Array(_) | Coll::Other => None,
     }
 }
 
-/// The scalar item `j` of the vector at `coll[i]` (a destructured
-/// `(nth coll i)` or nested `(nth (nth coll i) j)`): anything but a vector
-/// there, or a non-scalar or missing item, misses.
+fn aget(coll: &Coll<'_>, i: Sv) -> Option<Sv> {
+    let Coll::Array(array) = coll else {
+        return None;
+    };
+    let index = usize::try_from(i.int_of()?).ok()?;
+    Sv::of(&crate::arrays::aget_fast(array, index)?)
+}
+
+/// A scalar at two vector indexes. Wider indexes take the general path,
+/// where `get-in` narrows integer keys and `nth` checks them.
 fn nth2(coll: &Coll<'_>, i: Sv, j: Sv) -> Option<Sv> {
-    let idx = usize::try_from(i.int_of()?).ok()?;
-    let k = usize::try_from(j.int_of()?).ok()?;
+    let idx = i32::try_from(i.int_of()?).and_then(usize::try_from).ok()?;
+    let k = i32::try_from(j.int_of()?).and_then(usize::try_from).ok()?;
     let item = |v: &Value| match v {
         Value::Vector(inner) => inner.read_at(k, Sv::of),
         _ => None,
@@ -624,7 +640,7 @@ fn count(coll: &Coll<'_>) -> Option<Sv> {
             TransientKind::Vector(tv) => tv.len().ok()?,
             _ => return None,
         },
-        Coll::Other => return None,
+        Coll::Array(_) | Coll::Other => return None,
     };
     i64::try_from(n).ok().map(Sv::int)
 }
@@ -946,6 +962,7 @@ fn step_fp(fp: FpStep, s: &[Sv]) -> Option<(Sl, Sv)> {
 fn co_step(co: Co, s: &mut [Sv], colls: &[Coll<'_>]) -> Option<()> {
     let (d, v) = match co {
         Co::Nth(d, c, i) => (d, nth(&colls[usize::from(c)], s[usize::from(i)])?),
+        Co::Aget(d, c, i) => (d, aget(&colls[usize::from(c)], s[usize::from(i)])?),
         Co::Nth2(d, c, i, j) => (
             d,
             nth2(&colls[usize::from(c)], s[usize::from(i)], s[usize::from(j)])?,
@@ -1076,13 +1093,7 @@ fn run(ev: &mut Evaluator, f: &mut Frame<'_>, sc: &ScalarLoop, targets: &[usize]
             s[p] = Sv::of(&f.regs[*r])?;
         }
     }
-    for (slot, l) in sc.loads.iter() {
-        s[usize::from(*slot)] = Sv::of(f.get(*l))?;
-    }
-    for (slot, var) in sc.globals.iter() {
-        let val = ev.deref_var_cached(var.id, &var.sym);
-        s[usize::from(*slot)] = Sv::of(&val)?;
-    }
+    load_scalar_inputs(ev, f, sc, s)?;
     if !may_enter(ev, sc) {
         return None;
     }
@@ -1132,6 +1143,275 @@ fn run_program(ev: &mut Evaluator, f: &Frame<'_>, sc: &ScalarLoop, s: &mut [Sv])
         rollback(&mut log);
     }
     out
+}
+
+/// Load captured scalars and dereference globals in the current evaluator.
+fn load_scalar_inputs(
+    ev: &mut Evaluator,
+    frame: &Frame<'_>,
+    sc: &ScalarLoop,
+    slots: &mut [Sv],
+) -> Option<()> {
+    for (slot, loc) in &sc.loads {
+        slots[usize::from(*slot)] = Sv::of(frame.get(*loc))?;
+    }
+    for (slot, var) in &sc.globals {
+        slots[usize::from(*slot)] = Sv::of(&ev.deref_var_cached(var.id, &var.sym))?;
+    }
+    Some(())
+}
+
+pub(crate) struct ScalarFunction {
+    scalar: ScalarLoop,
+    dot: Option<[DotRead; 2]>,
+    scale: Option<Sl>,
+}
+
+#[inline(never)]
+pub(crate) fn run_scalar_call(
+    ev: &mut Evaluator,
+    frame: &Frame<'_>,
+    plan: &ScalarFunction,
+) -> Option<Value> {
+    if plan.scalar.code.len() < 8 {
+        return None;
+    }
+    run_scalar_value(ev, frame, plan)
+}
+
+pub(crate) fn run_scalar_value(
+    ev: &mut Evaluator,
+    frame: &Frame<'_>,
+    plan: &ScalarFunction,
+) -> Option<Value> {
+    let sc = &plan.scalar;
+    let snap = ev.direct_snapshot();
+    if !may_enter(ev, sc) {
+        return None;
+    }
+    let mut slots: SmallVec<[Sv; 64]> = SmallVec::from_slice(&sc.init);
+    for (index, used) in sc.scalar.iter().copied().enumerate() {
+        if used {
+            slots[index] = Sv::of(frame.get(Loc::Reg(index)))?;
+        }
+    }
+    load_scalar_inputs(ev, frame, sc, &mut slots)?;
+    let colls: SmallVec<[Coll<'_>; 8]> = sc.colls.iter().map(|l| coll_of(frame.get(*l))).collect();
+    if !immutable_reads(&colls) {
+        return None;
+    }
+    let mut watch = Watch {
+        snap,
+        trips: 0,
+        done: 0,
+        iters: 0,
+        logged: 0,
+    };
+    let result = exec::<false, false>(
+        sc,
+        ev,
+        frame,
+        &mut slots,
+        &colls,
+        &mut Log::default(),
+        &mut watch,
+    )?;
+    (ev.direct_snapshot() == snap).then_some(result)
+}
+
+fn immutable_reads(colls: &[Coll<'_>]) -> bool {
+    colls
+        .iter()
+        .all(|c| matches!(c, Coll::Ascii(_) | Coll::Str(_) | Coll::Vec(_)))
+}
+
+/// Attempt a pure range fold. On a miss, the caller can restart the
+/// general reduction because this program observes immutable inputs only.
+pub(crate) fn run_reduce(
+    ev: &mut Evaluator,
+    frame: &Frame<'_>,
+    plan: &ScalarFunction,
+    acc: &Value,
+    mut index: i64,
+    step: i64,
+    count: usize,
+) -> Option<Value> {
+    let sc = &plan.scalar;
+    let mut acc = Sv::of(acc)?;
+    let snap = ev.direct_snapshot();
+    if !may_enter(ev, sc) {
+        return None;
+    }
+    let mut watch = Watch {
+        snap,
+        trips: 0,
+        done: 0,
+        iters: 0,
+        logged: 0,
+    };
+    let mut slots: SmallVec<[Sv; 16]> = SmallVec::from_slice(&sc.init);
+    load_scalar_inputs(ev, frame, sc, &mut slots)?;
+    let colls: SmallVec<[Coll<'_>; 8]> = sc.colls.iter().map(|l| coll_of(frame.get(*l))).collect();
+    if !immutable_reads(&colls) {
+        return None;
+    }
+    if let (Some(dot), K::Double) = (plan.dot, acc.k) {
+        if let Some(out) = reduce_double_dot(dot, acc, index, step, count, &slots, &colls) {
+            return (ev.direct_snapshot() == watch.snap).then_some(out);
+        }
+    }
+    let mut log = Log::default();
+    for _ in 0..count {
+        slots[0] = acc;
+        slots[1] = Sv::int(index);
+        let result = exec::<false, false>(sc, ev, frame, &mut slots, &colls, &mut log, &mut watch)?;
+        acc = Sv::of(&result)?;
+        index = index.wrapping_add(step);
+    }
+    (ev.direct_snapshot() == watch.snap).then(|| acc.value())
+}
+
+pub(crate) fn run_reverse_fold(
+    ev: &mut Evaluator,
+    frame: &Frame<'_>,
+    plan: &ScalarFunction,
+    acc: &Value,
+    items: &[f64],
+) -> Option<Value> {
+    let scale = usize::from(plan.scale?);
+    let sc = &plan.scalar;
+    let Value::Double(mut result) = *acc else {
+        return None;
+    };
+    let snap = ev.direct_snapshot();
+    if !may_enter(ev, sc) {
+        return None;
+    }
+    let mut slots: SmallVec<[Sv; 16]> = SmallVec::from_slice(&sc.init);
+    load_scalar_inputs(ev, frame, sc, &mut slots)?;
+    let factor = slots[scale].f64_of()?;
+    for &item in items.iter().rev() {
+        result = result * factor + item;
+    }
+    (ev.direct_snapshot() == snap).then_some(Value::Double(result))
+}
+
+/// The straight-line double fold `(+ (* acc factor) item)` in its
+/// original operand order. The factor is a constant or a captured scalar.
+fn double_scale_add(code: &[Ins], out: Sl) -> Option<Sl> {
+    let [
+        Ins::Do(Step::Op2(IntOp2::Mul, product, 0, scale)),
+        Ins::Do(Step::Op2(IntOp2::Add, result, addend, 1)),
+        Ins::Exit(0),
+    ] = code
+    else {
+        return None;
+    };
+    (*product == *addend && *result == out && *scale > 1 && ![product, result].contains(&scale))
+        .then_some(*scale)
+}
+
+/// The two packed reads in a sequential sum of products. Analyze the
+/// shape once, when the reducer is compiled.
+fn double_dot(code: &[Ins], out: Sl) -> Option<[DotRead; 2]> {
+    let [
+        Ins::Co(a),
+        Ins::Co(b),
+        Ins::Do(Step::Op2(IntOp2::Mul, product, lhs, rhs)),
+        Ins::Do(Step::Op2(IntOp2::Add, result, 0, addend)),
+        Ins::Exit(0),
+    ] = code
+    else {
+        return None;
+    };
+    let (ad, a) = DotRead::from_read(*a)?;
+    let (bd, b) = DotRead::from_read(*b)?;
+    let written = [0, ad, bd, *product, *result];
+    if *lhs != ad
+        || *rhs != bd
+        || addend != product
+        || *result != out
+        || !a.invariant_indices(&written)
+        || !b.invariant_indices(&written)
+    {
+        return None;
+    }
+    Some([a, b])
+}
+
+fn reduce_double_dot(
+    [a, b]: [DotRead; 2],
+    acc: Sv,
+    mut index: i64,
+    step: i64,
+    count: usize,
+    slots: &[Sv],
+    colls: &[Coll<'_>],
+) -> Option<Value> {
+    let mut total = acc.f64_of()?;
+    for _ in 0..count {
+        let x = a.item(index, slots, colls)?;
+        let y = b.item(index, slots, colls)?;
+        total += x * y;
+        index = index.wrapping_add(step);
+    }
+    Some(Value::Double(total))
+}
+
+#[derive(Clone, Copy)]
+struct DotRead {
+    coll: u16,
+    index: Sl,
+    column: Option<Sl>,
+}
+
+impl DotRead {
+    fn from_read(read: Co) -> Option<(Sl, Self)> {
+        let (dest, coll, index, column) = match read {
+            Co::Nth(dest, coll, index) => (dest, coll, index, None),
+            Co::Nth2(dest, coll, index, column) => (dest, coll, index, Some(column)),
+            _ => return None,
+        };
+        Some((
+            dest,
+            Self {
+                coll,
+                index,
+                column,
+            },
+        ))
+    }
+
+    fn invariant_indices(self, written: &[Sl]) -> bool {
+        !written.contains(&self.index) && self.column.is_none_or(|c| !written.contains(&c))
+    }
+
+    #[inline]
+    fn item(self, index: i64, slots: &[Sv], colls: &[Coll<'_>]) -> Option<f64> {
+        let Coll::Vec(vector) = colls[usize::from(self.coll)] else {
+            return None;
+        };
+        let i = dot_index(self.index, index, slots)?;
+        let Some(column) = self.column else {
+            return vector.as_flat_doubles()?.get(i).copied();
+        };
+        let Value::Vector(row) = vector.get_ref(i)? else {
+            return None;
+        };
+        row.as_flat_doubles()?
+            .get(dot_index(column, index, slots)?)
+            .copied()
+    }
+}
+
+#[inline]
+fn dot_index(slot: Sl, index: i64, slots: &[Sv]) -> Option<usize> {
+    let n = if slot == 1 {
+        index
+    } else {
+        slots[usize::from(slot)].int_of()?
+    };
+    i32::try_from(n).and_then(usize::try_from).ok()
 }
 
 /// Whether a run may start: the sites validate (one cached verdict
@@ -1205,7 +1485,33 @@ struct Lower<'b> {
     targets: &'b [usize],
 }
 
-impl Lower<'_> {
+impl<'a> Lower<'a> {
+    fn new(nslots: usize, scalar: &'a [bool], targets: &'a [usize]) -> Self {
+        Self {
+            code: Vec::new(),
+            nslots,
+            consts: Vec::new(),
+            loads: Vec::new(),
+            globals: Vec::new(),
+            colls: Vec::new(),
+            effs: Vec::new(),
+            exits: Vec::new(),
+            labels: vec![0],
+            scalar,
+            targets,
+        }
+    }
+
+    /// Slot, effect, exit and collection ids are written as `u16`s.
+    fn ids_fit(&self) -> bool {
+        let ids = self
+            .nslots
+            .max(self.effs.len())
+            .max(self.exits.len())
+            .max(self.colls.len());
+        ids < usize::from(Sl::MAX)
+    }
+
     /// A fresh slot (indexes wrap past `Sl::MAX`; [`compile`]
     /// rejects such programs).
     fn sl(&mut self) -> Sl {
@@ -1299,9 +1605,14 @@ impl Lower<'_> {
                 Ins::Do(Step::Op2(*op, self.sl(), a, b))
             }
             Calc::Fp(fp) => Ins::Do(Step::Fp(self.fp_calc_val(fp))),
-            Calc::Nth(l, i) => {
-                let (c, i) = (self.coll(*l), self.val(i));
-                Ins::Co(Co::Nth(self.sl(), c, i))
+            Calc::Index(l, i, read) => {
+                let i = self.val(i);
+                let c = self.coll(*l);
+                let d = self.sl();
+                Ins::Co(match read {
+                    IndexRead::Nth => Co::Nth(d, c, i),
+                    IndexRead::Aget => Co::Aget(d, c, i),
+                })
             }
             Calc::Count(l) => {
                 let c = self.coll(*l);
@@ -1618,14 +1929,47 @@ impl Lower<'_> {
         self.place(after);
     }
 
-    /// Resolve label ids to code indexes (label 0 is the head).
-    fn finish(mut self) -> Vec<Ins> {
+    fn finish(
+        mut self,
+        sites: Vec<Site>,
+        roots: Vec<RootSite>,
+        depth: usize,
+        (entries, trips): (u32, u32),
+    ) -> Option<ScalarLoop> {
+        self.ids_fit().then_some(())?;
+        let mut init = vec![Sv::ZERO; self.nslots];
+        for (slot, v) in self.consts {
+            init[usize::from(slot)] = v;
+        }
+        // Resolve label ids to code indexes (label 0 is the head).
         for ins in &mut self.code {
             if let Ins::Br(_, t) | Ins::Jmp(t) = ins {
                 *t = self.labels[*t as usize];
             }
         }
-        self.code
+        let logs = !self.effs.is_empty() && mark_unlogged(&mut self.code);
+        Some(ScalarLoop {
+            scalar: self.scalar.into(),
+            init: init.into(),
+            code: self.code.into(),
+            loads: self.loads.into(),
+            globals: self.globals.into(),
+            colls: self.colls.into(),
+            effs: self.effs.into(),
+            exits: self.exits.into(),
+            sites: sites.into(),
+            roots: roots.into(),
+            depth,
+            logs,
+            gid: crate::vm::next_site(),
+            log_iters: AtomicUsize::new(0),
+            logged: AtomicUsize::new(0),
+            entries: AtomicU32::new(entries),
+            iters: AtomicU32::new(trips),
+            runs: AtomicU32::new(0),
+            misses: AtomicU32::new(0),
+            off: AtomicBool::new(false),
+        })
     }
 }
 
@@ -1680,7 +2024,7 @@ fn sinks(n: &Node) -> bool {
 fn reads_coll(e: &IExpr) -> bool {
     match e {
         IExpr::Calc(c) => match &**c {
-            Calc::Nth(..) | Calc::Count(_) | Calc::Nth2(..) => true,
+            Calc::Index(..) | Calc::Count(_) | Calc::Nth2(..) => true,
             Calc::Op1(_, a) | Calc::Fp(FpCalc::Math1(_, a) | FpCalc::Cast(_, a)) => reads_coll(a),
             Calc::Op2(_, a, b) | Calc::Fp(FpCalc::Div(a, b) | FpCalc::Math2(_, a, b)) => {
                 reads_coll(a) || reads_coll(b)
@@ -1718,6 +2062,7 @@ fn loc_eq(a: Loc, b: Loc) -> bool {
 /// the call-site records, and the closures calls may inline.
 pub(crate) trait Host {
     fn resolve_local(&mut self, idx: usize) -> Loc;
+
     /// Whether `expr` may read local `g` (`vm_live::may_read` over
     /// the compiling scope).
     fn reads(&self, expr: &Expr, g: usize) -> bool;
@@ -1728,6 +2073,10 @@ pub(crate) trait Host {
     /// AOT's nested lookup only probes immutable persistent vectors.
     fn can_defer_row_read(&self) -> bool {
         false
+    }
+    /// Mutable array reads use the VM's locking array accessor.
+    fn supports_array_read(&self) -> bool {
+        true
     }
     /// Resolve a read-only global collection (`Expr::Global(var)`) to a
     /// host-managed `Loc` (used by AOT for stable top-level vectors/tables).
@@ -1858,26 +2207,7 @@ fn build_ast(
     targets: &[usize],
     body_base: usize,
 ) -> Option<ScalarAst> {
-    let n = targets.len();
-    let mut b = Builder {
-        host,
-        body_base,
-        lex: Vec::new(),
-        nslots: n,
-        targets: targets.to_vec(),
-        scalar: vec![false; n],
-        boxed: vec![false; n],
-        sites: Vec::new(),
-        roots: Vec::new(),
-        stack: Vec::new(),
-        max_depth: 0,
-        inlined: 0,
-        inner: None,
-        primed: false,
-        seen_effect: false,
-        primed_after_effect: false,
-        deferred_row_read: false,
-    };
+    let mut b = Builder::new(host, body_base, targets);
     let node = b.body(body);
     let clash = b.scalar.iter().zip(&b.boxed).any(|(s, x)| *s && *x);
     if clash || !productive(&node) {
@@ -1919,6 +2249,10 @@ impl<F: Fn(&Var) -> bool> Host for AotHost<'_, F> {
 
     fn can_defer_row_read(&self) -> bool {
         true
+    }
+
+    fn supports_array_read(&self) -> bool {
+        false
     }
 
     fn callee(&self, var: &Var, argc: usize) -> Option<Callee> {
@@ -1968,25 +2302,9 @@ pub fn compile_aot_expr(
         can_read_global_coll,
         global_colls: Vec::new(),
     };
-    let mut b = Builder {
-        host: &mut host,
-        body_base,
-        lex: (0..n_params).map(Lex::Slot).collect(),
-        nslots: n_params,
-        targets: Vec::new(),
-        scalar: Vec::new(),
-        boxed: Vec::new(),
-        sites: Vec::new(),
-        roots: Vec::new(),
-        stack: Vec::new(),
-        max_depth: 0,
-        inlined: 0,
-        inner: None,
-        primed: false,
-        seen_effect: false,
-        primed_after_effect: false,
-        deferred_row_read: false,
-    };
+    let mut b = Builder::new(&mut host, body_base, &[]);
+    b.lex = (0..n_params).map(Lex::Slot).collect();
+    b.nslots = n_params;
     let expr = b.seq_expr(body);
     if b.seen_effect || misses(&expr) {
         return None;
@@ -2033,59 +2351,39 @@ pub(crate) fn compile(
 ) -> Option<ScalarLoop> {
     (entries < JUDGE_AFTER || trips >= MIN_TRIPS.saturating_mul(entries)).then_some(())?;
     let ast = build_ast(host, body, targets, body_base)?;
-    let mut lw = Lower {
-        code: vec![Ins::Top],
-        nslots: ast.nslots,
-        consts: Vec::new(),
-        loads: Vec::new(),
-        globals: Vec::new(),
-        colls: Vec::new(),
-        effs: Vec::new(),
-        exits: Vec::new(),
-        labels: vec![0],
-        scalar: &ast.scalar,
-        targets,
-    };
+    let mut lw = Lower::new(ast.nslots, &ast.scalar, targets);
+    lw.code.push(Ins::Top);
     lw.node(&ast.node, &Ctx::Outer);
-    // Slot, effect, exit and collection ids are `u16`s.
-    let ids = lw
-        .nslots
-        .max(lw.effs.len())
-        .max(lw.exits.len())
-        .max(lw.colls.len());
-    (ids < usize::from(Sl::MAX)).then_some(())?;
-    let mut init = vec![Sv::ZERO; lw.nslots];
-    for (slot, v) in &lw.consts {
-        init[usize::from(*slot)] = *v;
+    lw.finish(ast.sites, ast.roots, ast.max_depth, (entries, trips))
+}
+
+pub(crate) fn compile_scalar_function(
+    host: &mut dyn Host,
+    body: &[Expr],
+    body_base: usize,
+    targets: &[usize],
+) -> Option<ScalarFunction> {
+    let mut b = Builder::new(host, body_base, targets);
+    let expr = b.seq_expr(body);
+    let clash = b.scalar.iter().zip(&b.boxed).any(|(s, x)| *s && *x);
+    if b.seen_effect || b.inner.is_some() || clash || misses(&expr) {
+        return None;
     }
-    let loads = std::mem::take(&mut lw.loads);
-    let globals = std::mem::take(&mut lw.globals);
-    let (colls, effs) = (std::mem::take(&mut lw.colls), std::mem::take(&mut lw.effs));
-    let exits = std::mem::take(&mut lw.exits);
-    let mut code = lw.finish();
-    let logs = mark_unlogged(&mut code);
-    Some(ScalarLoop {
-        scalar: ast.scalar.into(),
-        init: init.into(),
-        code: code.into(),
-        loads: loads.into(),
-        globals: globals.into(),
-        colls: colls.into(),
-        effs: effs.into(),
-        exits: exits.into(),
-        sites: ast.sites.into(),
-        roots: ast.roots.into(),
-        depth: ast.max_depth,
-        logs,
-        gid: crate::vm::next_site(),
-        log_iters: AtomicUsize::new(0),
-        logged: AtomicUsize::new(0),
-        entries: AtomicU32::new(entries),
-        iters: AtomicU32::new(trips),
-        runs: AtomicU32::new(0),
-        misses: AtomicU32::new(0),
-        off: AtomicBool::new(false),
-    })
+    let mut lw = Lower::new(b.nslots, &b.scalar, targets);
+    let result = lw.val(&expr);
+    lw.effs.is_empty().then_some(())?;
+    lw.exits.push(ExitI::Slot(result));
+    lw.code.push(Ins::Exit(0));
+    let scalar = lw.finish(b.sites, b.roots, b.max_depth + 1, (0, 0))?;
+    let (dot, scale) = if targets.len() == 2 {
+        (
+            double_dot(&scalar.code, result),
+            double_scale_add(&scalar.code, result),
+        )
+    } else {
+        (None, None)
+    };
+    Some(ScalarFunction { scalar, dot, scale })
 }
 
 /// Whether some `recur` leaf can run on scalars (a body that
@@ -2131,9 +2429,9 @@ fn misses(e: &IExpr) -> bool {
 
 fn calc_misses(c: &Calc) -> bool {
     match c {
-        Calc::Op1(_, a) | Calc::Fp(FpCalc::Math1(_, a) | FpCalc::Cast(_, a)) | Calc::Nth(_, a) => {
-            misses(a)
-        }
+        Calc::Op1(_, a)
+        | Calc::Fp(FpCalc::Math1(_, a) | FpCalc::Cast(_, a))
+        | Calc::Index(_, a, _) => misses(a),
         Calc::Op2(_, a, b)
         | Calc::Fp(FpCalc::Div(a, b) | FpCalc::Math2(_, a, b))
         | Calc::Nth2(_, a, b) => misses(a) || misses(b),
@@ -2160,7 +2458,30 @@ fn cond_misses(c: &Cond) -> bool {
     }
 }
 
-impl Builder<'_> {
+impl<'h> Builder<'h> {
+    fn new(host: &'h mut dyn Host, body_base: usize, targets: &[usize]) -> Self {
+        let n = targets.len();
+        Self {
+            host,
+            body_base,
+            lex: Vec::new(),
+            nslots: n,
+            targets: targets.to_vec(),
+            scalar: vec![false; n],
+            boxed: vec![false; n],
+            sites: Vec::new(),
+            roots: Vec::new(),
+            stack: Vec::new(),
+            max_depth: 0,
+            inlined: 0,
+            inner: None,
+            primed: false,
+            seen_effect: false,
+            primed_after_effect: false,
+            deferred_row_read: false,
+        }
+    }
+
     fn slot(&mut self) -> usize {
         let s = self.nslots;
         self.nslots += 1;
@@ -2618,6 +2939,12 @@ impl Builder<'_> {
         Some(match (name, args) {
             ("/", args) if !args.is_empty() => self.div_expr(args),
             ("nth", [coll, i]) => self.nth_expr(coll, i),
+            ("get-in", [coll, Expr::VecLit(keys, None)]) => return self.get_in_expr(coll, keys),
+            ("aget", [coll, i]) if self.host.supports_array_read() => {
+                self.read_coll(coll).map_or(IExpr::Deopt, |l| {
+                    calc(Calc::Index(l, self.expr(i), IndexRead::Aget))
+                })
+            }
             ("count", [coll]) => self
                 .read_coll(coll)
                 .map_or(IExpr::Deopt, |l| calc(Calc::Count(l))),
@@ -2627,6 +2954,15 @@ impl Builder<'_> {
             ("abs", [x]) => calc(Calc::Fp(FpCalc::Math1(MathOp1::Abs, self.expr(x)))),
             _ => return None,
         })
+    }
+
+    fn get_in_expr(&mut self, coll: &Expr, keys: &[Expr]) -> Option<IExpr> {
+        let [row, col] = keys else {
+            return None;
+        };
+        let coll = self.read_coll(coll)?;
+        let row = self.expr(row);
+        Some(calc(Calc::Nth2(coll, row, self.expr(col))))
     }
 
     fn div_expr(&mut self, args: &[Expr]) -> IExpr {
@@ -2642,7 +2978,7 @@ impl Builder<'_> {
 
     fn nth_expr(&mut self, coll: &Expr, idx: &Expr) -> IExpr {
         if let Some(loc) = self.read_coll(coll) {
-            return calc(Calc::Nth(loc, self.expr(idx)));
+            return calc(Calc::Index(loc, self.expr(idx), IndexRead::Nth));
         }
         if let Expr::Local(i) = coll {
             if let Some(Lex::NthRef(loc, row_slot)) = self.lookup(*i) {
@@ -3166,6 +3502,84 @@ mod tests {
         assert!(ast.primed);
         assert_eq!(ast.scalar, vec![true, true]);
         assert!(compile_aot_loop(&[Expr::Local(1)], &[1], 2, &callees, |_| false).is_none());
+    }
+
+    #[test]
+    fn scalar_array_reads_preserve_redefinition_and_errors() {
+        let mut ev = boot();
+        ev.set_eager_tier(true);
+        let src = r#"
+(defn sum-array [xs n]
+  (loop [i 0 sum 0]
+    (if (< i n) (recur (inc i) (+ sum (aget xs i))) sum)))
+(let [xs (int-array [3 4 5])]
+  [(sum-array xs 3)
+   (with-redefs [aget (fn [_ _] 7)] (sum-array xs 3))
+   (try (sum-array xs 4) (catch ArrayIndexOutOfBoundsException _ :bounds))
+   (try (sum-array [3 4 5] 3) (catch Throwable _ :type))])"#;
+        let values = ev.eval_source(src).expect("array loops");
+        assert_eq!(
+            clj_value::pr_to_string(values.last().unwrap(), &clj_value::PrintOpts::pr()),
+            "[12 21 :bounds :type]"
+        );
+    }
+
+    #[test]
+    fn array_read_is_collection_access_and_leaves_nth_and_count_boxed() {
+        use super::{Calc, IExpr, IndexRead, Loc, calc, coll_of, count, nth, reads_coll};
+
+        let mut ev = boot();
+        let array = ev.eval_source("(int-array 1)").unwrap().pop().unwrap();
+        let coll = coll_of(&array);
+        assert!(nth(&coll, Sv::int(0)).is_none());
+        assert!(count(&coll).is_none());
+        assert!(reads_coll(&calc(Calc::Index(
+            Loc::Reg(0),
+            IExpr::Kst(Sv::int(0)),
+            IndexRead::Aget,
+        ))));
+    }
+
+    #[test]
+    fn aot_scalar_loop_keeps_array_reads_on_its_general_path() {
+        let src = "(def xs (int-array [3 4 5]))
+                   (loop [i 0 sum 0]
+                     (if (< i 3) (recur (inc i) (+ sum (aget xs i))) sum))";
+        let mut ev = boot();
+        let front = front_end(&mut ev, src, "array-loop.clj").expect("plan");
+        let body = front
+            .units
+            .iter()
+            .find_map(|unit| match &unit.expr {
+                Expr::Loop { body, .. } => Some(body),
+                _ => None,
+            })
+            .expect("array loop");
+        assert!(compile_aot_loop(body, &[0, 1], 2, &HashMap::new(), |_| true).is_none());
+    }
+
+    #[test]
+    fn vm_scalar_two_key_lookup_keeps_general_get_in_semantics() {
+        let mut ev = boot();
+        let src = r#"
+(defn sum-column [m row col]
+  (loop [i 0 total 0]
+    (if (< i 5000)
+      (recur (inc i) (+ total (get-in m [row col])))
+      total)))
+[(sum-column [[2 3]] 0 1)
+ (sum-column [[2 3]] 4294967296 1)
+ (sum-column [[2 3]] 0 4294967297)
+ (sum-column {0 {:x 3}} 0 :x)
+ (with-redefs [get-in (fn [_ _] 2)] (sum-column nil 0 1))
+ (loop [i 0 n 0] (if (= i 5000) n (recur (inc i) (+ n (get-in [0] [0])))))
+ (loop [i 0 n 0] (if (= i 5000) n (recur (inc i) (+ n (get-in [[0]] [0 0])))))]
+"#;
+        let forms = ev.eval_source(src).unwrap();
+        let expected = ev
+            .eval_source("[15000 15000 15000 15000 10000 0 0]")
+            .unwrap();
+        assert_eq!(forms.last(), expected.last());
     }
 
     #[test]

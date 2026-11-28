@@ -357,6 +357,191 @@ fn mixed_binary_native_failure_exits_like_run_256() {
 }
 
 #[test]
+fn native_binary_resolves_persistent_queue_empty() {
+    let source = "\
+(defn queue [] clojure.lang.PersistentQueue/EMPTY)
+(let [q (conj (queue) 1 2)]
+  (println [(identical? (queue) clojure.lang.PersistentQueue/EMPTY)
+            (vector? q) (peek q) (peek (pop q)) (count (queue))
+            (= '(1 2) (seq q))]))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("queue-empty", source, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[true false 1 2 0 true]\n", "", 0)
+    );
+}
+
+#[test]
+fn native_assoc_reads_the_collection_before_consuming_it() {
+    let source = "\
+(defn fill [v]
+  (loop [i 1 out v]
+    (if (= i (count out)) out
+        (recur (inc i)
+               (assoc out i (if (nth out (dec i)) false true))))))
+(let [base [true true true true]]
+  (println [(fill base) base]))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("assoc-last-read", source, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[[true false true false] [true true true true]]\n", "", 0)
+    );
+
+    let rebound = source.replace(
+        "(fill base)",
+        "(with-redefs [assoc (fn [v _ _] v)] (fill base))",
+    );
+    let (stdout, stderr, code, report) = build_mode_and_run("assoc-redefined", &rebound, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[[true true true true] [true true true true]]\n", "", 0)
+    );
+}
+
+#[test]
+fn native_assoc_still_fuses_an_indexed_increment() {
+    let source = "\
+(defn bump [v]
+  (loop [i 0 out v]
+    (if (= i (count out)) out
+        (recur (inc i) (assoc out i (inc (nth out i)))))))
+(let [base [0 5 7]]
+  (println [(bump base) base]))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("assoc-indexed-inc", source, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}",
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[[1 6 8] [0 5 7]]\n", "", 0),
+    );
+}
+
+#[test]
+fn native_assoc_in_reads_and_then_moves_the_matrix() {
+    let source = "\
+(defn bump [m]
+  (loop [i 0 out m]
+    (if (= i (count out)) out
+        (recur (inc i) (assoc-in out [i 0] (inc (get-in out [i 0])))))))
+(let [base [[2.0 3.0] [4.0 5.0]]]
+  (println [(bump [[2.0]]) (bump base) base
+            (with-redefs [assoc-in (fn [m _ _] m)] (bump base))]))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("assoc-in-last-read", source, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        (
+            "[[[3.0]] [[3.0 3.0] [5.0 5.0]] [[2.0 3.0] [4.0 5.0]] [[2.0 3.0] [4.0 5.0]]]\n",
+            "",
+            0
+        )
+    );
+}
+
+#[test]
+fn native_sum_reads_two_key_paths_and_preserves_get_in_fallbacks() {
+    let source = "\
+(defn sum-column [m row col]
+  (loop [i 0 total 0]
+    (if (< i 2)
+      (recur (inc i) (+ total (get-in m [(+ row i) col])))
+      total)))
+(defn count-column [m]
+  (loop [i 0 n 0]
+    (if (< i 2)
+      (recur (inc i) (if (get-in m [i 1]) (inc n) n))
+      n)))
+(println [(sum-column [[2 3] [4 5]] 0 1)
+          (sum-column [[2 3] [4 5]] 4294967296 4294967297)
+          (sum-column {0 {:x 3} 1 {:x 5}} 0 :x)
+          (sum-column (subvec [[0] [2 3] [4 5]] 1) 0 1)
+          (count-column [[1] [nil nil]])
+          (count-column [\"ab\" nil])
+          (with-redefs [get-in (fn [_ _] 10)] (sum-column nil 0 1))])
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("two-key-scalar-read", source, &[]);
+    assert!(
+        report.starts_with("aot: native 2/2 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[8 8 8 8 0 1 20]\n", "", 0)
+    );
+}
+
+#[test]
+fn native_deque_members_preserve_other_receivers_and_errors() {
+    let source = "\
+(defn empty-member [x] (.isEmpty x))
+(defn add-member [x v] (.addLast x v))
+(let [q (java.util.ArrayDeque.) name (str \"peekLast\")]
+  (println [(empty-member q) (empty-member [1])
+            (add-member q 7) (.peekLast q)
+            (clojure.core/__meth* name q) (.peekLast (identity q))
+            (letfn [(f [] 0)] (if (empty-member q) (.peekLast f) :kept))
+            (try (add-member q nil) (catch NullPointerException _ :nil))
+            (.pollLast q) (empty-member q)]))
+";
+    let (stdout, stderr, code, report) = build_mode_and_run("deque-members", source, &[]);
+    assert!(
+        report.starts_with("aot: native 2/2 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[true false true 7 7 7 :kept :nil 7 true]\n", "", 0)
+    );
+}
+
+#[test]
+fn native_reduce_inlines_a_destructured_accumulator() {
+    let source = "\
+(defn fold-items [items start]
+  (reduce (fn [[out total] x]
+            (if (= x 4) (reduced [out total]) [(conj out x) (+ total x)]))
+          start items))
+(let [start [[0] 0]]
+  (println [(fold-items [1 2 4 9] start)
+            (fold-items '(1 2 4 9) start)
+            (with-redefs [reduce (fn [_ init _] init)]
+              (fold-items [1 2 4 9] start))
+            start]))
+";
+    let (stdout, stderr, code, report) =
+        build_mode_and_run("reduce-destructured-accumulator", source, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[[[0 1 2] 3] [[0 1 2] 3] [[0] 0] [[0] 0]]\n", "", 0)
+    );
+}
+
+#[test]
 fn native_binary_runs_assoc_conj_and_fx_259() {
     let source = "\
 (let [t (transient [[1] [2]])

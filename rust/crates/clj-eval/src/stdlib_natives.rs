@@ -484,6 +484,11 @@ fn lite_replace(eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeErr
     ))
 }
 
+/// `string.clj`'s `replace-by`: each match, in `Matcher.find` order
+/// (#273), becomes `f`'s answer for its `re-groups`, inserted
+/// literally. The answer must be a `String` (`f`'s result goes through
+/// `Matcher/quoteReplacement`, whose parameter casts): anything else is
+/// the `ClassCastException`, nil the quote's NPE.
 fn lite_replace_by(
     eval: &mut Evaluator,
     orig: &Value,
@@ -491,28 +496,19 @@ fn lite_replace_by(
     pat: &str,
     f: &Value,
 ) -> Result<Value, NativeError> {
-    let re = crate::re::compile_source(pat)?;
-    let mut out = String::new();
-    let mut last = 0usize;
-    let mut matched = false;
-    for caps in re.captures_iter(s) {
-        let m = caps.get(0).expect("full match");
-        if !matched {
-            out.reserve(s.len());
-            matched = true;
-        }
-        out.push_str(&s[last..m.start()]);
-        let grp = crate::re::groups_value(&caps);
-        let repl = eval.call(f, &[grp]).map_err(signal_to_native)?;
-        let text = meth(eval, "toString", &repl, &[])?;
-        out.push_str(&crate::ns::str_of(&text));
-        last = m.end();
+    let (re, empty) = crate::re::compile_source_jdk(pat)?;
+    let hits = crate::jdkmatch::capture_finds(&re, empty, s);
+    let spliced = crate::jdkmatch::splice(s, hits, usize::MAX, |out, caps| {
+        let repl = eval
+            .call(f, &[crate::re::groups_value(caps)])
+            .map_err(signal_to_native)?;
+        out.push_str(&crate::jdkmatch::replacement_string(&repl)?);
+        Ok(())
+    })?;
+    match spliced {
+        Cow::Borrowed(_) => Ok(orig.clone()),
+        Cow::Owned(out) => Ok(Value::Str(Arc::from(out.as_str()))),
     }
-    if !matched {
-        return Ok(orig.clone());
-    }
-    out.push_str(&s[last..]);
-    Ok(Value::Str(Arc::from(out.as_str())))
 }
 
 /// Lite `join`: `(apply str coll)`, or `(str sep)` between each item's

@@ -612,6 +612,9 @@ fn realized_items(ext: &dyn ExtensionValue) -> Option<Vec<Value>> {
     if let Some(sp) = ext.as_any().downcast_ref::<crate::SplitVecValue>() {
         return Some(sp.items());
     }
+    if let Some(q) = ext.as_any().downcast_ref::<crate::QueueValue>() {
+        return Some(q.items());
+    }
     ext.as_any()
         .downcast_ref::<RealizedSeq>()
         .map(RealizedSeq::items)

@@ -195,6 +195,8 @@ pub(crate) struct LazyHooks {
         Value,
         Value,
     ) -> Result<Value, Signal>,
+    pub(crate) vm_reduce_range:
+        fn(&mut Evaluator, &Value, &Value, i64, i64, usize) -> Option<Value>,
     pub(crate) eval_expr: fn(&mut Evaluator, &Expr, &crate::env::Env) -> Result<Value, Signal>,
 }
 
@@ -211,6 +213,9 @@ pub(crate) struct PrintSnap {
     pub(crate) dup: bool,
     pub(crate) out: Value,
     pub(crate) flush: bool,
+    /// Whether the print multis are the booted defaults (`BootMode::Lite`,
+    /// or the full boot's [`Evaluator::pristine_print`] still in place).
+    pub(crate) defaults_only: bool,
 }
 
 /// [`Evaluator::core_read`]'s cache: `(name, var id or none, root once
@@ -297,6 +302,11 @@ pub struct Evaluator {
     /// (user table entries bypassed) while set — `print-simple`'s
     /// object half. Save/restore around the region, never nested.
     pub(crate) print_defaults_only: bool,
+    /// The full boot's own `print-method` / `print-dup` roots (#277):
+    /// while both vars still hold them, the print snapshot renders
+    /// scalars through the booted defaults like `BootMode::Lite` does
+    /// (a `defmethod` installs a new multi, so it no longer matches).
+    pub(crate) pristine_print: Option<(Value, Value)>,
     /// The `*load-path*` value at the last `data_readers.clj`
     /// autoload scan (`None` before the first read): an unchanged
     /// value skips the scan outright (upstream scans once at
@@ -445,6 +455,7 @@ impl Evaluator {
             analyze_depth_limit: None,
             flush_count: 0,
             print_defaults_only: false,
+            pristine_print: None,
             data_reader_scan_path: None,
             loaded_data_reader_files: HashSet::new(),
             canonical_default_readers: None,
@@ -498,6 +509,10 @@ impl Evaluator {
             // defaults-only mode never crosses threads either.
             flush_count: 0,
             print_defaults_only: false,
+            // The print multis are registry-global roots, so their
+            // pristine baseline crosses with the fork too (the guard
+            // re-reads the live roots on every refresh).
+            pristine_print: self.pristine_print.clone(),
             // The registry (hence the merged `*data-readers*` root)
             // is shared, so the merge history crosses with it —
             // otherwise a fork would re-merge (and re-fail on) the
@@ -618,6 +633,17 @@ impl Evaluator {
     /// `macroexpand` wrap position — read this).
     pub(crate) fn native_call_span(&self) -> Option<Span> {
         self.native_call_span
+    }
+
+    pub(crate) fn with_native_span<T>(
+        &mut self,
+        span: Span,
+        call: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let saved = self.native_call_span.replace(span);
+        let result = call(self);
+        self.native_call_span = saved;
+        result
     }
 
     /// The next `fn` display sequence number (the analyzer
@@ -1351,6 +1377,16 @@ impl Evaluator {
             opts,
             out: self.core_read("*out*"),
             flush: self.core_read("*flush-on-newline*").is_truthy(),
+            defaults_only: self.print_defaults_only || self.print_multis_pristine(),
+        })
+    }
+
+    /// Whether `print-method` and `print-dup` still hold the full boot's
+    /// multis (identity: `defmethod`/`remove-method` install new ones).
+    fn print_multis_pristine(&self) -> bool {
+        let same = |a: &Value, b: &Value| matches!((a, b), (Value::MultiFn(x), Value::MultiFn(y)) if Arc::ptr_eq(x, y));
+        self.pristine_print.as_ref().is_some_and(|(pm, pd)| {
+            same(&self.core_read("print-method"), pm) && same(&self.core_read("print-dup"), pd)
         })
     }
 

@@ -1281,10 +1281,19 @@ pub enum SortSpec {
 /// every `Value` (#221 R1). `sort` is the FT6 sorted-set
 /// order (same contract as [`Map`]'s): `members` stays in
 /// comparator order and compare-0 duplicates collapse.
-/// Maximum member count kept inline in [`SetStorage::Small`] (mirrors
-/// [`SMALL_MAP_MAX`]): avoids `rpds` trie + sidecar allocations and
-/// `compact()` churn on small sets (#271 Slice 5q).
-const SMALL_SET_MAX: usize = 8;
+/// Maximum member count kept flat in [`SetStorage::Small`], avoiding
+/// trie and sidecar allocations while copying small sets (#277).
+const SMALL_SET_MAX: usize = 16;
+
+/// Maximum member count a SORTED set keeps in [`SetStorage::Small`]
+/// (#277): sorted sets find positions by comparator binary search, never
+/// through the hash index, so the flat sorted slice serves them better
+/// than [`LargeSet`], whose insert re-clones every member into a new
+/// sidecar and updates the `rpds` index (a 64-member priority queue
+/// paid both on every `conj`/`disj`). A uniquely held set inserts with
+/// one `memmove`. Bounded because the generic hash paths
+/// ([`Set::contains`], set equality) scan small storage linearly.
+const SORTED_SMALL_SET_MAX: usize = 512;
 
 /// Hash-indexed persistent storage for sets past [`SMALL_SET_MAX`].
 #[derive(Clone, Debug)]
@@ -1647,6 +1656,11 @@ impl Vector {
     /// Append a value.
     #[must_use]
     pub fn push_back(mut self, v: Value) -> Self {
+        self.push_back_mut(v);
+        self
+    }
+
+    pub(crate) fn push_back_mut(&mut self, v: Value) {
         // Through `&mut`, so uniquely-owned `conj` chains mutate in
         // place while versions shared with other handles path-copy;
         // a foreign value converts typed storage once (to generic,
@@ -1658,7 +1672,6 @@ impl Vector {
             data.inner = VectorInner::Generic(g);
         }
         data.id = next_vector_id();
-        self
     }
 
     /// Replace the item at `index` (`None` when out of bounds).
@@ -1712,6 +1725,28 @@ impl Vector {
             }
             _ => false,
         }
+    }
+
+    /// Update an existing cell of a uniquely held vector of vectors.
+    /// Shared rows and storage changes take the normal assoc path.
+    #[inline]
+    pub fn assoc_nested_unique(&mut self, row: usize, column: usize, value: &mut Value) -> bool {
+        let Some(data) = Arc::get_mut(&mut self.0) else {
+            return false;
+        };
+        let VectorInner::Generic(rows) = &mut data.inner else {
+            return false;
+        };
+        let Some(Value::Vector(row)) = rows.unique_flat_mut().and_then(|rows| rows.get_mut(row))
+        else {
+            return false;
+        };
+        if !row.assoc_unique(column, value) {
+            return false;
+        }
+        row.data_mut().id = next_vector_id();
+        data.id = next_vector_id();
+        true
     }
 
     /// `conj` in place on a uniquely held, non-empty flat vector below
@@ -3191,7 +3226,7 @@ impl Set {
     pub fn insert_sorted_at(mut self, pos: usize, v: Value) -> Self {
         let data = Arc::make_mut(&mut self.0);
         match &mut data.storage {
-            SetStorage::Small(items) if items.len() < SMALL_SET_MAX => {
+            SetStorage::Small(items) if items.len() < SORTED_SMALL_SET_MAX => {
                 items.insert(pos, v);
             }
             SetStorage::Small(items) => {
@@ -3235,7 +3270,12 @@ impl Set {
     /// and the sort order.
     #[must_use]
     pub fn with_ordered_members(self, members: Vec<Value>) -> Self {
-        let storage = if members.len() <= SMALL_SET_MAX {
+        let small_max = if self.0.sort.is_some() {
+            SORTED_SMALL_SET_MAX
+        } else {
+            SMALL_SET_MAX
+        };
+        let storage = if members.len() <= small_max {
             SetStorage::Small(members)
         } else {
             SetStorage::large_from_vec(members)
@@ -3684,6 +3724,10 @@ fn seq_ext_meta(e: &Arc<dyn ExtensionValue>) -> Option<&Map> {
             any.downcast_ref::<crate::SplitVecValue>()
                 .and_then(crate::SplitVecValue::meta)
         })
+        .or_else(|| {
+            any.downcast_ref::<crate::QueueValue>()
+                .and_then(crate::QueueValue::meta)
+        })
 }
 
 /// Rebuild a sequence extension value with new metadata (`None`
@@ -3711,6 +3755,7 @@ fn seq_ext_with_meta(
     retag!(crate::ValSeqValue);
     retag!(crate::SubVectorValue);
     retag!(crate::SplitVecValue);
+    retag!(crate::QueueValue);
     None
 }
 
@@ -4400,6 +4445,12 @@ fn hash_extension<H: Hasher>(e: &Arc<dyn ExtensionValue>, state: &mut H) {
         for item in sv.iter() {
             item.hash(state);
         }
+    } else if let Some(q) = e.as_any().downcast_ref::<crate::QueueValue>() {
+        state.write_u8(8);
+        q.len().hash(state);
+        for item in q.iter() {
+            item.hash(state);
+        }
     } else if let Some(sp) = e.as_any().downcast_ref::<crate::SplitVecValue>() {
         state.write_u8(8);
         sp.len().hash(state);
@@ -4674,6 +4725,9 @@ fn seq_items(v: &Value) -> Option<Vec<Value>> {
             }
             if let Some(sp) = e.as_any().downcast_ref::<crate::SplitVecValue>() {
                 return Some(sp.items());
+            }
+            if let Some(q) = e.as_any().downcast_ref::<crate::QueueValue>() {
+                return Some(q.items());
             }
             None
         }
@@ -5642,6 +5696,22 @@ mod tests {
             (small.sorted_len(), small.sorted_key(1)),
             (2, Some(&Value::Int(2)))
         );
+    }
+
+    #[test]
+    fn large_sorted_set_compacts_front_removals() {
+        let n = super::SORTED_SMALL_SET_MAX + 1;
+        let mut set = super::new_set()
+            .with_sort(Some(super::SortSpec::Natural))
+            .with_ordered_members((0..n as i64).map(Value::Int).collect());
+        let original = set.clone();
+        let removed = n / 2 + 1;
+        for _ in 0..removed {
+            set = set.without_sorted_at(0);
+        }
+        assert_eq!(original.size(), n);
+        assert_eq!(set.size(), n - removed);
+        assert_eq!(set.sorted_member(0), Some(&Value::Int(removed as i64)));
     }
 
     #[test]
@@ -6826,8 +6896,34 @@ mod tests {
     }
 
     #[test]
+    fn nested_assoc_updates_only_unshared_rows() {
+        let row = Vector::from_flat_doubles(vec![1.0, 2.0]);
+        let row_id = row.id();
+        let mut matrix = Vector::from_vec(vec![Value::Vector(row)]);
+        let matrix_id = matrix.id();
+        assert!(matrix.assoc_nested_unique(0, 1, &mut Value::Double(3.0)));
+        assert_ne!(matrix.id(), matrix_id);
+        let row = matrix.get(0).expect("first row");
+        assert!(matches!(&row, Value::Vector(v) if v.id() != row_id));
+        assert_eq!(
+            row,
+            Value::Vector(Vector::from_flat_doubles(vec![1.0, 3.0]))
+        );
+
+        let mut new = Value::Double(4.0);
+        assert!(!matrix.assoc_nested_unique(0, 1, &mut new));
+        assert_eq!(new, Value::Double(4.0));
+        assert_eq!(matrix.get(0), Some(row));
+        assert!(!matrix.assoc_nested_unique(1, 0, &mut new));
+        assert!(!matrix.clone().assoc_nested_unique(0, 0, &mut new));
+        assert!(!Vector::from_flat_doubles(vec![1.0]).assoc_nested_unique(0, 0, &mut new));
+    }
+
+    #[test]
     fn small_and_large_set_storage_paths_271() {
-        use super::{PackedStrings, Set, SortSpec, Vector};
+        use super::{
+            PackedStrings, SMALL_SET_MAX, SORTED_SMALL_SET_MAX, Set, SetStorage, SortSpec, Vector,
+        };
         // Small set: from_items_checked, insert, dup insert, get, contains, without, iter
         let s = Set::from_items_checked(vec![Value::Int(1), Value::Int(2)]).unwrap();
         assert_eq!(s.size(), 2);
@@ -6844,29 +6940,48 @@ mod tests {
         assert!(Set::from_items_checked(vec![Value::Int(1), Value::Int(1)]).is_err());
 
         // Promotion > SMALL_SET_MAX via insert and via from_items_checked
+        let limit = SMALL_SET_MAX as i64;
         let mut big = new_set();
-        for i in 0..10 {
+        for i in 0..limit {
             big = big.insert(Value::Int(i));
         }
-        assert_eq!(big.size(), 10);
-        assert_eq!(big.get(&Value::Int(9)), Some(&Value::Int(9)));
-        assert_eq!(big.iter().count(), 10);
+        assert!(matches!(big.0.storage, SetStorage::Small(_)));
+        big = big.insert(Value::Int(limit));
+        assert!(matches!(big.0.storage, SetStorage::Large(_)));
+        assert_eq!(big.size(), SMALL_SET_MAX + 1);
+        assert_eq!(big.get(&Value::Int(limit)), Some(&Value::Int(limit)));
+        assert_eq!(
+            big.iter().cloned().collect::<Vec<_>>(),
+            (0..=limit).map(Value::Int).collect::<Vec<_>>()
+        );
         assert_eq!(big.clone().without(&Value::Int(99)).id(), big.id());
         let mut shrunk = big.clone();
-        for i in 0..7 {
+        for i in 0..(limit - 2) {
             shrunk = shrunk.without(&Value::Int(i));
         }
         assert_eq!(shrunk.size(), 3);
-        let big2 = Set::from_items_checked((0..10).map(Value::Int).collect()).unwrap();
+        let big2 = Set::from_items_checked((0..=limit).map(Value::Int).collect()).unwrap();
+        assert!(matches!(big2.0.storage, SetStorage::Large(_)));
         assert_eq!(big, big2);
 
-        // Small & promoted sorted sets
+        // Small & promoted sorted sets: sorted sets stay flat up to
+        // SORTED_SMALL_SET_MAX (#277), promote past it, and insert into
+        // the promoted storage after.
+        let n = SORTED_SMALL_SET_MAX + 8;
         let mut ss = new_set().with_sort(Some(SortSpec::Natural));
-        for i in 0..10 {
+        for i in 0..n {
             ss = ss.insert_sorted_at(i, Value::Int(i as i64));
+            let flat = matches!(ss.0.storage, SetStorage::Small(_));
+            assert_eq!(flat, i < SORTED_SMALL_SET_MAX, "size {}", i + 1);
         }
-        assert_eq!(ss.sorted_len(), 10);
+        assert_eq!(ss.sorted_len(), n);
         assert_eq!(ss.sorted_member(0), Some(&Value::Int(0)));
+        assert_eq!(ss.sorted_member(n - 1), Some(&Value::Int((n - 1) as i64)));
+        let rebuilt = new_set()
+            .with_sort(Some(SortSpec::Natural))
+            .with_ordered_members((0..n).map(|i| Value::Int(i as i64)).collect());
+        assert!(matches!(rebuilt.0.storage, SetStorage::Large(_)));
+        assert_eq!(rebuilt, ss);
         let ss_sm = new_set()
             .with_sort(Some(SortSpec::Natural))
             .with_ordered_members(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
@@ -6879,7 +6994,7 @@ mod tests {
             ss_lg = ss_lg.without(&Value::Int(i));
         }
         ss_lg = ss_lg.without(&Value::Int(8));
-        assert_eq!(ss_lg.sorted_len(), 2);
+        assert_eq!(ss_lg.sorted_len(), n - 8);
         let ss_rebuilt = new_set().with_ordered_members((0..10).map(Value::Int).collect());
         assert_eq!(ss_rebuilt.size(), 10);
 

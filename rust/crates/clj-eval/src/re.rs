@@ -52,6 +52,13 @@ fn pattern_syntax(err: regex::Error) -> NativeError {
 /// `\Q...\E` quotations translate first (the crate has no
 /// quotation syntax — `Pattern/quote` output must compile).
 pub(crate) fn compile_source(source: &str) -> Result<Arc<Regex>, NativeError> {
+    compile_source_jdk(source).map(|(re, _)| re)
+}
+
+/// [`compile_source`] plus whether the pattern can match the empty
+/// string (#273: only then does the JDK `find` order differ from the
+/// crate's iterators, see [`crate::jdkmatch`]).
+pub(crate) fn compile_source_jdk(source: &str) -> Result<(Arc<Regex>, bool), NativeError> {
     // Memoized per thread: a compile costs far more than the matches
     // one call runs (a `split` per input line recompiled its literal
     // every line). Handed out shared, never cloned: each `Regex`
@@ -60,21 +67,24 @@ pub(crate) fn compile_source(source: &str) -> Result<Arc<Regex>, NativeError> {
     // clears, bounding programs that mint patterns. Failures are not
     // cached (each use reports its own syntax error).
     thread_local! {
-        static COMPILED: std::cell::RefCell<crate::env::FxHashMap<String, Arc<Regex>>> =
+        static COMPILED: std::cell::RefCell<crate::env::FxHashMap<String, (Arc<Regex>, bool)>> =
             std::cell::RefCell::new(crate::env::FxHashMap::default());
     }
-    if let Some(re) = COMPILED.with(|c| c.borrow().get(source).cloned()) {
-        return Ok(re);
+    if let Some(hit) = COMPILED.with(|c| c.borrow().get(source).cloned()) {
+        return Ok(hit);
     }
-    let re = Arc::new(compile_java(&translate_quotations(source))?);
+    let unquoted = translate_quotations(source);
+    let crate_source = ascii_classes(&unquoted);
+    let re = Arc::new(Regex::new(&crate_source).map_err(pattern_syntax)?);
+    let hit = (re, crate::jdkmatch::matches_empty(&crate_source));
     COMPILED.with(|c| {
         let mut c = c.borrow_mut();
         if c.len() >= 256 {
             c.clear();
         }
-        c.insert(source.to_owned(), Arc::clone(&re));
+        c.insert(source.to_owned(), hit.clone());
     });
-    Ok(re)
+    Ok(hit)
 }
 
 /// Compile a (quotation-free) Java pattern source with the JDK's
@@ -272,10 +282,11 @@ fn anchored_trim_replace<'a>(
     }
 }
 
-/// Fast path for `clojure.string/replace` / `Matcher.replaceAll` over
-/// simple anchored single-character repeats (`^c+`, `c+$`) when the
-/// replacement has no `$` or `\` escapes; all other patterns use the
-/// cached compiled [`Regex`].
+/// `clojure.string/replace` over a pattern and a string replacement
+/// (`Matcher.replaceAll`, JDK find order and template grammar, #273).
+/// Fast path for simple anchored single-character repeats (`^c+`,
+/// `c+$`) when the replacement has no `$` or `\` escapes; all other
+/// patterns use the cached compiled [`Regex`].
 pub(crate) fn replace_all_fast<'a>(
     source: &str,
     text: &'a str,
@@ -303,13 +314,13 @@ pub(crate) fn replace_all_fast<'a>(
             ));
         }
     }
-    let re = compile_source(source)?;
-    Ok(re.replace_all(text, replacement))
+    let (re, empty) = compile_source_jdk(source)?;
+    crate::jdkmatch::replace(&re, empty, text, replacement, usize::MAX)
 }
 
 /// Split `text` around matches of the `source` pattern (the
-/// JDK `Pattern.java#split` loop over the crate's `find_iter`,
-/// whose empty-match advance matches `Matcher.find`): a
+/// JDK `Pattern.java#split` loop over `Matcher.find`'s order,
+/// [`crate::jdkmatch::finds`]): a
 /// zero-width match at the start yields no empty leader, no
 /// match at all yields the whole input, a positive `limit` caps
 /// the parts (the last keeps the remainder), `0` drops trailing
@@ -581,10 +592,10 @@ fn pattern_pieces_vec<V: PieceVec>(text: &str, source: &str, limit: i32) -> Resu
         let cuts = boundary_cuts(text, &alts)?;
         return Ok(split_ranges(text, cuts, limit));
     }
-    let re = compile_source(source)?;
+    let (re, empty) = compile_source_jdk(source)?;
     Ok(split_ranges(
         text,
-        re.find_iter(text).map(|m| (m.start(), m.end())),
+        crate::jdkmatch::finds(&re, empty, text).map(|m| (m.start(), m.end())),
         limit,
     ))
 }
@@ -959,10 +970,9 @@ fn native_re_matches(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, Nat
 /// `Cons` like the JVM's, nil when nothing matches at all).
 fn native_re_seq(_eval: &mut Evaluator, args: &[Value]) -> Result<Value, NativeError> {
     check_arity("clojure.core/re-seq", args, &[2])?;
-    let re = compile_source(pattern_source(&args[0])?)?;
+    let (re, empty) = compile_source_jdk(pattern_source(&args[0])?)?;
     let text = match_text(&args[1])?;
-    let items: Vec<Value> = re
-        .captures_iter(text)
+    let items: Vec<Value> = crate::jdkmatch::capture_finds(&re, empty, text)
         .map(|caps| groups_value(&caps))
         .collect();
     if items.is_empty() {

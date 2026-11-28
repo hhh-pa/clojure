@@ -43,6 +43,7 @@ fn ctor_arities_core(fqn: &str) -> Option<&'static [usize]> {
         "java.lang.String" => Some(&[0, 1, 2, 3, 4]),
         "java.lang.Object" => Some(&[0]),
         "java.lang.StringBuilder" => Some(&[0, 1]),
+        "java.lang.StringBuffer" => Some(&[0, 1]),
         // #205: the emulated allow-list grows (dispatch in `types`).
         "java.util.Random" => Some(&[0, 1]),
         "java.security.SecureRandom" => Some(&[0]),
@@ -159,6 +160,34 @@ pub(crate) fn build_string_builder(args: &[Value]) -> Result<Value, NativeError>
         },
         _ => Err(no_ctor("java.lang.StringBuilder", false)),
     }
+}
+
+/// Build `(StringBuffer. …)` (#273): like [`build_string_builder`],
+/// except that nil reaches the `(CharSequence)` overload and its NPE
+/// (JDK 26 oracle), and a `CharSequence` buffer copies.
+pub(crate) fn build_string_buffer(args: &[Value]) -> Result<Value, NativeError> {
+    let content = match args {
+        [] => String::new(),
+        [Value::Int(n)] => String::with_capacity(usize::try_from(*n).map_err(|_| {
+            NativeError::new(ThrowClass::NegativeArraySizeException, n.to_string())
+        })?),
+        [Value::Nil] => {
+            return Err(NativeError::new(
+                ThrowClass::NullPointerException,
+                "Cannot invoke \"java.lang.CharSequence.length()\" because \"seq\" is null"
+                    .to_owned(),
+            ));
+        }
+        // One `CharSequence` copies; anything else (the analyzer admits
+        // no other arity) has no ctor.
+        [v, ..] => match crate::classemu::char_sequence_text(v).filter(|_| args.len() == 1) {
+            Some(s) => s.to_string(),
+            None => return Err(no_ctor("java.lang.StringBuffer", false)),
+        },
+    };
+    Ok(Value::Extension(Arc::new(
+        crate::classemu::StringBuilder::fresh_buffer(content),
+    )))
 }
 
 /// A ctor-relevant array's cloned slots (`None` for non-arrays
