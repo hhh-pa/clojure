@@ -466,6 +466,32 @@ fn native_sum_reads_two_key_paths_and_preserves_get_in_fallbacks() {
 }
 
 #[test]
+fn native_reduce_inlines_a_destructured_accumulator() {
+    let source = "\
+(defn fold-items [items start]
+  (reduce (fn [[out total] x]
+            (if (= x 4) (reduced [out total]) [(conj out x) (+ total x)]))
+          start items))
+(let [start [[0] 0]]
+  (println [(fold-items [1 2 4 9] start)
+            (fold-items '(1 2 4 9) start)
+            (with-redefs [reduce (fn [_ init _] init)]
+              (fold-items [1 2 4 9] start))
+            start]))
+";
+    let (stdout, stderr, code, report) =
+        build_mode_and_run("reduce-destructured-accumulator", source, &[]);
+    assert!(
+        report.starts_with("aot: native 1/1 defns, embedded 0 top-level forms, "),
+        "{report}"
+    );
+    assert_eq!(
+        (stdout.as_str(), stderr.as_str(), code),
+        ("[[[0 1 2] 3] [[0 1 2] 3] [[0] 0] [[0] 0]]\n", "", 0)
+    );
+}
+
+#[test]
 fn native_binary_runs_assoc_conj_and_fx_259() {
     let source = "\
 (let [t (transient [[1] [2]])

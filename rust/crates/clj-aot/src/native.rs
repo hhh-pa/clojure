@@ -5386,11 +5386,20 @@ impl<'ctx> Lowerer<'ctx> {
         own_params: bool,
         dest: PointerValue<'ctx>,
     ) -> Result<(), Unsupported> {
-        for p in params {
-            f.env.push(Some(LocalRef::Slot(*p)));
+        let mut bindings = Vec::new();
+        for (pattern, &param) in arity.fixed.iter().zip(params) {
+            if let Pattern::Vec(v) = pattern {
+                // Only the fold plan admits a destructured accumulator.
+                debug_assert!(own_params);
+                bindings.extend(self.bind_vec(f, v, param)?);
+                self.drop_and_nil_slots(f.func, &[param]);
+            } else {
+                debug_assert!(matches!(pattern, Pattern::Symbol(_)));
+                f.env.push(Some(LocalRef::Slot(param)));
+            }
         }
         let owned: Vec<usize> = if own_params {
-            (base..base + params.len()).collect()
+            (base..f.env.len()).collect()
         } else {
             Vec::new()
         };
@@ -5399,6 +5408,7 @@ impl<'ctx> Lowerer<'ctx> {
         let lowered = self.lower_body(f, &arity.body, dest);
         f.moves = saved;
         f.env.truncate(base);
+        self.free_slots(f, &bindings);
         lowered
     }
 
@@ -9271,7 +9281,11 @@ fn one_hof_loop<'a>(
     } else {
         1
     };
-    let lf = fns.of(fe, n_params)?;
+    let lf = if kind == HofKind::Reduce {
+        destructuring_reducer(fe).or_else(|| fns.of(fe, n_params))
+    } else {
+        fns.of(fe, n_params)
+    }?;
     if lf.eta.is_some() && lazy_colls(coll, coll2) {
         return None;
     }
@@ -9463,17 +9477,43 @@ fn runtime_traversal(hof: &str, fe: &Expr) -> bool {
 /// and never `recur`s to itself: its body can run inline per item (a
 /// named `fn` arrives as a `letfn`, so it never refers to itself here).
 fn inline_fn(e: &Expr, params: usize) -> Option<(&FunExpr, &Arity)> {
+    let (fun, arity) = fixed_inline_fn(e, params)?;
+    arity
+        .fixed
+        .iter()
+        .all(|p| matches!(p, Pattern::Symbol(_)))
+        .then_some((fun, arity))
+}
+
+fn fixed_inline_fn(e: &Expr, params: usize) -> Option<(&FunExpr, &Arity)> {
     let Expr::Fn(fun) = e else {
         return None;
     };
     let [arity] = &fun.arities[..] else {
         return None;
     };
-    (arity.rest.is_none()
-        && arity.fixed.len() == params
-        && arity.fixed.iter().all(|p| matches!(p, Pattern::Symbol(_)))
-        && !self_recurs(&arity.body))
-    .then_some((fun, arity))
+    (arity.rest.is_none() && arity.fixed.len() == params && !self_recurs(&arity.body))
+        .then_some((fun, arity))
+}
+
+/// A fold that destructures its accumulator into a fixed vector of locals.
+fn destructuring_reducer(e: &Expr) -> Option<LoopFn<'_>> {
+    let (fun, arity) = fixed_inline_fn(e, 2)?;
+    let [Pattern::Vec(v), Pattern::Symbol(_)] = arity.fixed.as_slice() else {
+        return None;
+    };
+    if v.rest.is_some()
+        || v.as_sym.is_some()
+        || v.fixed.is_empty()
+        || !v.fixed.iter().all(|p| matches!(p, Pattern::Symbol(_)))
+    {
+        return None;
+    }
+    Some(LoopFn {
+        fun,
+        arity,
+        eta: None,
+    })
 }
 
 /// Whether every use of local `i` in `body` is a read-only call operand

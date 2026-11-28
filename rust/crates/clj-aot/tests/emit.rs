@@ -1508,6 +1508,42 @@ fn native_emit_ir_fuses_filter_some_and_in2_moves_271() {
 }
 
 #[test]
+fn native_emit_ir_inlines_a_fixed_accumulator_pattern() {
+    let ir = tmp("fold-pattern.ll");
+    let source = "\
+(defn fixed-fold [xs]
+  (reduce (fn [[q d] x] [(conj q x) (+ d x)]) [[] 0] xs))
+(defn rest-fold [xs]
+  (reduce (fn [[d & more] x] [(+ d x) more]) [0] xs))
+(println (fixed-fold [1 2]) (rest-fold [1 2]))
+";
+    clj_aot::build_str(
+        source,
+        "f.clj",
+        &tmp("nope-fold-pattern"),
+        &EmitOptions {
+            emit_ir: Some(ir.clone()),
+            emit_obj: None,
+        },
+        &no_link(),
+        clj_aot::BuildMode::Mixed,
+    )
+    .expect("build");
+    let text = std::fs::read_to_string(&ir).expect("ir");
+    std::fs::remove_file(&ir).expect("cleanup");
+    let fixed = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_fixed_fold("))
+        .expect("fixed fold");
+    assert_eq!(general_paths(fixed), 1, "{fixed}");
+    let rest = text
+        .split("\ndefine ")
+        .find(|d| d.contains("user_rest_fold("))
+        .expect("rest fold");
+    assert_eq!(general_paths(rest), 0, "{rest}");
+}
+
+#[test]
 fn native_emit_ir_plans_range_loops_directly_271() {
     let ir = tmp("range-plans.ll");
     clj_aot::build_str(

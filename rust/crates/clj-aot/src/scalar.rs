@@ -3217,7 +3217,14 @@ impl<'ctx> Lowerer<'ctx> {
         hl: &HofLoop<'_>,
         base: usize,
     ) -> Option<(clj_eval::aot_scalar::ScalarFnAst, AstScan)> {
-        if !self.inline_arith || !self.use_bitcode {
+        if !self.inline_arith
+            || !self.use_bitcode
+            || hl
+                .arity
+                .fixed
+                .iter()
+                .any(|pat| !matches!(pat, Pattern::Symbol(_)))
+        {
             return None;
         }
         let n_params = if hl.kind == HofKind::Reduce || hl.coll2.is_some() {
