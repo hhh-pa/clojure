@@ -6506,6 +6506,19 @@ mod tests {
         assert!(!pending.is_realized());
         let outer =
             super::concat_thunk(&[value.clone(), Value::Vector(Vector::from_ints(vec![3]))]);
+        let mut visited = Vec::new();
+        super::walk_sole_map(&mut eval, &outer, &mut |_, item| {
+            visited.push(item);
+            Ok(false)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(visited.len(), 1);
+        assert!(as_pending(&visited[0]).is_some());
+        assert!(!pending.is_realized());
+
+        let outer =
+            super::concat_thunk(&[value.clone(), Value::Vector(Vector::from_ints(vec![3]))]);
         assert!(!matches!(
             super::first_value(&mut eval, &outer).unwrap(),
             Value::Nil
