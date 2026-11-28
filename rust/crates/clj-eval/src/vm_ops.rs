@@ -1623,7 +1623,7 @@ pub(crate) enum InPlace {
 
 impl InPlace {
     #[inline(always)]
-    fn get<'v>(&'v self, f: &'v Frame<'_>) -> &'v Value {
+    pub(crate) fn get<'v>(&'v self, f: &'v Frame<'_>) -> &'v Value {
         match self {
             InPlace::Reg(r) => &f.regs[*r],
             InPlace::Up(u) => &f.up[*u],

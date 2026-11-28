@@ -2091,7 +2091,36 @@ impl Compiler {
         if let Some(code) = self.try_reduce_reversed(call) {
             return code;
         }
+        if let Some(code) = self.try_nth_peek(call) {
+            return code;
+        }
         self.compile_direct_plain(call)
+    }
+
+    /// Fuse the reads of `(nth coll (peek stack))` when both operands
+    /// are already available and both core vars still hold their natives.
+    fn try_nth_peek(&mut self, call: &DirectCall) -> Option<Exec> {
+        let ([coll, index], Some("nth")) = (call.args.as_slice(), crate::vm_ops::core_name(call))
+        else {
+            return None;
+        };
+        let peek = core_call(index, "peek", 1)?;
+        let coll = self.in_place(coll)?;
+        let stack = self.in_place(&peek.args[0])?;
+        let site = next_site();
+        let sites = [call, peek].map(|c| crate::vm_ops::Site::new(site_of(c)));
+        let fallback = self.compile_direct_plain(call);
+        Some(Box::new(move |ev, frame| {
+            use crate::vm_ops::{Nth, Op1, Op2, Peek};
+            if ev.group_valid(site, |ev| sites.iter().all(|site| site.valid(ev))) {
+                if let Some(value) =
+                    Peek::apply(stack.get(frame)).and_then(|idx| Nth::apply(coll.get(frame), &idx))
+                {
+                    return Ok(value);
+                }
+            }
+            fallback(ev, frame)
+        }))
     }
 
     fn try_trim_vector_tail(&mut self, call: &DirectCall) -> Option<Exec> {

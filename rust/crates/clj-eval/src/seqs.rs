@@ -183,9 +183,9 @@ fn walk_sole_map(
     )
 }
 
-/// Walk collections whose entries can be read in seq order
-/// without constructing the seq. A map visitor gets a fresh
-/// entry for each item it reaches.
+/// Walk a vector, a finite repeat, or a counted `long` range in
+/// place (#226): no chunk seq copies the items 32 at a time — the
+/// order and items are the seq's (`None`: walk the seq).
 fn walk_direct(
     eval: &mut Evaluator,
     coll: &Value,
@@ -201,11 +201,6 @@ fn walk_direct(
     };
     if let Value::Vector(v) = coll {
         return Some(each(&mut v.iter()));
-    }
-    if let Value::Map(m) = coll {
-        return Some(each(&mut m.iter().map(|(key, value)| {
-            clj_value::map_entry(key.clone(), value.clone())
-        })));
     }
     if let Some(sp) = crate::lazy::as_splitvec(coll) {
         return Some(each(&mut sp.iter()));
@@ -2341,14 +2336,26 @@ pub(crate) fn native_some_owned(
     };
     let mut found = Value::Nil;
     let prep = crate::vm::Prepared::of(&pred, 1);
-    walk_seq(eval, coll, |eval, head| {
+    let mut visit = |eval: &mut Evaluator, head: &Value| {
         let r = call_pred1(eval, &pred, prep.as_ref(), head)?;
         if r.is_truthy() {
             found = r;
             return Ok(Walk::Stop);
         }
         Ok(Walk::Continue)
-    })?;
+    };
+    if let Value::Map(map) = coll {
+        // Walk entries in seq order. An early hit never constructs
+        // the remaining entries or a sequence over them.
+        for (key, value) in map.iter() {
+            let entry = clj_value::map_entry(key.clone(), value.clone());
+            if matches!(visit(eval, &entry)?, Walk::Stop) {
+                break;
+            }
+        }
+    } else {
+        walk_seq(eval, coll, visit)?;
+    }
     Ok(found)
 }
 

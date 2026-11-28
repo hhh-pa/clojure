@@ -861,6 +861,22 @@ fn some_rows() {
 }
 
 #[test]
+fn indexed_peek_uses_live_roots_and_preserves_errors() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            r#"(let [v [10 20 30] f (fn [s] (nth v (peek s)))]
+                 [(f [0 1]) (f '(2 0))
+                  (with-redefs [peek (fn [_] 0)] (f [1]))
+                  (with-redefs [nth (fn [_ i] i)] (f [1]))
+                  (f [2]) (try (f [10]) (catch IndexOutOfBoundsException _ :miss))])"#
+        ),
+        "[20 30 10 1 30 :miss]"
+    );
+}
+
+#[test]
 fn map_walk_keeps_entry_types_and_seq_order() {
     let mut eval = boot();
     assert_eq!(
@@ -877,7 +893,9 @@ fn map_walk_keeps_entry_types_and_seq_order() {
     assert_eq!(
         run_last(
             &mut eval,
-            r#"(every? (fn [m] (= (mapv key m) (mapv key (seq m))))
+            r#"(every? (fn [m] (let [keys (atom [])]
+                                (some (fn [e] (swap! keys conj (key e)) nil) m)
+                                (= @keys (mapv key (seq m)))))
                        [{:c 1 :a 2 :b 3} (zipmap (range 20) (range 20))
                         (sorted-map-by > 1 :a 2 :b)])"#
         ),
