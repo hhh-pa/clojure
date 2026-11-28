@@ -829,24 +829,72 @@ impl ScalarArity {
     ) -> Option<&crate::vm_scalar::ScalarFunction> {
         self.program
             .get_or_init(|| {
-                let scope = fun.scalar_scope.as_ref()?;
-                let regs: Vec<_> = (0..argc).collect();
-                let mut host = LateHost {
-                    scope_base: fun.base,
-                    locate: |idx| scalar_loc(fun.base, &regs, &scope.rec, &scope.captures, idx),
-                    roots: &ev.registry,
-                    lost: false,
-                };
-                crate::vm_scalar::compile_scalar_function(
-                    &mut host,
-                    &fun.source[self.arity].body,
-                    fun.base + argc,
-                    &regs,
-                )
-                .filter(|_| !host.lost)
-                .map(Box::new)
+                compile_scalar_body(ev, fun, argc, &fun.source[self.arity].body).map(Box::new)
             })
             .as_deref()
+    }
+}
+
+fn compile_scalar_body(
+    ev: &Evaluator,
+    fun: &CompiledFun,
+    argc: usize,
+    body: &[Expr],
+) -> Option<crate::vm_scalar::ScalarFunction> {
+    let scope = fun.scalar_scope.as_ref()?;
+    let regs: SmallVec<[usize; 8]> = (0..argc).collect();
+    let mut host = LateHost {
+        scope_base: fun.base,
+        locate: |idx| scalar_loc(fun.base, &regs, &scope.rec, &scope.captures, idx),
+        roots: &ev.registry,
+        lost: false,
+    };
+    crate::vm_scalar::compile_scalar_function(&mut host, body, fun.base + argc, &regs)
+        .filter(|_| !host.lost)
+}
+
+/// A vector key whose elements can all be computed without running
+/// user code or modifying state. Each read still validates its sites.
+pub(crate) struct SortProjection<'a> {
+    code: &'a VmCode,
+    fields: Vec<crate::vm_scalar::ScalarFunction>,
+}
+
+impl<'a> SortProjection<'a> {
+    pub(crate) fn compile(ev: &Evaluator, key: &'a Value) -> Option<Self> {
+        let (code, arity) = fixed_target(key, 1)?;
+        let plan = arity.scalar.as_ref()?;
+        let [Expr::VecLit(fields, None)] = code.fun.source[plan.arity].body.as_slice() else {
+            return None;
+        };
+        if !(2..=4).contains(&fields.len()) {
+            return None;
+        }
+        let fields = fields
+            .iter()
+            .map(|field| compile_scalar_body(ev, &code.fun, 1, std::slice::from_ref(field)))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self { code, fields })
+    }
+
+    pub(crate) fn key(&self, ev: &mut Evaluator, item: &Value) -> Option<[i64; 4]> {
+        let Value::Int(item) = item else {
+            return None;
+        };
+        let mut regs = [Value::Int(*item)];
+        let frame = Frame {
+            regs: &mut regs,
+            up: &self.code.captured,
+            rec: self.code.recursive_bindings(),
+        };
+        let mut result = [0; 4];
+        for (out, field) in result.iter_mut().zip(&self.fields) {
+            let Value::Int(value) = crate::vm_scalar::run_scalar_value(ev, &frame, field)? else {
+                return None;
+            };
+            *out = value;
+        }
+        Some(result)
     }
 }
 

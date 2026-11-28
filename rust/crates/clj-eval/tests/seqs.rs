@@ -100,6 +100,37 @@ fn vec_concat_preserves_order_and_mixed_numeric_types() {
 }
 
 #[test]
+fn sort_by_can_cache_pure_integer_vector_keys() {
+    let mut eval = boot();
+    assert_eq!(
+        run_last(
+            &mut eval,
+            "(let [xs (vec (range 100 0 -1))
+                   values (vec (map (fn [i] [(rem i 7) (quot i 11)]) (range 101)))
+                   keyfn (fn [i] [(nth (nth values i) 0) (nth (nth values i) 1)])
+                   calls (atom 0)
+                   effectful (fn [i] [(do (swap! calls inc) (rem i 7)) (quot i 11)])
+                   indirect (fn [i] (swap! calls inc) (keyfn i))
+                   fast (vec (sort-by keyfn xs))
+                   boxed (vec (sort-by effectful xs))
+                   doubles (vec (sort-by (fn [i] [(double (rem i 7)) (quot i 11)]) xs))
+                   mixed (assoc xs 40 60.0)
+                   desc (fn [a b] (compare b a))
+                   redefined (with-redefs [nth (fn [_ _] 0)] (vec (sort-by keyfn xs)))]
+               [(= fast boxed) (> @calls 100)
+                (= fast (vec (sort-by indirect xs)))
+                (= redefined xs) (not= fast redefined)
+                (= fast doubles)
+                (= (mapv long (sort-by (fn [i] [(rem i 7) (quot i 11)]) mixed)) boxed)
+                (= (vec (sort-by (fn [i] [i]) xs)) (vec (range 1 101)))
+                (= (vec (sort-by keyfn desc xs))
+                   (vec (sort-by effectful desc xs)))])",
+        ),
+        "[true true true true true true true true true]",
+    );
+}
+
+#[test]
 fn apply_extrema_stream_realized_numeric_inputs() {
     let mut eval = boot();
     assert_eq!(

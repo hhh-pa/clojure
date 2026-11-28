@@ -1390,8 +1390,11 @@ pub(crate) fn native_sort_by_owned(
     // `compare` as `jvm_compare` itself (each was a checked general
     // call, three per comparison).
     let key = crate::vm::Prepared::of(&keyfn, 1);
-    let cmp = crate::vm::Prepared::of(&comp, 2);
     let default_compare = is_core_fn(&comp, "clojure.core/compare");
+    if default_compare && sort_integer_keys(eval, &keyfn, &mut items).is_some() {
+        return Ok(sorted_seq(items));
+    }
+    let cmp = crate::vm::Prepared::of(&comp, 2);
     sort_by_checked(&mut items, |a, b| {
         // `(comp (keyfn x) (keyfn y))` directly (the keyfn runs per
         // comparison; no int mapping).
@@ -1404,6 +1407,26 @@ pub(crate) fn native_sort_by_owned(
         afunction_order(r, || sort_cmp(eval, cmp.as_ref(), &comp, &kb, &ka))
     })?;
     Ok(sorted_seq(items))
+}
+
+/// A stable sort with integer vector keys. Every key must project
+/// successfully before the first item moves. A miss leaves the
+/// original ordering for the comparator-driven path.
+fn sort_integer_keys(eval: &mut Evaluator, key: &Value, items: &mut [Value]) -> Option<()> {
+    if items.len() < 64 {
+        return None;
+    }
+    let snapshot = eval.direct_snapshot();
+    let projection = crate::vm::SortProjection::compile(eval, key)?;
+    let keys = items
+        .iter()
+        .map(|item| projection.key(eval, item))
+        .collect::<Option<Vec<_>>>()?;
+    (eval.direct_snapshot() == snapshot).then(|| {
+        let mut order: Vec<usize> = (0..items.len()).collect();
+        order.sort_by_key(|&i| keys[i]);
+        permute(items, &mut order);
+    })
 }
 
 /// `(keyfn x)` for `sort-by`: the prepared callee when the keyfn has one

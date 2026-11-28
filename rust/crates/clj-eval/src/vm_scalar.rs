@@ -1172,10 +1172,18 @@ pub(crate) fn run_scalar_call(
     frame: &Frame<'_>,
     plan: &ScalarFunction,
 ) -> Option<Value> {
-    let sc = &plan.scalar;
-    if sc.code.len() < 8 {
+    if plan.scalar.code.len() < 8 {
         return None;
     }
+    run_scalar_value(ev, frame, plan)
+}
+
+pub(crate) fn run_scalar_value(
+    ev: &mut Evaluator,
+    frame: &Frame<'_>,
+    plan: &ScalarFunction,
+) -> Option<Value> {
+    let sc = &plan.scalar;
     let snap = ev.direct_snapshot();
     if !may_enter(ev, sc) {
         return None;
